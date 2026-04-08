@@ -1,0 +1,108 @@
+{
+  "realm": "bisque",
+  "enabled": true,
+  "displayName": "BisQue Dev Realm",
+  "loginTheme": "bisque-llm",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": true,
+  "groups": [
+    {
+      "name": "bisque-users"
+    },
+    {
+      "name": "bisque-admins"
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "BisQue",
+      "lastName": "Admin",
+      "email": "admin@local.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/bisque-users",
+        "/bisque-admins"
+      ]
+    },
+    {
+      "username": "developer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "BisQue",
+      "lastName": "Developer",
+      "email": "developer@local.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "developer",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/bisque-users"
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "bisque-dev",
+      "name": "BisQue Dev Client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "bisque-dev-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/auth_service/oidc_callback",
+        "http://localhost:8080/client_service/*",
+        "http://localhost:5173/v1/auth/oidc/callback",
+        "http://localhost:8000/v1/auth/oidc/callback",
+        "http://127.0.0.1:8080/auth_service/oidc_callback",
+        "http://127.0.0.1:8080/client_service/*",
+        "http://127.0.0.1:5173/v1/auth/oidc/callback",
+        "http://127.0.0.1:8000/v1/auth/oidc/callback",
+        "http://bisque:8080/auth_service/oidc_callback",
+        "http://bisque:8080/client_service/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://bisque:8080"
+      ],
+      "attributes": {
+        "access.token.lifespan": "900"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    }
+  ]
+}

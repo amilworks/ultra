@@ -1,0 +1,1187 @@
+.viewer-hdf-shell {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.viewer-hdf-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.viewer-hdf-hero-copy {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.viewer-hdf-hero-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  width: 100%;
+}
+
+.viewer-hdf-hero-title-stack {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.viewer-hdf-hero-heading h3 {
+  margin: 0;
+  font-size: 1.06rem;
+  line-height: 1.2;
+  color: var(--text-main);
+}
+
+.viewer-hdf-current-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.viewer-hdf-current-inline span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-current-inline strong {
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.viewer-hdf-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.viewer-hdf-path-chip {
+  display: block;
+  margin: 0;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent 18%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 76%, white 24%);
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1 1 320px;
+}
+
+.viewer-hdf-hero-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid color-mix(in oklab, var(--line) 84%, white 16%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 84%, white 16%);
+  padding: 6px 10px;
+  color: var(--text-main);
+}
+
+.viewer-hdf-context-trigger {
+  height: 30px;
+  padding-inline: 10px;
+}
+
+.viewer-hdf-context-card {
+  width: min(360px, calc(100vw - 48px));
+}
+
+.viewer-hdf-context-card-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.viewer-hdf-context-card-row,
+.viewer-hdf-context-card-section {
+  display: grid;
+  gap: 4px;
+}
+
+.viewer-hdf-context-card-row span,
+.viewer-hdf-context-card-section p {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.viewer-hdf-context-code {
+  display: block;
+  margin-top: 2px;
+  border: 1px solid color-mix(in oklab, var(--line) 84%, transparent 16%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 86%, white 14%);
+  padding: 8px 10px;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-hdf-context-card-section strong {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-dashboard-card {
+  min-height: 0;
+  overflow: hidden;
+  border-color: var(--line);
+  background: var(--viewer-panel-bg);
+}
+.viewer-hdf-stage-header,
+.viewer-hdf-dashboard-header {
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 84%, transparent 16%);
+  gap: 10px;
+  padding: 16px 24px 14px;
+}
+
+.viewer-hdf-dashboard-header-split {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.viewer-hdf-dashboard-note {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-dashboard {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.68fr) minmax(0, 1.32fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.viewer-hdf-dashboard-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.viewer-hdf-dashboard-content {
+  min-height: 0;
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
+.viewer-hdf-navigator-content {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.viewer-hdf-inspector-content {
+  display: grid;
+  min-height: 0;
+}
+
+.viewer-hdf-scroll-area {
+  min-height: 0;
+  height: 100%;
+}
+
+.viewer-hdf-scroll-area [data-slot="scroll-area-viewport"] {
+  height: 100%;
+}
+
+.viewer-hdf-tree-scroll,
+.viewer-hdf-detail-scroll {
+  min-height: 260px;
+}
+
+.viewer-hdf-scroll-empty {
+  height: 100%;
+}
+
+.viewer-hdf-command {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+  border: 1px solid color-mix(in oklab, var(--line) 84%, white 16%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--surface-panel) 92%, white 8%);
+}
+
+.viewer-hdf-command-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 84%, transparent 16%);
+  padding-right: 10px;
+}
+
+.viewer-hdf-command-toolbar [data-slot="command-input-wrapper"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+  padding-inline: 12px;
+}
+
+.viewer-hdf-command-toolbar [data-slot="command-input"] {
+  height: 2.75rem;
+  font-size: 0.82rem;
+}
+
+.viewer-hdf-command-toolbar > button {
+  flex: 0 0 auto;
+}
+
+.viewer-hdf-search-results {
+  min-height: 260px;
+  padding: 6px;
+}
+
+.viewer-hdf-command-item {
+  margin: 2px 0;
+  border: 1px solid transparent;
+}
+
+.viewer-hdf-command-item.is-active,
+.viewer-hdf-command-item[data-selected="true"],
+.viewer-hdf-command-item.is-selected {
+  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
+  background-color: color-mix(in oklab, var(--accent-soft) 82%, white 18%);
+}
+
+.viewer-hdf-command-item.is-selected {
+  box-shadow:
+    inset 3px 0 0 color-mix(in oklab, var(--accent) 88%, black 12%),
+    0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent 82%);
+}
+
+.viewer-hdf-command-item-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.viewer-hdf-command-path {
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-hdf-tree,
+.viewer-hdf-tree-branch {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-tree {
+  padding-right: 8px;
+}
+
+.viewer-hdf-tree-branch {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.viewer-hdf-node {
+  --hdf-depth: 0;
+  --hdf-indent: calc(var(--hdf-depth) * 18px);
+  --hdf-guide-color: color-mix(in oklab, var(--text-muted) 36%, transparent 64%);
+  --hdf-dot-color: color-mix(in oklab, var(--text-muted) 68%, white 32%);
+  color: var(--text-main);
+}
+
+.viewer-hdf-node:hover {
+  --hdf-guide-color: color-mix(in oklab, white 76%, var(--line) 24%);
+  --hdf-dot-color: color-mix(in oklab, white 88%, var(--line) 12%);
+}
+
+.viewer-hdf-node.has-selected-descendant {
+  --hdf-guide-color: color-mix(in oklab, var(--accent) 24%, white 76%);
+  --hdf-dot-color: color-mix(in oklab, var(--accent) 42%, white 58%);
+}
+
+.viewer-hdf-node.is-selected {
+  --hdf-guide-color: color-mix(in oklab, var(--accent) 42%, white 58%);
+  --hdf-dot-color: color-mix(in oklab, var(--accent) 72%, white 28%);
+}
+
+.viewer-hdf-node.has-selected-descendant > details > .viewer-hdf-node-summary {
+  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
+  background-color: color-mix(in oklab, var(--accent-soft) 70%, white 30%);
+}
+
+.viewer-hdf-node details {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-node-summary,
+.viewer-hdf-node-leaf {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  width: calc(100% - var(--hdf-indent));
+  border: 1px solid transparent;
+  border-radius: 12px;
+  margin-left: var(--hdf-indent);
+  padding: 9px 12px 9px 28px;
+  background-color: transparent;
+  text-align: left;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.viewer-hdf-node-summary::before,
+.viewer-hdf-node-leaf::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--hdf-guide-color);
+}
+
+.viewer-hdf-node-summary::after,
+.viewer-hdf-node-leaf::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 16px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--hdf-dot-color);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--viewer-panel-bg) 88%, white 12%);
+}
+
+.viewer-hdf-node-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.viewer-hdf-node-summary {
+  cursor: pointer;
+}
+
+.viewer-hdf-node-summary::-webkit-details-marker {
+  display: none;
+}
+
+.viewer-hdf-node-summary:hover,
+.viewer-hdf-node-leaf:hover {
+  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
+  background-color: color-mix(in oklab, var(--accent-soft) 82%, white 18%);
+}
+
+.viewer-hdf-node-leaf.is-selected,
+.viewer-hdf-node.is-selected > .viewer-hdf-node-leaf {
+  border-color: color-mix(in oklab, var(--accent) 48%, var(--line) 52%);
+  background-color: color-mix(in oklab, var(--accent-soft) 88%, white 12%);
+  box-shadow:
+    inset 3px 0 0 color-mix(in oklab, var(--accent) 88%, black 12%),
+    0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent 82%);
+}
+
+.viewer-hdf-node-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.viewer-hdf-node-leaf.is-selected .viewer-hdf-node-name,
+.viewer-hdf-node.is-selected > .viewer-hdf-node-leaf .viewer-hdf-node-name {
+  color: color-mix(in oklab, var(--text-main) 88%, black 12%);
+}
+
+.viewer-hdf-node-meta {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.viewer-hdf-detail-tabs {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.viewer-hdf-detail-tabs-list,
+.viewer-hdf-preview-tabs-list {
+  display: inline-flex;
+  width: fit-content;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.viewer-hdf-workspace-tabs {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.viewer-hdf-workspace-tabs-list {
+  display: inline-flex;
+  width: fit-content;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.viewer-hdf-workspace-tab {
+  display: grid;
+  min-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+}
+
+.viewer-hdf-workspace-tab[data-state="active"] {
+  display: grid;
+}
+
+.viewer-hdf-detail-tab,
+.viewer-hdf-preview-tab {
+  min-height: 0;
+  margin-top: 0;
+}
+
+.viewer-hdf-detail-tab-preview {
+  overflow: auto;
+}
+
+.viewer-hdf-detail-stack {
+  display: grid;
+  gap: 12px;
+  padding-right: 8px;
+}
+
+.viewer-hdf-detail-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in oklab, var(--line) 86%, transparent 14%);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 86%, white 14%);
+  padding: 12px;
+}
+
+.viewer-hdf-detail-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.viewer-hdf-detail-section-heading strong {
+  font-size: 0.8rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-chip-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.viewer-hdf-chip-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent 18%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 80%, white 20%);
+  padding: 10px 12px;
+}
+
+.viewer-hdf-chip-card strong {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-chip-card span {
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-preview-body {
+  display: grid;
+  gap: 14px;
+}
+
+.viewer-hdf-preview-tabs {
+  display: grid;
+  gap: 14px;
+}
+
+.viewer-hdf-preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.viewer-hdf-preview-toolbar-copy {
+  max-width: 56ch;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-preview-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+
+.viewer-hdf-preview-compact-toolbar {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.viewer-hdf-axis-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.viewer-hdf-inline-field {
+  display: grid;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.viewer-hdf-inline-field-compact {
+  min-width: 200px;
+}
+
+.viewer-hdf-inline-field span,
+.viewer-hdf-slider-header span,
+.viewer-hdf-tree-header span,
+.viewer-hdf-histogram-summary span,
+.viewer-hdf-pagination span,
+.viewer-hdf-sample-header span {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-select {
+  width: 100%;
+}
+
+.viewer-hdf-slider-field {
+  gap: 10px;
+  min-width: 0;
+}
+
+.viewer-hdf-slider-panel {
+  border-color: color-mix(in oklab, var(--line) 84%, transparent 16%);
+  background: color-mix(in oklab, var(--viewer-panel-bg) 88%, white 12%);
+  box-shadow: none;
+  width: 100%;
+  align-self: start;
+}
+
+.viewer-hdf-slider-panel-content {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.viewer-hdf-slider-panel .viewer-hdf-slider-field {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.viewer-hdf-slider-panel .viewer-hdf-slider-header {
+  display: grid;
+  justify-content: start;
+  align-items: start;
+  gap: 4px;
+}
+
+.viewer-hdf-slider {
+  padding-inline: 2px;
+}
+
+.viewer-hdf-slider [data-slot="slider-track"] {
+  background: color-mix(in oklab, var(--line) 72%, white 28%);
+}
+
+.viewer-hdf-slider [data-slot="slider-range"] {
+  background: color-mix(in oklab, var(--accent) 88%, black 12%);
+}
+
+.viewer-hdf-slider [data-slot="slider-thumb"] {
+  border-color: color-mix(in oklab, var(--accent) 88%, black 12%);
+  background: var(--viewer-panel-bg);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 12%, transparent 88%),
+    0 1px 2px rgba(15, 23, 42, 0.18);
+}
+
+.viewer-hdf-slider-header,
+.viewer-hdf-tree-header,
+.viewer-hdf-pagination,
+.viewer-hdf-sample-header,
+.viewer-hdf-histogram-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewer-hdf-tree-header strong,
+.viewer-hdf-sample-header strong {
+  font-size: 0.82rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-preview-note,
+.viewer-hdf-provenance-note {
+  border: 1px solid color-mix(in oklab, var(--accent) 22%, var(--line) 78%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--accent-soft) 78%, white 22%);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.viewer-hdf-preview-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-hdf-preview-note strong,
+.viewer-hdf-provenance-note strong {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-preview-note span,
+.viewer-hdf-provenance-note span {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.viewer-hdf-provenance-note strong {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-slice-shell {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--viewer-panel-bg) 76%, white 24%);
+  padding: 10px;
+}
+
+.viewer-hdf-slice-canvas {
+  height: clamp(280px, 44vh, 420px);
+  min-height: clamp(280px, 44vh, 420px);
+  max-height: clamp(280px, 44vh, 420px);
+}
+
+.viewer-hdf-slice-layout {
+  display: grid;
+  gap: 14px;
+}
+
+.viewer-hdf-slice-sidebar {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+[data-hdf5-slice-preview="true"] {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  align-content: start;
+}
+
+[data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: 1 / 1.16;
+}
+
+.viewer-hdf-chart-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.viewer-hdf-chart-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--viewer-panel-bg) 82%, white 18%);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.viewer-hdf-chart-canvas {
+  min-height: 220px;
+}
+
+.viewer-hdf-material-shell {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer-hdf-material-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.viewer-hdf-material-meta-label,
+.viewer-hdf-material-section-label,
+.viewer-hdf-material-source-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-note {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.viewer-hdf-material-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewer-hdf-material-panel-header h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  line-height: 1.2;
+  color: var(--text-main);
+}
+
+.viewer-hdf-material-map-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.46fr) minmax(0, 1.54fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.viewer-hdf-material-map-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  max-height: min(420px, calc(100vh - 340px));
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.viewer-hdf-material-map-button {
+  flex: 0 1 auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  height: auto;
+  min-height: 2rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  white-space: normal;
+}
+
+.viewer-hdf-material-map-button span {
+  font-size: 0.83rem;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
+.viewer-hdf-material-card {
+  min-width: 0;
+  overflow: hidden;
+  border-color: var(--line);
+  background: var(--viewer-panel-bg);
+}
+
+.viewer-hdf-material-selector-card {
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.viewer-hdf-material-card-header {
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.viewer-hdf-material-card-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewer-hdf-material-card-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-material-card-badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.viewer-hdf-material-source-card {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.viewer-hdf-material-source-card-grid,
+.viewer-hdf-material-source-card-section {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-material-source-card-section strong {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-source-card-section p {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.viewer-hdf-material-path-chip {
+  max-width: 100%;
+}
+
+.viewer-hdf-material-card-content {
+  display: grid;
+  grid-template-rows: minmax(220px, auto) auto;
+  gap: 12px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-chart-canvas {
+  min-width: 0;
+  min-height: 228px;
+  overflow: hidden;
+}
+
+.viewer-hdf-material-chart-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: start;
+}
+
+.viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
+  grid-column: span 6;
+}
+
+.viewer-hdf-material-card-footer {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.viewer-hdf-material-selector-card {
+  align-content: start;
+}
+
+.viewer-hdf-material-preview-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.viewer-hdf-material-preview-content {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-preview-toolbar {
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-preview-toolbar-copy {
+  display: none;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-preview-note {
+  display: none;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-inline-field.viewer-hdf-slider-field {
+  gap: 8px;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-preview-compact-toolbar {
+  gap: 12px;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-slice-shell {
+  padding: 8px;
+}
+
+.viewer-hdf-material-preview-card .viewer-hdf-slice-canvas {
+  height: clamp(220px, 27vh, 280px);
+  min-height: clamp(220px, 27vh, 280px);
+  max-height: clamp(220px, 27vh, 280px);
+}
+
+.viewer-hdf-material-preview-card [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+  height: clamp(240px, 28vh, 280px);
+  min-height: clamp(240px, 28vh, 280px);
+  max-height: clamp(240px, 28vh, 280px);
+}
+
+.viewer-hdf-material-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.viewer-hdf-material-actions-top {
+  padding-top: 2px;
+}
+
+.viewer-hdf-pagination-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.viewer-hdf-preview-tab-rows {
+  display: grid;
+  gap: 12px;
+}
+
+.viewer-hdf-table-shell {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: auto;
+  max-height: 380px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 78%, white 22%);
+}
+
+.viewer-hdf-table {
+  width: 100%;
+  min-width: 420px;
+  border-collapse: collapse;
+}
+
+.viewer-hdf-table th,
+.viewer-hdf-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 82%, transparent 18%);
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.viewer-hdf-table th {
+  position: sticky;
+  top: 0;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 94%, white 6%);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.viewer-hdf-table td {
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.viewer-hdf-sample-block {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-sample-value {
+  margin: 0;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 78%, white 22%);
+  padding: 12px;
+  color: var(--text-main);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  overflow: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-hdf-empty-state {
+  min-height: 220px;
+}
+
+@media (min-width: 960px) {
+  .viewer-hdf-slice-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+    align-items: start;
+  }
+}
+
+@media (max-width: 1380px) {
+  .viewer-hdf-shell {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .viewer-hdf-dashboard {
+    grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.28fr);
+  }
+
+  .viewer-hdf-material-chart-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 1120px) {
+  .viewer-hdf-shell {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .viewer-hdf-dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer-hdf-hero-copy,
+  .viewer-hdf-material-card-title-row {
+    align-items: flex-start;
+  }
+
+  .viewer-hdf-hero-copy {
+    flex-wrap: wrap;
+  }
+
+  .viewer-hdf-material-map-grid,
+  .viewer-hdf-material-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer-hdf-slider-panel {
+    width: 100%;
+  }
+
+  .viewer-hdf-slider-panel .viewer-hdf-slider-field {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
+
+@media (min-width: 1121px) {
+  .viewer-hdf-navigator-card > .viewer-hdf-dashboard-header,
+  .viewer-hdf-inspector-card > .viewer-hdf-dashboard-header {
+    min-height: 104px;
+  }
+}
+
+@media (max-height: 860px) {
+  .viewer-hdf-dashboard-header {
+    padding: 14px 20px 12px;
+  }
+
+  .viewer-hdf-tree-scroll,
+  .viewer-hdf-detail-scroll {
+    min-height: 220px;
+  }
+
+  .viewer-hdf-slice-canvas {
+    min-height: 280px;
+  }
+}

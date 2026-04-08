@@ -1,0 +1,53 @@
+services:
+  bisque:
+    environment:
+      - BISQUE_AUTH_MODE=${BISQUE_AUTH_MODE:-dual}
+      - BISQUE_AUTH_LOCAL_TOKEN_ENABLED=${BISQUE_AUTH_LOCAL_TOKEN_ENABLED:-true}
+      - BISQUE_OIDC_ISSUER=${BISQUE_OIDC_ISSUER:-http://localhost:18080/realms/bisque}
+      - BISQUE_OIDC_METADATA_URL=${BISQUE_OIDC_METADATA_URL:-http://keycloak:8080/realms/bisque/.well-known/openid-configuration}
+      - BISQUE_OIDC_JWKS_URI=${BISQUE_OIDC_JWKS_URI:-http://keycloak:8080/realms/bisque/protocol/openid-connect/certs}
+      - BISQUE_OIDC_AUTHORIZATION_ENDPOINT=${BISQUE_OIDC_AUTHORIZATION_ENDPOINT:-http://localhost:18080/realms/bisque/protocol/openid-connect/auth}
+      - BISQUE_OIDC_TOKEN_ENDPOINT=${BISQUE_OIDC_TOKEN_ENDPOINT:-http://keycloak:8080/realms/bisque/protocol/openid-connect/token}
+      - BISQUE_OIDC_END_SESSION_ENDPOINT=${BISQUE_OIDC_END_SESSION_ENDPOINT:-http://localhost:18080/realms/bisque/protocol/openid-connect/logout}
+      - BISQUE_OIDC_USERINFO_ENDPOINT=${BISQUE_OIDC_USERINFO_ENDPOINT:-http://keycloak:8080/realms/bisque/protocol/openid-connect/userinfo}
+      - BISQUE_OIDC_CLIENT_ID=${BISQUE_OIDC_CLIENT_ID:-bisque-dev}
+      - BISQUE_OIDC_CLIENT_SECRET=${BISQUE_OIDC_CLIENT_SECRET:-bisque-dev-secret}
+      - BISQUE_OIDC_REDIRECT_URI=${BISQUE_OIDC_REDIRECT_URI:-http://localhost:8080/auth_service/oidc_callback}
+      - BISQUE_OIDC_POST_LOGOUT_REDIRECT_URI=${BISQUE_OIDC_POST_LOGOUT_REDIRECT_URI:-http://localhost:8080/client_service/}
+      - BISQUE_OIDC_SCOPES=${BISQUE_OIDC_SCOPES:-openid profile email}
+      - BISQUE_OIDC_USERNAME_CLAIM=${BISQUE_OIDC_USERNAME_CLAIM:-preferred_username}
+      - BISQUE_OIDC_GROUPS_CLAIM=${BISQUE_OIDC_GROUPS_CLAIM:-groups}
+      - BISQUE_OIDC_VERIFY_AUDIENCE=${BISQUE_OIDC_VERIFY_AUDIENCE:-false}
+      - BISQUE_OIDC_AUTO_APPROVE_USERS=${BISQUE_OIDC_AUTO_APPROVE_USERS:-true}
+      - BISQUE_OIDC_LOGIN_PAGE_ENABLED=${BISQUE_OIDC_LOGIN_PAGE_ENABLED:-false}
+      - BISQUE_OIDC_PROVIDER_NAME=${BISQUE_OIDC_PROVIDER_NAME:-Keycloak}
+      - BISQUE_OIDC_LOGIN_BUTTON_TEXT=${BISQUE_OIDC_LOGIN_BUTTON_TEXT:-Continue with Keycloak}
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.5
+    container_name: bisque-keycloak
+    command:
+      - start-dev
+      - --import-realm
+      - --spi-theme-static-max-age=-1
+      - --spi-theme-cache-themes=false
+      - --spi-theme-cache-templates=false
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./docker/keycloak/realm-bisque-dev.json:/opt/keycloak/data/import/realm-bisque-dev.json:ro
+      - ./docker/keycloak/themes:/opt/keycloak/themes:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - bisque-net

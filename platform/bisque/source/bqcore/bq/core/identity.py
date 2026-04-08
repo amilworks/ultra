@@ -1,0 +1,324 @@
+
+#from turbogears import identity
+#from turbogears.util import request_available
+
+from contextlib import contextmanager
+
+from tg import request, session
+# from repoze.what.predicates import in_group #!!! was before python 3.10
+from tg.predicates import in_group
+from tg import request
+
+import logging
+from bq.exceptions import BQException
+from bq.core.model import DBSession, User
+
+user_admin = None
+current_user = None
+log = logging.getLogger("bq.identity")
+
+
+def _provision_bearer_user(username):
+    """
+    Lazily provision local TG/BQ user records for bearer-authenticated users.
+
+    Bearer auth executes before full TG request context; provisioning here
+    ensures DBSession is request-bound and store roots can be resolved.
+    """
+    resolved = str(username or "").strip()
+    if not resolved:
+        return None
+
+    claims = {}
+    try:
+        claims = dict(request.identity.get('bisque.bearer_claims') or {})
+    except Exception:
+        claims = {}
+
+    email = str(claims.get('email') or '').strip() or None
+    display_name = str(claims.get('name') or resolved).strip() or resolved
+
+    try:
+        from bq.data_service.model import BQUser
+        from bq.data_service.model.tag_model import Tag
+
+        bq_user = DBSession.query(BQUser).filter_by(resource_name=resolved).first()
+        if bq_user is None:
+            class _TokenUser:
+                pass
+
+            tg_proxy = _TokenUser()
+            tg_proxy.user_name = resolved
+            tg_proxy.email_address = email or f"{resolved}@local.invalid"
+            tg_proxy.display_name = display_name or resolved
+
+            bq_user = BQUser(tg_user=tg_proxy, create_tg=False, create_store=True)
+            DBSession.add(bq_user)
+            DBSession.flush()
+            bq_user.owner_id = bq_user.id
+            DBSession.flush()
+
+        def _upsert_tag(name, value):
+            if not value:
+                return
+            existing = (
+                DBSession.query(Tag)
+                .filter(
+                    Tag.parent == bq_user,
+                    Tag.resource_name == name,
+                )
+                .first()
+            )
+            if existing:
+                if existing.resource_value != value:
+                    existing.value = value
+                return
+            tag = Tag(parent=bq_user)
+            tag.name = name
+            tag.value = value
+            tag.owner = bq_user
+            DBSession.add(tag)
+
+        _upsert_tag('username', resolved)
+        _upsert_tag('display_name', display_name)
+        _upsert_tag('fullname', display_name)
+        if email:
+            _upsert_tag('email_verified', 'true')
+        DBSession.flush()
+        return bq_user
+    except Exception:
+        try:
+            DBSession.rollback()
+        except Exception:
+            pass
+        log.exception('Failed to auto-provision bearer user %s', resolved)
+        return None
+
+
+
+class BQIdentityException (BQException):
+    pass
+
+#################################################
+# Simple checks
+def request_valid ():
+    try:
+        return 'repoze.who.userid' in request.identity
+    except (TypeError, AttributeError):
+        return False
+
+def anonymous():
+    try:
+        return request.identity.get('repoze.who.userid') is None
+    except (TypeError, AttributeError):
+        return True
+
+def not_anonymous():
+    return not anonymous()
+
+
+
+# NOTE:
+# BisqueIdentity is an object even though the methods could be imlemented as classmethod
+# in order to 'property' style access
+class BisqueIdentity(object):
+    "helper class to fetch current user object"
+
+    def get_username (self):
+        if request_valid():
+            return request.identity['repoze.who.userid']
+        return None
+    #def set_username (cls, v):
+    #    if request_valid():
+    #        request.identity['repoze.who.userid'] = v
+    #user_name = property(get_username, set_username)
+    user_name = property(get_username)
+
+    def _get_tguser(self):
+        if not request_valid():
+            return None
+
+        return request.identity.get ('user')
+
+    #user = property(get_user)
+
+    def _get_bquser(self):
+        if not request_valid():
+            return None
+        bquser = request.identity.get ('bisque.bquser')
+        if bquser:
+            if bquser not in DBSession: #pylint: disable=unsupported-membership-test
+                bquser = DBSession.merge (bquser)
+                request.identity['bisque.bquser'] = bquser
+            return bquser
+
+        user_name = self.get_username()
+        if not user_name:
+            return None
+
+        from bq.data_service.model.tag_model import BQUser
+        log.debug ("fetch BQUser  by name")
+        bquser =  DBSession.query (BQUser).filter_by(resource_name = user_name).first()
+        if bquser is None and request.identity.get('bisque.auth_type') == 'bearer':
+            bquser = _provision_bearer_user(user_name)
+        request.identity['bisque.bquser'] = bquser
+        #log.debug ("bq user = %s" % user)
+        log.debug ('user %s -> %s' % (user_name, bquser))
+        return bquser
+
+    def set_current_user (self, user):
+        """"Set the current user for authentication
+
+        @param user:  a username or :class:BQUser object
+        @return: precious user or None
+        """
+        if isinstance (user, str):
+            from bq.data_service.model.tag_model import BQUser
+            user =  DBSession.query (BQUser).filter_by(resource_name = user).first()
+
+        oldbquser = request.identity.pop('bisque.bquser', None)
+        olduser   = request.identity.pop('repoze.who.userid', None)
+
+        if user is not None:
+            request.identity['bisque.bquser'] = user
+            request.identity['repoze.who.userid'] = user and user.resource_name
+
+        return oldbquser
+
+
+####################################
+##  Current user object
+current  = BisqueIdentity()
+
+def set_admin (admin):
+    global user_admin
+    user_admin = admin
+
+def get_admin():
+    user_admin = None
+    if hasattr(request, 'identity'):
+        user_admin = request.identity.get ('bisque.admin_user', None)
+    if user_admin is None:
+        from bq.data_service.model.tag_model import BQUser
+        user_admin = DBSession.query(BQUser).filter_by(resource_name='admin').first()
+        if hasattr(request, 'identity'):
+            request.identity['bisque.admin_user'] = user_admin
+    return user_admin
+
+def get_admin_id():
+    user_admin = get_admin()
+    return user_admin and user_admin.id
+
+# def is_admin (bquser=None):
+#     'return whether current user has admin priveledges'
+#     if bquser:
+#         groups  = bquser.get_groups()
+#         return any ( (g.group_name == 'admin' or g.group_name == 'admins') for g in groups )
+
+#     return in_group('admins').is_met(request.environ) or in_group('admin').is_met(request.environ)
+
+# !!! replacement for previous is_admin
+def is_admin(bquser=None):
+    """Return whether current user has admin privileges."""
+    if bquser:
+        groups = bquser.get_groups()
+        return any(g.group_name in ('admin', 'admins') for g in groups)
+
+    try:
+        return in_group('admins').is_met(request.environ) or in_group('admin').is_met(request.environ)
+    except Exception:
+        return False
+
+
+#     if request_available():
+#         return identity.not_anonymous()
+#     return current_user
+
+def get_user_id():
+    bquser = current._get_bquser()
+    return bquser and bquser.id #pylint: disable=no-member
+
+def get_username():
+    return current.get_username()
+
+def get_user():
+    """Get the current user object"""
+    return current._get_bquser()
+
+def get_current_user():
+    return current._get_bquser()
+
+def set_current_user(username):
+    """set the current user by name
+    @param username: a string username or a bquser reference
+    """
+    if not hasattr (request, 'identity'):
+        request.identity = {}
+    return current.set_current_user(username)
+
+
+@contextmanager
+def as_user(user):
+    """ Do some action as a particular user and reset the current user
+
+    >>> with as_user('admin'):
+    >>>     action()
+    >>>     action
+
+    @param user:  a username or a bquser instance
+    """
+    prev = get_current_user()
+    set_current_user(user)
+    try:
+        yield
+    except Exception:
+        raise
+    finally:
+        set_current_user(prev)
+
+def add_credentials(headers):
+    """add the current user credentials for outgoing http requests
+
+    This is a place holder for outgoing request made by the server
+    on behalf of the logged in user.  Will depend on login methods
+    (password, CAS, openid) and avaialble methods.
+    """
+    pass
+
+
+def set_admin_mode (groups=None):
+    """add or remove admin permissions.
+
+    on add return previous group permission.
+    to restome previous setting, call with groups
+
+    :param groups: None to set, False to remove, a set of groups to restore
+    :return a set of previous groups
+    """
+    if groups is None:
+        #user_admin = get_admin()
+        #current.set_current_user (user_admin)
+        credentials = request.environ.setdefault('repoze.what.credentials', {})
+        credset = set (credentials.get ('groups') or [])
+        prevset = credset.copy()
+        credset.add ('admins')
+        credentials['groups'] = tuple (credset)
+        return prevset
+    elif groups is True:
+        credentials = request.environ.setdefault('repoze.what.credentials', {})
+        credentials['groups'] = ('admins',)
+    elif groups is False:
+        credentials = request.environ.setdefault('repoze.what.credentials', {})
+        credset = set (credentials.get ('groups') or [])
+        if 'admins' in credset:
+            credset.remove ('admins')
+        credentials['groups'] = tuple (credset)
+    else:
+        credentials = request.environ.setdefault('repoze.what.credentials', {})
+        credentials['groups'] = tuple (groups)
+
+
+
+def mex_authorization_token():
+    mex_auth = request.identity.get ('bisque.mex_auth') or session.get('mex_auth')
+    return mex_auth

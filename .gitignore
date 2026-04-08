@@ -1,0 +1,53 @@
+# Local secrets and operator overrides
+.env
+.env.local
+.env.*.local
+!.env.example
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Node / frontend build output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+
+# Runtime state and generated artifacts
+.tmp/
+.viewer-cache/
+.codex-artifacts/
+data/
+runs/
+output/
+outputs/
+downloads/
+downloaded_*/
+repro_reports/
+
+# Local database / volume exports
+sqlite:/
+postgresql:/
+
+# BisQue generated state
+platform/bisque/Results/
+platform/bisque/SampleData/
+platform/bisque/.venv-engine-hardening/
+
+# Large local model assets and weights
+*.pt
+data/models/
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo

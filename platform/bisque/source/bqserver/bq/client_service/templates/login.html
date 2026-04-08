@@ -1,0 +1,119 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+                    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"
+    xmlns:py="http://genshi.edgewall.org/"
+    xmlns:xi="http://www.w3.org/2001/XInclude">
+
+<xi:include href="master.html" />
+
+<head>
+    <meta content="text/html; charset=UTF-8" http-equiv="content-type" py:replace="''"/>
+    <title>Bisque login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="crossorigin" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet" />
+    <link rel="stylesheet" type="text/css" href="${tg.url('/client_service/css/login.css')}" />
+</head>
+
+<script type="text/javascript">
+function redirectLogin(url) {
+    document.location = Ext.String.urlAppend(url, 'came_from=${came_from}');
+}
+</script>
+
+<body>
+<div class="auth-screen">
+    <div class="auth-screen-hero">
+        <div class="auth-screen-hero-overlay">
+            <div class="auth-screen-logo">
+                <div class="auth-screen-logo-mark" aria-hidden="true">
+                    <svg viewBox="0 0 128 128" fill="none">
+                        <g stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 32V64A44 44 0 0 0 108 64V32" />
+                            <path d="M34 58A16 16 0 0 1 64 48A16 16 0 0 0 94 58" />
+                        </g>
+                    </svg>
+                </div>
+                <span>BisQue Ultra</span>
+            </div>
+            <h1>Connect your BisQue account</h1>
+            <p>
+                <span py:if="show_oidc_login_page and oidc_login_enabled and not local_login_allowed">
+                    Sign in through BisQue SSO to use the same account across services.
+                </span>
+                <span py:if="not (show_oidc_login_page and oidc_login_enabled and not local_login_allowed)">
+                    Use the same credentials you use on BisQue. After sign-in, uploads, browsing,
+                    and tool calls run against your account.
+                </span>
+            </p>
+            <a href="/client_service/" target="_blank" rel="noreferrer">
+                Open BisQue client
+                <span class="auth-hero-link-arrow" aria-hidden="true">&#8599;</span>
+            </a>
+        </div>
+    </div>
+
+    <div class="auth-screen-form">
+        <div class="auth-card">
+            <div class="auth-card-header">
+                <h2>Welcome back</h2>
+                <p class="auth-card-subtitle">
+                    <span py:if="show_oidc_login_page and oidc_login_enabled and not local_login_allowed">
+                        Continue with your BisQue SSO account.
+                    </span>
+                    <span py:if="not (show_oidc_login_page and oidc_login_enabled and not local_login_allowed)">
+                        Sign in with your BisQue username and password.
+                    </span>
+                </p>
+            </div>
+
+            <div py:if="show_oidc_login_page and oidc_login_enabled" class="auth-oidc-block">
+                <a class="auth-submit" href="${oidc_login_url}">${oidc_button_text}</a>
+            </div>
+
+            <div py:if="show_oidc_login_page and oidc_login_enabled and local_login_allowed" class="auth-divider">
+                <span>or continue with local credentials</span>
+            </div>
+
+            <form py:if="local_login_allowed" action="${tg.url('/auth_service/login_handler', params={'came_from': str(came_from), '__logins': str(login_counter)})}" method="POST" id="login_form" class="auth-form">
+                <label class="auth-label" for="loginusername">Username</label>
+                <input type="text" id="loginusername" name="login" value="$username" class="auth-input" autocomplete="username" placeholder="your.username" />
+
+                <label class="auth-label" for="loginpassword">Password</label>
+                <input type="password" id="loginpassword" name="password" class="auth-input" autocomplete="current-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" />
+
+                <div class="auth-row">
+                    <a class="auth-link" href="/registration/lost_password">Forgot password?</a>
+                    <a class="auth-link" href="/registration/">Register</a>
+                </div>
+
+                <button type="submit" id="submit" class="auth-submit">Sign in</button>
+            </form>
+
+            <?python
+            firebase = [k for k in providers.keys() if k.startswith('firebase_')]
+            remote = [k for k in providers.keys() if k != 'local' and not k.startswith('firebase_')]
+            ?>
+
+            <div py:if="firebase or remote" class="auth-provider-wrap">
+                <div class="auth-divider"><span>Or continue with</span></div>
+
+                <div py:if="firebase" class="auth-provider-list">
+                    <button py:for="p in firebase" type="button" class="auth-provider-btn" name="${p}" onclick="redirectLogin('${providers[p]['url']}')">
+                        <img src="${providers[p].get('icon', '/core/images/signin/signin_bisque.png')}" alt="${providers[p].get('text', p)}" />
+                        <span>${providers[p].get('text', p)}</span>
+                    </button>
+                </div>
+
+                <div py:if="remote" class="auth-provider-list">
+                    <button py:for="p in remote" type="button" class="auth-provider-btn" name="${p}" onclick="redirectLogin('${providers[p]['url']}')">
+                        <img src="${providers[p].get('icon', '/core/images/signin/signin_bisque.png')}" alt="${providers[p].get('text', p)}" />
+                        <span>${providers[p].get('text', p)}</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

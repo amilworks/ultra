@@ -1,0 +1,25 @@
+# Git and local tooling
+.git
+.github
+.codex
+.venv
+.playwright-cli
+
+# Local build/test outputs
+artifacts
+output
+Results
+SampleData
+reports
+
+# Local data not needed at image build time
+data
+test_images
+dna_cover.png
+
+# BisQue runtime data directories (created in image at runtime)
+source/data
+source/staging
+source/reports
+source/public
+source/bisque_*.log

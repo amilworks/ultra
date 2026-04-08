@@ -1,0 +1,156 @@
+# Author: Wahid Sadique Koly
+# Date: 2025-Dec-08
+# Added necessary configurations to run BisQue with Docker Engine support for modules
+# Uses bridge networking so localhost access works reliably on macOS/Linux
+# Added both Postgres and MySQL services for database flexibility
+services:
+  bisque:
+    platform: ${BISQUE_DOCKER_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE_TAG:-bisque-ucsb:latest}
+    container_name: ${CONTAINER_NAME:-bisque-server}
+    ports:
+      - "${BISQUE_PORT:-8080}:8080"
+      - "${BISQUE_ENGINE_PORT:-27000}:27000"
+    volumes:
+      # Docker socket for running modules in containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Preserve configuration directory
+      - bisque_config:/source/config
+      # Preserve data directory (uploaded files, database, etc.)
+      - bisque_data:/source/data
+      # Preserve reports directory
+      - bisque_reports:/source/reports
+      # Preserve public directory (uploaded files accessible via web)
+      - bisque_public:/source/public
+      # Optional: Mount modules directory if you want to persist custom modules
+      - bisque_modules:/source/modules
+      # Optional: Preserve staging directory for uploads
+      - bisque_staging:/source/staging
+    environment:
+      # Server configuration
+      - BISQUE_SERVER=${BISQUE_SERVER:-http://localhost:8080}
+      - BISQUE_ENGINE=${BISQUE_ENGINE:-http://localhost:27000}
+      - BISQUE_BIND_HOST=${BISQUE_BIND_HOST:-0.0.0.0}
+      - BISQUE_ENABLE_ENGINE=${BISQUE_ENABLE_ENGINE:-1}
+      - BISQUE_ADMIN_EMAIL=${BISQUE_ADMIN_EMAIL:-admin@yourdomain.com}
+      - BISQUE_ADMIN_ID=${BISQUE_ADMIN_ID:-admin}
+      - BISQUE_ORGANIZATION=${BISQUE_ORGANIZATION:-Your Organization}
+      - BISQUE_TITLE=${BISQUE_TITLE:-BisQue Image Repository}
+      # Use postgres by default for near-production local runs.
+      - BISQUE_DBURL=${BISQUE_DBURL:-postgresql://postgres:postgres@postgres:5432/bisque}
+      # Auth mode controls browser/API auth compatibility.
+      - BISQUE_AUTH_MODE=${BISQUE_AUTH_MODE:-dual}
+      - BISQUE_AUTH_LOCAL_TOKEN_ENABLED=${BISQUE_AUTH_LOCAL_TOKEN_ENABLED:-true}
+      - BISQUE_AUTH_TOKEN_ALGORITHM=${BISQUE_AUTH_TOKEN_ALGORITHM:-HS256}
+      - BISQUE_AUTH_TOKEN_ISSUER=${BISQUE_AUTH_TOKEN_ISSUER:-bisque}
+      - BISQUE_AUTH_TOKEN_AUDIENCE=${BISQUE_AUTH_TOKEN_AUDIENCE:-bisque-api}
+      - BISQUE_AUTH_TOKEN_EXPIRY_SECONDS=${BISQUE_AUTH_TOKEN_EXPIRY_SECONDS:-3600}
+      - BISQUE_AUTH_TOKEN_CLOCK_SKEW_SECONDS=${BISQUE_AUTH_TOKEN_CLOCK_SKEW_SECONDS:-15}
+      - BISQUE_AUTH_TOKEN_VERIFY_AUDIENCE=${BISQUE_AUTH_TOKEN_VERIFY_AUDIENCE:-false}
+      - BISQUE_AUTH_TOKEN_SECRET=${BISQUE_AUTH_TOKEN_SECRET:-}
+      - BISQUE_OIDC_ISSUER=${BISQUE_OIDC_ISSUER:-http://localhost:18080/realms/bisque}
+      - BISQUE_OIDC_METADATA_URL=${BISQUE_OIDC_METADATA_URL:-http://keycloak:8080/realms/bisque/.well-known/openid-configuration}
+      - BISQUE_OIDC_JWKS_URI=${BISQUE_OIDC_JWKS_URI:-http://keycloak:8080/realms/bisque/protocol/openid-connect/certs}
+      - BISQUE_OIDC_AUTHORIZATION_ENDPOINT=${BISQUE_OIDC_AUTHORIZATION_ENDPOINT:-http://localhost:18080/realms/bisque/protocol/openid-connect/auth}
+      - BISQUE_OIDC_TOKEN_ENDPOINT=${BISQUE_OIDC_TOKEN_ENDPOINT:-http://keycloak:8080/realms/bisque/protocol/openid-connect/token}
+      - BISQUE_OIDC_END_SESSION_ENDPOINT=${BISQUE_OIDC_END_SESSION_ENDPOINT:-http://localhost:18080/realms/bisque/protocol/openid-connect/logout}
+      - BISQUE_OIDC_USERINFO_ENDPOINT=${BISQUE_OIDC_USERINFO_ENDPOINT:-http://keycloak:8080/realms/bisque/protocol/openid-connect/userinfo}
+      - BISQUE_OIDC_CLIENT_ID=${BISQUE_OIDC_CLIENT_ID:-bisque-dev}
+      - BISQUE_OIDC_CLIENT_SECRET=${BISQUE_OIDC_CLIENT_SECRET:-bisque-dev-secret}
+      - BISQUE_OIDC_REDIRECT_URI=${BISQUE_OIDC_REDIRECT_URI:-http://localhost:8080/auth_service/oidc_callback}
+      - BISQUE_OIDC_POST_LOGOUT_REDIRECT_URI=${BISQUE_OIDC_POST_LOGOUT_REDIRECT_URI:-http://localhost:8080/client_service/}
+      - BISQUE_OIDC_SCOPES=${BISQUE_OIDC_SCOPES:-openid profile email}
+      - BISQUE_OIDC_USERNAME_CLAIM=${BISQUE_OIDC_USERNAME_CLAIM:-preferred_username}
+      - BISQUE_OIDC_GROUPS_CLAIM=${BISQUE_OIDC_GROUPS_CLAIM:-groups}
+      - BISQUE_OIDC_AUDIENCE=${BISQUE_OIDC_AUDIENCE:-}
+      - BISQUE_OIDC_VERIFY_AUDIENCE=${BISQUE_OIDC_VERIFY_AUDIENCE:-false}
+      - BISQUE_OIDC_ALGORITHMS=${BISQUE_OIDC_ALGORITHMS:-RS256}
+      - BISQUE_OIDC_HTTP_TIMEOUT_SECONDS=${BISQUE_OIDC_HTTP_TIMEOUT_SECONDS:-10}
+      - BISQUE_OIDC_METADATA_TTL_SECONDS=${BISQUE_OIDC_METADATA_TTL_SECONDS:-300}
+      - BISQUE_OIDC_CLOCK_SKEW_SECONDS=${BISQUE_OIDC_CLOCK_SKEW_SECONDS:-15}
+      - BISQUE_OIDC_AUTO_APPROVE_USERS=${BISQUE_OIDC_AUTO_APPROVE_USERS:-true}
+      - BISQUE_OIDC_LOGIN_PAGE_ENABLED=${BISQUE_OIDC_LOGIN_PAGE_ENABLED:-false}
+      - BISQUE_OIDC_PROVIDER_NAME=${BISQUE_OIDC_PROVIDER_NAME:-Keycloak}
+      - BISQUE_OIDC_LOGIN_BUTTON_TEXT=${BISQUE_OIDC_LOGIN_BUTTON_TEXT:-Continue with Keycloak}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/image_service/formats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bisque-net
+
+  # if we want a proper postgres container
+  postgres:
+    image: postgres:15
+    container_name: bisque-postgres
+    environment:
+      POSTGRES_DB: bisque
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${BISQUE_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bisque-net
+
+  # MySQL database (alternative to postgres)
+  mysql:
+    image: mysql:8.0
+    container_name: bisque-mysql
+    environment:
+      MYSQL_DATABASE: bisque
+      MYSQL_USER: bisque
+      MYSQL_PASSWORD: bisque
+      MYSQL_ROOT_PASSWORD: rootpassword
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bisque-net
+
+volumes:
+  # Named volumes for persistent data
+  bisque_config:
+    driver: local
+  bisque_data:
+    driver: local
+  bisque_reports:
+    driver: local
+  bisque_public:
+    driver: local
+  bisque_modules:
+    driver: local
+  bisque_staging:
+    driver: local
+  postgres_data:
+    driver: local
+  mysql_data:
+    driver: local
+
+networks:
+  bisque-net:
+    name: ${NETWORK_NAME:-bisque-network}
+    driver: bridge

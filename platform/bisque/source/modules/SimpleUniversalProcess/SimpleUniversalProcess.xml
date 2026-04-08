@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<module name="SimpleUniversalProcess" type="runtime">
+
+     <tag name="inputs">
+          <tag name="Input Image" type="resource">
+               <template>
+                    <tag name="label" value="Input Image"/>
+                    <tag name="accepted_type" value="image"/>
+                    <tag name="prohibit_upload" value="True"/>
+               </template>
+          </tag>
+          <tag name="mex_url" type="system-input_resource"/>
+          <tag name="bisque_token" type="system-input_resource"/>
+     </tag>
+
+     <tag name="outputs">
+          <tag name="NonImage">
+               <template>
+                    <tag name="label" value="Outputs"/>
+               </template>
+          </tag>
+          <tag name="Output Image" type="image">
+               <template>
+                    <tag name="label" value="Output Image"/>
+               </template>
+          </tag>
+     </tag>
+
+     <tag name="module_options">
+          <tag name="version" value="1"/>
+     </tag>
+
+     <tag name="display_options">
+          <tag name="group" value="Metadata"/>
+     </tag>
+
+     <tag name="thumbnail" type="file" value="public/thumbnail.jpg"/>
+
+     <tag name="title" type="string" value="SimpleUniversalProcess"/>
+     <tag name="authors" type="string" value="BisQue Ultra"/>
+     <tag name="description" type="string" value="Robust preprocessing module for mixed image/binary-like inputs."/>
+</module>

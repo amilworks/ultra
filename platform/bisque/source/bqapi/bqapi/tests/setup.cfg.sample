@@ -1,0 +1,16 @@
+[Host]
+root: http://127.0.0.1:8080
+user: test
+password: test
+
+[Store]
+samples_url: https://s3-us-west-2.amazonaws.com/viqi-test-images/
+input_dir: SampleData
+results_dir: Results
+files: flowers_24bit_nointr.png
+
+#simple rgb image
+filename1: flowers_24bit_nointr.png
+
+[nosetests]
+

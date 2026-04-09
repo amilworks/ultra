@@ -1251,6 +1251,21 @@ class AgnoChatRuntime:
                 "If it is unbalanced, report that directly. Only search for corrected coefficients "
                 "if the user explicitly asks for a balanced form."
             )
+        if {
+            "search_bisque_resources",
+            "bisque_find_assets",
+            "load_bisque_resource",
+            "bisque_download_dataset",
+            "bisque_download_resource",
+            "bisque_fetch_xml",
+        }.intersection(tool_names):
+            instructions.extend(
+                [
+                    "For BisQue catalog answers, use only the tool results from this turn and do not invent public collections, sample datasets, or repository contents.",
+                    "When presenting a BisQue asset to the user, prefer client_view_url when available and avoid raw data_service resource URIs in visible prose unless the user explicitly asks for the raw URI.",
+                    "If a BisQue search returns zero results, say that directly and keep the answer short instead of padding it with generic portal instructions.",
+                ]
+            )
         return instructions
 
     @staticmethod
@@ -3776,6 +3791,45 @@ class AgnoChatRuntime:
         if allowed:
             filtered = [tool_name for tool_name in filtered if tool_name in allowed] or filtered
         return filtered
+
+    @staticmethod
+    def _looks_like_bisque_catalog_question(user_text: str) -> bool:
+        lowered = str(user_text or "").strip().lower()
+        if not lowered or "bisque" not in lowered:
+            return False
+        if not re.search(r"\b(dataset|datasets|resource|resources|image|images|file|files|table|tables|hdf5|h5|dream3d)\b", lowered):
+            return False
+        return bool(
+            re.search(
+                r"\b(search|find|list|browse|show me|look up|which|what|any|recent|latest|most recent)\b",
+                lowered
+            )
+            or "are there any" in lowered
+            or "do i have any" in lowered
+            or "what do i have" in lowered
+        )
+
+    def _infer_default_tool_names_for_turn(
+        self,
+        *,
+        turn_intent: AgnoTurnIntent,
+        route: AgnoRouteDecision,
+        explicit_tool_names: list[str],
+    ) -> list[str]:
+        if explicit_tool_names:
+            return []
+        workflow_id = str(turn_intent.workflow_hint.get("id") or "").strip().lower()
+        if workflow_id:
+            return []
+        if not route.available_tool_names:
+            return []
+        available = set(route.available_tool_names or [])
+        if (
+            "search_bisque_resources" in available
+            and self._looks_like_bisque_catalog_question(turn_intent.user_text)
+        ):
+            return ["search_bisque_resources"]
+        return []
 
     def _json_result(self, value: Any) -> tuple[Any, str]:
         if isinstance(value, dict):
@@ -12440,7 +12494,16 @@ class AgnoChatRuntime:
         explicit_tool_names = self._normalize_selected_tool_names(
             selected_tool_names or pending_hitl.get("selected_tool_names")
         )
-        tool_names = self._allowed_tools_for_route(route=route, selected_tool_names=explicit_tool_names)
+        inferred_default_tool_names = self._infer_default_tool_names_for_turn(
+            turn_intent=turn_intent,
+            route=route,
+            explicit_tool_names=explicit_tool_names,
+        )
+        effective_selected_tool_names = explicit_tool_names or inferred_default_tool_names
+        tool_names = self._allowed_tools_for_route(
+            route=route,
+            selected_tool_names=effective_selected_tool_names,
+        )
         agno_session_id = self._scope_session_id(
             conversation_id=conversation_id,
             user_id=user_id,

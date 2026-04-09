@@ -4645,49 +4645,54 @@ const buildToolResultCards = (
       const countValue = candidate.matchCount ?? candidate.resourceRows.length;
       return sum + Math.max(0, Math.round(countValue));
     }, 0);
-    const resourceTypes = Array.from(
-      new Set(
-        selectedBisqueSearches
-          .map((candidate) => String(candidate.resourceType ?? "").trim().toLowerCase())
-          .filter((value) => value.length > 0)
-      )
-    );
-    const subtitle =
-      resourceTypes.length === 0
-        ? undefined
-        : resourceTypes.length === 1
-          ? `${resourceTypes[0]} resources`
-          : `${resourceTypes.slice(0, 2).join(" + ")}${resourceTypes.length > 2 ? " + more" : ""} resources`;
-    const lastCandidate = selectedBisqueSearches[selectedBisqueSearches.length - 1];
-    mergedBisqueSearchMatchCount = totalMatches;
-    mergedBisqueSearchCard = {
-      id: `bisque-search-${lastCandidate.index}`,
-      tool:
-        selectedBisqueSearches.length === 1 &&
-        selectedBisqueSearches[0].toolName === "bisque_advanced_search"
-          ? "bisque_advanced_search"
-          : "search_bisque_resources",
-      title:
-        selectedBisqueSearches.length === 1 &&
-        selectedBisqueSearches[0].toolName === "bisque_advanced_search"
-          ? "BisQue advanced search"
-          : "BisQue search",
-      subtitle,
-      metrics: [
-        {
-          label: "Matches",
-          value: `${totalMatches}`,
-        },
-        {
-          label: "Shown",
-          value: `${mergedRows.length}`,
-        },
-      ],
-      classes: [],
-      images: toolCardImagesFromBisqueResourceRows(mergedRows, 1),
-      resourceRows: mergedRows,
-      downloadRows: [],
-    };
+    if (totalMatches <= 0 && mergedRows.length === 0) {
+      mergedBisqueSearchMatchCount = 0;
+      mergedBisqueSearchCard = null;
+    } else {
+      const resourceTypes = Array.from(
+        new Set(
+          selectedBisqueSearches
+            .map((candidate) => String(candidate.resourceType ?? "").trim().toLowerCase())
+            .filter((value) => value.length > 0)
+        )
+      );
+      const subtitle =
+        resourceTypes.length === 0
+          ? undefined
+          : resourceTypes.length === 1
+            ? `${resourceTypes[0]} resources`
+            : `${resourceTypes.slice(0, 2).join(" + ")}${resourceTypes.length > 2 ? " + more" : ""} resources`;
+      const lastCandidate = selectedBisqueSearches[selectedBisqueSearches.length - 1];
+      mergedBisqueSearchMatchCount = totalMatches;
+      mergedBisqueSearchCard = {
+        id: `bisque-search-${lastCandidate.index}`,
+        tool:
+          selectedBisqueSearches.length === 1 &&
+          selectedBisqueSearches[0].toolName === "bisque_advanced_search"
+            ? "bisque_advanced_search"
+            : "search_bisque_resources",
+        title:
+          selectedBisqueSearches.length === 1 &&
+          selectedBisqueSearches[0].toolName === "bisque_advanced_search"
+            ? "BisQue advanced search"
+            : "BisQue search",
+        subtitle,
+        metrics: [
+          {
+            label: "Matches",
+            value: `${totalMatches}`,
+          },
+          {
+            label: "Shown",
+            value: `${mergedRows.length}`,
+          },
+        ],
+        classes: [],
+        images: toolCardImagesFromBisqueResourceRows(mergedRows, 1),
+        resourceRows: mergedRows,
+        downloadRows: [],
+      };
+    }
   }
 
   let primaryBisqueCard: ToolResultCard | null = null;

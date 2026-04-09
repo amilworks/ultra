@@ -4167,6 +4167,20 @@ class AgnoChatRuntime:
     ) -> list[Function]:
         functions: list[Function] = []
         latest_result_refs: dict[str, Any] = {}
+        per_turn_tool_cache: dict[tuple[str, str], str] = {}
+
+        def _cache_key(selected_name: str, kwargs: dict[str, Any]) -> tuple[str, str] | None:
+            if selected_name not in {"search_bisque_resources", "bisque_find_assets"}:
+                return None
+            try:
+                normalized = json.dumps(kwargs, sort_keys=True, default=str)
+            except TypeError:
+                normalized = json.dumps(
+                    json.loads(json.dumps(kwargs, default=str)),
+                    sort_keys=True,
+                )
+            return (selected_name, normalized)
+
         for tool_name in tool_names:
             schema = TOOL_SCHEMA_MAP.get(tool_name)
             entrypoint = AVAILABLE_TOOLS.get(tool_name)
@@ -4179,6 +4193,11 @@ class AgnoChatRuntime:
 
             def _make_entrypoint(selected_name: str) -> Callable[..., str]:
                 def _tool_entrypoint(**kwargs: Any) -> str:
+                    cached_key = _cache_key(selected_name, kwargs)
+                    if cached_key is not None:
+                        cached = per_turn_tool_cache.get(cached_key)
+                        if cached is not None:
+                            return cached
                     raw_result = execute_tool_call(
                         selected_name,
                         kwargs,
@@ -4198,6 +4217,8 @@ class AgnoChatRuntime:
                                 if value is None:
                                     continue
                                 latest_result_refs[str(key)] = value
+                    if cached_key is not None:
+                        per_turn_tool_cache[cached_key] = raw_result
                     return raw_result
 
                 _tool_entrypoint.__name__ = selected_name

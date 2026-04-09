@@ -1,0 +1,7 @@
+[Unit]
+Description=BisQue Ultra backend target
+Wants=ultra-backend@1.service ultra-backend@2.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,9 @@
-.PHONY: help install dev platform-up platform-down platform-logs dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image
+.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
 PLATFORM_SERVICES := bisque postgres keycloak
+PLATFORM_PROD_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -24,6 +25,18 @@ platform-down: ## Stop the absorbed BisQue platform containers
 
 platform-logs: ## Tail logs from the absorbed BisQue platform container
 	docker compose --env-file $(ENV_FILE) $(PLATFORM_COMPOSE_FILES) logs -f $(PLATFORM_SERVICES)
+
+platform-up-prod: ## Start the production-shaped BisQue platform (localhost-bound ports, hardened Keycloak)
+	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) up -d --build $(PLATFORM_SERVICES)
+
+platform-down-prod: ## Stop the production-shaped BisQue platform containers
+	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) down --remove-orphans
+
+platform-logs-prod: ## Tail logs from the production-shaped BisQue platform container
+	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) logs -f $(PLATFORM_SERVICES)
+
+platform-config-prod: ## Print merged production docker compose config for BisQue + Keycloak + Postgres
+	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) config
 
 dev-stack: ## Start BisQue platform in Docker plus local API/frontend processes
 	ENV_FILE=$(ENV_FILE) ./scripts/dev_stack.sh

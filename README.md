@@ -13,7 +13,8 @@
   <a href="#before-you-start">Before you start</a> ·
   <a href="#step-1-create-your-local-env">Set your environment</a> ·
   <a href="#step-2-choose-an-inference-engine">Choose vLLM or Ollama</a> ·
-  <a href="#bring-the-platform-up">Bring the platform up</a>
+  <a href="#bring-the-platform-up">Bring the platform up</a> ·
+  <a href="#production-deployment">Production deployment</a>
 </p>
 
 BisQue Ultra gives you one local surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. BisQue stores the data. Keycloak handles identity. FastAPI routes tools, runs, and model traffic. React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at vLLM or Ollama without rewriting the application around a single vendor.
@@ -237,6 +238,27 @@ curl -I -fsS http://localhost:5173
 ## What the Ports Mean
 
 These ports are easy to confuse because they all belong to one system but not to one process.
+
+## Production Deployment
+
+This repo now includes a production deployment layer built around the same split the app already uses in development:
+
+- `nginx` at the edge
+- BisQue, Keycloak, and Postgres in Docker
+- two host-level Ultra backend instances under `systemd`
+- one static frontend release
+- one separate private model node for `vLLM` or `Ollama`
+
+The important operational boundary is this one: **normal pushes should redeploy Ultra without touching BisQue**. That is why the production repo now ships:
+
+- path-filtered GitHub Actions for Ultra frontend and Ultra backend
+- a manual-only platform deployment workflow for BisQue and Keycloak
+- `deploy/env/*.example` for server-side env files
+- `deploy/nginx/*.template` for same-origin reverse proxy routing
+- `deploy/systemd/*` for `ultra-backend@1` and `ultra-backend@2`
+- `platform/bisque/docker-compose.production.yml` for hardened Keycloak and one shared Postgres instance
+
+For the full production guide, use [docs/production-deployment.md](docs/production-deployment.md).
 
 - `8080`: BisQue itself
 - `18080`: Keycloak

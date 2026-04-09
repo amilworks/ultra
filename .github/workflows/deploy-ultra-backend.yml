@@ -1,0 +1,60 @@
+name: Deploy Ultra Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "bqapi/**"
+      - "docker/codeexec/**"
+      - "third_party/yolov5/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - ".env.example"
+      - "scripts/deploy_ultra_backend.sh"
+      - ".github/workflows/deploy-ultra-backend.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ULTRA_DEPLOY_ROOT: ${{ vars.ULTRA_DEPLOY_ROOT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+
+      - name: Configure known hosts
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Sync backend release
+        env:
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
+          RELEASE_DIR="$DEPLOY_ROOT/releases/${GITHUB_SHA}/backend"
+          ssh "$DEPLOY_TARGET" "mkdir -p '$RELEASE_DIR' '$DEPLOY_ROOT/ops'"
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.env' \
+            --exclude 'frontend' \
+            --exclude 'platform/bisque' \
+            ./ "$DEPLOY_TARGET:$RELEASE_DIR/"
+          rsync -az scripts/deploy_ultra_backend.sh "$DEPLOY_TARGET:$DEPLOY_ROOT/ops/"
+
+      - name: Activate backend release
+        env:
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
+          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/ops/deploy_ultra_backend.sh' && sudo ULTRA_RELEASE_ROOT='$DEPLOY_ROOT' '$DEPLOY_ROOT/ops/deploy_ultra_backend.sh' '${GITHUB_SHA}'"

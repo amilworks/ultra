@@ -13605,6 +13605,10 @@ def execute_tool_call(
                         current_resource_type == "image"
                         and inferred_resource_type != "image"
                     )
+                    or (
+                        inferred_resource_type == "dataset"
+                        and current_resource_type != "dataset"
+                    )
                 ):
                     args["resource_type"] = inferred_resource_type
                     logger.info(

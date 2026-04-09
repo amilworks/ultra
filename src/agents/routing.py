@@ -646,6 +646,12 @@ def _has_bisque_catalog_search_intent(normalized_text: str) -> bool:
     )
     mentions_recency = any(_keyword_match(normalized_text, cue) for cue in ("recent", "latest", "uploaded"))
     starts_like_question = normalized_text.startswith(("what ", "which ", "show me ", "list "))
+    asks_inventory = any(
+        phrase in normalized_text
+        for phrase in ("are there any", "do i have any", "what do i have")
+    )
+    if mentions_resource_noun and asks_inventory:
+        return True
     return bool(starts_like_question and mentions_resource_noun and (mentions_filetype or mentions_recency))
 
 

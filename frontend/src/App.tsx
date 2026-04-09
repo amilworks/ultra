@@ -10991,6 +10991,7 @@ export function App() {
     return (
       <AuthScreen
         bisqueRoot={bisqueRootForAuth}
+        bisqueHomeUrl={bisqueNavLinks?.home ?? undefined}
         oidcEnabled={authOidcEnabled}
         allowGuest={authGuestEnabled}
         loading={authSubmitting || authStatus === "checking"}

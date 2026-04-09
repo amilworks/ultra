@@ -41,7 +41,9 @@ def main() -> int:
 
     for template_path in sorted(template_dir.glob("*.template")):
         rendered = Template(template_path.read_text(encoding="utf-8")).substitute(env)
-        target_name = template_path.name.removesuffix(".template")
+        target_name = template_path.name
+        if target_name.endswith(".template"):
+            target_name = target_name[: -len(".template")]
         (output_dir / target_name).write_text(rendered, encoding="utf-8")
 
     print(f"Rendered nginx configs to {output_dir}")

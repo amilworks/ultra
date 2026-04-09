@@ -839,6 +839,18 @@ def create_app() -> FastAPI:
         separator = "&" if "?" in normalized_url else "?"
         return f"{normalized_url}{separator}{urlencode(filtered)}"
 
+    def _bisque_browser_bootstrap_url(destination: str) -> str:
+        target = str(destination or "").strip()
+        root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
+        if not target or not root:
+            return target
+        if not _oidc_via_bisque_login_enabled():
+            return target
+        return _append_query_params(
+            f"{root}/auth_service/oidc_login",
+            {"came_from": target},
+        )
+
     def _jwt_claims(token: str | None) -> dict[str, Any]:
         raw = str(token or "").strip()
         if not raw:
@@ -4606,11 +4618,15 @@ def create_app() -> FastAPI:
 
     def _bisque_nav_links() -> dict[str, str]:
         root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
+        home = f"{root}/client_service/"
+        images = f"{root}/client_service/browser?resource=/data_service/image"
+        datasets = f"{root}/client_service/browser?resource=/data_service/dataset"
+        tables = f"{root}/client_service/browser?resource=/data_service/table"
         return {
-            "home": f"{root}/client_service/",
-            "images": f"{root}/client_service/browser?resource=/data_service/image",
-            "datasets": f"{root}/client_service/browser?resource=/data_service/dataset",
-            "tables": f"{root}/client_service/browser?resource=/data_service/table",
+            "home": _bisque_browser_bootstrap_url(home),
+            "images": _bisque_browser_bootstrap_url(images),
+            "datasets": _bisque_browser_bootstrap_url(datasets),
+            "tables": _bisque_browser_bootstrap_url(tables),
         }
 
     def _bisque_browser_url() -> str:

@@ -1,8 +1,24 @@
-# BisQue Ultra
+<p align="center">
+  <img src="docs/images/ultra-launch.png" alt="BisQue Ultra hero image" width="960" />
+</p>
 
-BisQue Ultra is a scientific imaging system with a clear division of labor. BisQue stores images, datasets, and metadata. Keycloak handles login. A FastAPI backend routes tools, runs, and model calls. A React frontend keeps the whole process visible. The only part you swap freely is the inference engine. This repo already knows how to talk to both vLLM and Ollama through the same OpenAI-compatible interface, so you can choose the model stack that fits your hardware instead of rewriting the application around one vendor.
+<h1 align="center">BisQue Ultra</h1>
 
-If you want one sentence to hold the whole design in your head, use this one: BisQue Ultra is a local scientific workbench whose storage layer is BisQue, whose control plane is FastAPI, whose interface is React, and whose language model can come from any OpenAI-compatible server.
+<p align="center">
+  <strong>Scientific imaging, tool-guided analysis, and reproducible model workflows in one local workbench.</strong>
+</p>
+
+<p align="center">
+  <a href="#what-you-are-launching">What you launch</a> ·
+  <a href="#before-you-start">Before you start</a> ·
+  <a href="#step-1-create-your-local-env">Set your environment</a> ·
+  <a href="#step-2-choose-an-inference-engine">Choose vLLM or Ollama</a> ·
+  <a href="#bring-the-platform-up">Bring the platform up</a>
+</p>
+
+BisQue Ultra gives you one local surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. BisQue stores the data. Keycloak handles identity. FastAPI routes tools, runs, and model traffic. React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at vLLM or Ollama without rewriting the application around a single vendor.
+
+If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a local scientific workbench whose storage layer is BisQue, whose control plane is FastAPI, whose interface is React, and whose language model can come from any OpenAI-compatible server.
 
 ## What You Are Launching
 

@@ -68,6 +68,52 @@ log = logging.getLogger ("bq.service")
 
 __all__=["ServiceController",  "load_services" ]
 
+
+def _forwarded_host_url():
+    """Build a proxy-aware host URL when BisQue runs behind TLS termination."""
+    environ = getattr(request, "environ", {}) or {}
+    forwarded = environ.get("HTTP_FORWARDED", "")
+    forwarded_host = ""
+    forwarded_proto = ""
+    if forwarded:
+        first_hop = forwarded.split(",", 1)[0]
+        for segment in first_hop.split(";"):
+            if "=" not in segment:
+                continue
+            key, value = segment.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip().strip('"')
+            if key == "host" and value:
+                forwarded_host = value
+            elif key == "proto" and value:
+                forwarded_proto = value
+
+    forwarded_host = (
+        forwarded_host
+        or environ.get("HTTP_X_FORWARDED_HOST", "").split(",", 1)[0].strip()
+    )
+    forwarded_proto = (
+        forwarded_proto
+        or environ.get("HTTP_X_FORWARDED_PROTO", "").split(",", 1)[0].strip()
+    )
+    forwarded_port = environ.get("HTTP_X_FORWARDED_PORT", "").split(",", 1)[0].strip()
+
+    host_url = request.host_url
+    if not (forwarded_host or forwarded_proto or forwarded_port):
+        return host_url
+
+    parsed = urllib.parse.urlsplit(host_url)
+    scheme = forwarded_proto or parsed.scheme or "http"
+    netloc = forwarded_host or parsed.netloc
+    if forwarded_port and netloc and ":" not in netloc and forwarded_port not in {"80", "443"}:
+        netloc = f"{netloc}:{forwarded_port}"
+    if forwarded_port and netloc and ":" not in netloc and (
+        (scheme == "http" and forwarded_port == "80")
+        or (scheme == "https" and forwarded_port == "443")
+    ):
+        netloc = forwarded_host or parsed.netloc
+    return urllib.parse.urlunsplit((scheme, netloc, "/", "", ""))
+
 class ServiceDirectory(object):
     """Specialized dict of service_type -> to bq.service"""
 
@@ -241,7 +287,7 @@ class ServiceMixin(object):
 
     def get_uri(self):
         try:
-            host_url = request.host_url
+            host_url = _forwarded_host_url()
             #log.debug ("REQUEST %s" , host_url)
         except TypeError:
             #log.warn ("TYPEERROR on request")

@@ -31,7 +31,7 @@
                 Use the same credentials you use on BisQue. After sign-in, uploads, browsing,
                 and tool calls run against your account.
             </p>
-            <a href="${properties.bisqueClientUrl!'https://bisque.ece.ucsb.edu/client_service/'}" target="_blank" rel="noreferrer">Open BisQue client</a>
+            <a href="${properties.bisqueClientUrl!'/client_service/'}" target="_blank" rel="noreferrer">Open BisQue client</a>
         </div>
     </section>
 

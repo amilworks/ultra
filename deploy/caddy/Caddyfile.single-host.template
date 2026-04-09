@@ -1,0 +1,49 @@
+{
+    email ${ACME_EMAIL}
+}
+
+${ULTRA_PUBLIC_HOST} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-Frame-Options "SAMEORIGIN"
+        -Server
+    }
+
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
+    }
+
+    handle /v3/* {
+        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
+    }
+
+    handle /openapi.json {
+        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
+    }
+
+    handle /docs* {
+        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
+    }
+
+    handle /auth/* {
+        reverse_proxy 127.0.0.1:18080
+    }
+
+    @bisque path /auth_service* /blob_service* /client_service* /core* /data_service* /dataset_service* /engine_service* /export* /export_service* /features* /image_service* /import* /mex* /module_service* /notebook_service* /registration* /services* /stats* /table_service* /usage*
+    handle @bisque {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    redir /bisque /client_service/ 302
+    redir /bisque/ /client_service/ 302
+
+    handle {
+        root * /srv/ultra/frontend-current
+        try_files {path} /index.html
+        file_server
+    }
+}

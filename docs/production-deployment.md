@@ -10,7 +10,7 @@ This repo now includes the deployment scaffolding for that split.
 
 ## Recommended Topology
 
-Use two machines:
+Use two machines if you have them. If you only have one public DNS name and one app node, the stack still works cleanly with one front door:
 
 - **App node**
   - external `nginx`
@@ -25,6 +25,31 @@ Use two machines:
   - private OpenAI-compatible endpoint
 
 The app node keeps browser traffic, storage, and auth local. The model node absorbs the heavy inference load and can be replaced without changing the web stack.
+
+## Single-Hostname Production Layout
+
+For the single-host deployment where only `ultra.example.com` exists publicly, use one `nginx` site and split by path:
+
+- `https://ultra.example.com/`
+  - static Ultra frontend
+- `https://ultra.example.com/v1/*`
+  - Ultra backend API
+- `https://ultra.example.com/v3/*`
+  - Ultra run/session API
+- `https://ultra.example.com/auth/*`
+  - Keycloak
+- `https://ultra.example.com/client_service/*`
+  - BisQue browser UI
+- `https://ultra.example.com/auth_service/*`
+  - BisQue auth endpoints
+- `https://ultra.example.com/data_service/*`
+  - BisQue data APIs
+- `https://ultra.example.com/image_service/*`
+  - BisQue image APIs
+
+Do not put BisQue behind `/bisque`.
+
+BisQue is an older platform with many root-path assumptions baked into redirects, templates, JS, and generated URLs. Keep BisQue on its native top-level service namespaces and let `nginx` dispatch those namespaces to the BisQue container. Keycloak is the component that should live under a path prefix, because it supports a relative path cleanly.
 
 ## Repo Assets Added For Production
 
@@ -83,6 +108,20 @@ This file is for the FastAPI app and the backend deploy scripts. It should conta
 - `ULTRA_PUBLIC_HOST`
 - `ULTRA_RELEASE_ROOT`
 - `BISQUE_ROOT`
+
+### `platform.env`
+
+This file is for BisQue, Keycloak, and Postgres. In addition to hostnames and
+database credentials, keep the BisQue SQLAlchemy pool settings here. The
+authenticated first-load burst for `client_service` is large enough that the
+legacy defaults can exhaust the DB pool behind a reverse proxy.
+
+Recommended starting values:
+
+- `BISQUE_SQLALCHEMY_POOL_SIZE=25`
+- `BISQUE_SQLALCHEMY_MAX_OVERFLOW=25`
+- `BISQUE_SQLALCHEMY_POOL_TIMEOUT=60`
+- `BISQUE_SQLALCHEMY_POOL_PRE_PING=true`
 - `RUN_STORE_PATH`
 - `ARTIFACT_ROOT`
 - `SESSION_UPLOAD_ROOT`
@@ -130,7 +169,7 @@ This file is for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and `ngin
      --output-dir .tmp/rendered-production
    ```
 
-5. Copy the rendered `nginx` files to `/etc/nginx/sites-available/`, enable them, and reload `nginx`.
+5. For the single-host layout, install `ultra-single-host.conf` as the active site in `/etc/nginx/sites-available/`, enable it, and reload `nginx`.
 6. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
 7. Enable the backend target:
 
@@ -150,6 +189,7 @@ That production override does four things:
 
 - binds BisQue, Keycloak, and Postgres to localhost-only ports
 - switches Keycloak out of `start-dev`
+- mounts Keycloak at `/auth`
 - adds persistent Keycloak data
 - initializes separate `bisque`, `keycloak`, and `ultra` databases in one Postgres instance
 
@@ -241,11 +281,11 @@ Do not put the full app runtime `.env` into GitHub Secrets unless you intentiona
 
 ### After a live deploy
 
-- `https://ultra.ece.ucsb.edu/`
-- `https://ultra.ece.ucsb.edu/v1/health`
-- `https://ultra.ece.ucsb.edu/v1/config/public`
-- `https://bisque.example.com/image_service/formats`
-- `https://auth.example.com/realms/bisque/.well-known/openid-configuration`
+- `https://ultra.example.com/`
+- `https://ultra.example.com/v1/health`
+- `https://ultra.example.com/v1/config/public`
+- `https://ultra.example.com/image_service/formats`
+- `https://ultra.example.com/auth/realms/bisque/.well-known/openid-configuration`
 - one browser login
 - one upload
 - one `/v1/chat`

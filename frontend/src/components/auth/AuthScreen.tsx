@@ -11,6 +11,7 @@ type AuthMode = "login" | "guest";
 
 type AuthScreenProps = {
   bisqueRoot: string;
+  bisqueHomeUrl?: string;
   loading: boolean;
   oidcEnabled?: boolean;
   allowGuest?: boolean;
@@ -34,6 +35,7 @@ const hostFromUrl = (value: string): string => {
 
 export function AuthScreen({
   bisqueRoot,
+  bisqueHomeUrl,
   loading,
   oidcEnabled = false,
   allowGuest = true,
@@ -50,6 +52,13 @@ export function AuthScreen({
   const [guestAffiliation, setGuestAffiliation] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const bisqueHost = useMemo(() => hostFromUrl(bisqueRoot), [bisqueRoot]);
+  const bisqueHomeHref = useMemo(() => {
+    const explicit = String(bisqueHomeUrl ?? "").trim();
+    if (explicit) {
+      return explicit;
+    }
+    return `${bisqueRoot}/client_service/`;
+  }, [bisqueHomeUrl, bisqueRoot]);
   const effectiveMode: AuthMode = !allowGuest && mode === "guest" ? "login" : mode;
 
   useEffect(() => {
@@ -126,7 +135,7 @@ export function AuthScreen({
               ? "Sign in through BisQue SSO to use the same account across services."
               : "Use the same credentials you use on BisQue. After sign-in, uploads, browsing, and tool calls run against your account."}
           </p>
-          <a href={`${bisqueRoot}/client_service/`} target="_blank" rel="noreferrer">
+          <a href={bisqueHomeHref} target="_blank" rel="noreferrer">
             Open {bisqueHost}
             <ArrowUpRight className="size-4" />
           </a>

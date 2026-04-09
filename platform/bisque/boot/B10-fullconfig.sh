@@ -186,6 +186,11 @@ _set_option("bisque.oidc.auto_approve_users", os.environ.get("BISQUE_OIDC_AUTO_A
 _set_option("bisque.oidc.login_page_enabled", os.environ.get("BISQUE_OIDC_LOGIN_PAGE_ENABLED", "false"))
 _set_option("bisque.oidc.provider_name", os.environ.get("BISQUE_OIDC_PROVIDER_NAME", "Keycloak"))
 _set_option("bisque.oidc.login_button_text", os.environ.get("BISQUE_OIDC_LOGIN_BUTTON_TEXT", "Continue with Keycloak"))
+_set_option("sqlalchemy.pool_recycle", os.environ.get("BISQUE_SQLALCHEMY_POOL_RECYCLE", "3600"))
+_set_option("sqlalchemy.pool_pre_ping", os.environ.get("BISQUE_SQLALCHEMY_POOL_PRE_PING", "true"))
+_set_option("sqlalchemy.pool_size", os.environ.get("BISQUE_SQLALCHEMY_POOL_SIZE", "25"))
+_set_option("sqlalchemy.max_overflow", os.environ.get("BISQUE_SQLALCHEMY_MAX_OVERFLOW", "25"))
+_set_option("sqlalchemy.pool_timeout", os.environ.get("BISQUE_SQLALCHEMY_POOL_TIMEOUT", "60"))
 
 if not cfg.has_section("servers"):
     cfg.add_section("servers")

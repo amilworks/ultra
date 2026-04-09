@@ -1,0 +1,62 @@
+name: Deploy Ultra Frontend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - "scripts/deploy_ultra_frontend.sh"
+      - ".github/workflows/deploy-ultra-frontend.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ULTRA_DEPLOY_ROOT: ${{ vars.ULTRA_DEPLOY_ROOT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm --dir frontend build
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+
+      - name: Configure known hosts
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Sync release assets
+        env:
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
+          ssh "$DEPLOY_TARGET" "mkdir -p '$DEPLOY_ROOT/releases/${GITHUB_SHA}/frontend' '$DEPLOY_ROOT/ops'"
+          rsync -az --delete frontend/dist/ "$DEPLOY_TARGET:$DEPLOY_ROOT/releases/${GITHUB_SHA}/frontend/"
+          rsync -az scripts/deploy_ultra_frontend.sh "$DEPLOY_TARGET:$DEPLOY_ROOT/ops/"
+
+      - name: Activate frontend release
+        env:
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
+          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/ops/deploy_ultra_frontend.sh' && sudo ULTRA_RELEASE_ROOT='$DEPLOY_ROOT' '$DEPLOY_ROOT/ops/deploy_ultra_frontend.sh' '${GITHUB_SHA}'"

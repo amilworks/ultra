@@ -1,0 +1,24 @@
+[Unit]
+Description=BisQue Ultra backend instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ultra
+Group=ultra
+WorkingDirectory=/srv/ultra/current
+EnvironmentFile=/etc/ultra/ultra-backend.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'case "%i" in 1) port=8001 ;; 2) port=8002 ;; *) echo "Unsupported backend instance: %i" >&2; exit 1 ;; esac; exec /srv/ultra/current/.venv/bin/uvicorn src.api.main:app --host 127.0.0.1 --port "$port"'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-backend-%i
+
+[Install]
+WantedBy=multi-user.target

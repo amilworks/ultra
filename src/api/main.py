@@ -256,6 +256,104 @@ stream_chat_completion: Any | None = None
 logger = logging.getLogger(__name__)
 
 
+def _first_csv_header_value(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    token = raw.split(",", 1)[0].strip()
+    return token or None
+
+
+def _normalized_public_origin(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return None
+
+
+def _public_request_origin(
+    request: FastAPIRequest | None,
+    *,
+    fallback_url: str | None = None,
+) -> str | None:
+    if request is not None:
+        forwarded_proto = _first_csv_header_value(
+            request.headers.get("x-forwarded-proto")
+            or request.headers.get("x-forwarded-scheme")
+        )
+        forwarded_host = _first_csv_header_value(request.headers.get("x-forwarded-host"))
+        forwarded_port = _first_csv_header_value(request.headers.get("x-forwarded-port"))
+        host = forwarded_host or _first_csv_header_value(request.headers.get("host"))
+        if host and forwarded_port and ":" not in host and forwarded_port not in {"80", "443"}:
+            host = f"{host}:{forwarded_port}"
+        scheme = forwarded_proto or str(getattr(request.url, "scheme", "") or "").strip()
+        if scheme and host:
+            return f"{scheme}://{host}"
+        base_url = str(getattr(request, "base_url", "") or "").strip().rstrip("/")
+        if base_url:
+            return base_url
+    return _normalized_public_origin(fallback_url)
+
+
+def _normalize_bisque_resource_uri_with_root(resource: str, bisque_root: str) -> str:
+    if not resource:
+        raise ValueError("BisQue resource reference is empty.")
+
+    root = bisque_root.rstrip("/")
+    value = str(resource).strip()
+
+    if "resource=" in value:
+        candidate = value.split("resource=", 1)[-1].split("&", 1)[0]
+        candidate = unquote(candidate)
+        if candidate:
+            value = candidate
+
+    if value.startswith(root):
+        value = value[len(root) :]
+
+    if value.startswith("/resource/"):
+        value = value.replace("/resource/", "/data_service/", 1)
+    if value.startswith("/image_service/"):
+        value = value.replace("/image_service/", "/data_service/", 1)
+
+    if value.startswith("http://") or value.startswith("https://"):
+        parsed = urlparse(value)
+        path = str(parsed.path or "").strip()
+        if path.startswith("/resource/"):
+            path = path.replace("/resource/", "/data_service/", 1)
+        elif path.startswith("/image_service/"):
+            path = path.replace("/image_service/", "/data_service/", 1)
+        if path.startswith("/data_service/"):
+            return f"{root}{path}"
+        if "/data_service/" in path:
+            return f"{root}{path[path.index('/data_service/'):]}"
+        return value.replace("/image_service/", "/data_service/", 1) if "/image_service/" in value else value
+
+    if value.startswith("/data_service/"):
+        return f"{root}{value}"
+    if value.startswith("/image_service/"):
+        return f"{root}{value.replace('/image_service/', '/data_service/', 1)}"
+
+    return f"{root}/data_service/{value}"
+
+
+def _build_bisque_links_for_root(resource: str, bisque_root: str) -> dict[str, str | None]:
+    resource_uri = _normalize_bisque_resource_uri_with_root(resource, bisque_root)
+    resource_uniq = resource_uri.rstrip("/").split("/")[-1] or None
+    root = bisque_root.rstrip("/")
+    image_service_url = f"{root}/image_service/{resource_uniq}" if resource_uniq else None
+    client_view_url = f"{root}/client_service/view?resource={resource_uri}" if resource_uri else None
+    return {
+        "resource_uri": resource_uri,
+        "resource_uniq": resource_uniq,
+        "client_view_url": client_view_url,
+        "image_service_url": image_service_url,
+    }
+
+
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application and all ``/v1`` routes.
 
@@ -739,15 +837,12 @@ def create_app() -> FastAPI:
         configured = str(getattr(settings, "bisque_auth_oidc_redirect_uri", "") or "").strip()
         if configured:
             return configured
-        if request is not None:
-            base_url = str(getattr(request, "base_url", "") or "").strip().rstrip("/")
-            if base_url:
-                return f"{base_url}/v1/auth/oidc/callback"
-        orchestrator_api_url = str(getattr(settings, "orchestrator_api_url", "") or "").strip()
-        if orchestrator_api_url:
-            parsed = urlparse(orchestrator_api_url)
-            if parsed.scheme and parsed.netloc:
-                return f"{parsed.scheme}://{parsed.netloc}/v1/auth/oidc/callback"
+        public_origin = _public_request_origin(
+            request,
+            fallback_url=str(getattr(settings, "orchestrator_api_url", "") or "").strip(),
+        )
+        if public_origin:
+            return f"{public_origin}/v1/auth/oidc/callback"
         return "http://localhost:8000/v1/auth/oidc/callback"
 
     def _oidc_endpoint(kind: str) -> str:
@@ -775,10 +870,20 @@ def create_app() -> FastAPI:
             return ""
         return f"{issuer}/protocol/openid-connect/{path_suffix}"
 
-    def _frontend_oidc_redirect_url() -> str:
+    def _frontend_oidc_redirect_url(request: FastAPIRequest | None = None) -> str:
         configured = str(getattr(settings, "bisque_auth_oidc_frontend_redirect_url", "") or "").strip()
         if configured:
             return configured
+        if request is not None:
+            for header_name in ("origin", "referer"):
+                origin = _normalized_public_origin(request.headers.get(header_name))
+                if origin:
+                    return f"{origin}/"
+        root = str(getattr(settings, "bisque_root", "") or "").strip()
+        if root:
+            parsed = urlparse(root)
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}/"
         return "http://localhost:5173/"
 
     def _is_loopback_host(hostname: str | None) -> bool:
@@ -799,7 +904,7 @@ def create_app() -> FastAPI:
         target_host = str(parsed.hostname or "").strip().lower()
         request_host = str(getattr(request.url, "hostname", "") or "").strip().lower()
         configured_host = str(
-            urlparse(_frontend_oidc_redirect_url()).hostname or ""
+            urlparse(_frontend_oidc_redirect_url(request)).hostname or ""
         ).strip().lower()
         allowed_hosts = {host for host in (request_host, configured_host) if host}
         if target_host in allowed_hosts:
@@ -818,16 +923,22 @@ def create_app() -> FastAPI:
         candidate = str(preferred or "").strip()
         if _is_safe_frontend_redirect_target(request, candidate):
             return candidate
-        return _frontend_oidc_redirect_url()
+        return _frontend_oidc_redirect_url(request)
 
-    def _default_logout_redirect_url() -> str:
+    def _default_logout_redirect_url(
+        request: FastAPIRequest | None = None,
+        *,
+        preferred: str | None = None,
+    ) -> str:
         explicit = str(getattr(settings, "bisque_auth_logout_redirect_url", "") or "").strip()
         if explicit:
             return explicit
-        root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
-        if root:
-            return f"{root}/client_service/"
-        return _frontend_oidc_redirect_url()
+        candidate = str(preferred or "").strip()
+        if request is not None and _is_safe_frontend_redirect_target(request, candidate):
+            return candidate
+        if candidate:
+            return candidate
+        return _frontend_oidc_redirect_url(request)
 
     def _append_query_params(url: str, params: dict[str, str]) -> str:
         normalized_url = str(url or "").strip()
@@ -1272,6 +1383,19 @@ def create_app() -> FastAPI:
             request=request,
             anonymous_session=anonymous_session,
         )
+
+    def _require_authenticated_bisque_auth(
+        bisque_auth: dict[str, Any] | None,
+        *,
+        detail: str = "BisQue authentication is required.",
+    ) -> dict[str, Any]:
+        if not bisque_auth:
+            raise HTTPException(status_code=401, detail=detail)
+        mode = str(bisque_auth.get("mode") or "").strip().lower()
+        username = str(bisque_auth.get("username") or "").strip()
+        if mode != "bisque" or not username:
+            raise HTTPException(status_code=401, detail=detail)
+        return bisque_auth
 
     def _get_effective_bisque_credentials(
         bisque_auth: dict[str, Any] | None,
@@ -2076,57 +2200,10 @@ def create_app() -> FastAPI:
         return value.split("/")[-1] or None
 
     def _normalize_bisque_resource_uri(resource: str, bisque_root: str) -> str:
-        if not resource:
-            raise ValueError("BisQue resource reference is empty.")
-
-        root = bisque_root.rstrip("/")
-        value = str(resource).strip()
-
-        if "resource=" in value:
-            candidate = value.split("resource=", 1)[-1].split("&", 1)[0]
-            candidate = unquote(candidate)
-            if candidate:
-                value = candidate
-
-        if value.startswith(root):
-            value = value[len(root) :]
-
-        if value.startswith("/resource/"):
-            value = value.replace("/resource/", "/data_service/", 1)
-        if value.startswith("/image_service/"):
-            value = value.replace("/image_service/", "/data_service/", 1)
-
-        if value.startswith("http://") or value.startswith("https://"):
-            if "/image_service/" in value:
-                return value.replace("/image_service/", "/data_service/", 1)
-            return value
-
-        if value.startswith("/data_service/"):
-            return f"{root}{value}"
-        if value.startswith("/image_service/"):
-            return f"{root}{value.replace('/image_service/', '/data_service/', 1)}"
-
-        return f"{root}/data_service/{value}"
+        return _normalize_bisque_resource_uri_with_root(resource, bisque_root)
 
     def _build_bisque_links(resource: str, bisque_root: str) -> dict[str, str | None]:
-        resource_uri = _normalize_bisque_resource_uri(resource, bisque_root)
-        resource_uniq = _extract_bisque_resource_uniq(resource_uri)
-        parsed = urlparse(resource_uri)
-        root = (
-            f"{parsed.scheme}://{parsed.netloc}"
-            if parsed.scheme and parsed.netloc
-            else bisque_root.rstrip("/")
-        )
-        image_service_url = f"{root}/image_service/{resource_uniq}" if resource_uniq else None
-        client_view_url = (
-            f"{root}/client_service/view?resource={resource_uri}" if resource_uri else None
-        )
-        return {
-            "resource_uri": resource_uri,
-            "resource_uniq": resource_uniq,
-            "client_view_url": client_view_url,
-            "image_service_url": image_service_url,
-        }
+        return _build_bisque_links_for_root(resource, bisque_root)
 
     def _build_bisque_upload_xml(upload_row: dict[str, Any], fallback_name: str) -> str:
         resource_kind = str(upload_row.get("resource_kind") or "").strip().lower()
@@ -6400,6 +6477,8 @@ def create_app() -> FastAPI:
 
     def _resolve_chat_bisque_transfer_auth(
         bisque_auth: dict[str, Any] | None,
+        *,
+        allow_settings_fallback: bool = False,
     ) -> tuple[str | None, str | None, str | None, str | None]:
         request_context = get_request_bisque_auth()
         username = str(getattr(request_context, "username", "") or "").strip() or None
@@ -6415,23 +6494,57 @@ def create_app() -> FastAPI:
                 access_token = str(bisque_auth.get("access_token") or "").strip() or None
                 cookie_header = str(bisque_auth.get("bisque_cookie_header") or "").strip() or None
                 password = str(bisque_auth.get("password") or "").strip() or None
-        if not any((username, password, access_token, cookie_header)):
-            username, password = _get_effective_bisque_credentials(None)
         if not (access_token or cookie_header):
             if username and not password:
                 username = None
         if password and not username:
             password = None
+        if allow_settings_fallback and not any((username, password, access_token, cookie_header)):
+            configured_username = str(getattr(settings, "bisque_user", "") or "").strip() or None
+            configured_password = str(getattr(settings, "bisque_password", "") or "").strip() or None
+            if configured_username and configured_password:
+                username = configured_username
+                password = configured_password
         return username, password, access_token, cookie_header
+
+    def _require_bisque_user_execution_access(
+        bisque_auth: dict[str, Any] | None,
+    ) -> tuple[str | None, str | None, str | None, str | None]:
+        if not bisque_auth:
+            raise HTTPException(
+                status_code=401,
+                detail="BisQue sign-in is required for user-scoped BisQue actions.",
+            )
+        mode = str(bisque_auth.get("mode") or "").strip().lower()
+        if mode != "bisque":
+            raise HTTPException(
+                status_code=403,
+                detail="BisQue sign-in is required. Guest sessions cannot access BisQue resources.",
+            )
+        username, password, access_token, cookie_header = _resolve_chat_bisque_transfer_auth(
+            bisque_auth,
+            allow_settings_fallback=False,
+        )
+        if access_token or cookie_header or (username and password):
+            return username, password, access_token, cookie_header
+        raise HTTPException(
+            status_code=401,
+            detail="BisQue session credentials are unavailable or expired. Sign in again and retry.",
+        )
 
     def _build_request_bisque_auth_context(
         *,
         bisque_auth: dict[str, Any] | None,
         request: FastAPIRequest | None = None,
     ) -> BisqueAuthContext | None:
-        bisque_user, bisque_password = _get_effective_bisque_credentials(bisque_auth)
-        bisque_access_token = _get_effective_bisque_access_token(bisque_auth)
-        bisque_cookie_header = _get_effective_bisque_cookie_header(bisque_auth)
+        bisque_user: str | None = None
+        bisque_password: str | None = None
+        bisque_access_token: str | None = None
+        bisque_cookie_header: str | None = None
+        if bisque_auth:
+            bisque_user, bisque_password = _get_effective_bisque_credentials(bisque_auth)
+            bisque_access_token = _get_effective_bisque_access_token(bisque_auth)
+            bisque_cookie_header = _get_effective_bisque_cookie_header(bisque_auth)
         if not bisque_cookie_header and request is not None:
             bisque_cookie_header = _extract_passthrough_bisque_cookie_header(request)
         bisque_root = str((bisque_auth or {}).get("bisque_root") or "").strip().rstrip("/") or str(
@@ -6457,7 +6570,8 @@ def create_app() -> FastAPI:
 
     def _has_chat_bisque_execution_access(bisque_auth: dict[str, Any] | None) -> bool:
         username, password, access_token, cookie_header = _resolve_chat_bisque_transfer_auth(
-            bisque_auth
+            bisque_auth,
+            allow_settings_fallback=False,
         )
         return bool(access_token or cookie_header or (username and password))
 
@@ -6679,6 +6793,11 @@ def create_app() -> FastAPI:
         ]
         if not requested_resource_uris and not requested_dataset_uris:
             return [], [], []
+
+        _require_authenticated_bisque_auth(
+            bisque_auth,
+            detail="BisQue authentication is required to import BisQue resources into chat.",
+        )
 
         bisque_root = (
             str(getattr(get_request_bisque_auth(), "bisque_root", "") or "").strip().rstrip("/")
@@ -7011,7 +7130,11 @@ def create_app() -> FastAPI:
         _auth: None = Depends(_require_api_key),
     ) -> BisqueImportResponse:
         del _auth
-        user_id = _current_user_id(bisque_auth, allow_anonymous=True)
+        bisque_auth = _require_authenticated_bisque_auth(
+            bisque_auth,
+            detail="BisQue authentication is required before importing BisQue resources.",
+        )
+        user_id = _current_user_id(bisque_auth)
         bisque_root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
         bisque_username, bisque_password, bisque_access_token, bisque_cookie_header = (
             _resolve_chat_bisque_transfer_auth(bisque_auth)

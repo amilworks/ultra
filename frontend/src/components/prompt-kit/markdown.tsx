@@ -98,7 +98,10 @@ const resolveBisqueLinkMeta = (href: string): BisqueLinkMeta | null => {
   }
 
   const path = parsed.pathname;
-  const origin = `${parsed.protocol}//${parsed.host}`;
+  const origin =
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : `${parsed.protocol}//${parsed.host}`;
   let resourceUri: string | null = null;
 
   if (/\/client_service\/view$/i.test(path)) {

@@ -157,6 +157,10 @@ This file is also for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and 
 - BisQue OIDC variables
 - Keycloak admin bootstrap values
 
+The platform environment owns the BisQue browser client in Keycloak. The Ultra
+API/web client is loaded from `ultra-backend.env` during platform deploy so the
+realm can reconcile both intended production clients together.
+
 For hardened production auth, keep these values in the platform environment:
 
 - `BISQUE_AUTH_MODE=oidc`
@@ -164,6 +168,27 @@ For hardened production auth, keep these values in the platform environment:
 - `BISQUE_AUTH_COOKIE_SECURE=true`
 - `BISQUE_BEAKER_SESSION_SECURE=true`
 - `KEYCLOAK_CLIENT_DIRECT_ACCESS_GRANTS=false`
+- `KEYCLOAK_ADMIN_SERVER_URL=http://127.0.0.1:8080/auth`
+
+### Production Keycloak Client Model
+
+This repo now treats the Keycloak realm as having two intentional confidential
+web clients:
+
+- `bisque-web`
+  - BisQue browser UI
+  - callback: `/auth_service/oidc_callback`
+- `ultra-web`
+  - Ultra backend/browser login bridge
+  - callback: `/v1/auth/oidc/callback`
+
+`scripts/deploy_platform_manual.sh` loads both `/etc/ultra/platform.env` and
+`/etc/ultra/ultra-backend.env` before it renders and reconciles the realm, so
+the live Keycloak client configuration stays aligned with both services.
+
+The production realm renderer intentionally strips the dev users from
+`platform/bisque/docker/keycloak/realm-bisque-dev.json` and replaces the dev
+client list with only the configured production client(s).
 
 ## Initial Host Bootstrap
 
@@ -205,13 +230,16 @@ For hardened production auth, keep these values in the platform environment:
 The production platform stack uses the base BisQue compose file plus the production override:
 
 ```bash
-ENV_FILE=/etc/ultra/platform.env make platform-up-prod
+ENV_FILE=/etc/ultra/platform.env \
+ULTRA_ENV=/etc/ultra/ultra-backend.env \
+make platform-up-prod
 ```
 
 For the split-node platform layout, add the platform-node override:
 
 ```bash
 ENV_FILE=/etc/ultra/platform.env \
+ULTRA_ENV=/etc/ultra/ultra-backend.env \
 PLATFORM_DEPLOY_MODE=platform-node \
 ./scripts/deploy_platform_manual.sh up
 ```
@@ -221,7 +249,8 @@ The production overrides:
 - switch all stateful services to barrel-backed bind mounts
 - switch Keycloak out of `start-dev`
 - render a production realm import with public redirect URIs and web origins
-- reconcile the live Keycloak client on every deploy so existing realms do not drift
+- strip dev users and dev-only client baggage from the rendered realm
+- reconcile the live Keycloak client(s) on every deploy so existing realms do not drift
 - keep Keycloak under `/auth`
 - initialize separate `bisque`, `keycloak`, and `ultra` databases in one Postgres instance
 - add a small internal Caddy that exposes one platform ingress port

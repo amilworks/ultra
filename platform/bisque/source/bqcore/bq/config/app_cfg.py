@@ -15,6 +15,7 @@ convert them into boolean, for example, you should use the
 import os
 import sys
 import tg
+import uuid
 import logging
 import transaction
 import pkg_resources
@@ -427,28 +428,23 @@ class BisqueAppConfig(AppConfig):
             app = ConditionalAuthMiddleware(app, who_app)
             log.info("Conditional repoze.who middleware added for API endpoints only")
         else:
-            log.info("No who.config_file - using basic auth for API only")
+            log.error("No who.config_file - disabling header-based API authentication")
             # Simple conditional auth for API endpoints
             class SimpleAPIAuth:
                 def __init__(self, app):
                     self.app = app
                 
                 def __call__(self, environ, start_response):
-                    path = environ.get('PATH_INFO', '')
-                    if (path.startswith('/data_service/') or 
-                        path.startswith('/image_service/') or
-                        'basicauth' in environ.get('HTTP_AUTHORIZATION', '').lower()):
-                        # Add basic API authentication
-                        auth_header = environ.get('HTTP_AUTHORIZATION', '')
-                        if auth_header.startswith('Basic '):
-                            import base64
-                            try:
-                                credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
-                                username, password = credentials.split(':', 1)
-                                if username == 'admin' and password == 'admin':
-                                    environ['REMOTE_USER'] = username
-                            except:
-                                pass
+                    auth_header = environ.get('HTTP_AUTHORIZATION', '')
+                    if auth_header.lower().startswith(('basic ', 'mex ', 'bearer ')):
+                        start_response(
+                            '503 Service Unavailable',
+                            [
+                                ('Content-Type', 'application/json'),
+                                ('Cache-Control', 'no-store'),
+                            ],
+                        )
+                        return [b'{"error":"auth_misconfigured","error_description":"Header-based API authentication is unavailable because who.config_file is not configured"}']
                     return self.app(environ, start_response)
             
             app = SimpleAPIAuth(app)
@@ -545,8 +541,9 @@ base_config.DBSession = model.DBSession
 base_config.auth_backend = 'sqlalchemy'
 base_config.sa_auth.enabled = True
 
-# YOU MUST CHANGE THIS VALUE IN PRODUCTION TO SECURE YOUR APP
-base_config.sa_auth.cookie_secret = "images"
+# site.cfg should supply the real cookie secret; keep the import-time fallback
+# non-predictable so misconfigured deployments fail safer.
+base_config.sa_auth.cookie_secret = os.environ.get("BISQUE_AUTH_COOKIE_SECRET") or str(uuid.uuid4())
 
 # Configure the authentication models
 base_config.sa_auth.dbsession = model.DBSession

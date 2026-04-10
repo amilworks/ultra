@@ -156,6 +156,12 @@ cookie_secure = os.environ.get("BISQUE_AUTH_COOKIE_SECURE", "").strip().lower()
 if not cookie_secure:
     cookie_secure = "true" if server_url.startswith("https://") else "false"
 _set_option("sa_auth.cookie_secure", cookie_secure)
+auth_cookie_secret = os.environ.get("BISQUE_AUTH_COOKIE_SECRET", "").strip()
+if not auth_cookie_secret:
+    auth_cookie_secret = str(cfg.get("main", "sa_auth.cookie_secret", fallback="")).strip()
+if not auth_cookie_secret:
+    raise SystemExit("sa_auth.cookie_secret is not configured; set BISQUE_AUTH_COOKIE_SECRET")
+_set_option("sa_auth.cookie_secret", auth_cookie_secret)
 _set_option("bisque.auth.token_algorithm", os.environ.get("BISQUE_AUTH_TOKEN_ALGORITHM", "HS256"))
 _set_option("bisque.auth.token_issuer", os.environ.get("BISQUE_AUTH_TOKEN_ISSUER", "bisque"))
 _set_option("bisque.auth.token_audience", os.environ.get("BISQUE_AUTH_TOKEN_AUDIENCE", "bisque-api"))
@@ -163,6 +169,13 @@ _set_option("bisque.auth.token_expiry_seconds", os.environ.get("BISQUE_AUTH_TOKE
 _set_option("bisque.auth.token_clock_skew_seconds", os.environ.get("BISQUE_AUTH_TOKEN_CLOCK_SKEW_SECONDS", "15"))
 _set_option("bisque.auth.token_verify_audience", os.environ.get("BISQUE_AUTH_TOKEN_VERIFY_AUDIENCE", "false"))
 token_secret = os.environ.get("BISQUE_AUTH_TOKEN_SECRET", "").strip()
+if local_token_enabled == "true":
+    token_secret = token_secret or str(cfg.get("main", "bisque.auth.token_secret", fallback="")).strip()
+    if not token_secret:
+        raise SystemExit(
+            "bisque.auth.token_secret is required when local tokens are enabled; "
+            "set BISQUE_AUTH_TOKEN_SECRET"
+        )
 if token_secret:
     _set_option("bisque.auth.token_secret", token_secret)
 

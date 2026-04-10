@@ -6,6 +6,7 @@ ENV_FILE="${ENV_FILE:-/etc/ultra/platform.env}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLATFORM_DEPLOY_MODE="${PLATFORM_DEPLOY_MODE:-}"
+BUILD_PLATFORM_IMAGES="${BUILD_PLATFORM_IMAGES:-0}"
 
 load_env_file() {
   local env_path="$1"
@@ -68,7 +69,11 @@ render_platform_proxy() {
 case "$ACTION" in
   up)
     render_platform_proxy
-    docker compose "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    if [ "$BUILD_PLATFORM_IMAGES" = "1" ]; then
+      docker compose "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    else
+      docker compose "${COMPOSE_ARGS[@]}" up -d "${SERVICES[@]}"
+    fi
     ;;
   down)
     docker compose "${COMPOSE_ARGS[@]}" down --remove-orphans

@@ -3,6 +3,7 @@ import { memo, type ReactNode, useEffect, useId, useMemo, useState } from "react
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { CodeBlock, CodeBlockCode } from "./code-block";
 
@@ -89,6 +90,19 @@ const decodeSafe = (value: string): string => {
   }
 };
 
+const configuredBisqueOrigin = (() => {
+  const candidate = String(DEFAULT_BISQUE_BROWSER_URL || "").trim();
+  if (!candidate) {
+    return null;
+  }
+  try {
+    const parsed = new URL(candidate);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return null;
+  }
+})();
+
 const resolveBisqueLinkMeta = (href: string): BisqueLinkMeta | null => {
   let parsed: URL;
   try {
@@ -98,10 +112,7 @@ const resolveBisqueLinkMeta = (href: string): BisqueLinkMeta | null => {
   }
 
   const path = parsed.pathname;
-  const origin =
-    typeof window !== "undefined" && window.location?.origin
-      ? window.location.origin
-      : `${parsed.protocol}//${parsed.host}`;
+  const origin = configuredBisqueOrigin || `${parsed.protocol}//${parsed.host}`;
   let resourceUri: string | null = null;
 
   if (/\/client_service\/view$/i.test(path)) {

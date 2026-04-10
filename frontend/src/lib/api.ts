@@ -979,8 +979,12 @@ export class ApiClient {
     );
   }
 
-  getBisqueBrowserLogoutUrl(): string {
+  getBisqueBrowserLogoutUrl(redirectUrl?: string): string {
     const params: Record<string, string> = {};
+    const normalizedRedirect = String(redirectUrl ?? "").trim();
+    if (normalizedRedirect) {
+      params.next = normalizedRedirect;
+    }
     if (this.apiKey) {
       params.api_key = this.apiKey;
     }

@@ -2507,11 +2507,11 @@ const inferBisqueRootFromUrl = (urlValue: string): string | null => {
   if (!candidate) {
     return null;
   }
-  if (typeof window !== "undefined" && window.location?.origin) {
-    return window.location.origin;
-  }
   try {
-    const parsed = new URL(candidate);
+    const parsed =
+      typeof window !== "undefined" && window.location?.origin
+        ? new URL(candidate, window.location.origin)
+        : new URL(candidate);
     return `${parsed.protocol}//${parsed.host}`;
   } catch {
     return null;
@@ -2523,22 +2523,53 @@ const toBisqueClientViewUrl = (urlValue: string | null | undefined): string | nu
   if (!candidate) {
     return null;
   }
+  const preferredRoot =
+    inferBisqueRootFromUrl(DEFAULT_BISQUE_BROWSER_URL) || inferBisqueRootFromUrl(candidate);
+  if (!preferredRoot) {
+    return /\/client_service\/view\?resource=/i.test(candidate) ? candidate : null;
+  }
   if (/\/client_service\/view\?resource=/i.test(candidate)) {
-    return candidate;
+    try {
+      const parsed =
+        typeof window !== "undefined" && window.location?.origin
+          ? new URL(candidate, window.location.origin)
+          : new URL(candidate);
+      const resourceValue = String(parsed.searchParams.get("resource") || "").trim();
+      if (!resourceValue) {
+        return candidate;
+      }
+      const normalizedResource = toBisqueClientViewUrl(resourceValue);
+      if (!normalizedResource) {
+        return candidate;
+      }
+      const normalizedParsed =
+        typeof window !== "undefined" && window.location?.origin
+          ? new URL(normalizedResource, window.location.origin)
+          : new URL(normalizedResource);
+      const normalizedResourceUri = String(
+        normalizedParsed.searchParams.get("resource") || resourceValue
+      ).trim();
+      return `${preferredRoot}/client_service/view?resource=${normalizedResourceUri}`;
+    } catch {
+      return candidate;
+    }
   }
-  const root = inferBisqueRootFromUrl(candidate);
-  if (!root) {
-    return null;
-  }
-  const normalizedRoot =
-    typeof window !== "undefined" && window.location?.origin
-      ? window.location.origin
-      : root;
-  if (/\/image_service\//i.test(candidate)) {
-    return `${normalizedRoot}/client_service/view?resource=${candidate.replace("/image_service/", "/data_service/")}`;
-  }
-  if (/\/data_service\//i.test(candidate)) {
-    return `${normalizedRoot}/client_service/view?resource=${candidate}`;
+  try {
+    const parsed =
+      typeof window !== "undefined" && window.location?.origin
+        ? new URL(candidate, window.location.origin)
+        : new URL(candidate);
+    const normalizedPath = parsed.pathname.replace("/image_service/", "/data_service/");
+    if (/\/data_service\//i.test(normalizedPath)) {
+      return `${preferredRoot}/client_service/view?resource=${preferredRoot}${normalizedPath}`;
+    }
+  } catch {
+    if (/\/image_service\//i.test(candidate)) {
+      return `${preferredRoot}/client_service/view?resource=${preferredRoot}${candidate.replace("/image_service/", "/data_service/")}`;
+    }
+    if (/\/data_service\//i.test(candidate)) {
+      return `${preferredRoot}/client_service/view?resource=${preferredRoot}${candidate}`;
+    }
   }
   return null;
 };
@@ -2554,6 +2585,18 @@ const normalizeApiError = (error: unknown): string => {
     return error.message;
   }
   return String(error);
+};
+
+const isBisqueAuthApiError = (error: unknown): boolean => {
+  if (!(error instanceof ApiError)) {
+    return false;
+  }
+  if (![401, 403].includes(error.status)) {
+    return false;
+  }
+  const detail =
+    typeof error.detail === "string" ? error.detail : JSON.stringify(error.detail ?? {});
+  return /bisque|sign-?in|session credentials/i.test(`${error.message} ${detail}`);
 };
 
 const isAbortError = (error: unknown): boolean => {
@@ -7192,9 +7235,8 @@ export function App() {
     if (fallback) {
       return fallback;
     }
-    const derivedFromApi = inferBisqueRootFromUrl(apiBaseUrl);
-    return derivedFromApi || "http://localhost:8080";
-  }, [apiBaseUrl, bisqueNavLinks]);
+    return "http://localhost:8080";
+  }, [bisqueNavLinks]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -7205,6 +7247,10 @@ export function App() {
       .then((session) => {
         if (isCancelled) {
           return;
+        }
+        const sessionBisqueRoot = String(session.bisque_root ?? "").trim();
+        if (sessionBisqueRoot) {
+          setBisqueNavLinks(buildBisqueNavLinks(sessionBisqueRoot));
         }
         if (session.authenticated) {
           setAuthStatus("authenticated");
@@ -8261,7 +8307,7 @@ export function App() {
   const logoutBisque = async (): Promise<void> => {
     if (authOidcEnabled && typeof window !== "undefined") {
       clearAuthViewState();
-      window.location.assign(apiClient.getBisqueBrowserLogoutUrl());
+      window.location.assign(apiClient.getBisqueBrowserLogoutUrl(window.location.href));
       return;
     }
     try {
@@ -8530,6 +8576,9 @@ export function App() {
           updatedAt: Date.now(),
           selectionImportPending: false,
         }));
+      }
+      if (isBisqueAuthApiError(error)) {
+        void promptBisqueAuthentication(normalizeApiError(error));
       }
       setUiErrorBanner(`BisQue import failed: ${normalizeApiError(error)}`);
       return { uploadedFiles: [], bisqueLinksByFileId: {} };
@@ -10342,6 +10391,9 @@ export function App() {
       } catch (error) {
         importErrorMessage = normalizeApiError(error);
         promptForModel = text;
+        if (isBisqueAuthApiError(error)) {
+          void promptBisqueAuthentication(importErrorMessage);
+        }
         updateConversation(conversation.id, (current) => ({
           ...current,
           updatedAt: Date.now(),

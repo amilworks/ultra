@@ -3,6 +3,7 @@ set -euo pipefail
 
 ACTION="${1:-up}"
 ENV_FILE="${ENV_FILE:-/etc/ultra/platform.env}"
+ULTRA_ENV="${ULTRA_ENV:-/etc/ultra/ultra-backend.env}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLATFORM_DEPLOY_MODE="${PLATFORM_DEPLOY_MODE:-}"
@@ -33,6 +34,7 @@ load_env_file() {
 }
 
 load_env_file "$ENV_FILE"
+[ -f "$ULTRA_ENV" ] && load_env_file "$ULTRA_ENV"
 
 export BISQUE_AUTH_MODE="${BISQUE_AUTH_MODE_OVERRIDE:-oidc}"
 export BISQUE_AUTH_LOCAL_TOKEN_ENABLED="${BISQUE_AUTH_LOCAL_TOKEN_ENABLED_OVERRIDE:-false}"
@@ -43,6 +45,17 @@ export BISQUE_BEAKER_SESSION_SAMESITE="${BISQUE_BEAKER_SESSION_SAMESITE:-Lax}"
 export KEYCLOAK_CLIENT_DIRECT_ACCESS_GRANTS="${KEYCLOAK_CLIENT_DIRECT_ACCESS_GRANTS:-false}"
 export KEYCLOAK_CLIENT_STANDARD_FLOW="${KEYCLOAK_CLIENT_STANDARD_FLOW:-true}"
 export KEYCLOAK_REALM_IMPORT_FILE="${KEYCLOAK_REALM_IMPORT_FILE:-/etc/ultra/keycloak-realm-bisque.json}"
+export KEYCLOAK_REALM_NAME="${KEYCLOAK_REALM_NAME:-bisque}"
+
+if [ -z "${KEYCLOAK_ADMIN_SERVER_URL:-}" ]; then
+  KEYCLOAK_HTTP_RELATIVE_PATH="${KEYCLOAK_HTTP_RELATIVE_PATH:-/auth}"
+  if [[ "$KEYCLOAK_HTTP_RELATIVE_PATH" != /* ]]; then
+    KEYCLOAK_HTTP_RELATIVE_PATH="/$KEYCLOAK_HTTP_RELATIVE_PATH"
+  fi
+  KEYCLOAK_HTTP_RELATIVE_PATH="${KEYCLOAK_HTTP_RELATIVE_PATH%/}"
+  [ -n "$KEYCLOAK_HTTP_RELATIVE_PATH" ] || KEYCLOAK_HTTP_RELATIVE_PATH="/auth"
+  export KEYCLOAK_ADMIN_SERVER_URL="http://127.0.0.1:8080${KEYCLOAK_HTTP_RELATIVE_PATH}"
+fi
 
 if [ -z "$PLATFORM_DEPLOY_MODE" ]; then
   PLATFORM_DEPLOY_MODE="${PLATFORM_DEPLOY_MODE:-single-node}"
@@ -87,7 +100,9 @@ render_keycloak_realm() {
 }
 
 reconcile_keycloak_client() {
-  python3 "$ROOT/deploy/keycloak/sync_keycloak_realm.py" reconcile
+  python3 "$ROOT/deploy/keycloak/sync_keycloak_realm.py" reconcile \
+    --server "$KEYCLOAK_ADMIN_SERVER_URL" \
+    --realm "$KEYCLOAK_REALM_NAME"
 }
 
 case "$ACTION" in

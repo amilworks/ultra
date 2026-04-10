@@ -52,11 +52,9 @@ def verify_audience() -> bool:
 
 
 def token_secret() -> str:
-    # Keep a backwards-compatible fallback so deployments continue to work
-    # without immediate config changes.
     secret = config.get("bisque.auth.token_secret") or config.get("sa_auth.cookie_secret")
     if not secret:
-        secret = "images"
+        raise RuntimeError("bisque.auth.token_secret is not configured")
     return str(secret)
 
 

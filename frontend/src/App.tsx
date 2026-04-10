@@ -2507,6 +2507,9 @@ const inferBisqueRootFromUrl = (urlValue: string): string | null => {
   if (!candidate) {
     return null;
   }
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return window.location.origin;
+  }
   try {
     const parsed = new URL(candidate);
     return `${parsed.protocol}//${parsed.host}`;
@@ -2527,11 +2530,15 @@ const toBisqueClientViewUrl = (urlValue: string | null | undefined): string | nu
   if (!root) {
     return null;
   }
+  const normalizedRoot =
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : root;
   if (/\/image_service\//i.test(candidate)) {
-    return `${root}/client_service/view?resource=${candidate.replace("/image_service/", "/data_service/")}`;
+    return `${normalizedRoot}/client_service/view?resource=${candidate.replace("/image_service/", "/data_service/")}`;
   }
   if (/\/data_service\//i.test(candidate)) {
-    return `${root}/client_service/view?resource=${candidate}`;
+    return `${normalizedRoot}/client_service/view?resource=${candidate}`;
   }
   return null;
 };

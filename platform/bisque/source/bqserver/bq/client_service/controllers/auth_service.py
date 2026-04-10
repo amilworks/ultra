@@ -57,7 +57,7 @@ import json
 import posixpath
 import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urlparse
 
 from lxml import etree
 from paste.deploy.converters import asbool
@@ -90,6 +90,7 @@ from bq.core.lib.token_auth import (
 )
 from bq.core.lib.oidc_auth import (
     auth_mode,
+    decode_oidc_token,
     local_tokens_enabled,
     oidc_authorization_endpoint,
     oidc_client_id,
@@ -225,8 +226,11 @@ class AuthenticationServer(ServiceController):
     def _auth_tkt_plugin(self):
         from repoze.who.plugins.auth_tkt import AuthTktCookiePlugin
 
+        secret = str(config.get("sa_auth.cookie_secret", "") or "").strip()
+        if not secret:
+            raise ConfigurationError("sa_auth.cookie_secret is not configured")
         return AuthTktCookiePlugin(
-            secret=config.get("sa_auth.cookie_secret", "images"),
+            secret=secret,
             cookie_name=config.get("sa_auth.cookie_name", "authtkt"),
             secure=asbool(config.get("sa_auth.cookie_secure", False)),
             include_ip=asbool(config.get("sa_auth.cookie_include_ip", False)),
@@ -257,8 +261,28 @@ class AuthenticationServer(ServiceController):
             config.get("sa_auth.cookie_name", "authtkt"),
             "authtkt",
             "auth_tkt",
+            config.get("beaker.session.key", "bq"),
         }
-        cookie_domains = ("", "localhost", ".localhost", "localhost.local", ".localhost.local")
+        request_host = (request.host.split(":", 1)[0] if getattr(request, "host", "") else "").strip().lower()
+        configured_domain = str(config.get("sa_auth.cookie_domain", "") or "").strip().lower()
+        server_host = urlparse(str(config.get("bisque.server", "") or "")).hostname or ""
+        cookie_domains = {
+            "",
+            "localhost",
+            ".localhost",
+            "localhost.local",
+            ".localhost.local",
+        }
+        for domain in (configured_domain, request_host, server_host):
+            clean = domain.lstrip(".").strip().lower()
+            if not clean:
+                continue
+            cookie_domains.add(clean)
+            if "." in clean and clean != "localhost":
+                cookie_domains.add(f".{clean}")
+        secure = asbool(config.get("sa_auth.cookie_secure", False))
+        httponly = asbool(config.get("beaker.session.httponly", True))
+        same_site = str(config.get("beaker.session.samesite", "") or "").strip()
         for cookie_name in cookie_names:
             if not cookie_name:
                 continue
@@ -269,6 +293,12 @@ class AuthenticationServer(ServiceController):
                 ]
                 if domain:
                     overwrite_parts.append(f"Domain={domain}")
+                if secure:
+                    overwrite_parts.append("Secure")
+                if httponly:
+                    overwrite_parts.append("HttpOnly")
+                if same_site:
+                    overwrite_parts.append(f"SameSite={same_site}")
                 headers.append(("Set-Cookie", "; ".join(overwrite_parts)))
 
                 parts = [
@@ -279,6 +309,12 @@ class AuthenticationServer(ServiceController):
                 ]
                 if domain:
                     parts.append(f"Domain={domain}")
+                if secure:
+                    parts.append("Secure")
+                if httponly:
+                    parts.append("HttpOnly")
+                if same_site:
+                    parts.append(f"SameSite={same_site}")
                 headers.append(("Set-Cookie", "; ".join(parts)))
         return headers
 
@@ -532,6 +568,9 @@ class AuthenticationServer(ServiceController):
             log.warning("OIDC callback state mismatch expected=%s received=%s", expected_state, state)
             flash(_('OIDC login failed: invalid state'), 'error')
             redirect(update_url('/auth_service/login', dict(came_from=came_from)))
+        if not nonce:
+            flash(_('OIDC login failed: missing nonce state'), 'error')
+            redirect(update_url('/auth_service/login', dict(came_from=came_from)))
         if not code:
             flash(_('OIDC login failed: missing authorization code'), 'error')
             redirect(update_url('/auth_service/login', dict(came_from=came_from)))
@@ -563,20 +602,17 @@ class AuthenticationServer(ServiceController):
                 raise RuntimeError("OIDC token response is invalid")
 
             id_token = token_payload.get('id_token')
-            if id_token:
-                session['oidc_id_token'] = id_token
-            else:
-                session.pop('oidc_id_token', None)
+            if not id_token:
+                raise RuntimeError("OIDC provider did not return id_token")
+            session['oidc_id_token'] = id_token
             session.save()
 
-            token_to_validate = id_token or token_payload.get('access_token')
-            if not token_to_validate:
-                raise RuntimeError("OIDC provider did not return id_token/access_token")
-
-            claims = decode_access_token(token_to_validate, verify_exp=True)
+            claims = decode_oidc_token(id_token, verify_exp=True)
             if nonce:
                 token_nonce = claims.get('nonce')
-                if token_nonce and token_nonce != nonce:
+                if not token_nonce:
+                    raise RuntimeError("OIDC token missing nonce")
+                if token_nonce != nonce:
                     raise RuntimeError("OIDC nonce mismatch")
 
             username = oidc_username_from_claims(claims)

@@ -13,6 +13,9 @@ on:
           - up
           - down
           - logs
+  repository_dispatch:
+    types:
+      - platform-maintenance
 
 jobs:
   deploy:
@@ -61,9 +64,10 @@ EOF
       - name: Run platform action
         run: |
           DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
+          PLATFORM_ACTION="${{ github.event.inputs.action || github.event.client_payload.action || 'up' }}"
           if [ -n "${{ secrets.PLATFORM_DEPLOY_SSH_JUMP_HOST }}" ]; then
             DEPLOY_TARGET="platform-target"
           else
             DEPLOY_TARGET="${{ secrets.PLATFORM_DEPLOY_SSH_USER }}@${{ secrets.PLATFORM_DEPLOY_SSH_HOST }}"
           fi
-          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' && sudo ENV_FILE='/etc/ultra/platform.env' PLATFORM_DEPLOY_MODE='platform-node' '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' '${{ github.event.inputs.action }}'"
+          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' && sudo ENV_FILE='/etc/ultra/platform.env' PLATFORM_DEPLOY_MODE='platform-node' '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' '$PLATFORM_ACTION'"

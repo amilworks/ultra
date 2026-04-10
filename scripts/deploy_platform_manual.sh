@@ -7,12 +7,26 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLATFORM_DEPLOY_MODE="${PLATFORM_DEPLOY_MODE:-}"
 
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-fi
+load_env_file() {
+  local env_path="$1"
+  local raw_line line key value
+
+  [ -f "$env_path" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    if [ -z "$line" ] || [ "${line#\#}" != "$line" ] || [[ "$line" != *=* ]]; then
+      continue
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    export "$key=$value"
+  done < "$env_path"
+}
+
+load_env_file "$ENV_FILE"
 
 if [ -z "$PLATFORM_DEPLOY_MODE" ]; then
   PLATFORM_DEPLOY_MODE="${PLATFORM_DEPLOY_MODE:-single-node}"

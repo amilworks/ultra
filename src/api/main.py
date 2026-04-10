@@ -4623,10 +4623,13 @@ def create_app() -> FastAPI:
         datasets = f"{root}/client_service/browser?resource=/data_service/dataset"
         tables = f"{root}/client_service/browser?resource=/data_service/table"
         return {
-            "home": _bisque_browser_bootstrap_url(home),
-            "images": _bisque_browser_bootstrap_url(images),
-            "datasets": _bisque_browser_bootstrap_url(datasets),
-            "tables": _bisque_browser_bootstrap_url(tables),
+            # These links are opened from an already-authenticated Ultra session.
+            # Sending users through BisQue's explicit oidc_login bootstrap again can
+            # create slow or error-prone extra redirects on the shared-host setup.
+            "home": home,
+            "images": images,
+            "datasets": datasets,
+            "tables": tables,
         }
 
     def _bisque_browser_url() -> str:

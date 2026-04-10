@@ -1028,12 +1028,20 @@ def create_app() -> FastAPI:
                     return normalized
         return None
 
-    def _build_oidc_logout_url(*, id_token_hint: str | None = None) -> str:
+    def _build_oidc_logout_url(
+        *,
+        id_token_hint: str | None = None,
+        request: FastAPIRequest | None = None,
+        preferred_redirect: str | None = None,
+    ) -> str:
         logout_endpoint = _oidc_endpoint("logout")
         if not logout_endpoint:
-            return _default_logout_redirect_url()
+            return _default_logout_redirect_url(request, preferred=preferred_redirect)
         params: dict[str, str] = {
-            "post_logout_redirect_uri": _default_logout_redirect_url(),
+            "post_logout_redirect_uri": _default_logout_redirect_url(
+                request,
+                preferred=preferred_redirect,
+            ),
         }
         client_id = str(getattr(settings, "bisque_auth_oidc_client_id", "") or "").strip()
         if client_id:
@@ -1395,7 +1403,18 @@ def create_app() -> FastAPI:
         username = str(bisque_auth.get("username") or "").strip()
         if mode != "bisque" or not username:
             raise HTTPException(status_code=401, detail=detail)
-        return bisque_auth
+        resolved_username, resolved_password, access_token, cookie_header = (
+            _resolve_chat_bisque_transfer_auth(
+                bisque_auth,
+                allow_settings_fallback=False,
+            )
+        )
+        if access_token or cookie_header or (resolved_username and resolved_password):
+            return bisque_auth
+        raise HTTPException(
+            status_code=401,
+            detail="BisQue session credentials are unavailable or expired. Sign in again and retry.",
+        )
 
     def _get_effective_bisque_credentials(
         bisque_auth: dict[str, Any] | None,
@@ -5448,25 +5467,32 @@ def create_app() -> FastAPI:
     @v1.get("/auth/logout/browser")
     @legacy.get("/auth/logout/browser")
     def auth_logout_browser(
+        request: FastAPIRequest,
+        next: str | None = Query(default=None),
         bisque_session: str | None = Cookie(default=None, alias=bisque_session_cookie_name),
     ) -> RedirectResponse:
         session = _get_bisque_session(bisque_session)
         id_token_hint = str((session or {}).get("id_token") or "").strip() or None
         _delete_bisque_session(bisque_session)
+        preferred_redirect = _resolve_frontend_redirect_target(request, next)
         if _oidc_via_bisque_login_enabled():
             root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
             if root:
                 redirect_target = _append_query_params(
                     f"{root}/auth_service/oidc_logout",
-                    {"came_from": _default_logout_redirect_url()},
+                    {"came_from": _default_logout_redirect_url(request, preferred=preferred_redirect)},
                 )
             else:
-                redirect_target = _default_logout_redirect_url()
+                redirect_target = _default_logout_redirect_url(request, preferred=preferred_redirect)
         else:
             redirect_target = (
-                _build_oidc_logout_url(id_token_hint=id_token_hint)
+                _build_oidc_logout_url(
+                    id_token_hint=id_token_hint,
+                    request=request,
+                    preferred_redirect=preferred_redirect,
+                )
                 if _is_oidc_enabled()
-                else _default_logout_redirect_url()
+                else _default_logout_redirect_url(request, preferred=preferred_redirect)
             )
         response = RedirectResponse(redirect_target, status_code=302)
         response.delete_cookie(
@@ -6537,14 +6563,12 @@ def create_app() -> FastAPI:
         bisque_auth: dict[str, Any] | None,
         request: FastAPIRequest | None = None,
     ) -> BisqueAuthContext | None:
-        bisque_user: str | None = None
-        bisque_password: str | None = None
-        bisque_access_token: str | None = None
-        bisque_cookie_header: str | None = None
-        if bisque_auth:
-            bisque_user, bisque_password = _get_effective_bisque_credentials(bisque_auth)
-            bisque_access_token = _get_effective_bisque_access_token(bisque_auth)
-            bisque_cookie_header = _get_effective_bisque_cookie_header(bisque_auth)
+        bisque_user, bisque_password, bisque_access_token, bisque_cookie_header = (
+            _resolve_chat_bisque_transfer_auth(
+                bisque_auth,
+                allow_settings_fallback=False,
+            )
+        )
         if not bisque_cookie_header and request is not None:
             bisque_cookie_header = _extract_passthrough_bisque_cookie_header(request)
         bisque_root = str((bisque_auth or {}).get("bisque_root") or "").strip().rstrip("/") or str(
@@ -6805,7 +6829,7 @@ def create_app() -> FastAPI:
             or str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
         )
         bisque_username, bisque_password, bisque_access_token, bisque_cookie_header = (
-            _resolve_chat_bisque_transfer_auth(bisque_auth)
+            _require_bisque_user_execution_access(bisque_auth)
         )
         if not bisque_root:
             raise HTTPException(status_code=400, detail="BisQue root is not configured.")
@@ -7137,7 +7161,7 @@ def create_app() -> FastAPI:
         user_id = _current_user_id(bisque_auth)
         bisque_root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
         bisque_username, bisque_password, bisque_access_token, bisque_cookie_header = (
-            _resolve_chat_bisque_transfer_auth(bisque_auth)
+            _require_bisque_user_execution_access(bisque_auth)
         )
         resources = [str(item or "").strip() for item in req.resources if str(item or "").strip()]
         if not resources:
@@ -10367,7 +10391,7 @@ def create_app() -> FastAPI:
             missing_condition = "guest_session" if session_mode == "guest" else "missing_session"
             response_text = (
                 "BisQue search, import, metadata, tagging, and annotation tools require a "
-                "signed-in BisQue account or configured service credentials. "
+                "signed-in BisQue account with a live session. "
                 f"Current session mode: {session_mode or 'none'}. "
                 "Sign in with your BisQue account and retry."
             )

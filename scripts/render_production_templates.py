@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render production nginx templates from server-side env files."""
+"""Render production reverse-proxy templates from server-side env files."""
 
 from __future__ import annotations
 
@@ -24,6 +24,12 @@ def main() -> int:
     parser.add_argument("--ultra-env", required=True, help="Path to ultra-backend.env")
     parser.add_argument("--platform-env", required=True, help="Path to platform.env")
     parser.add_argument(
+        "--template",
+        action="append",
+        default=[],
+        help="Render only the named template file (for example: Caddyfile.platform-node.template). Can be passed multiple times.",
+    )
+    parser.add_argument(
         "--output-dir",
         required=True,
         help="Directory where rendered nginx configs should be written",
@@ -31,22 +37,31 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
-    template_dir = repo_root / "deploy" / "nginx"
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     env = {}
     env.update(load_env(Path(args.ultra_env).expanduser().resolve()))
     env.update(load_env(Path(args.platform_env).expanduser().resolve()))
+    selected_templates = set(args.template)
 
-    for template_path in sorted(template_dir.glob("*.template")):
-        rendered = Template(template_path.read_text(encoding="utf-8")).substitute(env)
-        target_name = template_path.name
-        if target_name.endswith(".template"):
-            target_name = target_name[: -len(".template")]
-        (output_dir / target_name).write_text(rendered, encoding="utf-8")
+    template_dirs = [
+        repo_root / "deploy" / "nginx",
+        repo_root / "deploy" / "caddy",
+    ]
+    for template_dir in template_dirs:
+        if not template_dir.exists():
+            continue
+        for template_path in sorted(template_dir.glob("*.template")):
+            if selected_templates and template_path.name not in selected_templates:
+                continue
+            rendered = Template(template_path.read_text(encoding="utf-8")).substitute(env)
+            target_name = template_path.name
+            if target_name.endswith(".template"):
+                target_name = target_name[: -len(".template")]
+            (output_dir / target_name).write_text(rendered, encoding="utf-8")
 
-    print(f"Rendered nginx configs to {output_dir}")
+    print(f"Rendered proxy configs to {output_dir}")
     return 0
 
 

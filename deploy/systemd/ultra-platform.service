@@ -1,0 +1,19 @@
+[Unit]
+Description=BisQue Ultra platform stack
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/ultra/platform-current
+Environment=ENV_FILE=/etc/ultra/platform.env
+ExecStart=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh up'
+ExecReload=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh up'
+ExecStop=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh down'
+TimeoutStartSec=180
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

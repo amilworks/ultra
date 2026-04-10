@@ -64,7 +64,7 @@
       "publicClient": false,
       "secret": "bisque-dev-secret",
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
+      "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
         "http://localhost:8080/auth_service/oidc_callback",

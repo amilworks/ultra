@@ -152,6 +152,10 @@ if not local_token_enabled:
 
 _set_option("bisque.auth.mode", auth_mode)
 _set_option("bisque.auth.local_token.enabled", local_token_enabled)
+cookie_secure = os.environ.get("BISQUE_AUTH_COOKIE_SECURE", "").strip().lower()
+if not cookie_secure:
+    cookie_secure = "true" if server_url.startswith("https://") else "false"
+_set_option("sa_auth.cookie_secure", cookie_secure)
 _set_option("bisque.auth.token_algorithm", os.environ.get("BISQUE_AUTH_TOKEN_ALGORITHM", "HS256"))
 _set_option("bisque.auth.token_issuer", os.environ.get("BISQUE_AUTH_TOKEN_ISSUER", "bisque"))
 _set_option("bisque.auth.token_audience", os.environ.get("BISQUE_AUTH_TOKEN_AUDIENCE", "bisque-api"))
@@ -186,6 +190,12 @@ _set_option("bisque.oidc.auto_approve_users", os.environ.get("BISQUE_OIDC_AUTO_A
 _set_option("bisque.oidc.login_page_enabled", os.environ.get("BISQUE_OIDC_LOGIN_PAGE_ENABLED", "false"))
 _set_option("bisque.oidc.provider_name", os.environ.get("BISQUE_OIDC_PROVIDER_NAME", "Keycloak"))
 _set_option("bisque.oidc.login_button_text", os.environ.get("BISQUE_OIDC_LOGIN_BUTTON_TEXT", "Continue with Keycloak"))
+beaker_session_secure = os.environ.get("BISQUE_BEAKER_SESSION_SECURE", "").strip().lower()
+if not beaker_session_secure:
+    beaker_session_secure = "true" if server_url.startswith("https://") else "false"
+_set_option("beaker.session.secure", beaker_session_secure)
+_set_option("beaker.session.httponly", os.environ.get("BISQUE_BEAKER_SESSION_HTTPONLY", "true"))
+_set_option("beaker.session.samesite", os.environ.get("BISQUE_BEAKER_SESSION_SAMESITE", "Lax"))
 _set_option("sqlalchemy.pool_recycle", os.environ.get("BISQUE_SQLALCHEMY_POOL_RECYCLE", "3600"))
 _set_option("sqlalchemy.pool_pre_ping", os.environ.get("BISQUE_SQLALCHEMY_POOL_PRE_PING", "true"))
 _set_option("sqlalchemy.pool_size", os.environ.get("BISQUE_SQLALCHEMY_POOL_SIZE", "25"))

@@ -149,12 +149,21 @@ This file is also for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and 
 
 - `BISQUE_PUBLIC_HOST`
 - `AUTH_PUBLIC_HOST`
+- `KEYCLOAK_REALM_IMPORT_FILE`
 - `POSTGRES_PASSWORD`
 - `BISQUE_DB_*`
 - `KEYCLOAK_DB_*`
 - `ULTRA_DB_*`
 - BisQue OIDC variables
 - Keycloak admin bootstrap values
+
+For hardened production auth, keep these values in the platform environment:
+
+- `BISQUE_AUTH_MODE=oidc`
+- `BISQUE_AUTH_LOCAL_TOKEN_ENABLED=false`
+- `BISQUE_AUTH_COOKIE_SECURE=true`
+- `BISQUE_BEAKER_SESSION_SECURE=true`
+- `KEYCLOAK_CLIENT_DIRECT_ACCESS_GRANTS=false`
 
 ## Initial Host Bootstrap
 
@@ -211,6 +220,8 @@ The production overrides:
 
 - switch all stateful services to barrel-backed bind mounts
 - switch Keycloak out of `start-dev`
+- render a production realm import with public redirect URIs and web origins
+- reconcile the live Keycloak client on every deploy so existing realms do not drift
 - keep Keycloak under `/auth`
 - initialize separate `bisque`, `keycloak`, and `ultra` databases in one Postgres instance
 - add a small internal Caddy that exposes one platform ingress port

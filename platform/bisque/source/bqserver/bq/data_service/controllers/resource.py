@@ -535,11 +535,12 @@ class HierarchicalCache(ResponseCache):
         resource_uniq = getattr(resource, 'resource_uniq', None) or ''
         # Datasets are in the form USER,UNIQ#extract so build a special list
         # invalidate cached resource varients
-        def delete_matches (files, names, mangle = lambda x:x):
+        def delete_matches(files, names, mangle=lambda x: x, matcher=None):
+            matcher = matcher or (lambda cf, qn: cf.startswith(qn))
             for f in list(files):
                 #cf = f.split(',',1)[-1] if user is None else f
-                cf = mangle (f)
-                if any ( cf.startswith(mangle (qn)) for qn in names ):
+                cf = mangle(f)
+                if any(matcher(cf, mangle(qn)) for qn in names):
                     try:
                         os.unlink (os.path.join(self.cachepath, f))
                     except OSError:
@@ -547,6 +548,16 @@ class HierarchicalCache(ResponseCache):
                         pass
                     files.remove (f)
                     log.debug ('cache  remove %s' ,  f)
+
+        def strip_user_prefix(value):
+            return value.split(',', 1)[-1]
+
+        def matches_query_cache(cache_key, query_name):
+            if not query_name:
+                return False
+            if query_name == '#':
+                return '#' in cache_key
+            return re.search(r'(^|,)%s' % re.escape(query_name), cache_key) is not None
 
         def delete_resource_matches(files, uniq):
             if not uniq:
@@ -577,7 +588,12 @@ class HierarchicalCache(ResponseCache):
                 log.debug ('cache delete for all')
                 #names = [ qnames.split(',',1)[-1] for qnames in names]
                 delete_resource_matches(files, resource_uniq)
-                delete_matches (files, names, lambda x: x.split(',', 1)[-1])
+                # Cache keys include the user id and may also include one or
+                # more authority tokens before the resource path. Match query
+                # prefixes after stripping only the user id so collection
+                # queries like ``host,8080,image#offset=...`` are invalidated
+                # regardless of the authority shape.
+                delete_matches(files, names, strip_user_prefix, matches_query_cache)
                 log.debug ("cache delete extract ", )
                 delete_matches (files, [ "#extract" ], lambda x: x.split ('#', 1)[-1])
         except Exception:

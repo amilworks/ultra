@@ -10,25 +10,27 @@ This repo now includes the deployment scaffolding for that split.
 
 ## Recommended Topology
 
-Use two machines if you have them. If you only have one public DNS name and one app node, the stack still works cleanly with one front door:
+Use two machines if you have them. If you only have one public DNS name, the clean production split is still:
 
 - **App node**
-  - external `nginx`
-  - BisQue
-  - Keycloak
-  - Postgres
+  - external `Caddy` or `nginx`
   - `ultra-backend@1`
   - `ultra-backend@2`
   - static frontend assets
+- **Platform node**
+  - BisQue
+  - Keycloak
+  - Postgres
+  - internal `Caddy`
 - **Model node**
   - `vLLM` or `Ollama`
   - private OpenAI-compatible endpoint
 
-The app node keeps browser traffic, storage, and auth local. The model node absorbs the heavy inference load and can be replaced without changing the web stack.
+The app node keeps the public edge small and responsive. The platform node absorbs the legacy BisQue/UI bootstrap load. The model node absorbs inference and can be replaced without changing the web stack.
 
 ## Single-Hostname Production Layout
 
-For the single-host deployment where only `ultra.example.com` exists publicly, use one `nginx` site and split by path:
+For the single-host deployment where only `ultra.example.com` exists publicly, keep one public edge and split by path:
 
 - `https://ultra.example.com/`
   - static Ultra frontend
@@ -37,9 +39,9 @@ For the single-host deployment where only `ultra.example.com` exists publicly, u
 - `https://ultra.example.com/v3/*`
   - Ultra run/session API
 - `https://ultra.example.com/auth/*`
-  - Keycloak
+  - Keycloak on the platform node
 - `https://ultra.example.com/client_service/*`
-  - BisQue browser UI
+  - BisQue browser UI on the platform node
 - `https://ultra.example.com/auth_service/*`
   - BisQue auth endpoints
 - `https://ultra.example.com/data_service/*`
@@ -49,16 +51,19 @@ For the single-host deployment where only `ultra.example.com` exists publicly, u
 
 Do not put BisQue behind `/bisque`.
 
-BisQue is an older platform with many root-path assumptions baked into redirects, templates, JS, and generated URLs. Keep BisQue on its native top-level service namespaces and let `nginx` dispatch those namespaces to the BisQue container. Keycloak is the component that should live under a path prefix, because it supports a relative path cleanly.
+BisQue is an older platform with many root-path assumptions baked into redirects, templates, JS, and generated URLs. Keep BisQue on its native top-level service namespaces and let the public edge dispatch those namespaces to the platform node. Keycloak is the component that should live under a path prefix, because it supports a relative path cleanly.
 
 ## Repo Assets Added For Production
 
 - `deploy/env/ultra-backend.env.example`
 - `deploy/env/platform.env.example`
+- `deploy/caddy/Caddyfile.platform-node.template`
 - `deploy/nginx/*.template`
 - `deploy/systemd/ultra-backend@.service`
 - `deploy/systemd/ultra-backend.target`
+- `deploy/systemd/ultra-platform.service`
 - `platform/bisque/docker-compose.production.yml`
+- `platform/bisque/docker-compose.platform-node.yml`
 - `platform/bisque/docker/postgres/init/10-create-app-databases.sh`
 - `scripts/render_production_templates.py`
 - `scripts/bootstrap_production_host.sh`
@@ -69,7 +74,7 @@ BisQue is an older platform with many root-path assumptions baked into redirects
 
 ## Runtime Layout
 
-The deployment scripts assume this filesystem layout:
+The deployment scripts assume this filesystem layout on the app node:
 
 ```text
 /srv/ultra/
@@ -87,7 +92,20 @@ The deployment scripts assume this filesystem layout:
     science/
 ```
 
-The backend continues to use local-disk roots, so both backend instances stay on the same node and share the same filesystem.
+On the platform node, use the shared barrel mount for stateful services:
+
+```text
+/mnt/barrel-data/ultra/platform/
+  postgres/
+  keycloak/
+  bisque-config/
+  bisque-data/
+  bisque-public/
+  bisque-reports/
+  bisque-staging/
+```
+
+The backend continues to use local-disk roots, so both backend instances stay on the same app node and share the same filesystem.
 
 ## Server-Side Environment Files
 
@@ -111,10 +129,7 @@ This file is for the FastAPI app and the backend deploy scripts. It should conta
 
 ### `platform.env`
 
-This file is for BisQue, Keycloak, and Postgres. In addition to hostnames and
-database credentials, keep the BisQue SQLAlchemy pool settings here. The
-authenticated first-load burst for `client_service` is large enough that the
-legacy defaults can exhaust the DB pool behind a reverse proxy.
+This file is for BisQue, Keycloak, Postgres, and split-node routing. In addition to hostnames and database credentials, keep the BisQue SQLAlchemy pool settings here. The authenticated first-load burst for `client_service` is large enough that the legacy defaults can exhaust the DB pool behind a reverse proxy.
 
 Recommended starting values:
 
@@ -122,17 +137,15 @@ Recommended starting values:
 - `BISQUE_SQLALCHEMY_MAX_OVERFLOW=25`
 - `BISQUE_SQLALCHEMY_POOL_TIMEOUT=60`
 - `BISQUE_SQLALCHEMY_POOL_PRE_PING=true`
-- `RUN_STORE_PATH`
-- `ARTIFACT_ROOT`
-- `SESSION_UPLOAD_ROOT`
-- `SCIENCE_DATA_ROOT`
-- `UPLOAD_STORE_ROOT`
-- all Ultra-side OIDC variables
-- model endpoint and model name
+- `PLATFORM_DEPLOY_MODE`
+- `PLATFORM_DATA_ROOT`
+- `PLATFORM_BIND_HOST`
+- `PLATFORM_PROXY_PORT`
+- `PLATFORM_DB_BIND_HOST`
+- `AUTH_UPSTREAM`
+- `BISQUE_UPSTREAM`
 
-### `platform.env`
-
-This file is for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and `nginx` template rendering. It should contain:
+This file is also for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and proxy template rendering. It should contain:
 
 - `BISQUE_PUBLIC_HOST`
 - `AUTH_PUBLIC_HOST`
@@ -146,7 +159,7 @@ This file is for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and `ngin
 ## Initial Host Bootstrap
 
 1. Install system packages:
-   - `nginx`
+   - `caddy` or `nginx` on the app node
    - `docker` + Compose plugin
    - `python3`
    - `uv`
@@ -160,7 +173,7 @@ This file is for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and `ngin
      --platform-env /etc/ultra/platform.env
    ```
 
-4. Render the `nginx` configs into a staging directory:
+4. Render the proxy configs into a staging directory:
 
    ```bash
    python3 scripts/render_production_templates.py \
@@ -169,9 +182,10 @@ This file is for Docker Compose, BisQue, Keycloak, Postgres bootstrap, and `ngin
      --output-dir .tmp/rendered-production
    ```
 
-5. For the single-host layout, install `ultra-single-host.conf` as the active site in `/etc/nginx/sites-available/`, enable it, and reload `nginx`.
-6. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
-7. Enable the backend target:
+5. On the app node, install `Caddyfile.single-host` or `ultra-single-host.conf` as the active edge config and reload the service.
+6. On the platform node, render and install `Caddyfile.platform-node` to the path referenced by `PLATFORM_CADDYFILE`.
+7. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
+8. Enable the backend target on the app node:
 
    ```bash
    sudo systemctl enable ultra-backend.target
@@ -185,15 +199,24 @@ The production platform stack uses the base BisQue compose file plus the product
 ENV_FILE=/etc/ultra/platform.env make platform-up-prod
 ```
 
-That production override does four things:
+For the split-node platform layout, add the platform-node override:
 
-- binds BisQue, Keycloak, and Postgres to localhost-only ports
-- switches Keycloak out of `start-dev`
-- mounts Keycloak at `/auth`
-- adds persistent Keycloak data
-- initializes separate `bisque`, `keycloak`, and `ultra` databases in one Postgres instance
+```bash
+ENV_FILE=/etc/ultra/platform.env \
+PLATFORM_DEPLOY_MODE=platform-node \
+./scripts/deploy_platform_manual.sh up
+```
 
-Use this only for the platform. Ultra backend and frontend deploy separately.
+The production overrides:
+
+- switch all stateful services to barrel-backed bind mounts
+- switch Keycloak out of `start-dev`
+- keep Keycloak under `/auth`
+- initialize separate `bisque`, `keycloak`, and `ultra` databases in one Postgres instance
+- add a small internal Caddy that exposes one platform ingress port
+- keep BisQue and Keycloak off the public internet
+
+Use this only for the platform. Ultra backend and frontend still deploy separately on the app node.
 
 ## Ultra Backend Rollout
 
@@ -248,7 +271,7 @@ Automatic deploys are split by concern:
   - runs only when you dispatch it manually
   - syncs BisQue/Keycloak/platform changes and runs the platform deploy script
 
-Normal pushes to `main` do not redeploy BisQue.
+Normal pushes to `main` do not redeploy BisQue. The platform workflow targets the platform node explicitly and is manual by design.
 
 ## GitHub Secrets And Variables
 

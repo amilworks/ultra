@@ -1,0 +1,38 @@
+{
+    auto_https off
+    admin off
+}
+
+:${PLATFORM_PROXY_PORT} {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-Frame-Options "SAMEORIGIN"
+        -Server
+    }
+
+    handle /auth/* {
+        reverse_proxy keycloak:8080 {
+            header_up X-Forwarded-Proto "https"
+            header_up X-Forwarded-Port "443"
+            header_up X-Forwarded-Host "{http.request.host}"
+            header_up Host "{http.request.host}"
+        }
+    }
+
+    @bisque path /auth_service* /blob_service* /client_service* /core* /data_service* /dataset_service* /engine_service* /export* /export_service* /features* /image_service* /import* /mex* /module_service* /notebook_service* /registration* /services* /stats* /table_service* /usage*
+    handle @bisque {
+        reverse_proxy bisque:8080 {
+            header_up X-Forwarded-Proto "https"
+            header_up X-Forwarded-Port "443"
+            header_up X-Forwarded-Host "{http.request.host}"
+            header_up Host "{http.request.host}"
+        }
+    }
+
+    handle {
+        respond "not found" 404
+    }
+}

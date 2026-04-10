@@ -26,27 +26,44 @@ jobs:
 
       - uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.PLATFORM_DEPLOY_SSH_PRIVATE_KEY }}
 
       - name: Configure known hosts
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.PLATFORM_DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+          if [ -n "${{ secrets.PLATFORM_DEPLOY_SSH_JUMP_HOST }}" ]; then
+            cat <<EOF > ~/.ssh/config
+Host platform-target
+  HostName ${{ secrets.PLATFORM_DEPLOY_SSH_HOST }}
+  User ${{ secrets.PLATFORM_DEPLOY_SSH_USER }}
+  ProxyJump ${{ secrets.PLATFORM_DEPLOY_SSH_JUMP_HOST }}
+EOF
+            chmod 600 ~/.ssh/config
+          fi
 
       - name: Sync platform assets
-        env:
-          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
         run: |
           DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
-          ssh "$DEPLOY_TARGET" "mkdir -p '$DEPLOY_ROOT/platform-release/${GITHUB_SHA}' '$DEPLOY_ROOT/ops'"
-          rsync -az platform/bisque "$DEPLOY_TARGET:$DEPLOY_ROOT/platform-release/${GITHUB_SHA}/platform/"
-          rsync -az scripts/deploy_platform_manual.sh "$DEPLOY_TARGET:$DEPLOY_ROOT/platform-release/${GITHUB_SHA}/scripts/"
+          if [ -n "${{ secrets.PLATFORM_DEPLOY_SSH_JUMP_HOST }}" ]; then
+            DEPLOY_TARGET="platform-target"
+          else
+            DEPLOY_TARGET="${{ secrets.PLATFORM_DEPLOY_SSH_USER }}@${{ secrets.PLATFORM_DEPLOY_SSH_HOST }}"
+          fi
+          ssh "$DEPLOY_TARGET" "mkdir -p '$DEPLOY_ROOT/platform-releases/${GITHUB_SHA}' '$DEPLOY_ROOT/ops'"
+          rsync -az platform/bisque "$DEPLOY_TARGET:$DEPLOY_ROOT/platform-releases/${GITHUB_SHA}/platform/"
+          rsync -az deploy "$DEPLOY_TARGET:$DEPLOY_ROOT/platform-releases/${GITHUB_SHA}/"
+          rsync -az scripts/deploy_platform_manual.sh scripts/render_production_templates.py "$DEPLOY_TARGET:$DEPLOY_ROOT/platform-releases/${GITHUB_SHA}/scripts/"
+          ssh "$DEPLOY_TARGET" "ln -sfn '$DEPLOY_ROOT/platform-releases/${GITHUB_SHA}' '$DEPLOY_ROOT/platform-current'"
           rsync -az scripts/deploy_platform_manual.sh "$DEPLOY_TARGET:$DEPLOY_ROOT/ops/"
 
       - name: Run platform action
-        env:
-          DEPLOY_TARGET: ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}
         run: |
           DEPLOY_ROOT="${ULTRA_DEPLOY_ROOT:-/srv/ultra}"
-          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/platform-release/${GITHUB_SHA}/scripts/deploy_platform_manual.sh' && sudo ENV_FILE='/etc/ultra/platform.env' '$DEPLOY_ROOT/platform-release/${GITHUB_SHA}/scripts/deploy_platform_manual.sh' '${{ github.event.inputs.action }}'"
+          if [ -n "${{ secrets.PLATFORM_DEPLOY_SSH_JUMP_HOST }}" ]; then
+            DEPLOY_TARGET="platform-target"
+          else
+            DEPLOY_TARGET="${{ secrets.PLATFORM_DEPLOY_SSH_USER }}@${{ secrets.PLATFORM_DEPLOY_SSH_HOST }}"
+          fi
+          ssh "$DEPLOY_TARGET" "chmod +x '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' && sudo ENV_FILE='/etc/ultra/platform.env' PLATFORM_DEPLOY_MODE='platform-node' '$DEPLOY_ROOT/platform-current/scripts/deploy_platform_manual.sh' '${{ github.event.inputs.action }}'"

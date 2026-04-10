@@ -1,8 +1,16 @@
 services:
   bisque:
     ports: !override
-      - "127.0.0.1:${BISQUE_PORT:-8080}:8080"
-      - "127.0.0.1:${BISQUE_ENGINE_PORT:-27000}:27000"
+      - "${PLATFORM_BIND_HOST:-127.0.0.1}:${BISQUE_PORT:-8080}:8080"
+      - "${PLATFORM_BIND_HOST:-127.0.0.1}:${BISQUE_ENGINE_PORT:-27000}:27000"
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/bisque-config:/source/config
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/bisque-data:/source/data
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/bisque-reports:/source/reports
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/bisque-public:/source/public
+      - ./modules:/source/modules:ro
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/bisque-staging:/source/staging
     environment:
       - BISQUE_SERVER=${BISQUE_SERVER:?set BISQUE_SERVER in platform.env}
       - BISQUE_DBURL=${BISQUE_DBURL:?set BISQUE_DBURL in platform.env}
@@ -32,7 +40,7 @@ services:
 
   postgres:
     ports: !override
-      - "127.0.0.1:${BISQUE_POSTGRES_PORT:-55433}:5432"
+      - "${PLATFORM_DB_BIND_HOST:-127.0.0.1}:${BISQUE_POSTGRES_PORT:-55433}:5432"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -47,7 +55,7 @@ services:
       ULTRA_DB_USERNAME: ${ULTRA_DB_USERNAME:-ultra}
       ULTRA_DB_PASSWORD: ${ULTRA_DB_PASSWORD:?set ULTRA_DB_PASSWORD in platform.env}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/postgres:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
 
   keycloak:
@@ -73,11 +81,11 @@ services:
       - KC_HTTP_ENABLED=true
       - KC_HOSTNAME=${AUTH_PUBLIC_HOST:?set AUTH_PUBLIC_HOST in platform.env}
     ports:
-      - "127.0.0.1:${KEYCLOAK_PORT:-18080}:8080"
+      - "${PLATFORM_BIND_HOST:-127.0.0.1}:${KEYCLOAK_PORT:-18080}:8080"
     volumes:
       - ./docker/keycloak/realm-bisque-dev.json:/opt/keycloak/data/import/realm-bisque-dev.json:ro
       - ./docker/keycloak/themes:/opt/keycloak/themes:ro
-      - keycloak_data:/opt/keycloak/data
+      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/keycloak:/opt/keycloak/data
     healthcheck:
       test:
         - CMD-SHELL
@@ -96,7 +104,3 @@ services:
   mysql:
     profiles:
       - disabled
-
-volumes:
-  keycloak_data:
-    driver: local

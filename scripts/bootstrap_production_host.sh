@@ -28,6 +28,7 @@ done
 
 mkdir -p \
   "$ULTRA_RELEASE_ROOT/releases" \
+  "$ULTRA_RELEASE_ROOT/platform-releases" \
   "$ULTRA_RELEASE_ROOT/ops" \
   "$ULTRA_RELEASE_ROOT/shared/artifacts" \
   "$ULTRA_RELEASE_ROOT/shared/uploads" \
@@ -36,6 +37,25 @@ mkdir -p \
   /var/log/ultra \
   "$(dirname "$ULTRA_ENV")" \
   "$(dirname "$PLATFORM_ENV")"
+
+if [ -f "$PLATFORM_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$PLATFORM_ENV"
+  set +a
+fi
+
+PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-}"
+if [ -n "$PLATFORM_DATA_ROOT" ]; then
+  mkdir -p \
+    "$PLATFORM_DATA_ROOT/postgres" \
+    "$PLATFORM_DATA_ROOT/keycloak" \
+    "$PLATFORM_DATA_ROOT/bisque-config" \
+    "$PLATFORM_DATA_ROOT/bisque-data" \
+    "$PLATFORM_DATA_ROOT/bisque-public" \
+    "$PLATFORM_DATA_ROOT/bisque-reports" \
+    "$PLATFORM_DATA_ROOT/bisque-staging"
+fi
 
 echo "Created production layout under $ULTRA_RELEASE_ROOT"
 echo "Place backend env at: $ULTRA_ENV"

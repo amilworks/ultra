@@ -1,0 +1,26 @@
+services:
+  bisque:
+    ports: !override []
+
+  keycloak:
+    ports: !override []
+
+  postgres:
+    ports: !override
+      - "${PLATFORM_DB_BIND_HOST:?set PLATFORM_DB_BIND_HOST in platform.env}:${BISQUE_POSTGRES_PORT:-55433}:5432"
+
+  platform-caddy:
+    image: caddy:2.8.4
+    container_name: ultra-platform-caddy
+    depends_on:
+      bisque:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    ports:
+      - "${PLATFORM_BIND_HOST:?set PLATFORM_BIND_HOST in platform.env}:${PLATFORM_PROXY_PORT:-8088}:${PLATFORM_PROXY_PORT:-8088}"
+    volumes:
+      - ${PLATFORM_CADDYFILE:?set PLATFORM_CADDYFILE in platform.env}:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+    networks:
+      - bisque-net

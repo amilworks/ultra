@@ -10,6 +10,10 @@ fi
 ULTRA_RELEASE_ROOT="${ULTRA_RELEASE_ROOT:-/srv/ultra}"
 RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA/backend"
 CURRENT_LINK="$ULTRA_RELEASE_ROOT/current"
+ULTRA_VENV_ROOT="${ULTRA_VENV_ROOT:-$ULTRA_RELEASE_ROOT/venvs}"
+ULTRA_PYTHON_ROOT="${ULTRA_PYTHON_ROOT:-$ULTRA_RELEASE_ROOT/python}"
+UV_PYTHON_VERSION="${UV_PYTHON_VERSION:-3.10}"
+VENV_DIR="$ULTRA_VENV_ROOT/$RELEASE_SHA"
 
 if [ ! -d "$RELEASE_DIR" ]; then
   echo "Backend release directory not found: $RELEASE_DIR" >&2
@@ -33,7 +37,22 @@ wait_for_health() {
 
 echo "Preparing backend release: $RELEASE_DIR"
 cd "$RELEASE_DIR"
-uv sync --frozen
+
+# Keep managed Python and virtualenvs on local disk so systemd can execute them
+# reliably even when releases live on a shared mount.
+mkdir -p "$ULTRA_VENV_ROOT" "$ULTRA_PYTHON_ROOT"
+rm -rf "$VENV_DIR" "$RELEASE_DIR/.venv"
+
+env UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
+  uv python install "$UV_PYTHON_VERSION"
+
+env UV_PYTHON="$UV_PYTHON_VERSION" \
+  UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
+  UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
+  UV_LINK_MODE=copy \
+  uv sync --frozen
+
+ln -sfn "$VENV_DIR" "$RELEASE_DIR/.venv"
 
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 systemctl daemon-reload

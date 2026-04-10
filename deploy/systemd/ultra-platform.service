@@ -12,7 +12,7 @@ Environment=ENV_FILE=/etc/ultra/platform.env
 ExecStart=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh up'
 ExecReload=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh up'
 ExecStop=/bin/bash -lc '/srv/ultra/platform-current/scripts/deploy_platform_manual.sh down'
-TimeoutStartSec=180
+TimeoutStartSec=3600
 TimeoutStopSec=120
 
 [Install]

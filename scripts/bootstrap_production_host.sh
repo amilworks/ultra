@@ -5,6 +5,25 @@ ULTRA_ENV="${ULTRA_ENV:-/etc/ultra/ultra-backend.env}"
 PLATFORM_ENV="${PLATFORM_ENV:-/etc/ultra/platform.env}"
 ULTRA_RELEASE_ROOT="${ULTRA_RELEASE_ROOT:-/srv/ultra}"
 
+load_env_file() {
+  local env_path="$1"
+  local raw_line line key value
+
+  [ -f "$env_path" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    if [ -z "$line" ] || [ "${line#\#}" != "$line" ] || [[ "$line" != *=* ]]; then
+      continue
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    export "$key=$value"
+  done < "$env_path"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ultra-env)
@@ -38,12 +57,7 @@ mkdir -p \
   "$(dirname "$ULTRA_ENV")" \
   "$(dirname "$PLATFORM_ENV")"
 
-if [ -f "$PLATFORM_ENV" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$PLATFORM_ENV"
-  set +a
-fi
+load_env_file "$PLATFORM_ENV"
 
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-}"
 if [ -n "$PLATFORM_DATA_ROOT" ]; then

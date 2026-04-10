@@ -32,6 +32,12 @@ services:
       - BISQUE_SQLALCHEMY_POOL_SIZE=${BISQUE_SQLALCHEMY_POOL_SIZE:-25}
       - BISQUE_SQLALCHEMY_MAX_OVERFLOW=${BISQUE_SQLALCHEMY_MAX_OVERFLOW:-25}
       - BISQUE_SQLALCHEMY_POOL_TIMEOUT=${BISQUE_SQLALCHEMY_POOL_TIMEOUT:-60}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/image_service/formats"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy

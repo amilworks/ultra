@@ -1362,67 +1362,94 @@ export class ApiClient {
     return (await response.json()) as ResumableUploadCompleteResponse;
   }
 
+  private isRecoverableResumableUploadError(error: unknown): boolean {
+    if (!(error instanceof ApiError)) {
+      return false;
+    }
+    const detail =
+      typeof error.detail === "string"
+        ? error.detail
+        : error.detail
+          ? JSON.stringify(error.detail)
+          : "";
+    return (
+      detail.includes("missing uploaded file") ||
+      detail.includes("Upload session was stale and has been reset")
+    );
+  }
+
   private async uploadFileResumable(file: File): Promise<UploadFilesResponse["uploaded"][number]> {
     const fingerprint = await this.fileFingerprint(file);
-    const init = await this.initResumableUpload({
-      file_name: file.name,
-      size_bytes: file.size,
-      content_type: file.type || "application/octet-stream",
-      fingerprint,
-    });
+    const runAttempt = async (allowRetry: boolean): Promise<UploadFilesResponse["uploaded"][number]> => {
+      const init = await this.initResumableUpload({
+        file_name: file.name,
+        size_bytes: file.size,
+        content_type: file.type || "application/octet-stream",
+        fingerprint,
+      });
 
-    if (init.status === "completed" && init.uploaded) {
-      return init.uploaded;
-    }
-    if (init.status === "failed") {
-      throw new ApiError(
-        `Upload session failed for ${file.name}`,
-        409,
-        init.error || "Upload session failed",
-      );
-    }
+      if (init.status === "completed" && init.uploaded) {
+        return init.uploaded;
+      }
+      if (init.status === "failed") {
+        throw new ApiError(
+          `Upload session failed for ${file.name}`,
+          409,
+          init.error || "Upload session failed",
+        );
+      }
 
-    const uploadId = init.upload_id;
-    const chunkSize = Math.max(256 * 1024, Number(init.chunk_size_bytes) || 5 * 1024 * 1024);
-    let offset = Math.max(0, Number(init.bytes_received) || 0);
-    let offsetMismatchRetries = 0;
+      const uploadId = init.upload_id;
+      const chunkSize = Math.max(256 * 1024, Number(init.chunk_size_bytes) || 5 * 1024 * 1024);
+      let offset = Math.max(0, Number(init.bytes_received) || 0);
+      let offsetMismatchRetries = 0;
 
-    while (offset < file.size) {
-      const end = Math.min(offset + chunkSize, file.size);
-      const chunk = file.slice(offset, end);
+      while (offset < file.size) {
+        const end = Math.min(offset + chunkSize, file.size);
+        const chunk = file.slice(offset, end);
+        try {
+          const chunkResponse = await this.uploadResumableChunk(uploadId, offset, chunk);
+          offset = Math.max(offset, Number(chunkResponse.bytes_received) || end);
+          offsetMismatchRetries = 0;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) {
+            const detail = error.detail;
+            const expectedOffset =
+              detail && typeof detail === "object"
+                ? (detail as Record<string, unknown>).expected_offset
+                : null;
+            if (typeof expectedOffset === "number" && Number.isFinite(expectedOffset)) {
+              offset = Math.max(0, Math.floor(expectedOffset));
+              offsetMismatchRetries += 1;
+              if (offsetMismatchRetries <= 5) {
+                continue;
+              }
+            }
+            const statusPayload = await this.getResumableUploadStatus(uploadId);
+            offset = Math.max(0, Number(statusPayload.bytes_received) || offset);
+            if (statusPayload.status === "active" && offset < file.size) {
+              offsetMismatchRetries += 1;
+              if (offsetMismatchRetries <= 5) {
+                continue;
+              }
+            }
+          }
+          throw error;
+        }
+      }
+
       try {
-        const chunkResponse = await this.uploadResumableChunk(uploadId, offset, chunk);
-        offset = Math.max(offset, Number(chunkResponse.bytes_received) || end);
-        offsetMismatchRetries = 0;
+        const complete = await this.completeResumableUpload(uploadId);
+        return complete.uploaded;
       } catch (error) {
-        if (error instanceof ApiError && error.status === 409) {
-          const detail = error.detail;
-          const expectedOffset =
-            detail && typeof detail === "object"
-              ? (detail as Record<string, unknown>).expected_offset
-              : null;
-          if (typeof expectedOffset === "number" && Number.isFinite(expectedOffset)) {
-            offset = Math.max(0, Math.floor(expectedOffset));
-            offsetMismatchRetries += 1;
-            if (offsetMismatchRetries <= 5) {
-              continue;
-            }
-          }
-          const statusPayload = await this.getResumableUploadStatus(uploadId);
-          offset = Math.max(0, Number(statusPayload.bytes_received) || offset);
-          if (statusPayload.status === "active" && offset < file.size) {
-            offsetMismatchRetries += 1;
-            if (offsetMismatchRetries <= 5) {
-              continue;
-            }
-          }
+        if (allowRetry && this.isRecoverableResumableUploadError(error)) {
+          return runAttempt(false);
         }
         throw error;
       }
-    }
+    };
 
-    const complete = await this.completeResumableUpload(uploadId);
-    return complete.uploaded;
+    return runAttempt(true);
   }
 
   async importBisqueResources(resources: string[]): Promise<BisqueImportResponse> {

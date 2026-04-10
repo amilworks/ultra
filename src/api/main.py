@@ -5804,6 +5804,27 @@ def create_app() -> FastAPI:
             error=str(session_row.get("error") or "").strip() or None,
         )
 
+    def _repair_stale_completed_upload_session(session_row: dict[str, Any]) -> bool:
+        if str(session_row.get("status") or "active") != "completed":
+            return False
+
+        session_id = str(session_row.get("session_id") or "").strip()
+        user_id = str(session_row.get("user_id") or "").strip()
+        file_id = str(session_row.get("file_id") or "").strip()
+        if file_id and store.get_upload(file_id, user_id=user_id):
+            return False
+
+        detail = (
+            "Stale completed upload session references missing uploaded file."
+            if file_id
+            else "Stale completed upload session has no uploaded file reference."
+        )
+        if session_id and user_id:
+            store.fail_upload_session(session_id=session_id, user_id=user_id, error=detail)
+        session_row["status"] = "failed"
+        session_row["error"] = detail
+        return True
+
     def _session_temp_path(session_row: dict[str, Any]) -> Path:
         raw = str(session_row.get("temp_path") or "").strip()
         if not raw:
@@ -6271,18 +6292,29 @@ def create_app() -> FastAPI:
                 ),
             )
 
-        session_id = uuid4().hex
-        temp_path = (upload_resumable_root / f"{session_id}.part").resolve()
-        session = store.create_or_resume_upload_session(
-            session_id=session_id,
-            user_id=user_id,
-            fingerprint=str(req.fingerprint),
-            original_name=file_name,
-            content_type=(str(req.content_type or "").strip() or None),
-            size_bytes=size_bytes,
-            temp_path=str(temp_path),
-            chunk_size_bytes=int(req.chunk_size_bytes),
+        session_args = {
+            "session_id": uuid4().hex,
+            "user_id": user_id,
+            "fingerprint": str(req.fingerprint),
+            "original_name": file_name,
+            "content_type": (str(req.content_type or "").strip() or None),
+            "size_bytes": size_bytes,
+            "chunk_size_bytes": int(req.chunk_size_bytes),
+        }
+        session_args["temp_path"] = str(
+            (upload_resumable_root / f"{session_args['session_id']}.part").resolve()
         )
+        session: dict[str, Any] | None = None
+        for _ in range(2):
+            session = store.create_or_resume_upload_session(**session_args)
+            if not _repair_stale_completed_upload_session(session):
+                break
+            session_args["session_id"] = uuid4().hex
+            session_args["temp_path"] = str(
+                (upload_resumable_root / f"{session_args['session_id']}.part").resolve()
+            )
+        if session is None:
+            raise HTTPException(status_code=500, detail="Failed to initialize upload session.")
 
         if str(session.get("status") or "active") != "active":
             return _serialize_upload_session(session)
@@ -6407,6 +6439,11 @@ def create_app() -> FastAPI:
 
         status = str(session.get("status") or "active")
         if status == "completed":
+            if _repair_stale_completed_upload_session(session):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Upload session was stale and has been reset. Retry the upload.",
+                )
             file_id = str(session.get("file_id") or "").strip()
             if not file_id:
                 raise HTTPException(

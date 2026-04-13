@@ -134,6 +134,14 @@ class Settings(BaseSettings):
             "Optional OpenAI-compatible base URL override used only by Pro Mode answer generation."
         ),
     )
+    pro_mode_transport: Literal["openai_compatible", "bedrock_published_api"] = Field(
+        default="openai_compatible",
+        description=(
+            "Transport used by the dedicated Pro Mode model path. "
+            "Use `bedrock_published_api` for the custom Bedrock publish endpoint that serves "
+            "`/conversation` instead of OpenAI chat/completions."
+        ),
+    )
     pro_mode_api_key: str | None = Field(
         default=None,
         description="Optional API key override used only by Pro Mode answer generation.",

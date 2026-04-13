@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from src.agno_backend.pro_mode import ProModeIntakeDecision
+from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeWorkflowResult
 from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan
 from src.config import Settings
 
@@ -60,12 +60,14 @@ def test_pro_mode_settings_prefer_dedicated_gateway_values() -> None:
 def test_pro_mode_settings_accept_custom_gateway_headers() -> None:
     settings = Settings(
         _env_file=None,
+        pro_mode_transport="bedrock_published_api",
         pro_mode_api_key_header="X-API-Key",
         pro_mode_api_key_prefix="",
         pro_mode_default_headers={"anthropic-version": "bedrock-2023-05-31"},
         pro_mode_default_query={"profile": "opus"},
     )
 
+    assert settings.pro_mode_transport == "bedrock_published_api"
     assert settings.pro_mode_api_key_header == "X-API-Key"
     assert settings.pro_mode_api_key_prefix == ""
     assert settings.pro_mode_default_headers == {"anthropic-version": "bedrock-2023-05-31"}
@@ -218,3 +220,197 @@ def test_pro_mode_gateway_can_use_api_gateway_style_header_auth(tmp_path: Path) 
     assert model.default_headers["anthropic-version"] == "bedrock-2023-05-31"
     assert model.default_query == {"profile": "opus"}
     assert model.id == "claude-opus-4-5"
+
+
+def test_published_api_transport_extracts_text_blocks() -> None:
+    payload = {
+        "conversationId": "conv-1",
+        "message": {
+            "content": [
+                {"contentType": "reasoning", "text": "hidden", "signature": "sig", "redactedContent": ""},
+                {"contentType": "text", "body": "First paragraph."},
+                {"contentType": "text", "body": "Second paragraph."},
+            ]
+        },
+    }
+
+    assert (
+        AgnoChatRuntime._published_api_extract_text(payload)
+        == "First paragraph.\nSecond paragraph."
+    )
+
+
+def test_published_api_text_phase_uses_dedicated_transport(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        llm_provider="openai",
+        llm_base_url="https://global-gateway.example/v1",
+        llm_api_key="global-key",
+        llm_model="gpt-oss-120b",
+        pro_mode_transport="bedrock_published_api",
+        pro_mode_base_url="https://published.example/api",
+        pro_mode_api_key="published-key",
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_model="claude-v4.5-opus",
+    )
+
+    async def fake_published(**_kwargs):
+        return "published-answer", {"conversation_id": "conv-1", "message_id": "msg-1"}
+
+    runtime._run_published_pro_mode_prompt = fake_published  # type: ignore[method-assign]
+
+    class FakeAgent:
+        async def arun(self, *_args, **_kwargs) -> str:
+            return "should-not-be-used"
+
+    def build_agent(_model_builder):
+        return FakeAgent()
+
+    result, metadata = asyncio.run(
+        runtime._arun_text_phase_with_optional_pro_mode_transport(
+            phase_name="reasoning_solver",
+            prompt="Hello",
+            build_agent=build_agent,
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            debug=False,
+            reasoning_mode="deep",
+            reasoning_effort_override="high",
+            max_runtime_seconds=30,
+        )
+    )
+
+    assert result == "published-answer"
+    assert metadata["transport"] == "bedrock_published_api"
+    assert metadata["active_model"] == "claude-v4.5-opus"
+    assert metadata["published_api"]["conversation_id"] == "conv-1"
+
+
+def test_published_api_keeps_structured_agent_phases_on_tool_capable_model(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        llm_provider="openai",
+        llm_base_url="https://global-gateway.example/v1",
+        llm_api_key="global-key",
+        llm_model="gpt-oss-120b",
+        pro_mode_transport="bedrock_published_api",
+        pro_mode_base_url="https://published.example/api",
+        pro_mode_api_key="published-key",
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_model="claude-v4.5-opus",
+    )
+
+    model = runtime._build_pro_mode_agent_model(reasoning_mode="deep")
+
+    assert model.id == "gpt-oss-120b"
+    assert model.base_url == "https://global-gateway.example/v1"
+
+
+def test_conceptual_tool_discussion_does_not_force_tool_workflow() -> None:
+    assert (
+        AgnoChatRuntime._requires_tool_workflow(
+            user_text=(
+                "Compare the assumptions behind Otsu thresholding and watershed segmentation "
+                "for fluorescence microscopy, and explain when each breaks down."
+            ),
+            uploaded_files=[],
+            selected_tool_names=[],
+            selection_context=None,
+            inferred_tool_names=["segment_image_sam3", "quantify_segmentation_masks"],
+        )
+        is False
+    )
+
+
+def test_operational_bisque_request_still_uses_tool_workflow() -> None:
+    assert (
+        AgnoChatRuntime._requires_tool_workflow(
+            user_text="Search BisQue for datasets and summarize what is available.",
+            uploaded_files=[],
+            selected_tool_names=[],
+            selection_context=None,
+            inferred_tool_names=["search_bisque_resources"],
+        )
+        is True
+    )
+
+
+def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        llm_provider="openai",
+        llm_base_url="https://global-gateway.example/v1",
+        llm_api_key="global-key",
+        llm_model="gpt-oss-120b",
+        pro_mode_transport="bedrock_published_api",
+        pro_mode_base_url="https://published.example/api",
+        pro_mode_api_key="published-key",
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_model="claude-v4.5-opus",
+    )
+
+    async def fake_intake(**_kwargs):
+        return ProModeIntakeDecision(
+            route="direct_response",
+            execution_regime="fast_dialogue",
+            reason="Simple conceptual answer.",
+            direct_response="Draft answer from intake.",
+        )
+
+    async def fake_fast_dialogue(**_kwargs):
+        return ProModeWorkflowResult(
+            response_text="Final answer from dedicated Pro Mode model.",
+            metadata={
+                "pro_mode": {
+                    "execution_path": "direct_response",
+                    "runtime_status": "completed",
+                    "model_route": {
+                        "active_model": "claude-v4.5-opus",
+                        "transport": "bedrock_published_api",
+                        "fallback_used": False,
+                    },
+                }
+            },
+            runtime_status="completed",
+            runtime_error=None,
+        )
+
+    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
+    runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    async def _collect() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in runtime.stream(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Explain the tradeoffs between Otsu thresholding and watershed segmentation.",
+                }
+            ],
+            uploaded_files=[],
+            conversation_id="conv-1",
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            reasoning_mode="deep",
+            user_id="user-1",
+            run_id="run-1",
+            debug=True,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    done_event = next(event for event in events if event.get("event") == "done")
+    payload = dict(done_event.get("data") or {})
+    metadata = dict(payload.get("metadata") or {})
+
+    assert payload["response_text"] == "Final answer from dedicated Pro Mode model."
+    assert payload["model"] == "claude-v4.5-opus"
+    assert metadata["pro_mode"]["execution_path"] == "direct_response"
+    assert metadata["pro_mode"]["model_route"]["transport"] == "bedrock_published_api"

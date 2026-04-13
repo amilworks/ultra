@@ -57,6 +57,21 @@ def test_pro_mode_settings_prefer_dedicated_gateway_values() -> None:
     assert settings.resolved_pro_mode_timeout_seconds == 180
 
 
+def test_pro_mode_settings_accept_custom_gateway_headers() -> None:
+    settings = Settings(
+        _env_file=None,
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_default_headers={"anthropic-version": "bedrock-2023-05-31"},
+        pro_mode_default_query={"profile": "opus"},
+    )
+
+    assert settings.pro_mode_api_key_header == "X-API-Key"
+    assert settings.pro_mode_api_key_prefix == ""
+    assert settings.pro_mode_default_headers == {"anthropic-version": "bedrock-2023-05-31"}
+    assert settings.pro_mode_default_query == {"profile": "opus"}
+
+
 def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
 
@@ -177,3 +192,29 @@ def test_pro_mode_helper_retries_once_on_gateway_failure(tmp_path: Path) -> None
     assert metadata["fallback_used"] is True
     assert metadata["fallback_reason"] == "transport_or_availability_failure"
     assert metadata["active_model"] == runtime.model
+
+
+def test_pro_mode_gateway_can_use_api_gateway_style_header_auth(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        llm_provider="openai",
+        llm_base_url="https://global-gateway.example/v1",
+        llm_api_key="global-key",
+        llm_model="gpt-oss-120b",
+        pro_mode_base_url="https://mpa10fscde.execute-api.us-east-1.amazonaws.com/api",
+        pro_mode_api_key="gateway-key",
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_default_headers={"anthropic-version": "bedrock-2023-05-31"},
+        pro_mode_default_query={"profile": "opus"},
+        pro_mode_model="claude-opus-4-5",
+    )
+
+    model = runtime._build_pro_mode_model()
+
+    assert model.base_url == "https://mpa10fscde.execute-api.us-east-1.amazonaws.com/api"
+    assert model.api_key == "EMPTY"
+    assert model.default_headers["X-API-Key"] == "gateway-key"
+    assert model.default_headers["anthropic-version"] == "bedrock-2023-05-31"
+    assert model.default_query == {"profile": "opus"}
+    assert model.id == "claude-opus-4-5"

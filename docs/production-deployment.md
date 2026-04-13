@@ -92,12 +92,10 @@ The deployment scripts assume this filesystem layout on the app node:
     science/
 ```
 
-On the platform node, use the shared barrel mount for stateful services:
+On the platform node, use the shared barrel mount only for BisQue file storage:
 
 ```text
 /mnt/barrel-data/ultra/platform/
-  postgres/
-  keycloak/
   bisque-config/
   bisque-data/
   bisque-public/
@@ -105,7 +103,12 @@ On the platform node, use the shared barrel mount for stateful services:
   bisque-staging/
 ```
 
-The backend continues to use local-disk roots, so both backend instances stay on the same app node and share the same filesystem.
+Postgres and Keycloak should use local Docker volumes on the platform node. Do
+not place Postgres data on the barrel NFS mount: transient NFS stalls can leave
+postgres processes in uninterruptible sleep and prevent fresh connections.
+
+The backend continues to use local-disk roots, so both backend instances stay
+on the same app node and share the same filesystem.
 
 ## Server-Side Environment Files
 
@@ -218,6 +221,27 @@ client list with only the configured production client(s).
 
 5. On the app node, install `Caddyfile.single-host` or `ultra-single-host.conf` as the active edge config and reload the service.
 6. On the platform node, render and install `Caddyfile.platform-node` to the path referenced by `PLATFORM_CADDYFILE`.
+
+### Fresh Install Reset
+
+If you need a clean rebuild of the platform node, wipe the platform containers
+and the local Docker volumes, but keep the BisQue barrel-backed file store if
+you want to preserve uploaded images:
+
+```bash
+cd /srv/ultra/platform-current
+docker compose \
+  --env-file /etc/ultra/platform.env \
+  -f platform/bisque/docker-compose.with-engine.yml \
+  -f platform/bisque/docker-compose.production.yml \
+  -f platform/bisque/docker-compose.platform-node.yml \
+  down -v --remove-orphans
+
+docker volume rm -f ultra-platform-postgres ultra-platform-keycloak || true
+```
+
+If you truly want a full wipe, remove `/mnt/barrel-data/ultra/platform/bisque-*`
+after the containers are down and then redeploy.
 7. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
 8. Enable the backend target on the app node:
 

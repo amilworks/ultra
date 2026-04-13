@@ -62,8 +62,6 @@ load_env_file "$PLATFORM_ENV"
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-}"
 if [ -n "$PLATFORM_DATA_ROOT" ]; then
   mkdir -p \
-    "$PLATFORM_DATA_ROOT/postgres" \
-    "$PLATFORM_DATA_ROOT/keycloak" \
     "$PLATFORM_DATA_ROOT/bisque-config" \
     "$PLATFORM_DATA_ROOT/bisque-data" \
     "$PLATFORM_DATA_ROOT/bisque-public" \

@@ -15,6 +15,37 @@ ULTRA_PYTHON_ROOT="${ULTRA_PYTHON_ROOT:-$ULTRA_RELEASE_ROOT/python}"
 UV_PYTHON_VERSION="${UV_PYTHON_VERSION:-3.10}"
 VENV_DIR="$ULTRA_VENV_ROOT/$RELEASE_SHA"
 
+resolve_uv_bin() {
+  local candidate
+
+  if [ -n "${UV_BIN:-}" ] && [ -x "${UV_BIN:-}" ]; then
+    printf '%s\n' "$UV_BIN"
+    return 0
+  fi
+
+  if command -v uv >/dev/null 2>&1; then
+    command -v uv
+    return 0
+  fi
+
+  for candidate in \
+    "/home/${SUDO_USER:-}/.local/bin/uv" \
+    "/root/.local/bin/uv" \
+    "/usr/local/bin/uv" \
+    "/usr/bin/uv"
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "Unable to locate uv; set UV_BIN to the absolute path of the uv executable." >&2
+  exit 1
+}
+
+UV_BIN="$(resolve_uv_bin)"
+
 if [ ! -d "$RELEASE_DIR" ]; then
   echo "Backend release directory not found: $RELEASE_DIR" >&2
   exit 1
@@ -44,13 +75,13 @@ mkdir -p "$ULTRA_VENV_ROOT" "$ULTRA_PYTHON_ROOT"
 rm -rf "$VENV_DIR" "$RELEASE_DIR/.venv"
 
 env UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
-  uv python install "$UV_PYTHON_VERSION"
+  "$UV_BIN" python install "$UV_PYTHON_VERSION"
 
 env UV_PYTHON="$UV_PYTHON_VERSION" \
   UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
   UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
   UV_LINK_MODE=copy \
-  uv sync --frozen
+  "$UV_BIN" sync --frozen
 
 ln -sfn "$VENV_DIR" "$RELEASE_DIR/.venv"
 

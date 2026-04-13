@@ -13,6 +13,8 @@ ChatRole = Literal["system", "user", "assistant", "tool"]
 ConfidenceLevel = Literal["low", "medium", "high"]
 BenchmarkAnswerFormat = Literal["mcq_letter"]
 BenchmarkVisibleAnswerStyle = Literal["natural", "mcq"]
+# Keep the full forced-regime surface for evaluation and benchmark override paths.
+# Production routing only auto-selects a smaller default set.
 ForcedProModeExecutionRegime = Literal[
     "fast_dialogue",
     "validated_tool",

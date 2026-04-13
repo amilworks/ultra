@@ -800,7 +800,8 @@ class AgnoChatRuntime:
         self.knowledge_hub = ScientificKnowledgeHub(notes=self.note_repository)
         self.learning_journal = ScientificLearningJournal(notes=self.note_repository)
         self.pro_mode = ProModeWorkflowRunner(
-            model_builder=self._build_model,
+            model_builder=self._build_pro_mode_model,
+            fallback_model_builder=self._build_model,
             enable_expert_council=self._pro_mode_expert_council_enabled(),
         )
 
@@ -878,6 +879,124 @@ class AgnoChatRuntime:
         except Exception:
             value = 1800
         return max(60, min(7200, value))
+
+    def _pro_mode_fallback_enabled(self) -> bool:
+        return bool(self._setting(self.settings, "pro_mode_fallback_enabled", True))
+
+    def _uses_dedicated_pro_mode_model(self) -> bool:
+        return any(
+            str(self._setting(self.settings, name, "") or "").strip()
+            for name in ("pro_mode_base_url", "pro_mode_api_key", "pro_mode_model")
+        )
+
+    def _resolved_pro_mode_timeout_seconds(self) -> float:
+        try:
+            value = float(self._setting(self.settings, "resolved_pro_mode_timeout_seconds", 60) or 60)
+        except Exception:
+            value = 60.0
+        return max(1.0, value)
+
+    @staticmethod
+    def _pro_mode_failure_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        text = re.sub(r"\s+", " ", text)
+        return text.lower()
+
+    @classmethod
+    def _classify_pro_mode_failure(cls, value: Any) -> str | None:
+        text = cls._pro_mode_failure_text(value)
+        if not text:
+            return None
+        if bool(
+            re.search(
+                r"\b("
+                r"api connection error|connection error|failed to connect|connection refused|"
+                r"no route to host|name or service not known|dns|timeout|timed out|read timeout|"
+                r"temporarily unavailable|service unavailable|bad gateway|gateway timeout|"
+                r"502|503|504|model not found|unknown model|provider returned 5"
+                r")\b",
+                text,
+            )
+        ):
+            return "transport_or_availability_failure"
+        return None
+
+    def _pro_mode_model_route_metadata(
+        self,
+        *,
+        fallback_used: bool,
+        failure_code: str | None = None,
+        active_model: str | None = None,
+    ) -> dict[str, Any]:
+        configured_model = str(
+            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+        ).strip() or self.model
+        return {
+            "configured_model": configured_model,
+            "active_model": str(active_model or configured_model).strip() or configured_model,
+            "uses_dedicated_model": self._uses_dedicated_pro_mode_model(),
+            "fallback_enabled": self._pro_mode_fallback_enabled(),
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": str(failure_code or "").strip() or None,
+        }
+
+    async def _arun_with_optional_pro_mode_fallback(
+        self,
+        *,
+        phase_name: str,
+        prompt: str,
+        build_agent: Callable[[Callable[..., OpenAILike]], Agent],
+        conversation_id: str | None,
+        run_id: str | None,
+        user_id: str | None,
+        debug: bool | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        agent = build_agent(self._build_pro_mode_model)
+        try:
+            result = await agent.arun(
+                prompt,
+                stream=False,
+                user_id=user_id,
+                session_id=self._scope_session_id(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    run_id=f"{str(run_id or '').strip()}::{phase_name}" if run_id else phase_name,
+                ),
+                debug_mode=bool(debug),
+            )
+            return result, self._pro_mode_model_route_metadata(
+                fallback_used=False,
+                active_model=str(
+                    self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+                ),
+            )
+        except Exception as exc:
+            failure_code = self._classify_pro_mode_failure(exc)
+            if not (
+                failure_code
+                and self._uses_dedicated_pro_mode_model()
+                and self._pro_mode_fallback_enabled()
+            ):
+                raise
+            fallback_agent = build_agent(self._build_model)
+            result = await fallback_agent.arun(
+                prompt,
+                stream=False,
+                user_id=user_id,
+                session_id=self._scope_session_id(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    run_id=f"{str(run_id or '').strip()}::{phase_name}:fallback" if run_id else f"{phase_name}:fallback",
+                ),
+                debug_mode=bool(debug),
+            )
+            return result, self._pro_mode_model_route_metadata(
+                fallback_used=True,
+                failure_code=failure_code,
+                active_model=self.model,
+            )
 
     @staticmethod
     def _rtd_requires_challenger(user_text: str, *, task_regime: str) -> bool:
@@ -1053,7 +1172,7 @@ class AgnoChatRuntime:
         )
 
     def _default_pro_mode_deep_execution_regime(self) -> str:
-        return "expert_council" if self._pro_mode_expert_council_enabled() else "reasoning_solver"
+        return "reasoning_solver"
 
     def _build_agno_db(self) -> SqliteDb | PostgresDb:
         db_target = str(self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
@@ -1156,6 +1275,46 @@ class AgnoChatRuntime:
             id=str(model_id or self.model or self._setting(self.settings, "openai_model", "gpt-oss-120b")),
             api_key=self.api_key or "EMPTY",
             base_url=self.base_url,
+            timeout=timeout_seconds,
+            max_retries=0,
+            reasoning_effort=reasoning_effort,
+            verbosity=self._verbosity_for_response(),
+            max_tokens=None,
+            max_completion_tokens=None,
+        )
+
+    def _build_pro_mode_model(
+        self,
+        *,
+        model_id: str | None = None,
+        reasoning_mode: str | None = None,
+        reasoning_effort_override: str | None = None,
+        max_runtime_seconds: int = 900,
+    ) -> OpenAILike:
+        timeout_seconds = max(
+            self._resolved_pro_mode_timeout_seconds(),
+            float(max_runtime_seconds) + 15.0,
+        )
+        reasoning_effort = str(
+            reasoning_effort_override or self._reasoning_effort_for_mode(reasoning_mode)
+        ).strip().lower()
+        if reasoning_effort not in {"low", "medium", "high"}:
+            reasoning_effort = self._reasoning_effort_for_mode(reasoning_mode)
+        raw_api_key = self._setting(self.settings, "resolved_pro_mode_api_key")
+        if raw_api_key is not None and str(raw_api_key).strip():
+            api_key = str(raw_api_key).strip()
+        else:
+            api_key = "EMPTY" if self.llm_provider in {"vllm", "ollama"} else (self.api_key or "EMPTY")
+        base_url = str(
+            self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url) or self.base_url
+        ).strip() or self.base_url
+        resolved_model = str(
+            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+        ).strip() or self.model
+        return OpenAILike(
+            id=str(model_id or resolved_model),
+            api_key=api_key,
+            base_url=base_url,
             timeout=timeout_seconds,
             max_retries=0,
             reasoning_effort=reasoning_effort,
@@ -2704,8 +2863,6 @@ class AgnoChatRuntime:
         if route == "direct_response":
             return "fast_dialogue"
         if route == "tool_workflow":
-            if tool_plan is not None and tool_plan.category == "research_program":
-                return "iterative_research"
             return "validated_tool"
         return self._default_pro_mode_deep_execution_regime()
 
@@ -3010,7 +3167,7 @@ class AgnoChatRuntime:
         open_ended_signal = bool(
             re.search(r"\b(explain|summari[sz]e|report|research|survey|literature|compare carefully)\b", lowered)
         )
-        return (proof_signal or proof_task_signal) and not open_ended_signal and len(lowered) > 180
+        return (proof_signal or proof_task_signal) and not open_ended_signal
 
     @staticmethod
     def _requires_self_contained_reasoning_solver(
@@ -3549,11 +3706,13 @@ class AgnoChatRuntime:
             stabilized.selected_tool_names = []
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
-            stabilized.reason = "Continue the saved rigorous proof state rather than restarting from scratch."
+            stabilized.reason = (
+                "Continue the saved rigorous proof state with the single frontier reasoning solver."
+            )
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
-                regime_override="proof_workflow",
+                regime_override="reasoning_solver",
                 task_regime_override="rigorous_proof",
             )
             return stabilized
@@ -3564,7 +3723,7 @@ class AgnoChatRuntime:
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
             stabilized.reason = (
-                "Explicit collective-reasoning cues requested a full expert-council deliberation."
+                "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
             )
             collective_task_regime = (
                 "self_contained_reasoning"
@@ -3577,7 +3736,7 @@ class AgnoChatRuntime:
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
-                regime_override="expert_council",
+                regime_override="reasoning_solver",
                 task_regime_override=collective_task_regime,
             )
             return stabilized
@@ -3604,7 +3763,7 @@ class AgnoChatRuntime:
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
-                regime_override="proof_workflow",
+                regime_override="reasoning_solver",
                 task_regime_override="rigorous_proof",
             )
             return stabilized
@@ -3615,7 +3774,7 @@ class AgnoChatRuntime:
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
             stabilized.reason = (
-                "Explicit collective-reasoning cues requested a full expert-council deliberation."
+                "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
             )
             collective_task_regime = (
                 "self_contained_reasoning"
@@ -3634,7 +3793,7 @@ class AgnoChatRuntime:
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
-                regime_override="expert_council",
+                regime_override="reasoning_solver",
                 task_regime_override=collective_task_regime,
             )
             return stabilized
@@ -3691,12 +3850,12 @@ class AgnoChatRuntime:
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
             stabilized.reason = (
-                "Open-ended report requests should use the focused reasoning team rather than the thin self-contained solver."
+                "Open-ended report requests stay on the frontier reasoning solver in production; the focused team is benchmark-only."
             )
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
-                regime_override="focused_team",
+                regime_override="reasoning_solver",
             )
             return stabilized
         if self._requires_tool_workflow(
@@ -4819,6 +4978,7 @@ class AgnoChatRuntime:
         self,
         *,
         latest_user_text: str,
+        task_regime: str | None,
         shared_context: dict[str, Any],
         conversation_id: str | None,
         run_id: str | None,
@@ -4827,6 +4987,9 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> ProModeWorkflowResult:
         context_sections: list[str] = []
+        normalized_task_regime = str(task_regime or "conceptual_high_uncertainty").strip().lower()
+        proof_like_request = normalized_task_regime == "rigorous_proof"
+        report_like_request = self._is_report_like_request(latest_user_text)
         counterfactual_verification_requested = bool(
             re.search(
                 r"\bcounterfactual verification pass\b|\bstrongest alternative\b|\bassume the current leading answer may be wrong\b",
@@ -4853,6 +5016,22 @@ class AgnoChatRuntime:
         prompt = "\n\n".join(
             [
                 "Solve the following hard, self-contained scientific question.",
+                *(
+                    [
+                        "Treat this as a rigorous proof-style request.",
+                        "State the theorem or claim status first, then the load-bearing argument, and name any unresolved gap instead of hand-waving it away.",
+                    ]
+                    if proof_like_request
+                    else []
+                ),
+                *(
+                    [
+                        "Treat this as a report-style synthesis request.",
+                        "Organize the answer into a compact but substantive explanatory report rather than a terse solver stub.",
+                    ]
+                    if report_like_request
+                    else []
+                ),
                 "Use deep reasoning internally, but return only the final answer and a concise derivation.",
                 "If the question asks for a single value or count, state it clearly near the beginning.",
                 "Prefer the most standard interpretation unless the prompt explicitly requires another convention.",
@@ -4870,60 +5049,78 @@ class AgnoChatRuntime:
                 f"Question: {latest_user_text}",
             ]
         )
-        agent = Agent(
-            name="pro-mode-reasoning-solver",
-            model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            reasoning_model=self._build_model(
-                reasoning_mode="deep",
-                reasoning_effort_override="high",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            instructions=[
-                "You answer self-contained scientific questions with rigorous but concise reasoning.",
-                "Lead with the answer when the user asked for a concrete result.",
-                "Show only the minimum derivation needed for confidence and readability.",
-                "Do not fabricate missing data or claim certainty beyond what the prompt supports.",
-                *(
-                    [
-                        "When the prompt indicates a counterfactual verification pass, treat it as a falsification challenge.",
-                        "Actively test the strongest competing explanation and revise the answer if the incumbent claim fails that challenge.",
-                    ]
-                    if counterfactual_verification_requested
-                    else []
+        def _build_reasoning_solver_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+            return Agent(
+                name="pro-mode-reasoning-solver",
+                model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
                 ),
-            ],
-            markdown=True,
-            telemetry=False,
-            retries=0,
-            store_events=False,
-            store_history_messages=False,
-            session_state={
-                "pro_mode_context": {
-                    "memory_messages": memory_messages[:6],
-                    "knowledge_messages": knowledge_messages[:6],
-                }
-            },
-            add_session_state_to_context=True,
-            reasoning=True,
-            reasoning_min_steps=2,
-            reasoning_max_steps=12,
-            debug_mode=bool(debug),
+                reasoning_model=model_builder(
+                    reasoning_mode="deep",
+                    reasoning_effort_override="high",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                instructions=[
+                    "You answer self-contained scientific questions with rigorous but concise reasoning.",
+                    "Lead with the answer when the user asked for a concrete result.",
+                    "Show only the minimum derivation needed for confidence and readability.",
+                    "Do not fabricate missing data or claim certainty beyond what the prompt supports.",
+                    *(
+                        [
+                            "For proof-style requests, prefer explicit lemma-to-conclusion bridges over rhetorical confidence.",
+                            "If a proof gap remains, say so directly instead of implying the proof is complete.",
+                        ]
+                        if proof_like_request
+                        else []
+                    ),
+                    *(
+                        [
+                            "For report-style requests, preserve real synthesis and structure rather than collapsing to a short direct answer.",
+                        ]
+                        if report_like_request
+                        else []
+                    ),
+                    *(
+                        [
+                            "When the prompt indicates a counterfactual verification pass, treat it as a falsification challenge.",
+                            "Actively test the strongest competing explanation and revise the answer if the incumbent claim fails that challenge.",
+                        ]
+                        if counterfactual_verification_requested
+                        else []
+                    ),
+                ],
+                markdown=True,
+                telemetry=False,
+                retries=0,
+                store_events=False,
+                store_history_messages=False,
+                session_state={
+                    "pro_mode_context": {
+                        "memory_messages": memory_messages[:6],
+                        "knowledge_messages": knowledge_messages[:6],
+                    }
+                },
+                add_session_state_to_context=True,
+                reasoning=True,
+                reasoning_min_steps=2,
+                reasoning_max_steps=12,
+                debug_mode=bool(debug),
+            )
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
         )
         try:
-            result = await agent.arun(
-                prompt,
-                stream=False,
+            result, model_route = await self._arun_with_optional_pro_mode_fallback(
+                phase_name="reasoning_solver",
+                prompt=prompt,
+                build_agent=_build_reasoning_solver_agent,
+                conversation_id=conversation_id,
+                run_id=run_id,
                 user_id=user_id,
-                session_id=self._scope_session_id(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::reasoning_solver" if run_id else "reasoning_solver",
-                ),
-                debug_mode=bool(debug),
+                debug=debug,
             )
         except Exception as exc:
             return ProModeWorkflowResult(
@@ -4932,6 +5129,7 @@ class AgnoChatRuntime:
                     "pro_mode": {
                         "execution_path": "reasoning_solver",
                         "runtime_status": "failed",
+                        "model_route": model_route,
                     }
                 },
                 runtime_status="failed",
@@ -4939,26 +5137,100 @@ class AgnoChatRuntime:
             )
         response_text, _source = self._coerce_visible_output(result)
         normalized_response_text = str(response_text or "").strip()
-        if re.fullmatch(
-            r"(?is)(?:api\s+)?connection error\.?",
-            normalized_response_text,
+        failure_code = self._classify_pro_mode_failure(normalized_response_text)
+        if (
+            failure_code
+            and not bool(model_route.get("fallback_used"))
+            and self._uses_dedicated_pro_mode_model()
+            and self._pro_mode_fallback_enabled()
         ):
+            try:
+                fallback_agent = _build_reasoning_solver_agent(self._build_model)
+                result = await fallback_agent.arun(
+                    prompt,
+                    stream=False,
+                    user_id=user_id,
+                    session_id=self._scope_session_id(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        run_id=f"{str(run_id or '').strip()}::reasoning_solver:fallback_text"
+                        if run_id
+                        else "reasoning_solver:fallback_text",
+                    ),
+                    debug_mode=bool(debug),
+                )
+                model_route = self._pro_mode_model_route_metadata(
+                    fallback_used=True,
+                    failure_code=failure_code,
+                    active_model=self.model,
+                )
+                response_text, _source = self._coerce_visible_output(result)
+                normalized_response_text = str(response_text or "").strip()
+                failure_code = self._classify_pro_mode_failure(normalized_response_text)
+            except Exception:
+                pass
+        if failure_code:
             return ProModeWorkflowResult(
                 response_text="",
                 metadata={
                     "pro_mode": {
                         "execution_path": "reasoning_solver",
                         "runtime_status": "failed",
+                        "model_route": model_route,
                     }
                 },
                 runtime_status="failed",
                 runtime_error=normalized_response_text,
+            )
+        verifier_report = ProModeVerifierReport(
+            passed=bool(normalized_response_text),
+            issues=[],
+            suggested_changes=[],
+            confidence="high" if normalized_response_text else "low",
+        )
+        if normalized_response_text and (
+            proof_like_request or report_like_request or counterfactual_verification_requested
+        ):
+            verifier_prompt = "\n".join(
+                [
+                    "Review the draft answer for correctness, unsupported leaps, and missing caveats.",
+                    "Return only structured output.",
+                    "Mark `passed=false` if the answer overstates confidence, skips a proof bridge, or hides a material limitation.",
+                    "",
+                    f"User request: {latest_user_text}",
+                    "",
+                    "Draft answer:",
+                    normalized_response_text,
+                ]
+            )
+            verifier_report = await self._run_tool_program_phase(
+                phase_name="reasoning_solver_verifier",
+                schema=ProModeVerifierReport,
+                prompt=verifier_prompt,
+                fallback=verifier_report,
+                session_state={
+                    "pro_mode_context": {
+                        "memory_messages": memory_messages[:6],
+                        "knowledge_messages": knowledge_messages[:6],
+                    }
+                },
+                conversation_id=conversation_id,
+                run_id=run_id,
+                user_id=user_id,
+                reasoning_mode="deep",
+                reasoning_effort_override="high",
+                use_reasoning_agent=False,
+                max_runtime_seconds=max(30, min(max_runtime_seconds, 90)),
+                debug=debug,
             )
         return ProModeWorkflowResult(
             response_text=normalized_response_text,
             metadata={
                 "pro_mode": {
                     "execution_path": "reasoning_solver",
+                    "task_regime": normalized_task_regime or "conceptual_high_uncertainty",
+                    "model_route": model_route,
+                    "verifier": verifier_report.model_dump(mode="json"),
                 }
             },
             runtime_status="completed",
@@ -5746,6 +6018,7 @@ class AgnoChatRuntime:
                 if selected_action_hint == "reasoning_solver" or skill_name == "counterfactual_verification_workflow":
                     result = await self._run_pro_mode_reasoning_solver(
                         latest_user_text=action_request,
+                        task_regime=task_regime,
                         shared_context={
                             "memory_messages": memory_messages,
                             "knowledge_messages": knowledge_messages,
@@ -5805,6 +6078,7 @@ class AgnoChatRuntime:
                         },
                         conversation_state_seed=autonomy_state_seed,
                         debug=debug,
+                        allow_research_program=True,
                     )
                     return StepOutput(
                         content={
@@ -5816,6 +6090,7 @@ class AgnoChatRuntime:
                     )
                 result = await self._run_pro_mode_reasoning_solver(
                     latest_user_text=action_request,
+                    task_regime=task_regime,
                     shared_context={
                         "memory_messages": memory_messages,
                         "knowledge_messages": knowledge_messages,
@@ -8225,6 +8500,7 @@ class AgnoChatRuntime:
         shared_context: dict[str, Any] | None,
         conversation_state_seed: dict[str, Any] | None,
         debug: bool | None,
+        allow_research_program: bool = False,
     ) -> dict[str, Any]:
         shared_context = dict(shared_context or {})
         prepared_messages = [
@@ -8256,7 +8532,7 @@ class AgnoChatRuntime:
                 inferred_tool_names=inferred_tool_names,
                 prior_pro_mode_state=conversation_state_seed,
             )
-        if tool_plan is not None and tool_plan.category == "research_program":
+        if allow_research_program and tool_plan is not None and tool_plan.category == "research_program":
             return await self._run_pro_mode_research_program_workflow(
                 messages=prepared_messages,
                 latest_user_text=latest_user_text,
@@ -8418,10 +8694,14 @@ class AgnoChatRuntime:
                 "runtime_error": "tool_workflow_no_attempt",
                 "selected_tool_names": initial_tool_names,
             }
-        if strict_validation and not self._tool_workflow_satisfied(
+        if (
+            allow_research_program
+            and strict_validation
+            and not self._tool_workflow_satisfied(
             tool_invocations=list(last_result.get("tool_invocations") or []),
             required_tool_names=required_tool_names,
             strict_validation=True,
+            )
         ):
             self._emit_event(
                 event_callback,
@@ -8460,7 +8740,7 @@ class AgnoChatRuntime:
                 conversation_state_seed=conversation_state_seed,
                 debug=debug,
             )
-        if self._should_escalate_validated_tool_to_research_program(
+        if allow_research_program and self._should_escalate_validated_tool_to_research_program(
             latest_user_text=latest_user_text,
             tool_plan=tool_plan,
             tool_invocations=list(last_result.get("tool_invocations") or []),
@@ -10299,64 +10579,70 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> Any:
         compression_stats: dict[str, Any] = {}
-        compression_manager = CompressionManager(
-            model=self._build_model(
-                reasoning_mode=reasoning_mode,
-                reasoning_effort_override=reasoning_effort_override,
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            compress_tool_results=True,
-            stats=compression_stats,
-        )
-        agent = Agent(
-            name=f"pro-mode-tool-program-{phase_name}",
-            model=self._build_model(
-                reasoning_mode=reasoning_mode,
-                reasoning_effort_override=reasoning_effort_override,
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            instructions=[
-                "You are operating inside a scientific workflow.",
-                "Return only the requested structured output.",
-                "Be evidence-seeking, concise, and tool-aware.",
-                "Do not invent measurements, metadata, coordinates, counts, or file handles.",
-                "If you use scratchpad tools, the only valid tool names are `think` and `analyze`; never invent aliases such as `analyze_output`.",
-            ],
-            output_schema=schema,
-            structured_outputs=True,
-            use_json_mode=True,
-            parse_response=True,
-            markdown=False,
-            telemetry=False,
-            retries=0,
-            store_events=False,
-            store_history_messages=False,
-            tools=list(tools or []) or None,
-            session_state=dict(session_state or {}),
-            add_session_state_to_context=True,
-            compress_tool_results=True,
-            compression_manager=compression_manager,
-            reasoning=bool(use_reasoning_agent),
-            reasoning_max_steps=8 if use_reasoning_agent else None,
-            debug_mode=bool(debug),
+        def _build_tool_program_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+            compression_manager = CompressionManager(
+                model=model_builder(
+                    reasoning_mode=reasoning_mode,
+                    reasoning_effort_override=reasoning_effort_override,
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                compress_tool_results=True,
+                stats=compression_stats,
+            )
+            return Agent(
+                name=f"pro-mode-tool-program-{phase_name}",
+                model=model_builder(
+                    reasoning_mode=reasoning_mode,
+                    reasoning_effort_override=reasoning_effort_override,
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                instructions=[
+                    "You are operating inside a scientific workflow.",
+                    "Return only the requested structured output.",
+                    "Be evidence-seeking, concise, and tool-aware.",
+                    "Do not invent measurements, metadata, coordinates, counts, or file handles.",
+                    "If you use scratchpad tools, the only valid tool names are `think` and `analyze`; never invent aliases such as `analyze_output`.",
+                ],
+                output_schema=schema,
+                structured_outputs=True,
+                use_json_mode=True,
+                parse_response=True,
+                markdown=False,
+                telemetry=False,
+                retries=0,
+                store_events=False,
+                store_history_messages=False,
+                tools=list(tools or []) or None,
+                session_state=dict(session_state or {}),
+                add_session_state_to_context=True,
+                compress_tool_results=True,
+                compression_manager=compression_manager,
+                reasoning=bool(use_reasoning_agent),
+                reasoning_max_steps=8 if use_reasoning_agent else None,
+                debug_mode=bool(debug),
+            )
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
         )
         try:
-            result = await agent.arun(
-                prompt,
-                stream=False,
+            result, model_route = await self._arun_with_optional_pro_mode_fallback(
+                phase_name=phase_name,
+                prompt=prompt,
+                build_agent=_build_tool_program_agent,
+                conversation_id=conversation_id,
+                run_id=run_id,
                 user_id=user_id,
-                session_id=self._scope_session_id(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::{phase_name}" if run_id else phase_name,
-                ),
-                debug_mode=bool(debug),
+                debug=debug,
             )
         except Exception:
             return fallback
         if isinstance(session_state, dict):
             compression_state = dict(session_state.get("compression_stats") or {})
-            compression_state[phase_name] = dict(compression_stats)
+            compression_state[phase_name] = {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
             session_state["compression_stats"] = compression_state
         return self._coerce_schema_output(schema=schema, result=result, fallback=fallback)
 
@@ -10614,55 +10900,56 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> str:
         compression_stats: dict[str, Any] = {}
-        compression_manager = CompressionManager(
-            model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            compress_tool_results=True,
-            stats=compression_stats,
-        )
-        agent = Agent(
-            name="pro-mode-report-writer",
-            model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            reasoning_model=self._build_model(
-                reasoning_mode="deep",
-                reasoning_effort_override="high",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            instructions=[
-                "You write comprehensive, scientist-facing reports from measured evidence.",
-                "Lead with the strongest supported takeaway, then organize the report into clear sections when helpful.",
-                "Prefer connected prose with a few short headings over bullet spam.",
-                "Ground every quantitative statement in the provided packet or evidence summaries.",
-                "When perturbation-stability results and detector confidence scores are both present, explain them as complementary but different signals.",
-                "Stability describes robustness of the prediction set under perturbation; confidence describes per-detection model scoring and is not a calibrated probability.",
-                "Do not frame a zero instability score as proof that every detection is correct.",
-                "Do not dump raw per-box confidence lists unless the user explicitly asks for every confidence value.",
-                "When multiple images or artifacts are being compared, discuss the most important differences explicitly.",
-                "State limitations plainly, but do not let them crowd out the main findings.",
-                "Do not mention internal workflows, canonical branches, blockers, council roles, or tool names.",
-                "Do not invent measurements, coordinates, acquisition metadata, species presence, or counts.",
-            ],
-            markdown=True,
-            telemetry=False,
-            retries=0,
-            store_events=False,
-            store_history_messages=False,
-            session_state=dict(session_state or {}),
-            add_session_state_to_context=True,
-            compress_tool_results=True,
-            compression_manager=compression_manager,
-            reasoning=True,
-            reasoning_min_steps=2,
-            reasoning_max_steps=10,
-            debug_mode=bool(debug),
-        )
+        def _build_report_writer_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+            compression_manager = CompressionManager(
+                model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                compress_tool_results=True,
+                stats=compression_stats,
+            )
+            return Agent(
+                name="pro-mode-report-writer",
+                model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                reasoning_model=model_builder(
+                    reasoning_mode="deep",
+                    reasoning_effort_override="high",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                instructions=[
+                    "You write comprehensive, scientist-facing reports from measured evidence.",
+                    "Lead with the strongest supported takeaway, then organize the report into clear sections when helpful.",
+                    "Prefer connected prose with a few short headings over bullet spam.",
+                    "Ground every quantitative statement in the provided packet or evidence summaries.",
+                    "When perturbation-stability results and detector confidence scores are both present, explain them as complementary but different signals.",
+                    "Stability describes robustness of the prediction set under perturbation; confidence describes per-detection model scoring and is not a calibrated probability.",
+                    "Do not frame a zero instability score as proof that every detection is correct.",
+                    "Do not dump raw per-box confidence lists unless the user explicitly asks for every confidence value.",
+                    "When multiple images or artifacts are being compared, discuss the most important differences explicitly.",
+                    "State limitations plainly, but do not let them crowd out the main findings.",
+                    "Do not mention internal workflows, canonical branches, blockers, council roles, or tool names.",
+                    "Do not invent measurements, coordinates, acquisition metadata, species presence, or counts.",
+                ],
+                markdown=True,
+                telemetry=False,
+                retries=0,
+                store_events=False,
+                store_history_messages=False,
+                session_state=dict(session_state or {}),
+                add_session_state_to_context=True,
+                compress_tool_results=True,
+                compression_manager=compression_manager,
+                reasoning=True,
+                reasoning_min_steps=2,
+                reasoning_max_steps=10,
+                debug_mode=bool(debug),
+            )
         prompt = "\n".join(
             [
                 "Write the final scientist-facing report from the structured evidence below.",
@@ -10683,18 +10970,20 @@ class AgnoChatRuntime:
                 json.dumps(handles, ensure_ascii=False, indent=2),
             ]
         )
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+        )
         try:
-            result = await asyncio.wait_for(
-                agent.arun(
-                    prompt,
-                    stream=False,
+            result, model_route = await asyncio.wait_for(
+                self._arun_with_optional_pro_mode_fallback(
+                    phase_name="research_program_report",
+                    prompt=prompt,
+                    build_agent=_build_report_writer_agent,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
                     user_id=user_id,
-                    session_id=self._scope_session_id(
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        run_id=f"{str(run_id or '').strip()}::research_program_report" if run_id else "research_program_report",
-                    ),
-                    debug_mode=bool(debug),
+                    debug=debug,
                 ),
                 timeout=max(10.0, min(float(max_runtime_seconds), 60.0)),
             )
@@ -10702,7 +10991,10 @@ class AgnoChatRuntime:
             return ""
         if isinstance(session_state, dict):
             compression_state = dict(session_state.get("compression_stats") or {})
-            compression_state["research_program_report_writer"] = dict(compression_stats)
+            compression_state["research_program_report_writer"] = {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
             session_state["compression_stats"] = compression_state
         response_text, _source = self._coerce_visible_output(result)
         return str(response_text or "").strip()
@@ -10730,7 +11022,7 @@ class AgnoChatRuntime:
         proof_writer_instructions: list[str] = []
         report_writer_instructions: list[str] = []
         math_writer_instructions: list[str] = []
-        if execution_regime == "proof_workflow":
+        if execution_regime == "proof_workflow" or str(task_regime or "").strip().lower() == "rigorous_proof":
             proof_writer_instructions = [
                 "For proofs, organize the answer pedagogically: verdict or current status first, then the main reduction, then the load-bearing steps, then the endgame or remaining gap.",
                 "Make dependency order explicit, and do not skip from a local lemma to the final theorem without naming the bridge.",
@@ -10753,72 +11045,73 @@ class AgnoChatRuntime:
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
         compression_stats: dict[str, Any] = {}
-        compression_manager = CompressionManager(
-            model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            compress_tool_results=True,
-            stats=compression_stats,
-        )
-        agent = Agent(
-            name="pro-mode-final-writer",
-            model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            reasoning_model=self._build_model(
-                reasoning_mode="deep",
-                reasoning_effort_override="high",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            output_model=self._build_model(
-                reasoning_mode="fast",
-                reasoning_effort_override="low",
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            output_model_prompt=(
-                "Refine the draft into lucid, elegant, scientist-facing prose. "
-                "Preserve every supported conclusion, number, caveat, and comparison. "
-                "Improve coherence, structure, and sentence flow. "
-                "Do not add facts. Do not imitate any named living writer. "
-                "Instead, use high-level prose qualities such as clarity, structure, concrete illustration, and controlled stylistic energy."
-            ),
-            instructions=[
-                "You are the final Pro Mode writer for scientifically grounded answers.",
-                "Lead with the answer or strongest supported takeaway.",
-                "Prefer connected prose with a crisp derivation or explanation when helpful.",
-                "Use short sections only when they genuinely improve readability.",
-                "Keep caveats brief and accurate.",
-                "Preserve all supported quantitative values, identities, and conditions from the draft.",
-                "If both perturbation-stability and detector confidence are mentioned, preserve the distinction: stability is robustness of the prediction set, while confidence is a per-detection score and not a calibrated probability.",
-                "Do not enumerate long raw confidence lists unless the user explicitly asked for them.",
-                "Do not invent facts, counts, coordinates, metadata, mechanisms, or citations.",
-                "Do not mention internal workflows, routes, councils, tools, blockers, or hidden reasoning.",
-                "Do not imitate any named living writer; aim instead for clear, elegant, idea-first prose.",
-                "Use disciplined explanatory nonfiction techniques rather than generic assistant prose.",
-                *[f"Technique: {item}" for item in PROSE_STYLE_GUIDELINES],
-                *[f"Student technique: {item}" for item in STUDENT_EXPLANATION_GUIDELINES],
-                *report_writer_instructions,
-                *math_writer_instructions,
-                *proof_writer_instructions,
-            ],
-            markdown=True,
-            telemetry=False,
-            retries=0,
-            store_events=False,
-            store_history_messages=False,
-            session_state=dict(session_state or {}),
-            add_session_state_to_context=True,
-            compress_tool_results=True,
-            compression_manager=compression_manager,
-            reasoning=True,
-            reasoning_min_steps=2,
-            reasoning_max_steps=8,
-            debug_mode=bool(debug),
-        )
+        def _build_final_writer_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+            compression_manager = CompressionManager(
+                model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                compress_tool_results=True,
+                stats=compression_stats,
+            )
+            return Agent(
+                name="pro-mode-final-writer",
+                model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                reasoning_model=model_builder(
+                    reasoning_mode="deep",
+                    reasoning_effort_override="high",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                output_model=model_builder(
+                    reasoning_mode="fast",
+                    reasoning_effort_override="low",
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+                output_model_prompt=(
+                    "Refine the draft into lucid, elegant, scientist-facing prose. "
+                    "Preserve every supported conclusion, number, caveat, and comparison. "
+                    "Improve coherence, structure, and sentence flow. "
+                    "Do not add facts. Do not imitate any named living writer. "
+                    "Instead, use high-level prose qualities such as clarity, structure, concrete illustration, and controlled stylistic energy."
+                ),
+                instructions=[
+                    "You are the final Pro Mode writer for scientifically grounded answers.",
+                    "Lead with the answer or strongest supported takeaway.",
+                    "Prefer connected prose with a crisp derivation or explanation when helpful.",
+                    "Use short sections only when they genuinely improve readability.",
+                    "Keep caveats brief and accurate.",
+                    "Preserve all supported quantitative values, identities, and conditions from the draft.",
+                    "If both perturbation-stability and detector confidence are mentioned, preserve the distinction: stability is robustness of the prediction set, while confidence is a per-detection score and not a calibrated probability.",
+                    "Do not enumerate long raw confidence lists unless the user explicitly asked for them.",
+                    "Do not invent facts, counts, coordinates, metadata, mechanisms, or citations.",
+                    "Do not mention internal workflows, routes, councils, tools, blockers, or hidden reasoning.",
+                    "Do not imitate any named living writer; aim instead for clear, elegant, idea-first prose.",
+                    "Use disciplined explanatory nonfiction techniques rather than generic assistant prose.",
+                    *[f"Technique: {item}" for item in PROSE_STYLE_GUIDELINES],
+                    *[f"Student technique: {item}" for item in STUDENT_EXPLANATION_GUIDELINES],
+                    *report_writer_instructions,
+                    *math_writer_instructions,
+                    *proof_writer_instructions,
+                ],
+                markdown=True,
+                telemetry=False,
+                retries=0,
+                store_events=False,
+                store_history_messages=False,
+                session_state=dict(session_state or {}),
+                add_session_state_to_context=True,
+                compress_tool_results=True,
+                compression_manager=compression_manager,
+                reasoning=True,
+                reasoning_min_steps=2,
+                reasoning_max_steps=8,
+                debug_mode=bool(debug),
+            )
         prompt = "\n".join(
             [
                 "Rewrite the grounded draft below into the final user-facing Pro Mode answer.",
@@ -10828,7 +11121,7 @@ class AgnoChatRuntime:
                     [
                         "For proof answers, make the structure teachable: identify the main reduction, the crucial intermediate obligations, and the closing bridge."
                     ]
-                    if execution_regime == "proof_workflow"
+                    if execution_regime == "proof_workflow" or str(task_regime or "").strip().lower() == "rigorous_proof"
                     else []
                 ),
                 *(
@@ -10885,18 +11178,20 @@ class AgnoChatRuntime:
                 ),
             ]
         )
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+        )
         try:
-            result = await asyncio.wait_for(
-                agent.arun(
-                    prompt,
-                    stream=False,
+            result, model_route = await asyncio.wait_for(
+                self._arun_with_optional_pro_mode_fallback(
+                    phase_name="pro_mode_final_writer",
+                    prompt=prompt,
+                    build_agent=_build_final_writer_agent,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
                     user_id=user_id,
-                    session_id=self._scope_session_id(
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        run_id=f"{str(run_id or '').strip()}::pro_mode_final_writer" if run_id else "pro_mode_final_writer",
-                    ),
-                    debug_mode=bool(debug),
+                    debug=debug,
                 ),
                 timeout=max(10.0, min(float(max_runtime_seconds), 45.0)),
             )
@@ -10904,19 +11199,37 @@ class AgnoChatRuntime:
             return "", {}
         if isinstance(session_state, dict):
             compression_state = dict(session_state.get("compression_stats") or {})
-            compression_state["pro_mode_final_writer"] = dict(compression_stats)
+            compression_state["pro_mode_final_writer"] = {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
             session_state["compression_stats"] = compression_state
         response_text, _source = self._coerce_visible_output(result)
         normalized_response = str(response_text or "").strip()
         if not normalized_response:
-            return "", dict(compression_stats)
+            return "", {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
         if self._report_text_has_internal_orchestration(normalized_response):
-            return "", dict(compression_stats)
+            return "", {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
         if re.search(r"\d", normalized_draft) and not re.search(r"\d", normalized_response):
-            return "", dict(compression_stats)
-        if re.fullmatch(r"(?is)(?:api\s+)?connection error\.?", normalized_response):
-            return "", dict(compression_stats)
-        return normalized_response, dict(compression_stats)
+            return "", {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
+        if self._classify_pro_mode_failure(normalized_response):
+            return "", {
+                **dict(compression_stats),
+                "model_route": dict(model_route),
+            }
+        return normalized_response, {
+            **dict(compression_stats),
+            "model_route": dict(model_route),
+        }
 
     async def _execute_research_program_actions(
         self,
@@ -12748,6 +13061,7 @@ class AgnoChatRuntime:
                     shared_context=shared_context,
                     conversation_state_seed=prior_pro_mode_state,
                     debug=pro_mode_debug,
+                    allow_research_program=intake_decision.execution_regime == "iterative_research",
                 )
                 self._emit_event(
                     event_callback,
@@ -13952,6 +14266,7 @@ class AgnoChatRuntime:
                 )
                 pro_mode_result = await self._run_pro_mode_reasoning_solver(
                     latest_user_text=latest_user_text,
+                    task_regime=intake_decision.task_regime,
                     shared_context=shared_context,
                     conversation_id=conversation_id,
                     run_id=run_id,
@@ -13960,7 +14275,6 @@ class AgnoChatRuntime:
                     debug=pro_mode_debug,
                 )
                 if not str(pro_mode_result.response_text or "").strip():
-                    fallback_to_council = self._pro_mode_expert_council_enabled()
                     self._emit_event(
                         event_callback,
                         {
@@ -13968,119 +14282,12 @@ class AgnoChatRuntime:
                             "event_type": "pro_mode.phase_failed",
                             "phase": "reasoning_solver",
                             "status": "failed",
-                            "message": (
-                                "Reasoning solver returned no answer; falling back to the expert council."
-                                if fallback_to_council
-                                else "Reasoning solver returned no answer and council fallback is disabled."
-                            ),
+                            "message": "Reasoning solver returned no answer and no legacy council fallback was used.",
                             "payload": {"runtime_error": pro_mode_result.runtime_error},
                         },
                     )
-                    if fallback_to_council:
-                        intake_decision.execution_regime = "expert_council"
-                    else:
-                        fallback_text = str(pro_mode_result.response_text or "").strip() or (
-                            "I couldn't produce a stable answer within the current Pro Mode reasoning workflow."
-                        )
-                        solver_metadata = {
-                            "execution_path": "reasoning_solver",
-                            "route": intake_decision.route,
-                            "execution_regime": "reasoning_solver",
-                            "task_regime": intake_decision.task_regime,
-                            "context_policy": context_policy,
-                            "intake": intake_decision.model_dump(mode="json"),
-                            "active_roles": ["Front Door Triage", "Reasoning Solver"],
-                            "phase_order": ["intake", "context_policy", "execution_router", "reasoning_solver", "finalize"],
-                            "round_count": 0,
-                            "discussion_round_count": 0,
-                            "model_call_count": 1,
-                            "convergence": {
-                                "per_role_vote": {},
-                                "central_blockers": [],
-                                "ready": False,
-                                "consensus_level": "low",
-                            },
-                            "role_stats": {},
-                            "calculator": {"used": False, "call_count": 0, "results": []},
-                            "verifier": {
-                                "passed": False,
-                                "issues": [],
-                                "suggested_changes": [],
-                                "confidence": "low",
-                            },
-                            "summary": "Reasoning solver did not converge and council fallback is disabled.",
-                            "fallback_policy": "no_expert_council",
-                        }
-                        final_result = self._run_output_to_result(
-                            run_output=None,
-                            fallback_text=fallback_text,
-                            route=route,
-                            tool_names=[],
-                            reasoning_mode=reasoning_mode,
-                            workflow_hint=workflow_hint,
-                            hitl_resume=hitl_resume,
-                            run_id=run_id,
-                            app_session_id=app_session_id,
-                            user_id=user_id,
-                            latest_user_text=latest_user_text,
-                            memory_policy=resolved_memory_policy,
-                            knowledge_scope=resolved_knowledge_scope,
-                            knowledge_context=knowledge_context,
-                            memory_context=memory_context.metadata(),
-                            knowledge_result=knowledge_result.metadata(),
-                            fallback_tool_invocations=[],
-                            runtime_status=pro_mode_result.runtime_status,
-                            runtime_error=pro_mode_result.runtime_error,
-                            extra_metadata={
-                                **dict(pro_mode_result.metadata or {}),
-                                "pro_mode": solver_metadata,
-                            },
-                            debug_override={
-                                "path": "pro_mode",
-                                "agent_mode": "reasoning_solver",
-                                "prompt_profile": "pro_mode",
-                                "route_reason": "pro_mode_reasoning_solver_no_council_fallback",
-                                "reasoning_mode": reasoning_mode,
-                                "response_source": "reasoning_solver_failure",
-                                "dev_trace_enabled": pro_mode_debug,
-                                "intake_route": intake_decision.route,
-                                "execution_regime": "reasoning_solver",
-                                "context_policy": context_policy,
-                                "active_roles": solver_metadata["active_roles"],
-                                "model_call_count": solver_metadata["model_call_count"],
-                                "runtime_status": pro_mode_result.runtime_status,
-                            },
-                        )
-                        yield {"event": "token", "data": {"delta": final_result.response_text}}
-                        _persist_turn_analysis_state(
-                            metadata=final_result.metadata,
-                            task_regime_override=str(
-                                intake_decision.task_regime or "self_contained_reasoning"
-                            ),
-                        )
-                        yield {
-                            "event": "done",
-                            "data": {
-                                "response_text": final_result.response_text,
-                                "selected_domains": final_result.selected_domains,
-                                "domain_outputs": final_result.domain_outputs,
-                                "tool_calls": final_result.tool_calls,
-                                "model": final_result.model,
-                                "metadata": final_result.metadata,
-                            },
-                        }
-                        return
-                else:
-                    self._emit_event(
-                        event_callback,
-                        {
-                            "kind": "graph",
-                            "event_type": "pro_mode.phase_completed",
-                            "phase": "reasoning_solver",
-                            "status": "completed",
-                            "message": "Self-contained reasoning solver completed.",
-                            "payload": {"runtime_status": pro_mode_result.runtime_status},
-                        },
+                    fallback_text = str(pro_mode_result.response_text or "").strip() or (
+                        "I couldn't produce a stable answer within the current Pro Mode reasoning workflow."
                     )
                     solver_metadata = {
                         "execution_path": "reasoning_solver",
@@ -14093,23 +14300,135 @@ class AgnoChatRuntime:
                         "phase_order": ["intake", "context_policy", "execution_router", "reasoning_solver", "finalize"],
                         "round_count": 0,
                         "discussion_round_count": 0,
-                        "model_call_count": 2,
+                        "model_call_count": 1,
                         "convergence": {
                             "per_role_vote": {},
                             "central_blockers": [],
-                            "ready": True,
-                            "consensus_level": "high",
+                            "ready": False,
+                            "consensus_level": "low",
                         },
                         "role_stats": {},
                         "calculator": {"used": False, "call_count": 0, "results": []},
                         "verifier": {
-                            "passed": bool(pro_mode_result.response_text),
+                            "passed": False,
                             "issues": [],
                             "suggested_changes": [],
-                            "confidence": "high",
+                            "confidence": "low",
                         },
+                        "summary": "Reasoning solver did not converge and no legacy council fallback was used.",
+                        "fallback_policy": "reasoning_solver_only",
+                    }
+                    final_result = self._run_output_to_result(
+                        run_output=None,
+                        fallback_text=fallback_text,
+                        route=route,
+                        tool_names=[],
+                        reasoning_mode=reasoning_mode,
+                        workflow_hint=workflow_hint,
+                        hitl_resume=hitl_resume,
+                        run_id=run_id,
+                        app_session_id=app_session_id,
+                        user_id=user_id,
+                        latest_user_text=latest_user_text,
+                        memory_policy=resolved_memory_policy,
+                        knowledge_scope=resolved_knowledge_scope,
+                        knowledge_context=knowledge_context,
+                        memory_context=memory_context.metadata(),
+                        knowledge_result=knowledge_result.metadata(),
+                        fallback_tool_invocations=[],
+                        runtime_status=pro_mode_result.runtime_status,
+                        runtime_error=pro_mode_result.runtime_error,
+                        extra_metadata={
+                            **dict(pro_mode_result.metadata or {}),
+                            "pro_mode": solver_metadata,
+                        },
+                        debug_override={
+                            "path": "pro_mode",
+                            "agent_mode": "reasoning_solver",
+                            "prompt_profile": "pro_mode",
+                            "route_reason": "pro_mode_reasoning_solver_no_council_fallback",
+                            "reasoning_mode": reasoning_mode,
+                            "response_source": "reasoning_solver_failure",
+                            "dev_trace_enabled": pro_mode_debug,
+                            "intake_route": intake_decision.route,
+                            "execution_regime": "reasoning_solver",
+                            "context_policy": context_policy,
+                            "active_roles": solver_metadata["active_roles"],
+                            "model_call_count": solver_metadata["model_call_count"],
+                            "runtime_status": pro_mode_result.runtime_status,
+                        },
+                    )
+                    yield {"event": "token", "data": {"delta": final_result.response_text}}
+                    _persist_turn_analysis_state(
+                        metadata=final_result.metadata,
+                        task_regime_override=str(
+                            intake_decision.task_regime or "self_contained_reasoning"
+                        ),
+                    )
+                    yield {
+                        "event": "done",
+                        "data": {
+                            "response_text": final_result.response_text,
+                            "selected_domains": final_result.selected_domains,
+                            "domain_outputs": final_result.domain_outputs,
+                            "tool_calls": final_result.tool_calls,
+                            "model": final_result.model,
+                            "metadata": final_result.metadata,
+                        },
+                    }
+                    return
+                else:
+                    self._emit_event(
+                        event_callback,
+                        {
+                            "kind": "graph",
+                            "event_type": "pro_mode.phase_completed",
+                            "phase": "reasoning_solver",
+                            "status": "completed",
+                            "message": "Self-contained reasoning solver completed.",
+                            "payload": {"runtime_status": pro_mode_result.runtime_status},
+                        },
+                    )
+                    solver_runtime_meta = (
+                        dict(pro_mode_result.metadata.get("pro_mode") or {})
+                        if isinstance(pro_mode_result.metadata, dict)
+                        else {}
+                    )
+                    verifier_payload = dict(solver_runtime_meta.get("verifier") or {})
+                    solver_metadata = {
+                        "execution_path": "reasoning_solver",
+                        "route": intake_decision.route,
+                        "execution_regime": "reasoning_solver",
+                        "task_regime": intake_decision.task_regime,
+                        "context_policy": context_policy,
+                        "intake": intake_decision.model_dump(mode="json"),
+                        "active_roles": ["Front Door Triage", "Reasoning Solver"],
+                        "phase_order": ["intake", "context_policy", "execution_router", "reasoning_solver", "finalize"],
+                        "round_count": 0,
+                        "discussion_round_count": 0,
+                        "model_call_count": 2 + (1 if verifier_payload else 0),
+                        "convergence": {
+                            "per_role_vote": {},
+                            "central_blockers": list(verifier_payload.get("issues") or []),
+                            "ready": bool(verifier_payload.get("passed", True)),
+                            "consensus_level": "high" if bool(verifier_payload.get("passed", True)) else "medium",
+                        },
+                        "role_stats": {},
+                        "calculator": {"used": False, "call_count": 0, "results": []},
+                        "verifier": (
+                            verifier_payload
+                            if verifier_payload
+                            else {
+                                "passed": bool(pro_mode_result.response_text),
+                                "issues": [],
+                                "suggested_changes": [],
+                                "confidence": "high",
+                            }
+                        ),
                         "summary": "Solved with the self-contained reasoning solver instead of the full expert council.",
                     }
+                    if dict(solver_runtime_meta.get("model_route") or {}):
+                        solver_metadata["model_route"] = dict(solver_runtime_meta.get("model_route") or {})
                     response_text = str(pro_mode_result.response_text or "").strip()
                     writer_stats: dict[str, Any] = {}
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
@@ -14118,7 +14437,11 @@ class AgnoChatRuntime:
                         execution_regime="reasoning_solver",
                         task_regime=intake_decision.task_regime,
                         supporting_points=[],
-                        reservations=[],
+                        reservations=[
+                            str(item or "").strip()
+                            for item in list(dict(solver_metadata.get("verifier") or {}).get("issues") or [])
+                            if str(item or "").strip()
+                        ],
                         session_state={"pro_mode_context": dict(shared_context or {})},
                         conversation_id=conversation_id,
                         run_id=run_id,
@@ -14195,7 +14518,8 @@ class AgnoChatRuntime:
             pro_mode_runner = self.pro_mode
             if intake_decision.execution_regime == "expert_council" and not self._pro_mode_expert_council_enabled():
                 pro_mode_runner = ProModeWorkflowRunner(
-                    model_builder=self._build_model,
+                    model_builder=self._build_pro_mode_model,
+                    fallback_model_builder=self._build_model,
                     enable_expert_council=True,
                 )
             pro_mode_result = await pro_mode_runner.execute(

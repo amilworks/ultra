@@ -311,12 +311,19 @@ class ProModeWorkflowRunner:
         requested = int(max(1.0, float(max_runtime_seconds)) * max(0.0, float(fraction)))
         return max(floor, min(ceiling, requested))
 
-    def __init__(self, *, model_builder: Callable[..., Any], enable_expert_council: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        model_builder: Callable[..., Any],
+        fallback_model_builder: Callable[..., Any] | None = None,
+        enable_expert_council: bool = False,
+    ) -> None:
         self._model_builder = model_builder
+        self._fallback_model_builder = fallback_model_builder
         self._enable_expert_council = bool(enable_expert_council)
 
     def _default_deep_execution_regime(self) -> ExecutionRegime:
-        return "expert_council" if self._enable_expert_council else "reasoning_solver"
+        return "reasoning_solver"
 
     def _normalize_intake_decision(self, decision: ProModeIntakeDecision) -> ProModeIntakeDecision:
         normalized = decision.model_copy(deep=True)
@@ -1636,40 +1643,43 @@ class ProModeWorkflowRunner:
         max_runtime_seconds: int,
         debug: bool,
     ) -> Any:
-        agent = Agent(
-            name=f"pro-mode-{phase_name}-{str(role).lower().replace(' ', '-')}",
-            model=self._model_builder(
-                reasoning_mode=self._role_reasoning_mode(
-                    phase_name=phase_name,
-                    role=str(role).strip().lower().replace(" ", "_"),
-                    requested=reasoning_mode,
+        def _build_phase_agent(model_builder: Callable[..., Any]) -> Agent:
+            return Agent(
+                name=f"pro-mode-{phase_name}-{str(role).lower().replace(' ', '-')}",
+                model=model_builder(
+                    reasoning_mode=self._role_reasoning_mode(
+                        phase_name=phase_name,
+                        role=str(role).strip().lower().replace(" ", "_"),
+                        requested=reasoning_mode,
+                    ),
+                    reasoning_effort_override=self._role_reasoning_effort_override(
+                        phase_name=phase_name,
+                        role=str(role).strip().lower().replace(" ", "_"),
+                        requested=reasoning_mode,
+                    ),
+                    max_runtime_seconds=max_runtime_seconds,
                 ),
-                reasoning_effort_override=self._role_reasoning_effort_override(
-                    phase_name=phase_name,
-                    role=str(role).strip().lower().replace(" ", "_"),
-                    requested=reasoning_mode,
-                ),
-                max_runtime_seconds=max_runtime_seconds,
-            ),
-            instructions=[
-                "You are participating in Pro Mode, a structured scientific council workflow.",
-                "Return only structured content matching the requested schema.",
-                "Be precise, grounded, and concise.",
-                "Do not reveal hidden chain-of-thought or workflow commentary.",
-            ],
-            output_schema=schema,
-            structured_outputs=True,
-            use_json_mode=True,
-            parse_response=True,
-            markdown=False,
-            telemetry=False,
-            retries=0,
-            store_events=False,
-            store_history_messages=False,
-            add_datetime_to_context=False,
-            add_location_to_context=False,
-            debug_mode=bool(debug),
-        )
+                instructions=[
+                    "You are participating in Pro Mode, a structured scientific council workflow.",
+                    "Return only structured content matching the requested schema.",
+                    "Be precise, grounded, and concise.",
+                    "Do not reveal hidden chain-of-thought or workflow commentary.",
+                ],
+                output_schema=schema,
+                structured_outputs=True,
+                use_json_mode=True,
+                parse_response=True,
+                markdown=False,
+                telemetry=False,
+                retries=0,
+                store_events=False,
+                store_history_messages=False,
+                add_datetime_to_context=False,
+                add_location_to_context=False,
+                debug_mode=bool(debug),
+            )
+
+        agent = _build_phase_agent(self._model_builder)
         try:
             result = await agent.arun(
                 prompt,
@@ -1683,7 +1693,23 @@ class ProModeWorkflowRunner:
                 debug_mode=bool(debug),
             )
         except Exception:
-            return fallback
+            if self._fallback_model_builder is None:
+                return fallback
+            try:
+                fallback_result = await _build_phase_agent(self._fallback_model_builder).arun(
+                    prompt,
+                    stream=False,
+                    user_id=user_id,
+                    session_id=self._phase_session_token(
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        phase_name=f"{phase_name}:{str(role).strip().lower().replace(' ', '_')}:fallback",
+                    ),
+                    debug_mode=bool(debug),
+                )
+            except Exception:
+                return fallback
+            return self._coerce_schema_output(schema=schema, result=fallback_result, fallback=fallback)
         return self._coerce_schema_output(schema=schema, result=result, fallback=fallback)
 
     @staticmethod

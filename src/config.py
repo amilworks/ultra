@@ -138,11 +138,40 @@ class Settings(BaseSettings):
         default=None,
         description="Optional API key override used only by Pro Mode answer generation.",
     )
+    pro_mode_api_key_header: str | None = Field(
+        default=None,
+        description=(
+            "Optional auth header name for dedicated Pro Mode gateways. "
+            "Set this to X-API-Key for API Gateway style publishes; leave unset for "
+            "standard OpenAI Bearer authentication."
+        ),
+    )
+    pro_mode_api_key_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Optional prefix prepended to the Pro Mode API key when "
+            "pro_mode_api_key_header is set. Leave blank for raw x-api-key headers."
+        ),
+    )
     pro_mode_model: str | None = Field(
         default=None,
         description=(
             "Optional model override used only by Pro Mode answer generation. "
             "When unset, falls back to resolved_llm_model."
+        ),
+    )
+    pro_mode_default_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional JSON object of additional default headers sent to the dedicated "
+            "Pro Mode gateway."
+        ),
+    )
+    pro_mode_default_query: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional JSON object of default query parameters sent to the dedicated "
+            "Pro Mode gateway."
         ),
     )
     pro_mode_timeout_seconds: int | None = Field(

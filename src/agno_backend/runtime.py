@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -886,7 +887,14 @@ class AgnoChatRuntime:
     def _uses_dedicated_pro_mode_model(self) -> bool:
         return any(
             str(self._setting(self.settings, name, "") or "").strip()
-            for name in ("pro_mode_base_url", "pro_mode_api_key", "pro_mode_model")
+            for name in (
+                "pro_mode_base_url",
+                "pro_mode_api_key",
+                "pro_mode_api_key_header",
+                "pro_mode_model",
+                "pro_mode_default_headers",
+                "pro_mode_default_query",
+            )
         )
 
     def _resolved_pro_mode_timeout_seconds(self) -> float:
@@ -895,6 +903,63 @@ class AgnoChatRuntime:
         except Exception:
             value = 60.0
         return max(1.0, value)
+
+    @staticmethod
+    def _string_dict(value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        parsed = value
+        if isinstance(parsed, str):
+            text = parsed.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {}
+        if not isinstance(parsed, Mapping):
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in parsed.items():
+            key = str(raw_key or "").strip()
+            if not key or raw_value is None:
+                continue
+            normalized[key] = str(raw_value)
+        return normalized
+
+    def _resolved_pro_mode_client_overrides(
+        self,
+        *,
+        api_key: str | None,
+    ) -> tuple[str, dict[str, str] | None, dict[str, str] | None, str | None]:
+        header_name = str(
+            self._setting(self.settings, "pro_mode_api_key_header", "") or ""
+        ).strip()
+        header_prefix_raw = self._setting(self.settings, "pro_mode_api_key_prefix", None)
+        headers = self._string_dict(
+            self._setting(self.settings, "pro_mode_default_headers", {})
+        )
+        query = self._string_dict(
+            self._setting(self.settings, "pro_mode_default_query", {})
+        )
+        effective_api_key = str(api_key or "").strip() or "EMPTY"
+
+        if header_name:
+            if header_name.lower() == "authorization" and header_prefix_raw in (None, "", "Bearer", "bearer"):
+                return effective_api_key, headers or None, query or None, "Authorization"
+            prefix = ""
+            if header_prefix_raw is None:
+                prefix = "Bearer" if header_name.lower() == "authorization" else ""
+            else:
+                prefix = str(header_prefix_raw).strip()
+            if api_key:
+                headers.setdefault(
+                    header_name,
+                    f"{prefix} {str(api_key).strip()}".strip() if prefix else str(api_key).strip(),
+                )
+            effective_api_key = "EMPTY"
+
+        return effective_api_key, headers or None, query or None, header_name or None
 
     @staticmethod
     def _pro_mode_failure_text(value: Any) -> str:
@@ -933,6 +998,9 @@ class AgnoChatRuntime:
         configured_model = str(
             self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
         ).strip() or self.model
+        auth_header_name = str(
+            self._setting(self.settings, "pro_mode_api_key_header", "") or ""
+        ).strip() or "Authorization"
         return {
             "configured_model": configured_model,
             "active_model": str(active_model or configured_model).strip() or configured_model,
@@ -940,6 +1008,14 @@ class AgnoChatRuntime:
             "fallback_enabled": self._pro_mode_fallback_enabled(),
             "fallback_used": bool(fallback_used),
             "fallback_reason": str(failure_code or "").strip() or None,
+            "transport": "openai_compatible",
+            "auth_header_name": auth_header_name,
+            "custom_headers_configured": bool(
+                self._string_dict(self._setting(self.settings, "pro_mode_default_headers", {}))
+            ),
+            "custom_query_configured": bool(
+                self._string_dict(self._setting(self.settings, "pro_mode_default_query", {}))
+            ),
         }
 
     async def _arun_with_optional_pro_mode_fallback(
@@ -1305,6 +1381,9 @@ class AgnoChatRuntime:
             api_key = str(raw_api_key).strip()
         else:
             api_key = "EMPTY" if self.llm_provider in {"vllm", "ollama"} else (self.api_key or "EMPTY")
+        effective_api_key, default_headers, default_query, _auth_header_name = (
+            self._resolved_pro_mode_client_overrides(api_key=api_key)
+        )
         base_url = str(
             self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url) or self.base_url
         ).strip() or self.base_url
@@ -1313,7 +1392,7 @@ class AgnoChatRuntime:
         ).strip() or self.model
         return OpenAILike(
             id=str(model_id or resolved_model),
-            api_key=api_key,
+            api_key=effective_api_key,
             base_url=base_url,
             timeout=timeout_seconds,
             max_retries=0,
@@ -1321,6 +1400,8 @@ class AgnoChatRuntime:
             verbosity=self._verbosity_for_response(),
             max_tokens=None,
             max_completion_tokens=None,
+            default_headers=default_headers,
+            default_query=default_query,
         )
 
     @staticmethod

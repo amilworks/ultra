@@ -2588,6 +2588,19 @@ class AgnoChatRuntime:
             tool_plan=None,
         ):
             return None
+        early_bisque_plan: ProModeToolPlan | None = None
+        if AgnoChatRuntime._is_bisque_management_request(user_text, selection_context=selection_context):
+            early_bisque_plan = AgnoChatRuntime._bisque_management_tool_plan(
+                user_text=user_text,
+                uploaded_files=uploaded_files,
+                selection_context=selection_context,
+                inferred_tool_names=inferred_tool_names,
+            )
+            if any(
+                tool_name not in {"search_bisque_resources", "bisque_find_assets", "load_bisque_resource"}
+                for tool_name in list(early_bisque_plan.selected_tool_names or [])
+            ):
+                return early_bisque_plan
         if AgnoChatRuntime._requires_iterative_research_program(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -2626,20 +2639,6 @@ class AgnoChatRuntime:
                 strict_validation=True,
                 reason="Closed-form quantitative prompt should be grounded with deterministic calculation.",
             )
-
-        early_bisque_plan: ProModeToolPlan | None = None
-        if AgnoChatRuntime._is_bisque_management_request(user_text, selection_context=selection_context):
-            early_bisque_plan = AgnoChatRuntime._bisque_management_tool_plan(
-                user_text=user_text,
-                uploaded_files=uploaded_files,
-                selection_context=selection_context,
-                inferred_tool_names=inferred_tool_names,
-            )
-            if any(
-                tool_name not in {"search_bisque_resources", "bisque_find_assets", "load_bisque_resource"}
-                for tool_name in list(early_bisque_plan.selected_tool_names or [])
-            ):
-                return early_bisque_plan
 
         if has_direct_image_target:
             if re.search(
@@ -3487,6 +3486,12 @@ class AgnoChatRuntime:
         lowered = str(user_text or "").strip().lower()
         selection_context = dict(selection_context or {})
         if AgnoChatRuntime._is_bisque_connectivity_request(user_text):
+            return False
+        if AgnoChatRuntime._is_bisque_upload_action_request(
+            user_text,
+            uploaded_files=uploaded_files,
+            selection_context=selection_context,
+        ):
             return False
         has_artifact_handles = AgnoChatRuntime._selection_context_has_artifact_handles(selection_context)
         has_direct_image_target = bool(

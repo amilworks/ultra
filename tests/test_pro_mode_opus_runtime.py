@@ -338,6 +338,34 @@ def test_operational_bisque_request_still_uses_tool_workflow() -> None:
     )
 
 
+def test_explicit_bisque_upload_turn_prefers_upload_tool_over_research_bundle() -> None:
+    plan = AgnoChatRuntime._build_pro_mode_tool_plan(
+        user_text="Upload this image to BisQue.",
+        uploaded_files=["/tmp/test-image.png"],
+        selected_tool_names=["upload_to_bisque", "search_bisque_resources"],
+        selection_context=None,
+        inferred_tool_names=["bioio_load_image", "segment_image_sam2", "search_bisque_resources"],
+        prior_pro_mode_state=None,
+    )
+
+    assert plan is not None
+    assert plan.category == "bisque_management"
+    assert plan.selected_tool_names == ["upload_to_bisque"]
+    assert plan.strict_validation is True
+
+
+def test_explicit_bisque_upload_turn_does_not_trigger_iterative_research_program() -> None:
+    assert (
+        AgnoChatRuntime._requires_iterative_research_program(
+            user_text="Upload this image to BisQue.",
+            uploaded_files=["/tmp/test-image.png"],
+            selection_context=None,
+            prior_pro_mode_state=None,
+        )
+        is False
+    )
+
+
 def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Path) -> None:
     runtime = _make_runtime(
         tmp_path,

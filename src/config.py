@@ -128,6 +128,37 @@ class Settings(BaseSettings):
             "Optional request timeout override (seconds) for code generation model calls."
         ),
     )
+    pro_mode_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional OpenAI-compatible base URL override used only by Pro Mode answer generation."
+        ),
+    )
+    pro_mode_api_key: str | None = Field(
+        default=None,
+        description="Optional API key override used only by Pro Mode answer generation.",
+    )
+    pro_mode_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model override used only by Pro Mode answer generation. "
+            "When unset, falls back to resolved_llm_model."
+        ),
+    )
+    pro_mode_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional request timeout override (seconds) for Pro Mode model calls."
+        ),
+    )
+    pro_mode_fallback_enabled: bool = Field(
+        default=True,
+        description=(
+            "When true, Pro Mode retries once on the default model path if the dedicated "
+            "Pro Mode gateway is unavailable."
+        ),
+    )
     llm_mock_mode: bool = Field(
         default=False,
         description=(
@@ -1154,6 +1185,34 @@ class Settings(BaseSettings):
         if self.resolved_codegen_provider == "ollama":
             return self.ollama_model.strip()
         return self.openai_model.strip()
+
+    @property
+    def resolved_pro_mode_base_url(self) -> str:
+        """Resolved OpenAI-compatible base URL for Pro Mode answer generation."""
+        if self.pro_mode_base_url and self.pro_mode_base_url.strip():
+            return self.pro_mode_base_url.strip()
+        return self.resolved_llm_base_url
+
+    @property
+    def resolved_pro_mode_api_key(self) -> str | None:
+        """Resolved API key for Pro Mode answer generation."""
+        if self.pro_mode_api_key and self.pro_mode_api_key.strip():
+            return self.pro_mode_api_key.strip()
+        return self.resolved_llm_api_key
+
+    @property
+    def resolved_pro_mode_model(self) -> str:
+        """Resolved model name for Pro Mode answer generation."""
+        if self.pro_mode_model and self.pro_mode_model.strip():
+            return self.pro_mode_model.strip()
+        return self.resolved_llm_model
+
+    @property
+    def resolved_pro_mode_timeout_seconds(self) -> int:
+        """Resolved timeout in seconds for Pro Mode model calls."""
+        if self.pro_mode_timeout_seconds is not None:
+            return max(1, int(self.pro_mode_timeout_seconds))
+        return max(1, int(self.openai_timeout or 60))
 
 
 @lru_cache

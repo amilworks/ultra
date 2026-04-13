@@ -15,6 +15,8 @@ export type ChatBenchmarkConfig = {
   experiment_label?: string | null;
   hidden_answer_format?: "mcq_letter";
   visible_answer_style?: "natural" | "mcq";
+  // Keep the full forced-regime surface for evaluation and benchmark overrides.
+  // Production routing auto-selects only the simplified default set.
   force_pro_mode_execution_regime?:
     | "fast_dialogue"
     | "validated_tool"

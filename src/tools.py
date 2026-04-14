@@ -1149,6 +1149,19 @@ def _ensure_dir(path: str | Path) -> str:
     return str(path)
 
 
+def _science_data_root_path() -> Path:
+    settings = get_settings()
+    root = str(getattr(settings, "science_data_root", "data/science") or "data/science").strip()
+    return Path(root).expanduser()
+
+
+def _science_output_root(*parts: str) -> str:
+    root = _science_data_root_path()
+    if parts:
+        root = root.joinpath(*parts)
+    return _ensure_dir(root)
+
+
 def _models_root() -> str:
     return _ensure_dir(Path("data") / "models" / "yolo")
 
@@ -2334,15 +2347,15 @@ _DEPTH_PRO_RUNTIME_CACHE: dict[tuple[str, bool, str], tuple[Any, Any]] = {}
 
 
 def _yolo_datasets_root() -> str:
-    return _ensure_dir(Path("data") / "yolo" / "datasets")
+    return _science_output_root("yolo", "datasets")
 
 
 def _yolo_training_root() -> str:
-    return _ensure_dir(Path("data") / "yolo" / "training")
+    return _science_output_root("yolo", "training")
 
 
 def _sequence_frames_root() -> str:
-    return _ensure_dir(Path("data") / "sequence_frames")
+    return _science_output_root("sequence_frames")
 
 
 def _is_sequence_media(path: Path) -> bool:
@@ -5596,7 +5609,7 @@ def segment_image_sam2(
         return {"success": False, "error": "file_paths is required"}
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    output_dir = Path("data") / "medsam2_results" / run_id
+    output_dir = Path(_science_output_root("medsam2_results")) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict[str, Any]] = []
@@ -5969,7 +5982,7 @@ def sam2_prompt_image(
             return {"success": False, "error": seg.get("error") or "MedSAM2 segmentation failed."}
 
         mask = np.asarray(seg.pop("_mask"))
-        output_dir = Path("data") / "medsam2_prompt_results"
+        output_dir = Path(_science_output_root("medsam2_prompt_results"))
         artifact_paths = _save_medsam_artifacts(
             source_path=str(file_path),
             output_dir=output_dir,
@@ -6174,7 +6187,7 @@ def estimate_depth_pro(
         return {"success": False, "error": str(exc)}
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    output_dir = Path("data") / "depth_pro_results" / run_id
+    output_dir = Path(_science_output_root("depth_pro_results")) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _scalar(value: Any) -> float | None:
@@ -6782,7 +6795,7 @@ def segment_image_sam3(
             return cached_result
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    output_dir = Path("data") / "sam3_results" / run_id
+    output_dir = Path(_science_output_root("sam3_results")) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict[str, Any]] = []
@@ -8174,7 +8187,7 @@ def _resolve_uploaded_local_path(
 
     fallback_candidates = [
         staging_dir / requested_name,
-        Path("data") / requested_name,
+        _science_data_root_path() / requested_name,
     ]
     for candidate in fallback_candidates:
         if candidate.exists() and candidate.is_file():
@@ -8533,11 +8546,11 @@ def run_bisque_module(
             "error": "input_resources is required. Provide at least one module input (for example {'Input Image': '<resource or file>'}).",
         }
 
-    staged_inputs_dir = Path("data") / "module_inputs"
+    staged_inputs_dir = Path(_science_output_root("module_inputs"))
     module_out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else Path("data") / "bisque_module_outputs" / _safe_slug(module)
+        else Path(_science_output_root("bisque_module_outputs", _safe_slug(module)))
     )
 
     bq: Any | None = None
@@ -9141,7 +9154,7 @@ def yolo_detect(
     paths = [str(p) for p in images]
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    out_dir_path = Path("data") / "yolo" / "predictions" / run_id
+    out_dir_path = Path(_science_output_root("yolo", "predictions")) / run_id
     out_dir_path.mkdir(parents=True, exist_ok=True)
     out_dir = str(out_dir_path.resolve())
 
@@ -9974,7 +9987,7 @@ def score_spectral_instability_tool(
         resolved_weights_path = str(_resolve_prairie_builtin_weights_path())
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    output_root = (Path("data") / "spectral_instability" / run_id).resolve()
+    output_root = (Path(_science_output_root("spectral_instability")) / run_id).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -11701,7 +11714,7 @@ def _normalize_bisque_dataset_resource_inputs(
             continue
         local_path = Path(token).expanduser()
         if not local_path.exists():
-            candidate = Path("data") / token
+            candidate = _science_data_root_path() / token
             if candidate.exists():
                 local_path = candidate
         try:
@@ -13756,7 +13769,9 @@ def execute_tool_call(
                 return local_candidates
             for resource_uri in selection_resource_uris[:1]:
                 resource_token = _safe_download_token(resource_uri, default="resource")
-                managed_output = str((Path("data") / "bisque_downloads" / resource_token).resolve())
+                managed_output = str(
+                    (Path(_science_output_root("bisque_downloads")) / resource_token).resolve()
+                )
                 download_result = bisque_download_resource(resource_uri, managed_output)
                 if not isinstance(download_result, dict) or not bool(download_result.get("success")):
                     continue
@@ -13822,7 +13837,9 @@ def execute_tool_call(
                 )
         if tool_name == "bisque_download_dataset" and not args.get("output_dir"):
             dataset_token = _safe_download_token(args.get("dataset_uri"), default="dataset")
-            args["output_dir"] = str((Path("data") / "bisque_downloads" / dataset_token).resolve())
+            args["output_dir"] = str(
+                (Path(_science_output_root("bisque_downloads")) / dataset_token).resolve()
+            )
             logger.info(
                 "Injected managed output_dir into %s: %s",
                 tool_name,
@@ -13830,7 +13847,9 @@ def execute_tool_call(
             )
         if tool_name == "bisque_download_resource" and not args.get("output_path") and args.get("resource_uri"):
             resource_token = _safe_download_token(args.get("resource_uri"), default="resource")
-            args["output_path"] = str((Path("data") / "bisque_downloads" / resource_token).resolve())
+            args["output_path"] = str(
+                (Path(_science_output_root("bisque_downloads")) / resource_token).resolve()
+            )
             logger.info(
                 "Injected managed output_path into %s: %s",
                 tool_name,
@@ -13886,7 +13905,7 @@ def execute_tool_call(
                 resolved_uploaded_local = _resolve_uploaded_local_path(
                     provided_file_path,
                     uploaded_files=uploaded_files,
-                    staging_dir=Path("data") / "tool_inputs",
+                    staging_dir=Path(_science_output_root("tool_inputs")),
                 )
             provided_local_exists = bool(
                 provided_file_path

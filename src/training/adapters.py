@@ -1339,20 +1339,24 @@ def _slug_token(value: str) -> str:
     return token or "sample"
 
 
+def _package_root_path() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_package_relative_path(value: str | None, default: str) -> Path:
+    raw = str(value or "").strip() or default
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = _package_root_path() / candidate
+    return candidate.resolve()
+
+
 def _resolve_yolov5_repo_path() -> Path:
-    configured = str(os.getenv("YOLOV5_RUNTIME_PATH") or "").strip()
-    if configured:
-        candidate = Path(configured).expanduser().resolve()
-    else:
-        candidate = Path("third_party/yolov5").resolve()
-    return candidate
+    return _resolve_package_relative_path(os.getenv("YOLOV5_RUNTIME_PATH"), "third_party/yolov5")
 
 
 def _resolve_rarespot_weights_path() -> Path:
-    configured = str(os.getenv("YOLOV5_RARESPOT_WEIGHTS") or "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path("RareSpotWeights.pt").resolve()
+    return _resolve_package_relative_path(os.getenv("YOLOV5_RARESPOT_WEIGHTS"), "RareSpotWeights.pt")
 
 
 def _ensure_yolov5_font_asset(config_dir: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import src.agno_backend.runtime as runtime_module
 from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeWorkflowResult
 from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan
 from src.config import Settings
@@ -364,6 +365,130 @@ def test_explicit_bisque_upload_turn_does_not_trigger_iterative_research_program
         )
         is False
     )
+
+
+def test_strict_tool_workflow_executes_required_upload_tool_when_model_skips_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "Please attach the file here or tell me where it lives.",
+                "metadata": {"tool_invocations": []},
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **kwargs):
+        assert tool_name == "upload_to_bisque"
+        assert args == {}
+        assert kwargs["uploaded_files"] == ["/tmp/test-image.png"]
+        return {
+            "success": True,
+            "results": [
+                {
+                    "file": "test-image.png",
+                    "resource_uri": "https://ultra.ece.ucsb.edu/data_service/01-upload",
+                    "client_view_url": "https://ultra.ece.ucsb.edu/client_service/view?resource=https://ultra.ece.ucsb.edu/data_service/01-upload",
+                }
+            ],
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[{"role": "user", "content": "Upload this to BisQue."}],
+            latest_user_text="Upload this to BisQue.",
+            uploaded_files=["/tmp/test-image.png"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["upload_to_bisque"],
+            tool_plan_category="bisque_management",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert [item["tool"] for item in result["tool_invocations"]] == ["upload_to_bisque"]
+    assert result["tool_invocations"][0]["status"] == "completed"
+    assert result["response_text"] != "Please attach the file here or tell me where it lives."
+
+
+def test_strict_tool_workflow_executes_required_search_tool_when_model_skips_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "I can help search BisQue if you want.",
+                "metadata": {"tool_invocations": []},
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **_kwargs):
+        assert tool_name == "search_bisque_resources"
+        assert args == {}
+        return {
+            "success": True,
+            "results": [
+                {
+                    "name": "Prairie_Dog_Active_Learning",
+                    "resource_type": "dataset",
+                    "client_view_url": "https://ultra.ece.ucsb.edu/client_service/view?resource=https://ultra.ece.ucsb.edu/data_service/00-dataset",
+                }
+            ],
+            "count": 1,
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[{"role": "user", "content": "Search BisQue for datasets."}],
+            latest_user_text="Search BisQue for datasets.",
+            uploaded_files=[],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["search_bisque_resources"],
+            tool_plan_category="catalog_lookup",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert [item["tool"] for item in result["tool_invocations"]] == ["search_bisque_resources"]
+    assert result["tool_invocations"][0]["status"] == "completed"
+    assert result["response_text"] != "I can help search BisQue if you want."
 
 
 def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Path) -> None:

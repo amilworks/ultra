@@ -9150,6 +9150,84 @@ class AgnoChatRuntime:
                 "selected_tool_names": initial_tool_names,
             }
         if (
+            strict_validation
+            and required_tool_names
+            and not self._tool_workflow_satisfied(
+                tool_invocations=list(last_result.get("tool_invocations") or []),
+                required_tool_names=required_tool_names,
+                strict_validation=True,
+            )
+        ):
+            fallback_actions = [
+                ToolProgramAction(
+                    tool_name=tool_name,
+                    purpose=(
+                        "Running the required tool directly because the initial model response "
+                        "did not execute the requested action."
+                    ),
+                    args={},
+                )
+                for tool_name in list(required_tool_names)
+                if str(tool_name or "").strip()
+            ]
+            if fallback_actions:
+                self._emit_event(
+                    event_callback,
+                    {
+                        "kind": "graph",
+                        "event_type": "pro_mode.phase_started",
+                        "phase": "tool_workflow",
+                        "status": "started",
+                        "message": "Running the required tool directly because the earlier answer skipped it.",
+                        "payload": {
+                            "required_tool_names": list(required_tool_names),
+                            "tool_plan_category": str(tool_plan.category if tool_plan is not None else ""),
+                        },
+                    },
+                )
+                deterministic_invocations = await self._execute_tool_program_actions(
+                    phase="tool_workflow",
+                    phase_label="tool workflow",
+                    actions=fallback_actions,
+                    uploaded_files=uploaded_files,
+                    latest_user_text=latest_user_text,
+                    selection_context=selection_context,
+                    event_callback=event_callback,
+                    request_bisque_auth=request_bisque_auth,
+                )
+                if deterministic_invocations:
+                    merged_tool_invocations = self._merge_tool_invocations(
+                        list(last_result.get("tool_invocations") or []),
+                        deterministic_invocations,
+                    )
+                    deterministic_satisfied = self._tool_workflow_satisfied(
+                        tool_invocations=merged_tool_invocations,
+                        required_tool_names=required_tool_names,
+                        strict_validation=True,
+                    )
+                    deterministic_response_text = (
+                        self._tool_invocation_fallback_text(merged_tool_invocations)
+                        or self._tool_invocation_fallback_text(deterministic_invocations)
+                        or str(last_result.get("response_text") or "").strip()
+                        or "Completed the required tool workflow."
+                    )
+                    deterministic_metadata = dict(last_result.get("metadata") or {})
+                    deterministic_metadata["tool_invocations"] = merged_tool_invocations
+                    deterministic_tool_workflow_meta = dict(deterministic_metadata.get("tool_workflow") or {})
+                    deterministic_tool_workflow_meta["deterministic_required_tool_fallback"] = {
+                        "required_tool_names": list(required_tool_names),
+                        "tool_invocation_count": len(deterministic_invocations),
+                    }
+                    deterministic_metadata["tool_workflow"] = deterministic_tool_workflow_meta
+                    last_result = {
+                        **last_result,
+                        "response_text": deterministic_response_text,
+                        "tool_invocations": merged_tool_invocations,
+                        "metadata": deterministic_metadata,
+                        "runtime_status": "completed" if deterministic_satisfied else "error",
+                        "runtime_error": None if deterministic_satisfied else "required_tool_execution_failed",
+                    }
+        if (
             allow_research_program
             and strict_validation
             and not self._tool_workflow_satisfied(
@@ -11713,25 +11791,28 @@ class AgnoChatRuntime:
             "model_route": dict(model_route),
         }
 
-    async def _execute_research_program_actions(
+    async def _execute_tool_program_actions(
         self,
         *,
-        family: str,
+        phase: str,
+        phase_label: str,
         actions: list[ToolProgramAction],
         uploaded_files: list[str],
         latest_user_text: str,
         selection_context: dict[str, Any] | None,
         event_callback: Callable[[dict[str, Any]], None] | None,
+        request_bisque_auth: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        family_actions = [
-            action for action in list(actions or [])
-            if self._research_program_tool_family(action.tool_name) == family
+        normalized_actions = [
+            action
+            for action in list(actions or [])
+            if str(action.tool_name or "").strip()
         ]
-        if not family_actions:
+        if not normalized_actions:
             return []
 
         results: list[dict[str, Any]] = []
-        for action in family_actions:
+        for action in normalized_actions:
             tool_name = str(action.tool_name or "").strip()
             args = dict(action.args or {})
             self._emit_event(
@@ -11739,12 +11820,13 @@ class AgnoChatRuntime:
                 {
                     "kind": "graph",
                     "event_type": "pro_mode.tool_requested",
-                    "phase": "research_program",
+                    "phase": phase,
                     "status": "started",
                     "message": action.purpose,
                     "payload": {"tool": tool_name, "args": args},
                 },
             )
+            context_token = set_request_bisque_auth(request_bisque_auth) if request_bisque_auth else None
             try:
                 raw_output = await asyncio.to_thread(
                     execute_tool_call,
@@ -11765,7 +11847,7 @@ class AgnoChatRuntime:
                     "output_preview": raw_text[:4000],
                 }
                 event_status = "completed"
-                event_message = f"{tool_name} completed for the iterative research program."
+                event_message = f"{tool_name} completed for the {phase_label}."
                 event_payload: dict[str, Any] = {"tool": tool_name, "summary": invocation["output_summary"]}
             except Exception as exc:
                 invocation = {
@@ -11778,21 +11860,48 @@ class AgnoChatRuntime:
                     "output_preview": str(exc or exc.__class__.__name__),
                 }
                 event_status = "failed"
-                event_message = f"{tool_name} failed during the iterative research program."
+                event_message = f"{tool_name} failed during the {phase_label}."
                 event_payload = {"tool": tool_name, "error": str(exc or exc.__class__.__name__)}
+            finally:
+                if context_token is not None:
+                    reset_request_bisque_auth(context_token)
             results.append(invocation)
             self._emit_event(
                 event_callback,
                 {
                     "kind": "graph",
                     "event_type": "pro_mode.tool_completed",
-                    "phase": "research_program",
+                    "phase": phase,
                     "status": event_status,
                     "message": event_message,
                     "payload": event_payload,
                 },
             )
         return results
+
+    async def _execute_research_program_actions(
+        self,
+        *,
+        family: str,
+        actions: list[ToolProgramAction],
+        uploaded_files: list[str],
+        latest_user_text: str,
+        selection_context: dict[str, Any] | None,
+        event_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> list[dict[str, Any]]:
+        family_actions = [
+            action for action in list(actions or [])
+            if self._research_program_tool_family(action.tool_name) == family
+        ]
+        return await self._execute_tool_program_actions(
+            phase="research_program",
+            phase_label="iterative research program",
+            actions=family_actions,
+            uploaded_files=uploaded_files,
+            latest_user_text=latest_user_text,
+            selection_context=selection_context,
+            event_callback=event_callback,
+        )
 
     async def _run_pro_mode_research_program_workflow(
         self,

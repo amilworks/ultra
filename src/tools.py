@@ -1188,7 +1188,10 @@ def _models_root() -> str:
 
 
 def _finetuned_dir() -> str:
-    return _ensure_dir(Path(_models_root()) / "finetuned")
+    legacy_dir = Path(_models_root()) / "finetuned"
+    if legacy_dir.exists():
+        return _ensure_dir(legacy_dir)
+    return _ensure_dir(Path(_science_output_root("yolo", "models", "finetuned")))
 
 
 def _require_ultralytics() -> Any:

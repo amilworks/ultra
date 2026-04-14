@@ -85,6 +85,14 @@ The deployment scripts assume this filesystem layout on the app node:
       backend/
       frontend/
   ops/
+  models/
+    yolo/
+    medsam2/
+      checkpoints/
+    sam3/
+      facebook-sam3/
+  runtime/
+    MedSAM2/
   shared/
     artifacts/
     uploads/
@@ -129,6 +137,18 @@ This file is for the FastAPI app and the backend deploy scripts. It should conta
 - `ULTRA_PUBLIC_HOST`
 - `ULTRA_RELEASE_ROOT`
 - `BISQUE_ROOT`
+
+For deterministic scientific tooling, also point the backend at stable local
+model/runtime paths on the app node instead of release-relative paths:
+
+- `YOLO_DEFAULT_MODEL=/srv/ultra/models/yolo/yolo26x.pt`
+- `YOLOV5_RARESPOT_WEIGHTS=/srv/ultra/models/yolo/RareSpotWeights.pt`
+- `MEDSAM2_RUNTIME_ROOT=/srv/ultra/runtime/MedSAM2`
+- `MEDSAM2_CHECKPOINT_DIR=/srv/ultra/models/medsam2/checkpoints`
+- `SAM3_MODEL_ID=/srv/ultra/models/sam3/facebook-sam3`
+
+Use `scripts/sync_science_model_assets.sh --source <old-local-repo> --remote-host <app-node>`
+to seed those local assets without committing weights into Git.
 
 ### `platform.env`
 
@@ -201,6 +221,7 @@ client list with only the configured production client(s).
    - `python3`
    - `uv`
    - `rsync`
+   - `libgl1` and `libglib2.0-0` on Ubuntu/Debian app nodes so `opencv-python` / `ultralytics` can import for YOLO and segmentation tools
 2. Copy the env examples into `/etc/ultra/` and fill them with real values.
 3. Create the release layout:
 
@@ -209,6 +230,10 @@ client list with only the configured production client(s).
      --ultra-env /etc/ultra/ultra-backend.env \
      --platform-env /etc/ultra/platform.env
    ```
+
+   On Ubuntu/Debian, the bootstrap script now installs `libgl1` and
+   `libglib2.0-0` automatically when it is run as root and those packages are
+   missing.
 
 4. Render the proxy configs into a staging directory:
 

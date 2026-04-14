@@ -46,6 +46,7 @@ platform/bisque/.venv-engine-hardening/
 # Large local model assets and weights
 *.pt
 data/models/
+data/runtime/MedSAM2/
 
 # OS/editor noise
 .DS_Store

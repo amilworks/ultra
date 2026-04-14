@@ -167,7 +167,7 @@ class AuthenticationServer(ServiceController):
     def _ensure_oidc_user_tags(self, tg_user, email, name, claims):
         from bq.data_service.model import BQUser
 
-        bq_user = DBSession.query(BQUser).filter(BQUser.resource_name == tg_user.user_name).first()
+        bq_user = self._ensure_bq_user_record(tg_user)
         if not bq_user:
             return
 
@@ -189,6 +189,25 @@ class AuthenticationServer(ServiceController):
             self._upsert_bq_tag(bq_user, "oidc_groups", ",".join(str(x) for x in groups if x))
         elif isinstance(groups, str):
             self._upsert_bq_tag(bq_user, "oidc_groups", groups)
+
+    def _ensure_bq_user_record(self, tg_user):
+        from bq.data_service.model import BQUser
+
+        if tg_user is None or not getattr(tg_user, "user_name", None):
+            return None
+
+        bq_user = DBSession.query(BQUser).filter(BQUser.resource_name == tg_user.user_name).first()
+        if bq_user is None:
+            log.warning("Missing BQUser for TG user %s; creating it during auth reconciliation", tg_user.user_name)
+            bq_user = BQUser(tg_user=tg_user, create_tg=False, create_store=True)
+            DBSession.add(bq_user)
+            DBSession.flush()
+
+        if not getattr(bq_user, "owner_id", None):
+            bq_user.owner_id = bq_user.id
+            DBSession.flush()
+
+        return bq_user
 
     def _ensure_local_oidc_user(self, username, email, name, claims):
         from bq.core.model.auth import User as TGUser
@@ -219,6 +238,7 @@ class AuthenticationServer(ServiceController):
         if email and tg_user.email_address != email:
             tg_user.email_address = email
 
+        self._ensure_bq_user_record(tg_user)
         self._ensure_oidc_user_tags(tg_user, email=email, name=name, claims=claims)
         DBSession.flush()
         return tg_user

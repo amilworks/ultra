@@ -104,8 +104,18 @@ def bootstrap(command, conf, vars):
         session['mex_id'] = initial_mex.id
         #request.identity['bisque.mex_id'] = initial_mex.id
 
-
         admin = model.DBSession.query(BQUser).filter_by(resource_name = 'admin').first()
+        if admin is None:
+            log.warning('Bootstrap found TG admin without BQUser; creating missing BQUser record')
+            admin_tg = model.DBSession.query(model.User).filter_by(user_name='admin').first()
+            if admin_tg is None:
+                raise RuntimeError('Bootstrap could not find TG admin user to reconcile')
+            admin = BQUser(tg_user=admin_tg, create_tg=False, create_store=True)
+            model.DBSession.add(admin)
+            model.DBSession.flush()
+            admin.owner_id = admin.id
+            transaction.commit()
+
         admin.mex_id = initial_mex.id
         initial_mex.owner = admin
         session['user'] = admin

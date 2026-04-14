@@ -50,3 +50,24 @@ def test_models_root_falls_back_to_rarespot_parent(monkeypatch, tmp_path):
 
     assert resolved == weights_path.parent
     assert resolved.is_dir()
+
+
+def test_finetuned_dir_uses_shared_science_root_when_legacy_missing(monkeypatch, tmp_path):
+    science_root = tmp_path / "science"
+    model_path = tmp_path / "readonly-models" / "yolo" / "yolo26x.pt"
+    monkeypatch.delenv("YOLO_MODEL_ROOT", raising=False)
+    monkeypatch.setenv("YOLO_DEFAULT_MODEL", str(model_path))
+    monkeypatch.setenv("SCIENCE_DATA_ROOT", str(science_root))
+    monkeypatch.setattr(
+        tools,
+        "get_settings",
+        lambda: SimpleNamespace(
+            prairie_rarespot_weights_path="",
+            science_data_root=str(science_root),
+        ),
+    )
+
+    resolved = Path(tools._finetuned_dir())
+
+    assert resolved == science_root / "yolo" / "models" / "finetuned"
+    assert resolved.is_dir()

@@ -248,6 +248,7 @@ Ext.define('BQ.admin.UserTable', {
     initComponent: function(config) {
         var config = config || {};
         var me = this;
+        me.localUserCreationEnabled = true;
 
         var tbar = new Ext.Toolbar({
             margin: false,
@@ -283,6 +284,7 @@ Ext.define('BQ.admin.UserTable', {
                 scope: this,
             }, ' ', {
                 xtype: 'button',
+                itemId: 'add-user-button',
                 text: 'Add',
                 iconCls : 'icon add',
                 tooltip: 'Add new user',
@@ -384,6 +386,30 @@ Ext.define('BQ.admin.UserTable', {
             tbar: tbar
         });
         this.callParent([config]);
+        this.loadAuthSettings();
+    },
+
+    loadAuthSettings: function() {
+        var me = this;
+        Ext.Ajax.request({
+            url: '/admin/auth_settings',
+            method: 'GET',
+            success: function(response) {
+                var payload = {};
+                try {
+                    payload = Ext.decode(response.responseText);
+                } catch (err) {
+                    payload = {};
+                }
+
+                me.localUserCreationEnabled = payload.local_user_creation_enabled !== false;
+                var addButton = me.down('#add-user-button');
+                if (addButton && me.localUserCreationEnabled === false) {
+                    addButton.setDisabled(true);
+                    addButton.setTooltip('Create approved users in Keycloak, then have them sign in once to provision their BisQue profile.');
+                }
+            },
+        });
     },
 
     initTable: function() {
@@ -461,6 +487,10 @@ Ext.define('BQ.admin.UserTable', {
 
     addUserWin : function() {
         var me = this;
+        if (me.localUserCreationEnabled === false) {
+            BQ.ui.notification('Create approved users in Keycloak, then have them sign in once to provision their BisQue profile.');
+            return;
+        }
         var userForm = Ext.create('Ext.form.Panel', {
             padding: '20px',
             layout: 'anchor',
@@ -1916,4 +1946,3 @@ Ext.define('BQ.data.writer.Groups', {
     }
 
 });
-

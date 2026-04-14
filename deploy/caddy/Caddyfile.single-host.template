@@ -34,7 +34,7 @@ ${ULTRA_PUBLIC_HOST} {
         header >Set-Cookie "(.*)" "$$1; Secure"
     }
 
-    @bisque path /auth_service* /blob_service* /client_service* /core* /data_service* /dataset_service* /engine_service* /export* /export_service* /features* /image_service* /import* /mex* /module_service* /notebook_service* /registration* /services* /stats* /table_service* /usage*
+    @bisque path /admin* /auth_service* /blob_service* /client_service* /core* /data_service* /dataset_service* /engine_service* /export* /export_service* /features* /image_service* /import* /mex* /module_service* /notebook_service* /registration* /services* /stats* /table_service* /usage*
     @login_handler path /auth_service/login_handler /auth_service/login_handler*
     redir @login_handler /auth_service/oidc_login?{query} 302
 

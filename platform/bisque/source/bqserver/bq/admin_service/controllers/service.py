@@ -197,6 +197,14 @@ class AdminController(ServiceController):
     def manager(self):
         return dict()
 
+    @expose(content_type='application/json')
+    def auth_settings(self):
+        mode = auth_mode()
+        return json.dumps({
+            'auth_mode': mode,
+            'local_user_creation_enabled': mode != 'oidc',
+        })
+
     @expose("bq.admin_service.templates.domain_management")  
     def domain_management(self):
         """Domain management page"""

@@ -35,4 +35,9 @@ def test_admin_ui_blocks_local_user_creation_in_oidc_mode() -> None:
 
     assert "Local BisQue user creation is disabled while OIDC-only auth is enabled." in admin_service
     assert "Create approved users in Keycloak" in admin_service
+    assert "def auth_settings(self):" in admin_service
+    assert "'local_user_creation_enabled': mode != 'oidc'" in admin_service
+    assert "loadAuthSettings: function()" in manager_js
+    assert "url: '/admin/auth_settings'" in manager_js
+    assert "Create approved users in Keycloak, then have them sign in once to provision their BisQue profile." in manager_js
     assert "message = response.responseText;" in manager_js

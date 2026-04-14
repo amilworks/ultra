@@ -54,9 +54,16 @@ def _torch_available() -> bool:
 
 
 def _vendored_medsam2_root() -> Path | None:
-    candidate = Path(__file__).resolve().parents[2] / "third_party" / "MedSAM2"
-    if candidate.exists():
-        return candidate
+    settings = get_settings()
+    configured = str(getattr(settings, "medsam2_runtime_root", "") or "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path(__file__).resolve().parents[2] / "third_party" / "MedSAM2")
+    candidates.append(Path(__file__).resolve().parents[2] / "data" / "runtime" / "MedSAM2")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
     return None
 
 

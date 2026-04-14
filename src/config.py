@@ -1011,6 +1011,13 @@ class Settings(BaseSettings):
         default="wanglab/MedSAM2",
         description="Default MedSAM2 model selector (e.g., wanglab/MedSAM2, latest, or a .pt path).",
     )
+    medsam2_runtime_root: str = Field(
+        default="third_party/MedSAM2",
+        description=(
+            "Directory containing the vendored MedSAM2 runtime (sam2 package and configs). "
+            "Use an absolute host path in production if the runtime is installed outside the release tree."
+        ),
+    )
     medsam2_checkpoint_dir: str = Field(
         default="data/models/medsam2/checkpoints",
         description="Directory where MedSAM2 .pt checkpoints are stored.",
@@ -1134,6 +1141,7 @@ class Settings(BaseSettings):
             "session_upload_root",
             "science_data_root",
             "upload_store_root",
+            "medsam2_runtime_root",
             "medsam2_checkpoint_dir",
             "tool_call_napkin_path",
             "tool_call_napkin_skill_path",

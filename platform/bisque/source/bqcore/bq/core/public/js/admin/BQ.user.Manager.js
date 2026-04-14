@@ -628,7 +628,11 @@ Ext.define('BQ.admin.UserTable', {
                 this.reload()
             },
             failure: function(response) {
-                BQ.ui.error('Failed to add new user!')
+                var message = 'Failed to add new user!';
+                if (response && response.responseText) {
+                    message = response.responseText;
+                }
+                BQ.ui.error(message)
             },
             scope: this
         })
@@ -1912,5 +1916,4 @@ Ext.define('BQ.data.writer.Groups', {
     }
 
 });
-
 

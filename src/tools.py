@@ -1163,6 +1163,27 @@ def _science_output_root(*parts: str) -> str:
 
 
 def _models_root() -> str:
+    settings = get_settings()
+    explicit_root = str(os.getenv("YOLO_MODEL_ROOT") or "").strip()
+    if explicit_root:
+        return _ensure_dir(Path(explicit_root).expanduser())
+
+    configured_default_model = str(os.getenv("YOLO_DEFAULT_MODEL") or "").strip()
+    if configured_default_model:
+        default_model_path = Path(configured_default_model).expanduser()
+        if default_model_path.suffix:
+            return _ensure_dir(default_model_path.parent)
+        return _ensure_dir(default_model_path)
+
+    configured_rarespot = str(
+        getattr(settings, "prairie_rarespot_weights_path", "") or ""
+    ).strip()
+    if configured_rarespot:
+        rarespot_path = Path(configured_rarespot).expanduser()
+        if rarespot_path.suffix:
+            return _ensure_dir(rarespot_path.parent)
+        return _ensure_dir(rarespot_path)
+
     return _ensure_dir(Path("data") / "models" / "yolo")
 
 
@@ -1172,6 +1193,7 @@ def _finetuned_dir() -> str:
 
 def _require_ultralytics() -> Any:
     try:
+        os.environ.setdefault("YOLO_CONFIG_DIR", _ensure_dir(_science_data_root_path() / ".cache" / "ultralytics"))
         from ultralytics import YOLO  # type: ignore
 
         return YOLO

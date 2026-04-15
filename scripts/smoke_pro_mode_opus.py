@@ -152,7 +152,7 @@ def _probe_local_backend(settings: Settings) -> int:
         pro_mode_meta = metadata.get("pro_mode") or {}
         model_route = pro_mode_meta.get("model_route") or {}
         runtime_status = str(pro_mode_meta.get("runtime_status") or "").strip().lower()
-        published_api = pro_mode_meta.get("published_api") or {}
+        published_api = pro_mode_meta.get("published_api") or model_route.get("published_api") or {}
         print(f"response_model={parsed.get('model')}")
         print(f"execution_path={pro_mode_meta.get('execution_path')}")
         print(f"runtime_status={runtime_status or '(missing)'}")
@@ -183,6 +183,132 @@ def _probe_local_backend(settings: Settings) -> int:
         return 5
 
 
+def _post_local_chat(
+    api_root: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 240.0,
+) -> dict[str, Any]:
+    with httpx.Client(timeout=timeout_seconds) as client:
+        response = client.post(f"{api_root}/v1/chat", json=payload)
+    response.raise_for_status()
+    return response.json()
+
+
+def _tool_invocations(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = parsed.get("metadata") or {}
+    invocations = metadata.get("tool_invocations")
+    if isinstance(invocations, list):
+        return [item for item in invocations if isinstance(item, dict)]
+    return []
+
+
+def _tool_name(invocation: dict[str, Any]) -> str:
+    return (
+        str(
+            invocation.get("tool")
+            or invocation.get("tool_name")
+            or invocation.get("name")
+            or invocation.get("display_name")
+            or ""
+        )
+        .strip()
+    )
+
+
+def _probe_local_code_tools(settings: Settings) -> int:
+    _print_header("Local Code Tool Probe")
+    api_root = str(settings.orchestrator_api_url or "http://127.0.0.1:8000").strip().rstrip("/")
+    payload: dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "In Pro Mode, write Python to compute the mean and standard deviation of "
+                    "the list [1, 2, 3, 4, 5], run it, and explain the result briefly."
+                ),
+            }
+        ],
+        "conversation_id": "local-opus-code-smoke",
+        "workflow_hint": {"id": "pro_mode", "source": "slash_menu"},
+        "reasoning_mode": "deep",
+        "debug": True,
+        "budgets": {"max_tool_calls": 8, "max_runtime_seconds": 240},
+    }
+    try:
+        parsed = _post_local_chat(api_root, payload, timeout_seconds=300.0)
+        metadata = parsed.get("metadata") or {}
+        pro_mode_meta = metadata.get("pro_mode") or {}
+        tool_invocations = _tool_invocations(parsed)
+        tool_names = [_tool_name(item) for item in tool_invocations]
+        writer_route = (
+            (pro_mode_meta.get("model_routes") or {}).get("pro_mode_final_writer")
+            if isinstance(pro_mode_meta.get("model_routes"), dict)
+            else {}
+        ) or {}
+        print(f"response_model={parsed.get('model')}")
+        print(f"execution_path={pro_mode_meta.get('execution_path')}")
+        print(f"execution_regime={pro_mode_meta.get('execution_regime')}")
+        print(f"tool_runtime_model={pro_mode_meta.get('tool_runtime_model')}")
+        print(f"writer_transport={writer_route.get('transport')}")
+        print(f"writer_model={writer_route.get('active_model')}")
+        print(f"tool_names={json.dumps(tool_names)}")
+        print(f"response_text={str(parsed.get('response_text') or '')[:300]}")
+        if "codegen_python_plan" not in tool_names or "execute_python_job" not in tool_names:
+            print("Expected Pro Mode code workflow to run both codegen_python_plan and execute_python_job.")
+            return 11
+        if str(writer_route.get("transport") or "").strip() not in {"bedrock_published_api", "aws_bedrock_claude"}:
+            print("Expected Pro Mode final writer to stay on the dedicated Opus transport.")
+            return 12
+        return 0
+    except Exception as exc:  # pragma: no cover - smoke script
+        print(f"local_code_tool_error={exc}")
+        return 13
+
+
+def _probe_local_bisque_tools(settings: Settings) -> int:
+    _print_header("Local BisQue Tool Probe")
+    if not str(settings.bisque_user or "").strip() or not str(settings.bisque_password or "").strip():
+        print("Skipping BisQue tool probe because BISQUE_USER/BISQUE_PASSWORD are not configured.")
+        return 0
+    api_root = str(settings.orchestrator_api_url or "http://127.0.0.1:8000").strip().rstrip("/")
+    payload: dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "In Pro Mode, search BisQue for images and summarize one result briefly.",
+            }
+        ],
+        "conversation_id": "local-opus-bisque-smoke",
+        "workflow_hint": {"id": "pro_mode", "source": "slash_menu"},
+        "reasoning_mode": "deep",
+        "debug": True,
+        "budgets": {"max_tool_calls": 8, "max_runtime_seconds": 240},
+    }
+    try:
+        parsed = _post_local_chat(api_root, payload, timeout_seconds=300.0)
+        metadata = parsed.get("metadata") or {}
+        pro_mode_meta = metadata.get("pro_mode") or {}
+        tool_invocations = _tool_invocations(parsed)
+        tool_names = [_tool_name(item) for item in tool_invocations]
+        text = str(parsed.get("response_text") or "")
+        print(f"response_model={parsed.get('model')}")
+        print(f"execution_path={pro_mode_meta.get('execution_path')}")
+        print(f"tool_runtime_model={pro_mode_meta.get('tool_runtime_model')}")
+        print(f"tool_names={json.dumps(tool_names)}")
+        print(f"response_text={text[:300]}")
+        if "search_bisque_resources" not in tool_names:
+            print("Expected Pro Mode BisQue workflow to call search_bisque_resources.")
+            return 14
+        if "BisQue authentication required" in text:
+            print("BisQue tool path still reports missing authentication.")
+            return 15
+        return 0
+    except Exception as exc:  # pragma: no cover - smoke script
+        print(f"local_bisque_tool_error={exc}")
+        return 16
+
+
 def main() -> int:
     settings = Settings()
     exit_code = 0
@@ -203,6 +329,12 @@ def main() -> int:
     local_status = _probe_local_backend(settings)
     if local_status != 0 and exit_code == 0:
         exit_code = local_status
+    code_tool_status = _probe_local_code_tools(settings)
+    if code_tool_status != 0 and exit_code == 0:
+        exit_code = code_tool_status
+    bisque_tool_status = _probe_local_bisque_tools(settings)
+    if bisque_tool_status != 0 and exit_code == 0:
+        exit_code = bisque_tool_status
     return exit_code
 
 

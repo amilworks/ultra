@@ -8,6 +8,36 @@ BisQue Ultra runs cleanly in production when you separate three concerns:
 
 This repo now includes the deployment scaffolding for that split.
 
+## Current UCSB Production Topology
+
+The live UCSB production deployment currently uses:
+
+- public hostname: `https://ultra.ece.ucsb.edu`
+- app node: `nail01.ece.ucsb.edu`
+- platform node: `nail04.ece.ucsb.edu`
+
+Current responsibilities:
+
+- `nail01`
+  - public `Caddy` edge
+  - static frontend from `/srv/ultra/frontend-current`
+  - `ultra-backend@1`
+  - `ultra-backend@2`
+- `nail04`
+  - platform `docker compose` stack
+  - BisQue
+  - Keycloak
+  - Postgres
+  - internal platform `Caddy`
+
+Current SSH entry points:
+
+- app node: `ssh bisque_amil@nail01.ece.ucsb.edu`
+- platform node: `ssh amil@nail04.ece.ucsb.edu`
+
+Treat `nail01` as the normal target for frontend/backend releases and `nail04`
+as the normal target for BisQue/Keycloak/Postgres/platform work.
+
 ## Recommended Topology
 
 Use two machines if you have them. If you only have one public DNS name, the clean production split is still:
@@ -337,14 +367,17 @@ The frontend deploy script assumes the built assets already exist at:
 Then it:
 
 1. atomically switches `/srv/ultra/frontend-current`
-2. runs `nginx -t`
-3. reloads `nginx`
+2. validates the active web server config
+3. reloads the active web server
 
 Manual rollout:
 
 ```bash
 sudo ULTRA_RELEASE_ROOT=/srv/ultra ./scripts/deploy_ultra_frontend.sh <git-sha>
 ```
+
+On current UCSB production, this means validating and reloading `Caddy`, not
+`nginx`.
 
 ## GitHub Actions
 
@@ -405,6 +438,28 @@ Do not put the full app runtime `.env` into GitHub Secrets unless you intentiona
 - one BisQue resource search
 - one Pro Mode run
 - one artifact-producing tool run
+
+### Current UCSB quick checks
+
+On `nail01` after an app deploy:
+
+```bash
+readlink -f /srv/ultra/current
+readlink -f /srv/ultra/frontend-current
+systemctl is-active ultra-backend@1 ultra-backend@2
+systemctl is-active caddy
+```
+
+On `nail04` after a platform deploy:
+
+```bash
+cd /srv/ultra/platform-current
+docker compose --env-file /etc/ultra/platform.env \
+  -f platform/bisque/docker-compose.with-engine.yml \
+  -f platform/bisque/docker-compose.production.yml \
+  -f platform/bisque/docker-compose.platform-node.yml \
+  ps
+```
 
 ## Rollback
 

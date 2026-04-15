@@ -28,12 +28,12 @@ H = 2048
 
 #config = ConfigParser.ConfigParser()
 #config.read(config_file)
-#root = config.get('Host', 'root') or 'http://bisque.ece.ucsb.edu'
+#root = config.get('Host', 'root') or 'https://bisque.example.com'
 #user = config.get('Host', 'user') or 'Mex'
 #pswd = config.get('Host', 'password') or 'Mary:00-rvFkDRQyoheksMZnhBhi2n'
 #session = BQSession().init_local(user, pswd,  bisque_root=root, create_mex=False)
 
-mex_url = 'http://bisque.ece.ucsb.edu/module_service/mex/00-rvFkDRQyoheksMZnhBhi2n'
+mex_url = 'https://bisque.example.com/module_service/mex/00-rvFkDRQyoheksMZnhBhi2n'
 bisque_token = 'Mary:00-rvFkDRQyoheksMZnhBhi2n'
 session = BQSession().init_mex(mex_url, bisque_token)
 

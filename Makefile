@@ -1,4 +1,4 @@
-.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image
+.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
@@ -85,6 +85,9 @@ verify-bisque-chat-api: ## Run deterministic BisQue chat selector/runtime/API ve
 
 verify-bisque-chat-live: ## Run seeded live Playwright BisQue chat verification against the local stack
 	ENV_FILE=$(ENV_FILE) ./scripts/verify_bisque_chat_live.sh
+
+smoke-pro-mode-opus: ## Probe the configured Pro Mode Opus gateway and optionally the local backend
+	uv run python scripts/smoke_pro_mode_opus.py
 
 postgres-up: ## Start local Postgres for production-like testing
 	docker compose -f docker-compose.postgres.yml up -d

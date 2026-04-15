@@ -1,6 +1,6 @@
 user = '';
 pass = '';
-image_url = 'http://bisque.ece.ucsb.edu/data_service/00-cSqpgp8ZDhAjyjocvKiak7';
+image_url = 'https://bisque.example.com/data_service/00-cSqpgp8ZDhAjyjocvKiak7';
 
 image = bq.Factory.fetch([image_url '?view=deep'], [], user, pass); 
 

@@ -1,4 +1,4 @@
-imurl = 'http://bisque.ece.ucsb.edu/data_service/image/161855';
+imurl = 'https://bisque.example.com/data_service/image/161855';
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % using bq.Image
@@ -50,7 +50,7 @@ c(2, :) = s.values;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % storing an image matrix into Bisque
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-host = 'http://vidi.ece.ucsb.edu:9090';
+host = 'http://localhost:9090';
 user = 'XXXX';
 pass = 'XXXX';
 
@@ -113,7 +113,7 @@ end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % storing an image file into Bisque
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-host = 'http://vidi.ece.ucsb.edu:9090';
+host = 'http://localhost:9090';
 user = 'XXX';
 pass = 'XXX';
 filename = 'PATH/test_online.tif';
@@ -127,7 +127,7 @@ end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % registering a multi-file image from files accessible by the bisque system
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-host = 'http://vidi.ece.ucsb.edu:9090';
+host = 'http://localhost:9090';
 user = 'XXX';
 pass = 'XXX';
 
@@ -160,7 +160,7 @@ image = s.store(image);
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % direct reading of a public image by its image service URL
-%3D image 512x512x13Zx2C: http://bisque.ece.ucsb.edu/data_service/image/161855
+%3D image 512x512x13Zx2C: https://bisque.example.com/data_service/image/161855
 info = bq.iminfo(imurl);
 url = bq.Url(info.src);
 

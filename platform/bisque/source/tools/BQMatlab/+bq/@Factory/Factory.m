@@ -94,7 +94,7 @@ classdef Factory
         end % new
         
         function nodes = query(bisque_root, resource_type, tag_query, tag_order, view, offset, limit, wpublic, user, password)
-        % exposes query RESTful API: http://biodev.ece.ucsb.edu/projects/bisquik/wiki/Developer/DataServer
+        % exposes query RESTful API: https://docs.example.com/bisque/data-server
         % resource_type: resource type to search for, e.g. image
         % view: Change the output format of the returned resource [short, full, deep], clean,
         % limit: Limit the number of items returned

@@ -2,7 +2,7 @@
   stats.js - data accessor and plotter for Bisque Statistics Service
   <http://www.bioimage.ucsb.edu/downloads/Bisque%20Database>
 
-  @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>
+  @author Dmitry Fedorov  <fedorov@example.com>
 
   Copyright (c) 2011-2012 Dmitry Fedorov, Center for Bio-Image Informatics
 

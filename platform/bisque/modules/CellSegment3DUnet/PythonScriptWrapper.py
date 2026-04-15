@@ -358,9 +358,9 @@ class PythonScriptWrapper(object):
 
     # test with named argument and options at the start
     python PythonScriptWrapper.py \
-    http://drishti.ece.ucsb.edu:8080/data_service/00-kDwj3vQq83vJA6SvVvVVh8 \
+    http://localhost:8080/data_service/00-kDwj3vQq83vJA6SvVvVVh8 \
     15 0.05 \
-    http://drishti.ece.ucsb.edu:8080/module_service/mex/00-XW6DsZR9puKj76Ezn9Mi79 \
+    http://localhost:8080/module_service/mex/00-XW6DsZR9puKj76Ezn9Mi79 \
     admin:00-XW6DsZR9puKj76Ezn9Mi79
 
     # Note: last two argument are the mex_url and token and remaining are parsed as options

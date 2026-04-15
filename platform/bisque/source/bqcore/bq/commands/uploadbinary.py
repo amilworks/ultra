@@ -3,7 +3,7 @@
 #
 import os, re, urllib.request, urllib.error, urllib.parse, hashlib, inspect, sys
 
-BASE= "https://biodev.ece.ucsb.edu/binaries/upload/"
+BASE= "https://packages.example.com/binaries/upload/"
 
 class Abort(Exception):
     pass
@@ -15,7 +15,7 @@ def _sha1hash(data):
 
 def upload_file(url, filename, user='', passwd='', opts=None):
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-    pm.add_password(None, 'biodev.ece.ucsb.edu', user, passwd)
+    pm.add_password(None, 'biodev.example.com', user, passwd)
     print(('Uploading %s to %s (%s Kb)\n' % (filename, url, os.path.getsize(filename) / 1024)))
     auth = urllib.request.HTTPBasicAuthHandler(pm)
     try:

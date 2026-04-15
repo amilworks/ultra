@@ -73,7 +73,7 @@ import datetime
 from six.moves import input
 
 BASE = "http://www.dirt.biology.gatech.edu/sites/default/files/data/alex"
-BISQUE_ROOT = "https://loup.ece.ucsb.edu"
+BISQUE_ROOT = "https://bisque.example.com"
 
 # Original fields ['Image ID', 'Image name', 'Failed', 'Experiment
 #number', 'circle ratio', 'x pixel', 'y pixel', 'xScale', 'yScale',

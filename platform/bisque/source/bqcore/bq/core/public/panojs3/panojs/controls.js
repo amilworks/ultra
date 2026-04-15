@@ -2,7 +2,7 @@
   Controls - creates buttons for zooming and, full screen
 
   GSV 3.0 : PanoJS3
-  @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>
+  @author Dmitry Fedorov  <fedorov@example.com>
 
   Copyright (c) 2010 Dmitry Fedorov, Center for Bio-Image Informatics
 

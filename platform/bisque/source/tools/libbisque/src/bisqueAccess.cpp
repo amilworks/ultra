@@ -30,7 +30,7 @@ BQ::AccessDialog::AccessDialog() {
   ui.downloadButton->setVisible( false );
 
   QSettings conf( QSettings::IniFormat, QSettings::UserScope, BQ_ORGANIZATION, BQ_APPLICATION );
-  ui.urlEdit->setText( conf.value( "url", "bisque.ece.ucsb.edu" ).toString() );
+  ui.urlEdit->setText( conf.value( "url", "bisque.example.com" ).toString() );
   ui.userEdit->setText( conf.value( "user", "" ).toString() );
   ui.passwordEdit->setText( conf.value( "passwd", "" ).toString() );
 
@@ -525,7 +525,7 @@ QStringList BQ::ImageList::toStringList( const QUrl &u ) const {
 // BQ::Url
 //---------------------------------------------------------------------------
 
-//"bioview3d://resource/?user=name&pass=pass&url=http://vidi.ece.ucsb.edu:8080/ds/images/1073"
+//"bioview3d://resource/?user=name&pass=pass&url=http://vidi.example.com:8080/ds/images/1073"
 
 BQ::Url::Url( const QString &in_url ) {
   u = QUrl( in_url );

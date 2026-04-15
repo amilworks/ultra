@@ -66,7 +66,7 @@ services:
       ULTRA_DB_USERNAME: ${ULTRA_DB_USERNAME:-ultra}
       ULTRA_DB_PASSWORD: ${ULTRA_DB_PASSWORD:?set ULTRA_DB_PASSWORD in platform.env}
     volumes:
-      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/postgres:/var/lib/postgresql/data
+      - platform-postgres:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
 
   keycloak:
@@ -96,7 +96,7 @@ services:
     volumes:
       - ${KEYCLOAK_REALM_IMPORT_FILE:?set KEYCLOAK_REALM_IMPORT_FILE in platform.env}:/opt/keycloak/data/import/realm-bisque.json:ro
       - ./docker/keycloak/themes:/opt/keycloak/themes:ro
-      - ${PLATFORM_DATA_ROOT:?set PLATFORM_DATA_ROOT in platform.env}/keycloak:/opt/keycloak/data
+      - platform-keycloak:/opt/keycloak/data
     healthcheck:
       test:
         - CMD-SHELL
@@ -115,3 +115,9 @@ services:
   mysql:
     profiles:
       - disabled
+
+volumes:
+  platform-postgres:
+    name: ultra-platform-postgres
+  platform-keycloak:
+    name: ultra-platform-keycloak

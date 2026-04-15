@@ -2,7 +2,7 @@
 # during system setup.  Each file external file must be in the form
 # of sha1_filename.ext where sha1 is UPPERCASE SHA1 hex hash of the file contents.
 #
-# Accessing http://biodev.ece.ucsb.edu/binaries/upload will allow you to place
+# Accessing https://packages.example.com/binaries/upload will allow you to place
 # a file on the binary server and create the correct name.
 # There is also a script bqdev-upload-binary for uploading local files.
 #

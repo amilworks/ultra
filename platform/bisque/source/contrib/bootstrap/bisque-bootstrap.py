@@ -13,11 +13,11 @@ PIP_SYS_INSTALL = [ 'pip', 'install', '-U' ]
 
 if os.name == 'nt':
     PIP_LIST=[
-        #('numpy-1.10.4+mkl-cp27-none-win_amd64.whl', 'https://biodev.ece.ucsb.edu/~bisque/wheels/numpy-1.10.4+mkl-cp27-none-win_amd64.whl'),
-        #('numexpr-2.4.6-cp27-none-win_amd64.whl', 'https://biodev.ece.ucsb.edu/~bisque/wheels/numexpr-2.4.6-cp27-none-win_amd64.whl'),
-        #('tables-3.2.2-cp27-none-win_amd64.whl', 'https://biodev.ece.ucsb.edu/~bisque/wheels/tables-3.2.2-cp27-none-win_amd64.whl'),
+        #('numpy-1.10.4+mkl-cp27-none-win_amd64.whl', 'https://infrastructure.example.com/~bisque/wheels/numpy-1.10.4+mkl-cp27-none-win_amd64.whl'),
+        #('numexpr-2.4.6-cp27-none-win_amd64.whl', 'https://infrastructure.example.com/~bisque/wheels/numexpr-2.4.6-cp27-none-win_amd64.whl'),
+        #('tables-3.2.2-cp27-none-win_amd64.whl', 'https://infrastructure.example.com/~bisque/wheels/tables-3.2.2-cp27-none-win_amd64.whl'),
     ]
-    PIP_INDEX = 'https://biodev.ece.ucsb.edu/py/bisque/win64/+simple/'
+    PIP_INDEX = 'https://packages.example.com/py/bisque/win64/+simple/'
     PIP_INSTALL = [ 'pip', 'install', '-U',  '-i', PIP_INDEX ]
 else:
     PIP_LIST = [
@@ -25,7 +25,7 @@ else:
         #('numexpr', None),
         #('tables', None),
     ]
-    PIP_INDEX = 'https://biodev.ece.ucsb.edu/py/bisque/dev/+simple/'
+    PIP_INDEX = 'https://packages.example.com/py/bisque/dev/+simple/'
     PIP_INSTALL = [ 'pip', 'install', '-U',  '-i', PIP_INDEX ]
 
 shell = False
@@ -82,7 +82,7 @@ def install_source(filename, URL, command=None):
 
 def run_bootstrap():
     parser = argparse.ArgumentParser(description='Boostrap bisque')
-    parser.add_argument("--repo", default="http://biodev.ece.ucsb.edu/hg/bisque-stable")
+    parser.add_argument("--repo", default="https://git.example.com/bisque-stable")
     parser.add_argument("bqenv", nargs="?", default="bqenv")
     parser.add_argument('install', nargs="?", default='server', choices=['server', 'engine'])
     args = parser.parse_args()
@@ -138,7 +138,7 @@ def run_bootstrap():
         print('Re-Installing pip and setuptools to fix virtualenv error under windows')
         print("----------------------------------------------------------\n")
         install_setup("get-pip.py", "https://bootstrap.pypa.io/get-pip.py")
-        install_easy('pywin32-219.win-amd64-py2.7.exe', "https://biodev.ece.ucsb.edu/~bisque/wheels/pywin32-219.win-amd64-py2.7.exe")
+        install_easy('pywin32-219.win-amd64-py2.7.exe', "https://infrastructure.example.com/~bisque/wheels/pywin32-219.win-amd64-py2.7.exe")
     else:
         #install_sys_pip('pip==8.0.3')
         install_sys_pip('pip')
@@ -159,7 +159,7 @@ def run_bootstrap():
        r = 1
     if r != 0:
         if os.name == 'nt':
-            #install_pip('mercurial-3.7.1-cp27-none-win_amd64.whl', "https://biodev.ece.ucsb.edu/~bisque/wheels/mercurial-3.7.1-cp27-none-win_amd64.whl")
+            #install_pip('mercurial-3.7.1-cp27-none-win_amd64.whl', "https://infrastructure.example.com/~bisque/wheels/mercurial-3.7.1-cp27-none-win_amd64.whl")
             install_pip('mercurial')
         else:
             install_pip('mercurial')
@@ -183,9 +183,9 @@ def run_bootstrap():
     print("********************************")
     print()
     print()
-    #subprocess.call(['pip', 'install', '--trusted-host', 'biodev.ece.ucsb.edu', '-i', 'http://biodev.ece.ucsb.edu/py/bisque/dev/+simple', 'Paste==1.7.5.1+bisque2'], shell=shell)
-    #subprocess.call(['pip', 'install', '--trusted-host', 'biodev.ece.ucsb.edu', '-r', 'requirements.txt'], shell=shell)
-    #subprocess.call(['pip', 'install', '-r', 'requirements.txt', '--trusted-host=biodev.ece.ucsb.edu'], shell=shell)
+    #subprocess.call(['pip', 'install', '--trusted-host', 'biodev.example.com', '-i', 'https://packages.example.com/py/bisque/dev/+simple', 'Paste==1.7.5.1+bisque2'], shell=shell)
+    #subprocess.call(['pip', 'install', '--trusted-host', 'biodev.example.com', '-r', 'requirements.txt'], shell=shell)
+    #subprocess.call(['pip', 'install', '-r', 'requirements.txt', '--trusted-host=biodev.example.com'], shell=shell)
     subprocess.call(['pip', 'install', '-r', 'requirements.txt', '-i', PIP_INDEX], shell=shell)
 
     print("**************************************************************")
@@ -193,7 +193,7 @@ def run_bootstrap():
     print("Use 'server' for a full BisQue server")
     print("Use 'engine' to run a module serving a remote BisQue")
     print("Please visit:")
-    print("  http://biodev.ece.ucsb.edu/projects/bisquik/wiki/InstallationInstructions")
+    print("  https://docs.example.com/bisque/installation")
     print("for more information")
     print("*************************************************************\n")
     if os.name == 'nt':

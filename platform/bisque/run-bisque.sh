@@ -2,7 +2,7 @@
 # Updated by Wahid Sadique Koly on 2025-07-29 to align with the new upgraded codebase.
 set -x
 CMD=$1; shift
-# INDEX=${PY_INDEX:=https://biodev.ece.ucsb.edu/py/bisque/d8/+simple}
+# INDEX=${PY_INDEX:=https://packages.example.com/py/bisque/d8/+simple}
 CONFIG=./config/site.cfg
 # export  PIP_INDEX_URL=$INDEX
 reports=$(pwd)/reports/

@@ -102,7 +102,7 @@ COPY boot/ /builder/boot-scripts.d/
 ########################################################################################
 
 RUN /builder/virtualenv.sh
-ENV PY_INDEX=https://biodev.ece.ucsb.edu/py/bisque/xenial/+simple
+ENV PY_INDEX=https://packages.example.com/py/bisque/xenial/+simple
 
 
 

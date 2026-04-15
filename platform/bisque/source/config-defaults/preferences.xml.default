@@ -20,8 +20,8 @@
             <tag name="usage_statistics" value="/usage/" />
             <tag name="help" value="/client_service/help" />
             <tag name="project_website" value="http://bioimage.ucsb.edu/bisque" />
-            <tag name="developers_website" value="http://biodev.ece.ucsb.edu/projects/bisquik" />
-            <tag name="submit_bug" value="http://biodev.ece.ucsb.edu/projects/bisquik/newticket" />
+            <tag name="developers_website" value="https://docs.example.com/bisque" />
+            <tag name="submit_bug" value="https://support.example.com/bisque/new-ticket" />
             <tag name="email" value="mailto:bisque-bioimage@googlegroups.com" />
         </tag>
         <tag name="ResourceBrowser">

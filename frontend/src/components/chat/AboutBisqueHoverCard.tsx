@@ -42,7 +42,7 @@ export function AboutBisqueHoverCard() {
           begin with the creator.
         </p>
         <a
-          href="https://vision.ece.ucsb.edu"
+          href="https://example.com/vision-lab"
           target="_blank"
           rel="noreferrer"
           className="inline-flex text-sm font-medium text-foreground underline underline-offset-4 transition-colors hover:text-primary"

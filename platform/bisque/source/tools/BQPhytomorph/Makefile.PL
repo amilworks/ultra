@@ -4,7 +4,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile(
     NAME                => 'BQPhytomorph',
-    AUTHOR              => 'CBI <bisque-dev@biodev.ece.ucsb.edu>',
+    AUTHOR              => 'CBI <bisque-dev@biodev.example.com>',
     VERSION_FROM        => 'lib/BQPhytomorph.pm',
     ABSTRACT_FROM       => 'lib/BQPhytomorph.pm',
     PL_FILES            => {},

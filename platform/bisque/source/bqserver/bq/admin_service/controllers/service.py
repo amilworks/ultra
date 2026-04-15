@@ -88,6 +88,7 @@ from bq.client_service.controllers import notify_service
 from bq.core.identity import get_username, set_current_user
 from bq.core.model import DBSession, Group, User  # , Visit
 from bq.core.service import ServiceController
+from bq.core.lib.oidc_auth import auth_mode
 from bq.data_service.model import BQUser, Image, TaggableAcl, Tag, current_session
 from bq.data_service.controllers.formats import find_inputer, find_formatter
 
@@ -195,6 +196,14 @@ class AdminController(ServiceController):
     @expose ("bq.admin_service.templates.manager")
     def manager(self):
         return dict()
+
+    @expose(content_type='application/json')
+    def auth_settings(self):
+        mode = auth_mode()
+        return json.dumps({
+            'auth_mode': mode,
+            'local_user_creation_enabled': mode != 'oidc',
+        })
 
     @expose("bq.admin_service.templates.domain_management")  
     def domain_management(self):
@@ -902,6 +911,13 @@ class AdminController(ServiceController):
                     <tag name="display_name" value="user"/>
                 </user>
         """
+        if auth_mode() == 'oidc':
+            abort(
+                405,
+                'Local BisQue user creation is disabled while OIDC-only auth is enabled. '
+                'Create approved users in Keycloak, then have them sign in once to provision their BisQue profile.',
+            )
+
         userxml = etree.fromstring(doc)
 
         def _upsert_tag(node, name, value):

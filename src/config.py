@@ -1,6 +1,7 @@
 """Application configuration management using pydantic-settings."""
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -126,6 +127,122 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "Optional request timeout override (seconds) for code generation model calls."
+        ),
+    )
+    pro_mode_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional OpenAI-compatible base URL override used only by Pro Mode answer generation."
+        ),
+    )
+    pro_mode_transport: Literal[
+        "openai_compatible",
+        "bedrock_published_api",
+        "aws_bedrock_claude",
+    ] = Field(
+        default="openai_compatible",
+        description=(
+            "Transport used by the dedicated Pro Mode model path. "
+            "Use `bedrock_published_api` for the custom Bedrock publish endpoint that serves "
+            "`/conversation` instead of OpenAI chat/completions. Use "
+            "`aws_bedrock_claude` to call Anthropic Claude on AWS Bedrock via Agno's "
+            "native Bedrock provider."
+        ),
+    )
+    pro_mode_api_key: str | None = Field(
+        default=None,
+        description="Optional API key override used only by Pro Mode answer generation.",
+    )
+    pro_mode_api_key_header: str | None = Field(
+        default=None,
+        description=(
+            "Optional auth header name for dedicated Pro Mode gateways. "
+            "Set this to X-API-Key for API Gateway style publishes; leave unset for "
+            "standard OpenAI Bearer authentication."
+        ),
+    )
+    pro_mode_api_key_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Optional prefix prepended to the Pro Mode API key when "
+            "pro_mode_api_key_header is set. Leave blank for raw x-api-key headers."
+        ),
+    )
+    pro_mode_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model override used only by Pro Mode answer generation. "
+            "When unset, falls back to resolved_llm_model."
+        ),
+    )
+    pro_mode_default_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional JSON object of additional default headers sent to the dedicated "
+            "Pro Mode gateway."
+        ),
+    )
+    pro_mode_default_query: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional JSON object of default query parameters sent to the dedicated "
+            "Pro Mode gateway."
+        ),
+    )
+    pro_mode_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional request timeout override (seconds) for Pro Mode model calls."
+        ),
+    )
+    pro_mode_fallback_enabled: bool = Field(
+        default=True,
+        description=(
+            "When true, Pro Mode retries once on the default model path if the dedicated "
+            "Pro Mode gateway is unavailable."
+        ),
+    )
+    pro_mode_aws_region: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS region override for the native Pro Mode Bedrock Claude transport. "
+            "Falls back to AWS_REGION."
+        ),
+    )
+    pro_mode_aws_profile: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS profile name for the native Pro Mode Bedrock Claude transport. "
+            "Falls back to AWS_PROFILE."
+        ),
+    )
+    pro_mode_aws_access_key_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS access key ID override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_ACCESS_KEY_ID."
+        ),
+    )
+    pro_mode_aws_secret_access_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS secret access key override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_SECRET_ACCESS_KEY."
+        ),
+    )
+    pro_mode_aws_session_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS session token override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_SESSION_TOKEN."
+        ),
+    )
+    pro_mode_aws_sso_auth: bool = Field(
+        default=False,
+        description=(
+            "When true, the native Pro Mode Bedrock Claude transport uses the current AWS "
+            "SSO/profile session instead of explicit access keys."
         ),
     )
     llm_mock_mode: bool = Field(
@@ -354,7 +471,7 @@ class Settings(BaseSettings):
         default=None, description="OpenAI API key (optional for vLLM)"
     )
     openai_base_url: str = Field(
-        default="http://vrl-h200.ece.ucsb.edu:8000/v1",
+        default="http://localhost:8001/v1",
         description="OpenAI API base URL or vLLM endpoint",
     )
     openai_model: str = Field(default="gpt-oss-120b", description="Model name")
@@ -370,7 +487,7 @@ class Settings(BaseSettings):
     )
 
     # BisQue settings
-    bisque_root: str = Field(default="https://bisque.ece.ucsb.edu", description="BisQue root URL")
+    bisque_root: str = Field(default="http://localhost:8080", description="BisQue root URL")
     bisque_user: str | None = Field(default=None, description="BisQue username")
     bisque_password: str | None = Field(default=None, description="BisQue password")
     bisque_auth_mode: Literal["local", "oidc", "dual"] = Field(
@@ -943,6 +1060,13 @@ class Settings(BaseSettings):
         default="wanglab/MedSAM2",
         description="Default MedSAM2 model selector (e.g., wanglab/MedSAM2, latest, or a .pt path).",
     )
+    medsam2_runtime_root: str = Field(
+        default="third_party/MedSAM2",
+        description=(
+            "Directory containing the vendored MedSAM2 runtime (sam2 package and configs). "
+            "Use an absolute host path in production if the runtime is installed outside the release tree."
+        ),
+    )
     medsam2_checkpoint_dir: str = Field(
         default="data/models/medsam2/checkpoints",
         description="Directory where MedSAM2 .pt checkpoints are stored.",
@@ -1066,6 +1190,7 @@ class Settings(BaseSettings):
             "session_upload_root",
             "science_data_root",
             "upload_store_root",
+            "medsam2_runtime_root",
             "medsam2_checkpoint_dir",
             "tool_call_napkin_path",
             "tool_call_napkin_skill_path",
@@ -1154,6 +1279,74 @@ class Settings(BaseSettings):
         if self.resolved_codegen_provider == "ollama":
             return self.ollama_model.strip()
         return self.openai_model.strip()
+
+    @property
+    def resolved_pro_mode_base_url(self) -> str:
+        """Resolved OpenAI-compatible base URL for Pro Mode answer generation."""
+        if self.pro_mode_base_url and self.pro_mode_base_url.strip():
+            return self.pro_mode_base_url.strip()
+        return self.resolved_llm_base_url
+
+    @property
+    def resolved_pro_mode_api_key(self) -> str | None:
+        """Resolved API key for Pro Mode answer generation."""
+        if self.pro_mode_api_key and self.pro_mode_api_key.strip():
+            return self.pro_mode_api_key.strip()
+        return self.resolved_llm_api_key
+
+    @property
+    def resolved_pro_mode_model(self) -> str:
+        """Resolved model name for Pro Mode answer generation."""
+        if self.pro_mode_model and self.pro_mode_model.strip():
+            return self.pro_mode_model.strip()
+        return self.resolved_llm_model
+
+    @property
+    def resolved_pro_mode_timeout_seconds(self) -> int:
+        """Resolved timeout in seconds for Pro Mode model calls."""
+        if self.pro_mode_timeout_seconds is not None:
+            return max(1, int(self.pro_mode_timeout_seconds))
+        return max(1, int(self.openai_timeout or 60))
+
+    @property
+    def resolved_pro_mode_aws_region(self) -> str | None:
+        """Resolved AWS region for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_region and self.pro_mode_aws_region.strip():
+            return self.pro_mode_aws_region.strip()
+        env_value = os.getenv("AWS_REGION")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_profile(self) -> str | None:
+        """Resolved AWS profile for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_profile and self.pro_mode_aws_profile.strip():
+            return self.pro_mode_aws_profile.strip()
+        env_value = os.getenv("AWS_PROFILE")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_access_key_id(self) -> str | None:
+        """Resolved AWS access key for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_access_key_id and self.pro_mode_aws_access_key_id.strip():
+            return self.pro_mode_aws_access_key_id.strip()
+        env_value = os.getenv("AWS_ACCESS_KEY_ID")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_secret_access_key(self) -> str | None:
+        """Resolved AWS secret for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_secret_access_key and self.pro_mode_aws_secret_access_key.strip():
+            return self.pro_mode_aws_secret_access_key.strip()
+        env_value = os.getenv("AWS_SECRET_ACCESS_KEY")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_session_token(self) -> str | None:
+        """Resolved AWS session token for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_session_token and self.pro_mode_aws_session_token.strip():
+            return self.pro_mode_aws_session_token.strip()
+        env_value = os.getenv("AWS_SESSION_TOKEN")
+        return env_value.strip() if env_value and env_value.strip() else None
 
 
 @lru_cache

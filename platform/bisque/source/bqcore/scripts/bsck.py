@@ -294,7 +294,7 @@ if __name__ == "__main__":
                       default = 0,
                       help="Start processing at this image ID")
     parser.add_option('--oldhost', action="store", default = None,
-                      help="Replace tagvalues that match this host i.e. http://dough.ece.ucsb.edu")
+                      help="Replace tagvalues that match this host i.e. http://localhost:8080")
     parser.add_option ('-c', '--config', action="store", default='shell.ini',
                        help="Provide an alternate config default=site.cfg")
     parser.add_option('--blobonly', action="store_true", default=False)

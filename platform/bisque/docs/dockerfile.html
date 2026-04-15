@@ -231,7 +231,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <li><a href="upload-an-image.html#upload-an-image"><strong>Upload an Image</strong></a></li>
 </ul></li>
 <li class="divider"></li>
-<li><a href="https://bisque.ece.ucsb.edu/" target="blank">UCSB BisQue Cloud Platform</a></li>
+<li><a href="https://bisque.example.com/" target="blank">UCSB BisQue Cloud Platform</a></li>
 
 </ul>
 
@@ -277,7 +277,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <p>Now we add any pip installs that our module may need such as <code>numpy</code>, <code>pandas</code>, <code>Tensorflow</code>, and any others. If you used a virtual environment to develop module locally, and hopefully you did, then simply use <code>pip freeze &gt; requirements.txt</code>. This will give you a text file with all the packages you are using in your virtual environment for your module. If you are a diligent person, you probably do not use one virtual environment for all your development in, say, Python 3.6. Hence, you will only have the necessary packages in the <code>requirements.txt</code> file. From this file, fill in the necessary pip installs within the Dockerfile.</p>
 <div class="sourceCode" id="cb8"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb8-1"><a href="dockerfile.html#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ex">RUN</span> pip install numpy pandas tensorflow</span>
 <span id="cb8-2"><a href="dockerfile.html#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="ex">RUN</span> pip install scikit-learn==0.19.1   # <span class="op">&lt;</span>--- For specific versions</span>
-<span id="cb8-3"><a href="dockerfile.html#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="ex">RUN</span> pip install -i https://biodev.ece.ucsb.edu/py/bisque/prod/+simple bisque-api==0.5.9</span></code></pre></div>
+<span id="cb8-3"><a href="dockerfile.html#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="ex">RUN</span> pip install -i https://packages.example.com/py/bisque/prod/+simple bisque-api==0.5.9</span></code></pre></div>
 </div>
 <div id="working-directory-source-code" class="section level4 unnumbered">
 <h4>Working Directory, Source Code</h4>
@@ -329,7 +329,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <p>Additionally, <strong>do not forget to install the <code>BQAPI</code> inside the container.</strong></p>
 <pre><code>RUN pip install pymks tables scipy
 RUN pip install --user --install-option=&quot;--prefix=&quot; -U scikit-learn==0.19.1
-RUN pip install -i https://biodev.ece.ucsb.edu/py/bisque/prod/+simple bisque-api==0.5.9
+RUN pip install -i https://packages.example.com/py/bisque/prod/+simple bisque-api==0.5.9
 RUN pip install requests==2.10.0</code></pre>
 </div>
 <div id="step-4.-set-working-directory-and-copy-source-files" class="section level4 unnumbered">

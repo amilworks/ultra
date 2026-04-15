@@ -85,6 +85,14 @@ The deployment scripts assume this filesystem layout on the app node:
       backend/
       frontend/
   ops/
+  models/
+    yolo/
+    medsam2/
+      checkpoints/
+    sam3/
+      facebook-sam3/
+  runtime/
+    MedSAM2/
   shared/
     artifacts/
     uploads/
@@ -92,12 +100,10 @@ The deployment scripts assume this filesystem layout on the app node:
     science/
 ```
 
-On the platform node, use the shared barrel mount for stateful services:
+On the platform node, use the shared barrel mount only for BisQue file storage:
 
 ```text
 /mnt/barrel-data/ultra/platform/
-  postgres/
-  keycloak/
   bisque-config/
   bisque-data/
   bisque-public/
@@ -105,7 +111,12 @@ On the platform node, use the shared barrel mount for stateful services:
   bisque-staging/
 ```
 
-The backend continues to use local-disk roots, so both backend instances stay on the same app node and share the same filesystem.
+Postgres and Keycloak should use local Docker volumes on the platform node. Do
+not place Postgres data on the barrel NFS mount: transient NFS stalls can leave
+postgres processes in uninterruptible sleep and prevent fresh connections.
+
+The backend continues to use local-disk roots, so both backend instances stay
+on the same app node and share the same filesystem.
 
 ## Server-Side Environment Files
 
@@ -126,6 +137,18 @@ This file is for the FastAPI app and the backend deploy scripts. It should conta
 - `ULTRA_PUBLIC_HOST`
 - `ULTRA_RELEASE_ROOT`
 - `BISQUE_ROOT`
+
+For deterministic scientific tooling, also point the backend at stable local
+model/runtime paths on the app node instead of release-relative paths:
+
+- `YOLO_DEFAULT_MODEL=/srv/ultra/models/yolo/yolo26x.pt`
+- `YOLOV5_RARESPOT_WEIGHTS=/srv/ultra/models/yolo/RareSpotWeights.pt`
+- `MEDSAM2_RUNTIME_ROOT=/srv/ultra/runtime/MedSAM2`
+- `MEDSAM2_CHECKPOINT_DIR=/srv/ultra/models/medsam2/checkpoints`
+- `SAM3_MODEL_ID=/srv/ultra/models/sam3/facebook-sam3`
+
+Use `scripts/sync_science_model_assets.sh --source <old-local-repo> --remote-host <app-node>`
+to seed those local assets without committing weights into Git.
 
 ### `platform.env`
 
@@ -198,6 +221,7 @@ client list with only the configured production client(s).
    - `python3`
    - `uv`
    - `rsync`
+   - `libgl1` and `libglib2.0-0` on Ubuntu/Debian app nodes so `opencv-python` / `ultralytics` can import for YOLO and segmentation tools
 2. Copy the env examples into `/etc/ultra/` and fill them with real values.
 3. Create the release layout:
 
@@ -206,6 +230,10 @@ client list with only the configured production client(s).
      --ultra-env /etc/ultra/ultra-backend.env \
      --platform-env /etc/ultra/platform.env
    ```
+
+   On Ubuntu/Debian, the bootstrap script now installs `libgl1` and
+   `libglib2.0-0` automatically when it is run as root and those packages are
+   missing.
 
 4. Render the proxy configs into a staging directory:
 
@@ -218,6 +246,27 @@ client list with only the configured production client(s).
 
 5. On the app node, install `Caddyfile.single-host` or `ultra-single-host.conf` as the active edge config and reload the service.
 6. On the platform node, render and install `Caddyfile.platform-node` to the path referenced by `PLATFORM_CADDYFILE`.
+
+### Fresh Install Reset
+
+If you need a clean rebuild of the platform node, wipe the platform containers
+and the local Docker volumes, but keep the BisQue barrel-backed file store if
+you want to preserve uploaded images:
+
+```bash
+cd /srv/ultra/platform-current
+docker compose \
+  --env-file /etc/ultra/platform.env \
+  -f platform/bisque/docker-compose.with-engine.yml \
+  -f platform/bisque/docker-compose.production.yml \
+  -f platform/bisque/docker-compose.platform-node.yml \
+  down -v --remove-orphans
+
+docker volume rm -f ultra-platform-postgres ultra-platform-keycloak || true
+```
+
+If you truly want a full wipe, remove `/mnt/barrel-data/ultra/platform/bisque-*`
+after the containers are down and then redeploy.
 7. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
 8. Enable the backend target on the app node:
 
@@ -299,19 +348,19 @@ sudo ULTRA_RELEASE_ROOT=/srv/ultra ./scripts/deploy_ultra_frontend.sh <git-sha>
 
 ## GitHub Actions
 
-Automatic deploys are split by concern:
+GitHub Actions are currently split into lightweight verification plus manual platform operations:
 
 - `deploy-ultra-frontend.yml`
-  - triggers on `frontend/**`
-  - ships static assets only
+  - triggers on frontend changes for pushes and pull requests
+  - installs dependencies and builds the frontend
 - `deploy-ultra-backend.yml`
-  - triggers on `src/**`, `pyproject.toml`, `uv.lock`, and backend deploy scripts
-  - ships the backend release only
+  - triggers on backend changes for pushes and pull requests
+  - syncs the Python environment, compiles key modules, and runs focused backend tests
 - `deploy-platform-manual.yml`
-  - runs only when you dispatch it manually
+  - runs only when you dispatch it manually or trigger `repository_dispatch`
   - syncs BisQue/Keycloak/platform changes and runs the platform deploy script
 
-Normal pushes to `main` do not redeploy BisQue. The platform workflow targets the platform node explicitly and is manual by design.
+Normal pushes do not auto-roll production anymore. App deploys happen manually from an operator shell, and the platform workflow targets the platform node explicitly when you choose to run it.
 
 ## GitHub Secrets And Variables
 
@@ -319,10 +368,11 @@ Set these in GitHub:
 
 ### Secrets
 
-- `DEPLOY_SSH_PRIVATE_KEY`
-- `DEPLOY_SSH_HOST`
-- `DEPLOY_SSH_USER`
-- `DEPLOY_SSH_KNOWN_HOSTS`
+- `PLATFORM_DEPLOY_SSH_PRIVATE_KEY`
+- `PLATFORM_DEPLOY_SSH_HOST`
+- `PLATFORM_DEPLOY_SSH_USER`
+- `PLATFORM_DEPLOY_SSH_KNOWN_HOSTS`
+- `PLATFORM_DEPLOY_SSH_JUMP_HOST`
 
 ### Variables
 

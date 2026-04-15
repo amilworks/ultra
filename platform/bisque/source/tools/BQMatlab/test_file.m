@@ -1,4 +1,4 @@
-url = 'http://bisque.ece.ucsb.edu/data_service/file/1974936';
+url = 'https://bisque.example.com/data_service/file/1974936';
 user = '';
 pass = '';
 
@@ -14,7 +14,7 @@ fn = file.fetch( [] );
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % storing a file into Bisque
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-host = 'http://vidi.ece.ucsb.edu:9090';
+host = 'http://localhost:9090';
 user = 'USER';
 pass = 'PASS';
 %filename = 'PATH\gtrain.model';

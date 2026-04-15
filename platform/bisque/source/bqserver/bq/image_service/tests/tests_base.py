@@ -38,7 +38,7 @@ import logging
 
 IMGCNV='imgcnv'
 
-#url_image_store     = 'https://biodev.ece.ucsb.edu/~bisque/test_data/images/'
+#url_image_store     = 'https://infrastructure.example.com/~bisque/test_data/images/'
 url_image_store     = 'https://s3-us-west-2.amazonaws.com/viqi-test-images/'
 local_store_images  = 'images'
 local_store_tests   = 'tests'

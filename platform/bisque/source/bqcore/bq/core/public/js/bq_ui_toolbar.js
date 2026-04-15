@@ -469,11 +469,11 @@ Ext.define('BQ.Application.Toolbar', {
             }, {
                 text: 'Developers website',
                 itemId: 'menu_help_developers_website',
-                handler: Ext.Function.pass(urlAction, 'http://biodev.ece.ucsb.edu/projects/bisquik'),
+                handler: Ext.Function.pass(urlAction, 'https://docs.example.com/bisque'),
             }, {
                 text: 'Submit a bug or suggestion',
                 itemId: 'menu_help_submit_bug',
-                handler: Ext.Function.pass(urlAction, 'http://biodev.ece.ucsb.edu/projects/bisquik/newticket'),
+                handler: Ext.Function.pass(urlAction, 'https://support.example.com/bisque/new-ticket'),
             }, {
                 text: 'Send us e-mail',
                 itemId: 'menu_help_email',
@@ -1028,8 +1028,8 @@ Ext.define('BQ.Application.Toolbar', {
             { f: pageAction, n: 'usage_statistics', d: '/usage/' },
             { f: urlAction,  n: 'help', d: '/client_service/help' },
             { f: urlAction,  n: 'project_website', d: 'http://bioimage.ucsb.edu/bisque' },
-            { f: urlAction,  n: 'developers_website', d: 'http://biodev.ece.ucsb.edu/projects/bisquik' },
-            { f: urlAction,  n: 'submit_bug', d: 'http://biodev.ece.ucsb.edu/projects/bisquik/newticket' },
+            { f: urlAction,  n: 'developers_website', d: 'https://docs.example.com/bisque' },
+            { f: urlAction,  n: 'submit_bug', d: 'https://support.example.com/bisque/new-ticket' },
             { f: urlAction,  n: 'email', d: 'mailto:bisque-bioimage@googlegroups.com' },
         ];
         var e = null;

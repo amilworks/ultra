@@ -38,7 +38,7 @@ import logging
 
 IMGCNV='imgcnv'
 
-url_image_store     = 'http://hammer.ece.ucsb.edu/~bisque/test_data/images/'
+url_image_store     = 'https://example.com/~bisque/test_data/images/'
 local_store_images  = 'images'
 local_store_tests   = 'tests'
 

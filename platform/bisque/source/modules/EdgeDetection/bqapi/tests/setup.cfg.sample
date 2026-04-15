@@ -4,7 +4,7 @@ user: test
 password: test
 
 [Store]
-location: http://hammer.ece.ucsb.edu/~bisque/test_data/images/
+location: https://example.com/~bisque/test_data/images/
 local_location: SampleData
 results_location: Results
 

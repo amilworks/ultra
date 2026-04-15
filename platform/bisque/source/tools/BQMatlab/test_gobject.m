@@ -1,4 +1,4 @@
-url = 'http://bisque.ece.ucsb.edu/data_service/image/765131?view=deep';
+url = 'https://bisque.example.com/data_service/image/765131?view=deep';
 
 % get gobject in the image
 image = bq.Factory.fetch(url);

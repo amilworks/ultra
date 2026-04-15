@@ -238,7 +238,7 @@ public:
         BisqueWebAccessDialog->setWindowTitle(QApplication::translate("BisqueWebAccessDialog", "Bisque Access", 0, QApplication::UnicodeUTF8));
         groupBox_3->setTitle(QApplication::translate("BisqueWebAccessDialog", "Bisque server configuration", 0, QApplication::UnicodeUTF8));
         label->setText(QApplication::translate("BisqueWebAccessDialog", "Url", 0, QApplication::UnicodeUTF8));
-        urlEdit->setText(QApplication::translate("BisqueWebAccessDialog", "http://dough.ece.ucsb.edu/", 0, QApplication::UnicodeUTF8));
+        urlEdit->setText(QApplication::translate("BisqueWebAccessDialog", "http://localhost:8080/", 0, QApplication::UnicodeUTF8));
         label_2->setText(QApplication::translate("BisqueWebAccessDialog", "User", 0, QApplication::UnicodeUTF8));
         userEdit->setText(QString());
         searchButton->setText(QApplication::translate("BisqueWebAccessDialog", "Browse", 0, QApplication::UnicodeUTF8));

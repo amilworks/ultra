@@ -42,4 +42,4 @@ Do not replace this with lab-specific hostnames in production docs or examples.
 
 - Keep this folder trimmed to the modules the release actually supports.
 - Prefer local `localhost` examples in docs, scripts, and screenshots.
-- If you need broader upstream context, use [README_main.md](/Users/macbook/Documents/phd/bisque_ultra_production_repo/platform/bisque/README_main.md) as historical background, not as the release runbook.
+- If you need broader upstream context, use [README_main.md](README_main.md) as historical background, not as the release runbook.

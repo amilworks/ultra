@@ -260,7 +260,7 @@ sub update_mex {
 
 =head1 AUTHOR
 
-CBI, C<< <bisque-dev at biodev.ece.ucsb.edu> >>
+CBI, C<< <bisque-dev at biodev.example.com> >>
 
 =head1 BUGS
 

@@ -2572,6 +2572,22 @@ class AgnoChatRuntime:
         lowered = str(user_text or "").strip().lower()
         return bool(re.search(r"\b(segment|segmentation|sam2|sam3|mask)\b", lowered))
 
+    @staticmethod
+    def _prefers_megaseg_segmentation(user_text: str) -> bool:
+        lowered = str(user_text or "").strip().lower()
+        return bool(re.search(r"\b(megaseg|dynunet)\b", lowered))
+
+    @classmethod
+    def _preferred_segmentation_tool_names(cls, user_text: str) -> list[str]:
+        tool_names = [
+            "segment_image_megaseg"
+            if cls._prefers_megaseg_segmentation(user_text)
+            else "segment_image_sam2"
+        ]
+        if cls._segmentation_request_needs_quantification(user_text):
+            tool_names.append("quantify_segmentation_masks")
+        return tool_names
+
     @classmethod
     def _is_depth_segmentation_request(cls, user_text: str) -> bool:
         return cls._is_depth_request(user_text) and cls._is_segmentation_request(user_text)
@@ -2792,11 +2808,7 @@ class AgnoChatRuntime:
                     reason="Image-targeted prompt explicitly asks for detection.",
                 )
             if AgnoChatRuntime._is_segmentation_request(user_text):
-                segmentation_tools = (
-                    ["segment_image_sam2", "quantify_segmentation_masks"]
-                    if AgnoChatRuntime._segmentation_request_needs_quantification(user_text)
-                    else ["segment_image_sam2"]
-                )
+                segmentation_tools = AgnoChatRuntime._preferred_segmentation_tool_names(user_text)
                 return ProModeToolPlan(
                     category="segmentation",
                     selected_tool_names=segmentation_tools,
@@ -4100,6 +4112,14 @@ class AgnoChatRuntime:
                 "run_bisque_module",
             }
             inferred = [tool_name for tool_name in inferred if tool_name not in bisque_management_tools]
+        if self._prefers_megaseg_segmentation(latest_user_text):
+            inferred = [
+                tool_name
+                for tool_name in inferred
+                if tool_name not in {"segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
+            ]
+            if "segment_image_megaseg" not in inferred:
+                inferred.insert(0, "segment_image_megaseg")
         return inferred
 
     @staticmethod
@@ -4145,9 +4165,7 @@ class AgnoChatRuntime:
             if re.search(r"\b(yolo|detect|detection|bounding box|bbox)\b", lowered):
                 return ["yolo_detect"], True
             if AgnoChatRuntime._is_segmentation_request(user_text):
-                required = ["segment_image_sam2"]
-                if AgnoChatRuntime._segmentation_request_needs_quantification(user_text):
-                    required.append("quantify_segmentation_masks")
+                required = AgnoChatRuntime._preferred_segmentation_tool_names(user_text)
                 return required, True
             if AgnoChatRuntime._is_image_metadata_request(user_text):
                 return ["bioio_load_image"], True

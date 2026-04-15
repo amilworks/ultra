@@ -33,6 +33,7 @@ from src.tools import (
     BISQUE_ADVANCED_SEARCH_TOOL,
     BISQUE_RUN_MODULE_TOOL,
     DEPTH_PRO_ESTIMATE_TOOL,
+    MEGASEG_SEGMENT_TOOL,
     SAM3_SEGMENT_TOOL,
     SEGMENT_EVALUATE_BATCH_TOOL,
     SEGMENTATION_EVAL_TOOL,
@@ -1550,6 +1551,7 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
     }
     segmentation_core_tools = {
         "bioio_load_image",
+        "segment_image_megaseg",
         "segment_image_sam3",
         "quantify_segmentation_masks",
     }
@@ -1585,6 +1587,7 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
         text,
         ("segment", "segmentation", "sam2", "medsam2", "sam3", "mask", "track"),
     )
+    mentions_megaseg = _contains_any(text, ("megaseg", "dynunet"))
     mentions_depth = _contains_any(
         text,
         ("depth", "depth map", "depth estimation", "monocular depth", "depthpro"),
@@ -1743,6 +1746,8 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
         selected_names.update(detection_core_tools)
     if mentions_segmentation:
         selected_names.update(segmentation_core_tools)
+    if mentions_megaseg:
+        selected_names.add("segment_image_megaseg")
     if mentions_sam2_flow:
         selected_names.update(segmentation_interactive_tools)
     if mentions_depth:
@@ -1759,7 +1764,9 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
     if mentions_code_execution:
         selected_names.update(code_execution_tools)
     if mentions_image_measurements:
-        selected_names.update({"bioio_load_image", "segment_image_sam3", "quantify_segmentation_masks"})
+        selected_names.update(
+            {"bioio_load_image", "segment_image_megaseg", "segment_image_sam3", "quantify_segmentation_masks"}
+        )
 
     if mentions_segmentation and mentions_evaluation:
         selected_names.update({"evaluate_segmentation_masks", "quantify_segmentation_masks"})
@@ -1999,6 +2006,7 @@ def stream_chat_completion_with_tools(
         "- BisQue HDF5/DREAM3D assets are table resources. Search them as table/hdf5 resources rather than image resources.\n"
         "- If a BisQue tool fails because of authentication, permissions, or tool/runtime budget, report that exact blocker briefly. Do not replace it with a generic portal walkthrough.\n"
         "- Core researcher path: bioio_load_image -> segment_image_sam3 -> evaluate_segmentation_masks -> quantify_segmentation_masks -> repro_report.\n"
+        "- For Megaseg or DynUNet microscopy inference requests, call segment_image_megaseg and preserve its binary mask artifacts for follow-up quantification.\n"
         "- For SAM3, default to preset='balanced'. Use preset='fast' for quick checks and preset='high_quality' only when user asks for best quality.\n"
         "- When the user names object(s) to segment in plain language, distill that wording into concept_prompt and use SAM3 concept mode. Use automatic prompting only when no specific object target is given.\n"
         "- For segmentation tasks that ask for measurements, summaries, morphology, overlap, counts, or region properties, run quantify_segmentation_masks on produced mask artifacts (preferred_upload_paths or prior segmentation mask refs), not on raw source images.\n"
@@ -2072,6 +2080,7 @@ def stream_chat_completion_with_tools(
         BISQUE_RUN_MODULE_TOOL,
         BIOIO_LOAD_IMAGE_TOOL,
         DEPTH_PRO_ESTIMATE_TOOL,
+        MEGASEG_SEGMENT_TOOL,
         SAM3_SEGMENT_TOOL,
         SEGMENT_EVALUATE_BATCH_TOOL,
         SEGMENTATION_EVAL_TOOL,

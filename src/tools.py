@@ -17,6 +17,8 @@ import time
 import threading
 import inspect
 import statistics
+import subprocess
+import sys
 from collections import Counter
 from datetime import datetime
 from uuid import uuid4
@@ -80,6 +82,7 @@ from src.tooling.domains import (
     BISQUE_UPLOAD_TOOL,
     COMPARE_CONDITIONS_TOOL,
     COMPARE_STRUCTURES_TOOL,
+    MEGASEG_SEGMENT_TOOL,
     PLOT_QUANTIFIED_DETECTIONS_TOOL,
     QUANTIFY_OBJECTS_TOOL,
     QUANTIFY_SEGMENTATION_MASKS_TOOL,
@@ -1160,6 +1163,75 @@ def _science_output_root(*parts: str) -> str:
     if parts:
         root = root.joinpath(*parts)
     return _ensure_dir(root)
+
+
+_MEGASEG_DEFAULT_BENCHMARK_ROOT = Path("/Users/macbook/Documents/phd/megaseg_final/benchmark")
+_MEGASEG_DEFAULT_CHECKPOINT = _MEGASEG_DEFAULT_BENCHMARK_ROOT / "checkpoints" / "epoch_650.ckpt"
+_MEGASEG_DEFAULT_ALIAS_CHECKPOINT = (
+    _MEGASEG_DEFAULT_BENCHMARK_ROOT / "checkpoints" / "megaseg" / "dynunet.ckpt"
+)
+_MEGASEG_DEFAULT_PYTHON = Path("/Users/macbook/Documents/phd/cyto-dl/venv/bin/python")
+
+
+def _resolve_megaseg_runner_script() -> Path:
+    return (Path(__file__).resolve().parent / "science" / "megaseg_runner.py").resolve()
+
+
+def _resolve_megaseg_python() -> str | None:
+    candidates = [
+        str(os.getenv("MEGASEG_PYTHON") or "").strip(),
+        str(os.getenv("CYTODL_PYTHON") or "").strip(),
+        str(_MEGASEG_DEFAULT_PYTHON),
+        str(Path(sys.executable).expanduser().resolve()),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists() and path.is_file():
+            return str(path.absolute())
+    return None
+
+
+def _resolve_megaseg_checkpoint_path(explicit_path: str | None = None) -> str | None:
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(str(explicit_path)).expanduser())
+    env_checkpoint = str(os.getenv("MEGASEG_CHECKPOINT_PATH") or "").strip()
+    if env_checkpoint:
+        candidates.append(Path(env_checkpoint).expanduser())
+    candidates.extend(
+        [
+            _MEGASEG_DEFAULT_CHECKPOINT,
+            _MEGASEG_DEFAULT_ALIAS_CHECKPOINT,
+        ]
+    )
+    benchmark_root = str(os.getenv("MEGASEG_BENCHMARK_ROOT") or "").strip()
+    if benchmark_root:
+        benchmark_path = Path(benchmark_root).expanduser()
+        candidates.extend(
+            [
+                benchmark_path / "checkpoints" / "epoch_650.ckpt",
+                benchmark_path / "checkpoints" / "megaseg" / "dynunet.ckpt",
+            ]
+        )
+        candidates.extend(
+            sorted(
+                benchmark_path.glob("checkpoints/epoch_*.ckpt"),
+                key=lambda item: item.name,
+                reverse=True,
+            )
+        )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+    return None
 
 
 def _models_root() -> str:
@@ -2364,6 +2436,8 @@ _DEFAULT_STEM_STRIP_TOKENS = (
     "sam3",
     "sam2",
     "medsam2",
+    "megaseg",
+    "dynunet",
 )
 
 _SEGMENTATION_RESULT_CACHE: dict[str, dict[str, Any]] = {}
@@ -2703,6 +2777,8 @@ def _collect_latest_mask_paths_from_refs(latest_result_refs: dict[str, Any] | No
         "segment_image_sam2.preferred_upload_paths",
         "segment_image_sam3.mask_paths",
         "segment_image_sam3.preferred_upload_paths",
+        "segment_image_megaseg.mask_paths",
+        "segment_image_megaseg.preferred_upload_paths",
         "sam2_prompt_image.mask_paths",
         "sam2_prompt_image.preferred_upload_paths",
         "latest_segmentation_mask_paths",
@@ -2716,6 +2792,7 @@ def _collect_latest_mask_paths_from_refs(latest_result_refs: dict[str, Any] | No
     for key in (
         "segment_image_sam2.latest_mask_path",
         "segment_image_sam3.latest_mask_path",
+        "segment_image_megaseg.latest_mask_path",
         "sam2_prompt_image.latest_mask_path",
         "latest_mask_path",
         "latest_segmentation_mask_path",
@@ -2857,6 +2934,301 @@ def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]
     if result.get("output_directory"):
         refs["latest_segmentation_output_directory"] = str(result.get("output_directory"))
     return refs
+
+
+def segment_image_megaseg(
+    file_paths: list[str],
+    structure_channel: int = 4,
+    nucleus_channel: int | None = 6,
+    channel_index_base: int = 1,
+    mask_threshold: float = 0.5,
+    save_visualizations: bool = True,
+    generate_report: bool = True,
+    device: str | None = None,
+    checkpoint_path: str | None = None,
+    structure_name: str | None = None,
+) -> dict[str, Any]:
+    """Run Megaseg DynUNet inference on multichannel microscopy images."""
+    if not file_paths:
+        return {"success": False, "error": "file_paths is required."}
+
+    runner_script = _resolve_megaseg_runner_script()
+    if not runner_script.exists():
+        return {
+            "success": False,
+            "error": f"Megaseg runner script is missing: {runner_script}",
+        }
+
+    runner_python = _resolve_megaseg_python()
+    if not runner_python:
+        return {
+            "success": False,
+            "error": (
+                "Megaseg requires a Python runtime with cyto-dl/monai installed. "
+                "Set MEGASEG_PYTHON or CYTODL_PYTHON to a valid interpreter."
+            ),
+        }
+
+    resolved_checkpoint = _resolve_megaseg_checkpoint_path(checkpoint_path)
+    if not resolved_checkpoint:
+        return {
+            "success": False,
+            "error": (
+                "No Megaseg checkpoint could be resolved. "
+                "Provide checkpoint_path or set MEGASEG_CHECKPOINT_PATH."
+            ),
+        }
+
+    try:
+        expanded = _expand_file_inputs([str(path) for path in file_paths])
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+    missing = [str(path) for path in expanded if not path.exists()]
+    if missing:
+        return {
+            "success": False,
+            "error": "Some files do not exist.",
+            "missing": missing[:50],
+        }
+
+    images = [path for path in expanded if path.exists() and _is_segmentation_image(path)]
+    non_images = [str(path) for path in expanded if path.exists() and not _is_segmentation_image(path)]
+    if not images:
+        return {"success": False, "error": "No microscopy image files were found in file_paths."}
+
+    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    output_dir = Path(_science_output_root("megaseg_results")) / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    request_payload = {
+        "file_paths": [str(path.resolve()) for path in images],
+        "output_dir": str(output_dir.resolve()),
+        "structure_channel": int(structure_channel),
+        "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
+        "channel_index_base": int(channel_index_base),
+        "mask_threshold": float(mask_threshold),
+        "save_visualizations": bool(save_visualizations),
+        "generate_report": bool(generate_report),
+        "device": str(device or "").strip() or None,
+        "checkpoint_path": str(Path(resolved_checkpoint).expanduser().resolve()),
+        "structure_name": str(structure_name or "structure"),
+    }
+    request_json_path = output_dir / "megaseg_request.json"
+    request_json_path.write_text(
+        json.dumps(request_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    try:
+        completed = subprocess.run(
+            [runner_python, str(runner_script), "--request-json", str(request_json_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=7200,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "Megaseg inference timed out after 7200 seconds.",
+            "output_directory": str(output_dir),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Failed to launch Megaseg inference: {exc}",
+            "output_directory": str(output_dir),
+        }
+
+    stdout_text = str(completed.stdout or "").strip()
+    stderr_text = str(completed.stderr or "").strip()
+    if completed.returncode != 0:
+        return {
+            "success": False,
+            "error": "Megaseg inference subprocess failed.",
+            "details": stderr_text[-4000:] or stdout_text[-4000:] or None,
+            "return_code": int(completed.returncode),
+            "output_directory": str(output_dir),
+        }
+
+    try:
+        runner_result = json.loads(stdout_text)
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Failed to parse Megaseg runner output: {exc}",
+            "stdout_tail": stdout_text[-4000:] or None,
+            "stderr_tail": stderr_text[-4000:] or None,
+            "output_directory": str(output_dir),
+        }
+
+    runner_files = runner_result.get("files") if isinstance(runner_result.get("files"), list) else []
+    successful = [row for row in runner_files if isinstance(row, dict) and row.get("success")]
+    files_processed: list[dict[str, Any]] = []
+    preferred_upload_paths: list[str] = []
+    preferred_upload_entries: list[dict[str, Any]] = []
+    visualization_paths: list[dict[str, Any]] = []
+    scientific_rows: list[dict[str, Any]] = []
+
+    for row in runner_files:
+        if not isinstance(row, dict):
+            continue
+        if row.get("success"):
+            segmentation = row.get("segmentation") if isinstance(row.get("segmentation"), dict) else {}
+            intensity_context = (
+                row.get("intensity_context")
+                if isinstance(row.get("intensity_context"), dict)
+                else {}
+            )
+            preferred_path = str(row.get("mask_path") or "").strip() or None
+            probability_path = str(row.get("probability_path") or "").strip() or None
+            if preferred_path:
+                preferred_upload_paths.append(preferred_path)
+                preferred_upload_entries.append(
+                    {
+                        "file": row.get("file"),
+                        "path": preferred_path,
+                    }
+                )
+            row_visualizations = row.get("visualizations") if isinstance(row.get("visualizations"), list) else []
+            for visualization in row_visualizations:
+                if not isinstance(visualization, dict) or not visualization.get("path"):
+                    continue
+                visualization_paths.append(
+                    {
+                        "path": str(visualization.get("path")),
+                        "file": row.get("file"),
+                        "coverage_percent": segmentation.get("coverage_percent"),
+                        "title": visualization.get("title"),
+                        "kind": visualization.get("kind"),
+                    }
+                )
+            files_processed.append(
+                {
+                    "file": row.get("file"),
+                    "success": True,
+                    "coverage_percent": segmentation.get("coverage_percent"),
+                    "object_count": segmentation.get("object_count"),
+                    "active_slice_count": segmentation.get("active_slice_count"),
+                    "largest_component_voxels": segmentation.get("largest_component_voxels"),
+                    "preferred_upload_path": preferred_path,
+                    "probability_path": probability_path,
+                    "visualization_saved": bool(row_visualizations),
+                    "technical_summary": row.get("technical_summary"),
+                }
+            )
+            scientific_rows.append(
+                {
+                    "file": row.get("file"),
+                    "coverage_percent": segmentation.get("coverage_percent"),
+                    "object_count": segmentation.get("object_count"),
+                    "active_slice_count": segmentation.get("active_slice_count"),
+                    "largest_component_voxels": segmentation.get("largest_component_voxels"),
+                    "structure_inside_outside_ratio": intensity_context.get("structure_inside_outside_ratio"),
+                    "nucleus_inside_outside_ratio": intensity_context.get("nucleus_inside_outside_ratio"),
+                    "technical_summary": row.get("technical_summary"),
+                }
+            )
+        else:
+            files_processed.append(
+                {
+                    "file": row.get("file"),
+                    "success": False,
+                    "error": row.get("error", "Megaseg inference failed."),
+                }
+            )
+
+    aggregate = runner_result.get("aggregate") if isinstance(runner_result.get("aggregate"), dict) else {}
+    summary_payload = {
+        "processed_files": len(successful),
+        "total_files": len(runner_files),
+        "mean_coverage_percent": aggregate.get("mean_coverage_percent"),
+        "median_coverage_percent": aggregate.get("median_coverage_percent"),
+        "mean_object_count": aggregate.get("mean_object_count"),
+        "median_object_count": aggregate.get("median_object_count"),
+    }
+
+    ui_artifacts: list[dict[str, Any]] = [
+        {
+            "type": "metrics",
+            "title": "Megaseg summary",
+            "payload": summary_payload,
+        },
+        {
+            "type": "table",
+            "title": "Megaseg per-file metrics",
+            "payload": scientific_rows[:200],
+        },
+    ]
+    for item in visualization_paths[:24]:
+        if item.get("path"):
+            ui_artifacts.append(
+                {
+                    "type": "image",
+                    "title": item.get("title") or "Megaseg overlay",
+                    "path": item.get("path"),
+                }
+            )
+
+    warnings: list[Any] = []
+    if non_images:
+        warnings.append({"ignored_non_images": non_images[:50]})
+    if stderr_text and "Failed to load image Python extension" not in stderr_text:
+        warnings.append({"runner_stderr_tail": stderr_text[-2000:]})
+    runner_warnings = runner_result.get("warnings")
+    if isinstance(runner_warnings, list):
+        warnings.extend(runner_warnings[:20])
+
+    response: dict[str, Any] = {
+        "success": len(successful) > 0,
+        "processed": len(successful),
+        "total_files": len(runner_files),
+        "files_processed": files_processed,
+        "output_directory": str(output_dir),
+        "model": "Megaseg DynUNet",
+        "checkpoint_path": str(Path(resolved_checkpoint).expanduser().resolve()),
+        "device": runner_result.get("device") or device or "auto",
+        "structure_channel": int(structure_channel),
+        "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
+        "channel_index_base": int(channel_index_base),
+        "mask_threshold": float(mask_threshold),
+        "preferred_upload_paths": preferred_upload_paths,
+        "preferred_upload_entries": preferred_upload_entries,
+        "visualization_paths": visualization_paths,
+        "summary_csv_path": runner_result.get("summary_csv_path"),
+        "report_path": runner_result.get("report_path"),
+        "scientific_summary": {
+            "aggregate": aggregate,
+            "files": scientific_rows[:200],
+        },
+        "ui_artifacts": ui_artifacts,
+        "message": (
+            "Megaseg DynUNet inference completed on the requested microscopy image set. "
+            "Binary mask artifacts are ready for upload or downstream quantify_segmentation_masks, "
+            "and probability volumes plus technical summaries were saved for each processed file."
+            if successful
+            else "Megaseg inference did not produce a successful segmentation result."
+        ),
+    }
+    if warnings:
+        response["warnings"] = warnings
+
+    latest_refs = _tool_result_refs_for_segmentation(response)
+    if preferred_upload_paths:
+        latest_refs.update(
+            {
+                "segment_image_megaseg.mask_paths": [str(path) for path in preferred_upload_paths],
+                "segment_image_megaseg.preferred_upload_paths": [str(path) for path in preferred_upload_paths],
+                "segment_image_megaseg.latest_mask_path": str(preferred_upload_paths[-1]),
+            }
+        )
+    if response.get("report_path"):
+        latest_refs["segment_image_megaseg.report_path"] = str(response.get("report_path"))
+    if response.get("summary_csv_path"):
+        latest_refs["segment_image_megaseg.summary_csv_path"] = str(response.get("summary_csv_path"))
+    response["latest_result_refs"] = latest_refs
+    return response
 
 
 def _yolo_candidate_stems(path: Path) -> list[str]:
@@ -13309,6 +13681,7 @@ AVAILABLE_TOOLS: dict[str, Callable] = {
     "bisque_add_gobjects": bisque_add_gobjects,
     "bisque_advanced_search": bisque_advanced_search,
     "bioio_load_image": bioio_load_image,
+    "segment_image_megaseg": segment_image_megaseg,
     "segment_image_sam2": segment_image_sam2,
     "sam2_prompt_image": sam2_prompt_image,
     "estimate_depth_pro": estimate_depth_pro,
@@ -13723,6 +14096,7 @@ def execute_tool_call(
             getattr(settings, "ui_force_tool_visualizations", True)
         )
         if force_tool_visualizations and tool_name in {
+            "segment_image_megaseg",
             "segment_image_sam2",
             "segment_image_sam3",
             "estimate_depth_pro",
@@ -13912,6 +14286,7 @@ def execute_tool_call(
         selection_image_files: list[str] = []
         if tool_name in {
             "bioio_load_image",
+            "segment_image_megaseg",
             "segment_image_sam2",
             "segment_image_sam3",
             "estimate_depth_pro",
@@ -14179,7 +14554,7 @@ def execute_tool_call(
                         "Replaced unavailable analyze_csv inputs with %s uploaded CSV/tabular file(s)",
                         len(csv_files),
                     )
-            elif tool_name in {"segment_image_sam2", "segment_image_sam3", "estimate_depth_pro"}:
+            elif tool_name in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "estimate_depth_pro"}:
                 provided_paths = _list_arg("file_paths")
                 if not args.get("file_paths") or args.get("file_paths") == []:
                     image_files = [p for p in uploaded_files if _is_segmentation_image(Path(str(p)))]
@@ -14363,6 +14738,7 @@ def execute_tool_call(
                     args["ground_truth_paths"] = explicit_gt_locals
 
         if (not uploaded_files) and tool_name in {
+            "segment_image_megaseg",
             "segment_image_sam2",
             "segment_image_sam3",
             "estimate_depth_pro",

@@ -216,6 +216,7 @@ BIO_PROFILE = DomainProfile(
     tool_allowlist=(
         *COMMON_BISQUE_TOOLS,
         "bioio_load_image",
+        "segment_image_megaseg",
         "segment_image_sam3",
         "segment_evaluate_batch",
         "evaluate_segmentation_masks",

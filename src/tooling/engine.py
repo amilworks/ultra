@@ -1521,6 +1521,7 @@ _STATUS_LABELS = {
     "bisque_advanced_search": "Querying BisQue",
     "run_bisque_module": "Running BisQue module",
     "bioio_load_image": "Loading scientific image",
+    "segment_image_megaseg": "Segmenting with Megaseg",
     "segment_image_sam3": "Segmenting with SAM3",
     "estimate_depth_pro": "Estimating depth",
     "segment_evaluate_batch": "Running segmentation + evaluation workflow",

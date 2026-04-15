@@ -1643,41 +1643,65 @@ class ProModeWorkflowRunner:
         max_runtime_seconds: int,
         debug: bool,
     ) -> Any:
+        normalized_role = str(role).strip().lower().replace(" ", "_")
+        response_reasoning_mode = self._role_reasoning_mode(
+            phase_name=phase_name,
+            role=normalized_role,
+            requested=reasoning_mode,
+        )
+        response_reasoning_effort = self._role_reasoning_effort_override(
+            phase_name=phase_name,
+            role=normalized_role,
+            requested=reasoning_mode,
+        )
+        reasoning_bounds = self._role_reasoning_step_bounds(
+            phase_name=phase_name,
+            role=normalized_role,
+            requested=reasoning_mode,
+        )
+
         def _build_phase_agent(model_builder: Callable[..., Any]) -> Agent:
-            return Agent(
-                name=f"pro-mode-{phase_name}-{str(role).lower().replace(' ', '-')}",
-                model=model_builder(
-                    reasoning_mode=self._role_reasoning_mode(
-                        phase_name=phase_name,
-                        role=str(role).strip().lower().replace(" ", "_"),
-                        requested=reasoning_mode,
-                    ),
-                    reasoning_effort_override=self._role_reasoning_effort_override(
-                        phase_name=phase_name,
-                        role=str(role).strip().lower().replace(" ", "_"),
-                        requested=reasoning_mode,
-                    ),
+            agent_kwargs: dict[str, Any] = {
+                "name": f"pro-mode-{phase_name}-{normalized_role}",
+                "model": model_builder(
+                    reasoning_mode=response_reasoning_mode,
+                    reasoning_effort_override=response_reasoning_effort,
                     max_runtime_seconds=max_runtime_seconds,
                 ),
-                instructions=[
+                "instructions": [
                     "You are participating in Pro Mode, a structured scientific council workflow.",
                     "Return only structured content matching the requested schema.",
                     "Be precise, grounded, and concise.",
                     "Do not reveal hidden chain-of-thought or workflow commentary.",
                 ],
-                output_schema=schema,
-                structured_outputs=True,
-                use_json_mode=True,
-                parse_response=True,
-                markdown=False,
-                telemetry=False,
-                retries=0,
-                store_events=False,
-                store_history_messages=False,
-                add_datetime_to_context=False,
-                add_location_to_context=False,
-                debug_mode=bool(debug),
-            )
+                "output_schema": schema,
+                "structured_outputs": True,
+                "use_json_mode": True,
+                "parse_response": True,
+                "markdown": False,
+                "telemetry": False,
+                "retries": 0,
+                "store_events": False,
+                "store_history_messages": False,
+                "add_datetime_to_context": False,
+                "add_location_to_context": False,
+                "debug_mode": bool(debug),
+            }
+            if reasoning_bounds is not None:
+                min_steps, max_steps = reasoning_bounds
+                agent_kwargs.update(
+                    {
+                        "reasoning_model": model_builder(
+                            reasoning_mode="deep",
+                            reasoning_effort_override="high",
+                            max_runtime_seconds=max_runtime_seconds,
+                        ),
+                        "reasoning": True,
+                        "reasoning_min_steps": min_steps,
+                        "reasoning_max_steps": max_steps,
+                    }
+                )
+            return Agent(**agent_kwargs)
 
         agent = _build_phase_agent(self._model_builder)
         try:
@@ -1780,6 +1804,25 @@ class ProModeWorkflowRunner:
         if role in {"formalist", "contrarian", "tool_broker", "verifier"}:
             return "high"
         return None
+
+    @classmethod
+    def _role_reasoning_step_bounds(
+        cls,
+        *,
+        phase_name: str,
+        role: str,
+        requested: str | None,
+    ) -> tuple[int, int] | None:
+        normalized = str(requested or "auto").strip().lower() or "auto"
+        if phase_name == "intake" or role == "intake" or normalized == "fast":
+            return None
+        if phase_name in {"synthesis", "verifier", "retry_round"}:
+            return (3, 8)
+        if phase_name.startswith("critique_round_"):
+            return (2, 6)
+        if phase_name in {"private_memos", "socratic_review", "tool_broker"}:
+            return (2, 5)
+        return (2, 4)
 
     @staticmethod
     def _render_context_snapshot(

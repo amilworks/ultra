@@ -14,6 +14,11 @@ import {
   Wrench,
   Workflow,
 } from "lucide-react";
+import {
+  DEFAULT_THINKING_TEXT,
+  getPhaseDetail,
+  getPhaseLabel,
+} from "@/lib/runStepCopy";
 
 type ChatRunStepsProps = {
   runEvents: RunEvent[];
@@ -46,43 +51,6 @@ const TOOL_LABELS: Record<string, string> = {
   segment_image_sam2: "MedSAM2 segmentation",
   segment_image_sam3: "SAM3 segmentation",
   yolo_detect: "YOLO detection",
-};
-
-const PHASE_LABELS: Record<string, string> = {
-  approval: "Wait for approval",
-  calculator_evidence: "Run calculator checks",
-  context_hydrate: "Load shared context",
-  context_policy: "Load only needed context",
-  code_verify: "Verify with code",
-  deliberation: "Choose execution path",
-  execution_router: "Choose Pro regime",
-  finalize: "Write final answer",
-  critique_round_1: "Council discussion",
-  critique_round_2: "Council follow-up",
-  direct_response: "Answer immediately",
-  intake: "Triage request",
-  tool_workflow: "Run tool workflow",
-  knowledge: "Load scientific context",
-  learning: "Update reusable notes",
-  memory: "Load scientific memory",
-  model_request: "Request model response",
-  preflight: "Prepare request",
-  private_memos: "Explore perspectives",
-  research_program: "Run iterative research",
-  socratic_review: "Socratic crux review",
-  reconciliation: "Build consensus",
-  reasoning: "Reason through the problem",
-  route: "Choose execution path",
-  retry_round: "Retry council round",
-  solve: "Generate answer",
-  synthesis: "Synthesize answer",
-  synthesize: "Finalize response",
-  tool_broker: "Decide on evidence",
-  targeted_critiques: "Internal discussion",
-  triage: "Choose execution path",
-  verify: "Check result",
-  verifier: "Verify solution",
-  verifier_retry: "Recheck revised synthesis",
 };
 
 const toRecord = (value: unknown): Record<string, unknown> | null => {
@@ -135,22 +103,12 @@ const formatToolLabel = (toolName: string): string => {
   return TOOL_LABELS[normalized] ?? titleCaseWords(normalized);
 };
 
-const formatPhaseLabel = (
-  phase: string,
-  payload: Record<string, unknown>,
-  nestedPayload: Record<string, unknown> | null
-): string => {
+const formatPhaseLabel = (phase: string): string => {
   const normalized = phase.trim().toLowerCase();
   if (!normalized) {
-    return "Workflow step";
+    return "Progress update";
   }
-  if (normalized === "solve") {
-    const domainId = String(payload.domain_id ?? nestedPayload?.domain_id ?? "").trim();
-    if (domainId && domainId.toLowerCase() !== "core") {
-      return `Generate ${titleCaseWords(domainId)} answer`;
-    }
-  }
-  return PHASE_LABELS[normalized] ?? titleCaseWords(normalized);
+  return getPhaseLabel(normalized) ?? "Progress update";
 };
 
 const cleanDetail = (value: unknown): string | null => {
@@ -203,8 +161,8 @@ const buildStepItems = (
       upsertStep(`graph:${phase}:${eventType}`, {
         id: `graph:${phase}:${eventType}`,
         kind: "phase",
-        label: formatPhaseLabel(phase, payload, nestedPayload),
-        detail,
+        label: formatPhaseLabel(phase),
+        detail: getPhaseDetail(phase),
         status: toStepStatus(payload.status),
       });
       return;
@@ -248,8 +206,8 @@ const buildStepItems = (
     upsertStep(key, {
       id: key,
       kind: "phase",
-      label: formatPhaseLabel(phase, payload, nestedPayload),
-      detail,
+      label: formatPhaseLabel(phase),
+      detail: getPhaseDetail(phase),
       status: toStepStatus(payload.status),
     });
   });
@@ -312,16 +270,17 @@ export function ChatRunSteps({
   const lastItem = stepItems[stepItems.length - 1] ?? null;
   const hasFailure = stepItems.some((item) => item.status === "failed");
   const triggerText = String(
-    fallbackLabel || activeItem?.label || lastItem?.label || "Working through the analysis"
+    fallbackLabel || activeItem?.label || lastItem?.label || DEFAULT_THINKING_TEXT
   ).trim();
 
   return (
     <Steps
       defaultOpen
-      className={cn("w-full", className)}
+      className={cn("chat-run-steps w-full", className)}
       data-testid="chat-run-steps"
     >
       <StepsTrigger
+        className="chat-run-steps-trigger text-left"
         leftIcon={
           isStreaming ? (
             <Loader2 className="size-4 animate-spin" />
@@ -335,6 +294,7 @@ export function ChatRunSteps({
         {`Steps: ${triggerText}`}
       </StepsTrigger>
       <StepsContent
+        className="chat-run-steps-content"
         bar={
           <StepsBar
             className={cn(
@@ -350,7 +310,7 @@ export function ChatRunSteps({
       >
         <div className="space-y-2">
           {stepItems.map((item) => (
-            <StepsItem key={item.id}>
+            <StepsItem key={item.id} className="chat-run-step-item">
               <div className="flex items-start gap-2">
                 <span
                   className={cn(

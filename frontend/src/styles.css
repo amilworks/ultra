@@ -465,9 +465,38 @@ body {
   letter-spacing: -0.012em;
 }
 
+.app-main-shell {
+  min-height: 100svh;
+  min-height: 100dvh;
+}
+
+.app-shell-header {
+  padding-top: env(safe-area-inset-top, 0px);
+  min-height: calc(4rem + env(safe-area-inset-top, 0px));
+}
+
 .app-header-title {
+  min-width: 0;
   font-weight: var(--font-weight-panel-heading);
   letter-spacing: -0.012em;
+}
+
+.app-header-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-header-meta {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.app-composer-shell {
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
 
 .app-history-button:hover {
@@ -1934,9 +1963,9 @@ body {
 }
 
 .composer-pro-button {
-  height: 2.3rem;
+  min-height: 2.75rem;
   border-radius: 999px;
-  padding-inline: 0.82rem 0.94rem;
+  padding-inline: 0.92rem 1.02rem;
   border: 0;
   background: transparent;
   color: var(--text-muted);
@@ -1952,6 +1981,13 @@ body {
 .composer-pro-button > * {
   position: relative;
   z-index: 1;
+}
+
+@media (min-width: 640px) {
+  .composer-pro-button {
+    min-height: 2.3rem;
+    padding-inline: 0.82rem 0.94rem;
+  }
 }
 
 .composer-pro-button[data-active="false"]:hover,
@@ -3812,6 +3848,78 @@ details {
   border: 1px dashed var(--line);
   border-radius: var(--radius-sm);
   padding: 8px 10px;
+}
+
+.chat-run-steps-trigger {
+  min-width: 0;
+}
+
+.chat-run-step-item {
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .app-shell-header {
+    gap: 0.55rem;
+  }
+
+  .app-header-running {
+    display: none;
+  }
+
+  .chat-log-content {
+    padding: 20px 12px 12px;
+  }
+
+  .hero-state {
+    padding: clamp(2rem, 9vh, 3.75rem) 0.25rem 1.5rem;
+  }
+
+  .hero-title {
+    font-size: clamp(1.55rem, 7vw, 2.1rem);
+  }
+
+  .hero-subtitle {
+    margin-top: 0.65rem;
+    font-size: 0.95rem;
+  }
+
+  .composer-running {
+    padding: 0.55rem 0.85rem 0.2rem;
+  }
+
+  .composer-preview-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .pk-prompt-input {
+    padding: 8px;
+  }
+
+  .pk-prompt-input-textarea {
+    min-height: 48px;
+  }
+
+  .pk-prompt-input-actions {
+    margin-top: 8px;
+    padding-top: 8px;
+    gap: 6px;
+  }
+
+  .chat-run-steps-trigger {
+    font-size: 0.84rem;
+    line-height: 1.35;
+  }
+
+  .chat-run-steps-content {
+    margin-top: 0.75rem;
+  }
+
+  .chat-run-step-item {
+    font-size: 0.8125rem;
+    line-height: 1.35;
+  }
 }
 
 .pk-file-upload-content-drag {

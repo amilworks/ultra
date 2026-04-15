@@ -1,6 +1,7 @@
 import React from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DEFAULT_THINKING_TEXT } from "@/lib/runStepCopy";
 import { TextShimmer } from "./text-shimmer";
 
 type ThinkingBarProps = {
@@ -13,7 +14,7 @@ type ThinkingBarProps = {
 
 export function ThinkingBar({
   className,
-  text = "Thinking",
+  text = DEFAULT_THINKING_TEXT,
   onStop,
   stopLabel = "Answer now",
   onClick,

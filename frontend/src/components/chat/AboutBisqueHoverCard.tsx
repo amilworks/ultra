@@ -15,7 +15,7 @@ export function AboutBisqueHoverCard() {
           type="button"
           variant="ghost"
           size="icon-sm"
-          className="rounded-full text-muted-foreground transition-colors hover:text-foreground"
+          className="size-11 shrink-0 rounded-full text-muted-foreground transition-colors hover:text-foreground md:size-8"
           aria-label="About BisQue Ultra"
         >
           <Info className="size-4" />

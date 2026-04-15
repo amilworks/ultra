@@ -1252,6 +1252,22 @@ class AgnoChatRuntime:
             ),
         }
 
+    @staticmethod
+    def _structured_phase_model_routes(
+        compression_stats: Mapping[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        routes: dict[str, dict[str, Any]] = {}
+        if not isinstance(compression_stats, Mapping):
+            return routes
+        for raw_phase, raw_payload in compression_stats.items():
+            phase_name = str(raw_phase or "").strip()
+            if not phase_name or not isinstance(raw_payload, Mapping):
+                continue
+            route_payload = raw_payload.get("model_route")
+            if isinstance(route_payload, Mapping) and route_payload:
+                routes[phase_name] = dict(route_payload)
+        return routes
+
     async def _arun_with_optional_pro_mode_fallback(
         self,
         *,
@@ -14079,6 +14095,16 @@ class AgnoChatRuntime:
                     if polished_response_text:
                         response_text = polished_response_text
                         writer_applied = True
+                structured_phase_routes = self._structured_phase_model_routes(
+                    research_program_meta.get("compression_stats")
+                )
+                if isinstance(writer_stats.get("model_route"), dict) and writer_stats.get("model_route"):
+                    structured_phase_routes["pro_mode_final_writer"] = dict(
+                        writer_stats.get("model_route") or {}
+                    )
+                if structured_phase_routes:
+                    pro_mode_metadata["model_routes"] = structured_phase_routes
+                pro_mode_metadata["tool_runtime_model"] = str(tool_result.get("model") or self.model)
                 pro_mode_metadata["writer"] = {
                     "applied": writer_applied,
                     "kind": "final_writer",

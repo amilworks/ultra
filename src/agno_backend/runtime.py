@@ -20,6 +20,7 @@ from agno.compression.manager import CompressionManager
 from agno.db.postgres import PostgresDb
 from agno.db.sqlite import SqliteDb
 from agno.knowledge.document.base import Document
+from agno.models.base import Model as AgnoModel
 from agno.models.message import Message
 from agno.models.openai.like import OpenAILike
 from agno.models.response import ToolExecution
@@ -153,6 +154,7 @@ RESEARCH_PROGRAM_TOOL_BUNDLES: dict[str, tuple[str, ...]] = {
     "vision": (
         "bioio_load_image",
         "yolo_detect",
+        "segment_image_megaseg",
         "segment_image_sam2",
         "estimate_depth_pro",
     ),
@@ -889,7 +891,7 @@ class AgnoChatRuntime:
         reasoning_mode: str | None = None,
         reasoning_effort_override: str | None = None,
         max_runtime_seconds: int = 900,
-    ) -> OpenAILike:
+    ) -> AgnoModel:
         if self._uses_published_pro_mode_api():
             return self._build_model(
                 model_id=model_id,
@@ -908,6 +910,8 @@ class AgnoChatRuntime:
         return bool(self._setting(self.settings, "pro_mode_fallback_enabled", True))
 
     def _uses_dedicated_pro_mode_model(self) -> bool:
+        if self._pro_mode_transport() == "aws_bedrock_claude":
+            return True
         return any(
             str(self._setting(self.settings, name, "") or "").strip()
             for name in (
@@ -932,12 +936,15 @@ class AgnoChatRuntime:
             self._setting(self.settings, "pro_mode_transport", "openai_compatible")
             or "openai_compatible"
         ).strip().lower()
-        if transport not in {"openai_compatible", "bedrock_published_api"}:
+        if transport not in {"openai_compatible", "bedrock_published_api", "aws_bedrock_claude"}:
             return "openai_compatible"
         return transport
 
     def _uses_published_pro_mode_api(self) -> bool:
         return self._pro_mode_transport() == "bedrock_published_api"
+
+    def _uses_native_bedrock_claude(self) -> bool:
+        return self._pro_mode_transport() == "aws_bedrock_claude"
 
     @staticmethod
     def _string_dict(value: Any) -> dict[str, str]:
@@ -1116,7 +1123,7 @@ class AgnoChatRuntime:
         *,
         phase_name: str,
         prompt: str,
-        build_agent: Callable[[Callable[..., OpenAILike]], Agent],
+        build_agent: Callable[[Callable[..., AgnoModel]], Agent],
         conversation_id: str | None,
         run_id: str | None,
         user_id: str | None,
@@ -1196,7 +1203,10 @@ class AgnoChatRuntime:
                 r"api connection error|connection error|failed to connect|connection refused|"
                 r"no route to host|name or service not known|dns|timeout|timed out|read timeout|"
                 r"temporarily unavailable|service unavailable|bad gateway|gateway timeout|"
-                r"502|503|504|model not found|unknown model|provider returned 5"
+                r"502|503|504|model not found|unknown model|provider returned 5|"
+                r"unable to locate credentials|credentials not found|aws credentials not found|"
+                r"security token|access denied|forbidden|unauthorized|invalidclienttokenid|"
+                r"expiredtoken|profile .* could not be found"
                 r")\b",
                 text,
             )
@@ -1217,6 +1227,8 @@ class AgnoChatRuntime:
         auth_header_name = str(
             self._setting(self.settings, "pro_mode_api_key_header", "") or ""
         ).strip() or "Authorization"
+        if self._uses_native_bedrock_claude():
+            auth_header_name = "AWS SigV4 / IAM"
         return {
             "configured_model": configured_model,
             "active_model": str(active_model or configured_model).strip() or configured_model,
@@ -1226,6 +1238,12 @@ class AgnoChatRuntime:
             "fallback_reason": str(failure_code or "").strip() or None,
             "transport": self._pro_mode_transport(),
             "auth_header_name": auth_header_name,
+            "aws_region_configured": bool(
+                str(self._setting(self.settings, "resolved_pro_mode_aws_region", "") or "").strip()
+            ),
+            "aws_profile_configured": bool(
+                str(self._setting(self.settings, "resolved_pro_mode_aws_profile", "") or "").strip()
+            ),
             "custom_headers_configured": bool(
                 self._string_dict(self._setting(self.settings, "pro_mode_default_headers", {}))
             ),
@@ -1239,7 +1257,7 @@ class AgnoChatRuntime:
         *,
         phase_name: str,
         prompt: str,
-        build_agent: Callable[[Callable[..., OpenAILike]], Agent],
+        build_agent: Callable[[Callable[..., AgnoModel]], Agent],
         conversation_id: str | None,
         run_id: str | None,
         user_id: str | None,
@@ -1553,7 +1571,7 @@ class AgnoChatRuntime:
         reasoning_mode: str | None = None,
         reasoning_effort_override: str | None = None,
         max_runtime_seconds: int = 900,
-    ) -> OpenAILike:
+    ) -> AgnoModel:
         timeout_seconds = max(
             float(self._setting(self.settings, "openai_timeout", 60) or 60),
             float(max_runtime_seconds) + 15.0,
@@ -1575,6 +1593,79 @@ class AgnoChatRuntime:
             max_completion_tokens=None,
         )
 
+    def _build_native_bedrock_claude_model(
+        self,
+        *,
+        model_id: str | None = None,
+        max_runtime_seconds: int = 900,
+    ) -> AgnoModel:
+        try:
+            from agno.models.aws import Claude as AwsBedrockClaude
+        except ImportError as exc:  # pragma: no cover - exercised in smoke/local env
+            raise RuntimeError(
+                "Native AWS Bedrock Claude transport requires boto3 and anthropic[bedrock]. "
+                "Run `uv sync` after pulling the updated production repo."
+            ) from exc
+
+        profile = str(
+            self._setting(self.settings, "resolved_pro_mode_aws_profile", "") or ""
+        ).strip() or None
+        region = str(
+            self._setting(self.settings, "resolved_pro_mode_aws_region", "") or ""
+        ).strip() or None
+        access_key = str(
+            self._setting(self.settings, "resolved_pro_mode_aws_access_key_id", "") or ""
+        ).strip() or None
+        secret_key = str(
+            self._setting(self.settings, "resolved_pro_mode_aws_secret_access_key", "") or ""
+        ).strip() or None
+        session_token = str(
+            self._setting(self.settings, "resolved_pro_mode_aws_session_token", "") or ""
+        ).strip() or None
+        use_sso = bool(self._setting(self.settings, "pro_mode_aws_sso_auth", False))
+        timeout_seconds = max(
+            self._resolved_pro_mode_timeout_seconds(),
+            float(max_runtime_seconds) + 15.0,
+        )
+        resolved_model = str(
+            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+        ).strip() or self.model
+
+        session = None
+        if profile or use_sso:
+            try:
+                from boto3.session import Session
+            except ImportError as exc:  # pragma: no cover - exercised in smoke/local env
+                raise RuntimeError(
+                    "AWS profile support for native Bedrock Claude requires boto3. "
+                    "Run `uv sync` after pulling the updated production repo."
+                ) from exc
+            session_kwargs: dict[str, Any] = {}
+            if profile:
+                session_kwargs["profile_name"] = profile
+            if region:
+                session_kwargs["region_name"] = region
+            session = Session(**session_kwargs)
+
+        kwargs: dict[str, Any] = {
+            "id": str(model_id or resolved_model),
+            "timeout": timeout_seconds,
+        }
+        if session is not None:
+            kwargs["session"] = session
+            if region:
+                kwargs["aws_region"] = region
+        else:
+            if region:
+                kwargs["aws_region"] = region
+            if access_key:
+                kwargs["aws_access_key"] = access_key
+            if secret_key:
+                kwargs["aws_secret_key"] = secret_key
+            if session_token:
+                kwargs["aws_session_token"] = session_token
+        return AwsBedrockClaude(**kwargs)
+
     def _build_pro_mode_model(
         self,
         *,
@@ -1582,7 +1673,12 @@ class AgnoChatRuntime:
         reasoning_mode: str | None = None,
         reasoning_effort_override: str | None = None,
         max_runtime_seconds: int = 900,
-    ) -> OpenAILike:
+    ) -> AgnoModel:
+        if self._uses_native_bedrock_claude():
+            return self._build_native_bedrock_claude_model(
+                model_id=model_id,
+                max_runtime_seconds=max_runtime_seconds,
+            )
         timeout_seconds = max(
             self._resolved_pro_mode_timeout_seconds(),
             float(max_runtime_seconds) + 15.0,
@@ -2776,7 +2872,7 @@ class AgnoChatRuntime:
         prompt_sections.append(f"User request: {latest_user_text}")
         prompt = "\n\n".join(section for section in prompt_sections if section)
 
-        def _build_fast_dialogue_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+        def _build_fast_dialogue_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             return Agent(
                 name="pro-mode-fast-dialogue",
                 model=model_builder(
@@ -2823,6 +2919,7 @@ class AgnoChatRuntime:
                 max_runtime_seconds=max_runtime_seconds,
             )
         except Exception as exc:
+            failure_code = self._classify_pro_mode_failure(exc) or "published_api_failure"
             fallback_text = draft or str(exc or exc.__class__.__name__).strip()
             return ProModeWorkflowResult(
                 response_text=fallback_text,
@@ -2830,7 +2927,11 @@ class AgnoChatRuntime:
                     "pro_mode": {
                         "execution_path": "direct_response",
                         "runtime_status": "failed",
-                        "model_route": model_route,
+                        "model_route": self._pro_mode_model_route_metadata(
+                            fallback_used=False,
+                            failure_code=failure_code,
+                            active_model=self.model,
+                        ),
                     }
                 },
                 runtime_status="failed",
@@ -5501,7 +5602,7 @@ class AgnoChatRuntime:
                 f"Question: {latest_user_text}",
             ]
         )
-        def _build_reasoning_solver_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+        def _build_reasoning_solver_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             return Agent(
                 name="pro-mode-reasoning-solver",
                 model=model_builder(
@@ -9604,7 +9705,7 @@ class AgnoChatRuntime:
                     _append("depth_map_paths", item)
                 for item in list(envelope.get("depth_npy_paths") or []):
                     _append("depth_npy_paths", item)
-            elif tool_name in {"segment_image_sam2", "segment_image_sam3"}:
+            elif tool_name in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3"}:
                 for item in list(envelope.get("preferred_upload_paths") or []):
                     _append("mask_paths", item)
                 for row in list(envelope.get("files_processed") or []):
@@ -11112,7 +11213,7 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> Any:
         compression_stats: dict[str, Any] = {}
-        def _build_tool_program_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+        def _build_tool_program_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
                     reasoning_mode=reasoning_mode,
@@ -11454,7 +11555,7 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> str:
         compression_stats: dict[str, Any] = {}
-        def _build_report_writer_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+        def _build_report_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
                     reasoning_mode="fast",
@@ -11602,7 +11703,7 @@ class AgnoChatRuntime:
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
         compression_stats: dict[str, Any] = {}
-        def _build_final_writer_agent(model_builder: Callable[..., OpenAILike]) -> Agent:
+        def _build_final_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
                     reasoning_mode="fast",
@@ -12874,6 +12975,8 @@ class AgnoChatRuntime:
             return "MedSAM2"
         if "sam3" in lowered or tool_name == "segment_image_sam3":
             return "SAM3"
+        if "megaseg" in lowered or "dynunet" in lowered or tool_name == "segment_image_megaseg":
+            return "Megaseg DynUNet"
         return raw_label or "Segmentation"
 
     @classmethod
@@ -13042,7 +13145,7 @@ class AgnoChatRuntime:
     ) -> str:
         for invocation in reversed(list(tool_invocations or [])):
             tool_name = str(invocation.get("tool") or "").strip()
-            if tool_name not in {"segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}:
+            if tool_name not in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}:
                 continue
             status = str(invocation.get("status") or "").strip().lower()
             if status and status not in {"completed", "success"}:
@@ -13663,6 +13766,9 @@ class AgnoChatRuntime:
                 )
                 final_metadata = dict(fast_dialogue_result.metadata or {})
                 pro_mode_metadata = dict(final_metadata.get("pro_mode") or {})
+                fast_dialogue_completed = (
+                    str(fast_dialogue_result.runtime_status or "").strip().lower() == "completed"
+                )
                 pro_mode_metadata.update(
                     {
                         "route": intake_decision.route,
@@ -13679,18 +13785,22 @@ class AgnoChatRuntime:
                         "convergence": {
                             "per_role_vote": {},
                             "central_blockers": [],
-                            "ready": bool(fast_dialogue_result.response_text),
-                            "consensus_level": "high" if fast_dialogue_result.response_text else "low",
+                            "ready": bool(fast_dialogue_result.response_text) and fast_dialogue_completed,
+                            "consensus_level": "high" if fast_dialogue_completed and fast_dialogue_result.response_text else "low",
                         },
                         "role_stats": {},
                         "calculator": {"used": False, "call_count": 0, "results": []},
                         "verifier": {
-                            "passed": bool(fast_dialogue_result.response_text),
+                            "passed": bool(fast_dialogue_result.response_text) and fast_dialogue_completed,
                             "issues": [],
                             "suggested_changes": [],
-                            "confidence": "medium" if fast_dialogue_result.response_text else "low",
+                            "confidence": "medium" if fast_dialogue_completed and fast_dialogue_result.response_text else "low",
                         },
-                        "summary": "Answered directly through the dedicated Pro Mode reasoning model.",
+                        "summary": (
+                            "Answered directly through the dedicated Pro Mode reasoning model."
+                            if fast_dialogue_completed
+                            else "Returned the intake draft because the dedicated Pro Mode reasoning model path did not complete."
+                        ),
                     }
                 )
                 final_metadata["pro_mode"] = pro_mode_metadata
@@ -15946,7 +16056,7 @@ class AgnoChatRuntime:
         conversation_id: str | None = None,
     ) -> dict[str, Any]:
         tool_snapshot = json.dumps(tool_result, ensure_ascii=False, default=str)[:12000]
-        segmentation_tool = tool_name in {"segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
+        segmentation_tool = tool_name in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
         prompt = (
             "Summarize this scientific tool result for the user.\n\n"
             f"Domain: {domain_id}\n"

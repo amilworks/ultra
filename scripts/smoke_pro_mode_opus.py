@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -82,6 +83,46 @@ def _probe_gateway(settings: Settings) -> int:
         return 3
 
 
+def _probe_native_bedrock_auth(settings: Settings) -> int:
+    _print_header("Native Bedrock Auth Probe")
+    region = str(settings.resolved_pro_mode_aws_region or "").strip()
+    profile = str(settings.resolved_pro_mode_aws_profile or "").strip()
+    has_access_key = bool(str(settings.resolved_pro_mode_aws_access_key_id or "").strip())
+    has_secret_key = bool(str(settings.resolved_pro_mode_aws_secret_access_key or "").strip())
+    has_session_token = bool(str(settings.resolved_pro_mode_aws_session_token or "").strip())
+    print(f"transport={settings.pro_mode_transport}")
+    print(f"model={settings.resolved_pro_mode_model}")
+    print(f"aws_region={region or '(unset)'}")
+    print(f"aws_profile={profile or '(unset)'}")
+    print(f"aws_sso_auth={settings.pro_mode_aws_sso_auth}")
+    print(f"has_access_key={has_access_key}")
+    print(f"has_secret_key={has_secret_key}")
+    print(f"has_session_token={has_session_token}")
+    print(f"env_AWS_PROFILE={'set' if os.getenv('AWS_PROFILE') else 'unset'}")
+    print(f"env_AWS_REGION={'set' if os.getenv('AWS_REGION') else 'unset'}")
+    try:
+        import boto3
+    except Exception as exc:  # pragma: no cover - smoke script
+        print(f"aws_dependency_error={exc}")
+        return 8
+    try:
+        session_kwargs: dict[str, Any] = {}
+        if profile:
+            session_kwargs["profile_name"] = profile
+        if region:
+            session_kwargs["region_name"] = region
+        session = boto3.Session(**session_kwargs)
+        sts_client = session.client("sts", region_name=region or None)
+        identity = sts_client.get_caller_identity()
+        arn = str(identity.get("Arn") or "")
+        print(f"sts_account={str(identity.get('Account') or '')[-4:] or '(unknown)'}")
+        print(f"sts_arn_suffix={arn.split('/')[-1] if arn else '(unknown)'}")
+        return 0
+    except Exception as exc:  # pragma: no cover - smoke script
+        print(f"aws_auth_error={exc}")
+        return 9
+
+
 def _probe_local_backend(settings: Settings) -> int:
     _print_header("Local Backend Probe")
     api_root = str(settings.orchestrator_api_url or "http://127.0.0.1:8000").strip().rstrip("/")
@@ -132,6 +173,10 @@ def _probe_local_backend(settings: Settings) -> int:
                     "Bedrock transport."
                 )
                 return 7
+        if settings.pro_mode_transport == "aws_bedrock_claude":
+            if str(model_route.get("transport") or "").strip() != "aws_bedrock_claude":
+                print("Local backend did not report the native Bedrock Claude transport in metadata.")
+                return 10
         return 0
     except Exception as exc:  # pragma: no cover - smoke script
         print(f"local_backend_error={exc}")
@@ -141,15 +186,20 @@ def _probe_local_backend(settings: Settings) -> int:
 def main() -> int:
     settings = Settings()
     exit_code = 0
-    if settings.pro_mode_transport != "bedrock_published_api":
+    if settings.pro_mode_transport == "bedrock_published_api":
+        gateway_status = _probe_gateway(settings)
+        if gateway_status != 0:
+            exit_code = gateway_status
+    elif settings.pro_mode_transport == "aws_bedrock_claude":
+        auth_status = _probe_native_bedrock_auth(settings)
+        if auth_status != 0:
+            exit_code = auth_status
+    else:
         print(
-            "Configured PRO_MODE_TRANSPORT is not 'bedrock_published_api'. "
-            "Local Opus smoke is intended for the Bedrock-published path."
+            "Configured PRO_MODE_TRANSPORT is neither 'bedrock_published_api' nor "
+            "'aws_bedrock_claude'. The Opus smoke target is intended for those transports."
         )
         exit_code = 1
-    gateway_status = _probe_gateway(settings)
-    if gateway_status != 0:
-        exit_code = gateway_status
     local_status = _probe_local_backend(settings)
     if local_status != 0 and exit_code == 0:
         exit_code = local_status

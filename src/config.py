@@ -1,6 +1,7 @@
 """Application configuration management using pydantic-settings."""
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -134,12 +135,18 @@ class Settings(BaseSettings):
             "Optional OpenAI-compatible base URL override used only by Pro Mode answer generation."
         ),
     )
-    pro_mode_transport: Literal["openai_compatible", "bedrock_published_api"] = Field(
+    pro_mode_transport: Literal[
+        "openai_compatible",
+        "bedrock_published_api",
+        "aws_bedrock_claude",
+    ] = Field(
         default="openai_compatible",
         description=(
             "Transport used by the dedicated Pro Mode model path. "
             "Use `bedrock_published_api` for the custom Bedrock publish endpoint that serves "
-            "`/conversation` instead of OpenAI chat/completions."
+            "`/conversation` instead of OpenAI chat/completions. Use "
+            "`aws_bedrock_claude` to call Anthropic Claude on AWS Bedrock via Agno's "
+            "native Bedrock provider."
         ),
     )
     pro_mode_api_key: str | None = Field(
@@ -194,6 +201,48 @@ class Settings(BaseSettings):
         description=(
             "When true, Pro Mode retries once on the default model path if the dedicated "
             "Pro Mode gateway is unavailable."
+        ),
+    )
+    pro_mode_aws_region: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS region override for the native Pro Mode Bedrock Claude transport. "
+            "Falls back to AWS_REGION."
+        ),
+    )
+    pro_mode_aws_profile: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS profile name for the native Pro Mode Bedrock Claude transport. "
+            "Falls back to AWS_PROFILE."
+        ),
+    )
+    pro_mode_aws_access_key_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS access key ID override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_ACCESS_KEY_ID."
+        ),
+    )
+    pro_mode_aws_secret_access_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS secret access key override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_SECRET_ACCESS_KEY."
+        ),
+    )
+    pro_mode_aws_session_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS session token override for the native Pro Mode Bedrock Claude "
+            "transport. Falls back to AWS_SESSION_TOKEN."
+        ),
+    )
+    pro_mode_aws_sso_auth: bool = Field(
+        default=False,
+        description=(
+            "When true, the native Pro Mode Bedrock Claude transport uses the current AWS "
+            "SSO/profile session instead of explicit access keys."
         ),
     )
     llm_mock_mode: bool = Field(
@@ -1258,6 +1307,46 @@ class Settings(BaseSettings):
         if self.pro_mode_timeout_seconds is not None:
             return max(1, int(self.pro_mode_timeout_seconds))
         return max(1, int(self.openai_timeout or 60))
+
+    @property
+    def resolved_pro_mode_aws_region(self) -> str | None:
+        """Resolved AWS region for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_region and self.pro_mode_aws_region.strip():
+            return self.pro_mode_aws_region.strip()
+        env_value = os.getenv("AWS_REGION")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_profile(self) -> str | None:
+        """Resolved AWS profile for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_profile and self.pro_mode_aws_profile.strip():
+            return self.pro_mode_aws_profile.strip()
+        env_value = os.getenv("AWS_PROFILE")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_access_key_id(self) -> str | None:
+        """Resolved AWS access key for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_access_key_id and self.pro_mode_aws_access_key_id.strip():
+            return self.pro_mode_aws_access_key_id.strip()
+        env_value = os.getenv("AWS_ACCESS_KEY_ID")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_secret_access_key(self) -> str | None:
+        """Resolved AWS secret for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_secret_access_key and self.pro_mode_aws_secret_access_key.strip():
+            return self.pro_mode_aws_secret_access_key.strip()
+        env_value = os.getenv("AWS_SECRET_ACCESS_KEY")
+        return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_session_token(self) -> str | None:
+        """Resolved AWS session token for the native Pro Mode Bedrock Claude transport."""
+        if self.pro_mode_aws_session_token and self.pro_mode_aws_session_token.strip():
+            return self.pro_mode_aws_session_token.strip()
+        env_value = os.getenv("AWS_SESSION_TOKEN")
+        return env_value.strip() if env_value and env_value.strip() else None
 
 
 @lru_cache

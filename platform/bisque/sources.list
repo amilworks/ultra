@@ -1,4 +1,4 @@
-deb https://biodev.ece.ucsb.edu/debian/archive unstable/
+deb https://packages.example.com/debian/archive unstable/
 deb ftp://ftp.ucsb.edu/pub/mirrors/linux/debian jessie main non-free contrib
 deb http://mirrors.kernel.org/debian/ jessie main non-free contrib
 deb http://security.debian.org/ jessie/updates main

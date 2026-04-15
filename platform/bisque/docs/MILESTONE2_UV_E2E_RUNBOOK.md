@@ -1,7 +1,7 @@
 # Milestone 2 Runbook: uv Local BisQue + bqapi Module E2E
 
 Date: 2026-02-17
-Repository: `/Users/macbook/Documents/phd/bisque_ultra/bisqueUCSB3`
+Repository: `/path/to/bisque-repo`
 
 ## Goal
 Run BisQue locally with `uv`, verify core services/UI, execute modules end-to-end through `bqapi`, and validate output image retrieval for both built-in and custom modules.
@@ -20,7 +20,7 @@ This runbook is written so a human or LLM can reproduce Milestone 2 without hidd
 From repo root:
 
 ```bash
-cd /Users/macbook/Documents/phd/bisque_ultra/bisqueUCSB3
+cd /path/to/bisque-repo
 ```
 
 Required:
@@ -274,7 +274,7 @@ This stops the local BisQue services and restores `source/config/site.cfg` from 
 ## 12. Repro checklist (copy/paste order)
 
 ```bash
-cd /Users/macbook/Documents/phd/bisque_ultra/bisqueUCSB3
+cd /path/to/bisque-repo
 ./scripts/dev/bootstrap_uv_backend.sh
 ./scripts/dev/build_simpleuniversal_module.sh
 ./scripts/dev/start_bisque_m2_env.sh

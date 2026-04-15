@@ -65,7 +65,7 @@ def walk_deep(path):
 
 DEFAULTS  = dict(
     logfile    = '/tmp/bisque_insert.log',
-    bisque_host='https://loup.ece.ucsb.edu',
+    bisque_host='https://bisque.example.com',
     bisque_user='admin',
     bisque_pass='admin',
     irods_host='irods://mokie.iplantcollaborative.org',

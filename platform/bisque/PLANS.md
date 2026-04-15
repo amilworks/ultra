@@ -504,7 +504,7 @@ Implementation update (2026-02-17):
 1. Compose/runtime fixes:
    - `source/bqengine/bq/engine/controllers/docker_env.py` now creates module containers with `--add-host host.docker.internal:host-gateway` and rewrites loopback args (`127.0.0.1`/`localhost`/`0.0.0.0`) for container reachability.
 2. Module runtime standardization for local images:
-   - `source/modules/EdgeDetection/runtime-module.cfg`: added `[docker]` overrides (`docker.hub=` etc.) so local runs stop pulling `nail04.ece.ucsb.edu:5000/...` and use local tags (`edgedetection:v1.0.0`).
+   - `source/modules/EdgeDetection/runtime-module.cfg`: added `[docker]` overrides (`docker.hub=` etc.) so local runs stop pulling `registry.example.com/...` and use local tags (`edgedetection:v1.0.0`).
    - `source/modules/SimpleUniversalProcess/runtime-module.cfg`: same local override behavior.
 3. Module input/output URI reliability in Docker:
    - `source/modules/EdgeDetection/PythonScriptWrapper.py` and `source/modules/SimpleUniversalProcess/PythonScriptWrapper.py`:

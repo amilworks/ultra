@@ -21,7 +21,7 @@ server {
 #EDIT    root         /path/to/bisque/public;
 
     # Enable SSL 
-    # http://biodev.ece.ucsb.edu/projects/bisquik/wiki/Installation/NginxInstall#HTTPS
+    # https://docs.example.com/bisque/wiki/Installation/NginxInstall#HTTPS
     ssl on;
     ssl_certificate /etc/ssl/localcerts/nginx.pem;
     ssl_certificate_key /etc/ssl/localcerts/nginx.key;

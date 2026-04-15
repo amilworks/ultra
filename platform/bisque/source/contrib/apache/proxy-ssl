@@ -22,6 +22,6 @@
        AddOutputFilterByType SUBSTITUTE;DEFLATE application/xml
        AddOutputFilterByType SUBSTITUTE;DEFLATE text/xml
        AddOutputFilterByType SUBSTITUTE;DEFLATE text/html
-       Substitute       "s,http://localhost:8080/,https://loup.ece.ucsb.edu/,nq"
+       Substitute       "s,http://localhost:8080/,https://bisque.example.com/,nq"
       </Location>
       #############################

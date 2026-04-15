@@ -15,9 +15,9 @@ from optparse import OptionParser
 ############################
 # Config for local installation
 LOGFILE='/tmp/bisque_insert.log'
-BISQUE_HOST='http://bisque.ece.ucsb.edu'
+BISQUE_HOST='https://bisque.example.com'
 BISQUE_ADMIN_PASS='guessme'
-IRODS_HOST='irods://irods.ece.ucsb.edu'
+IRODS_HOST='irods://irods.example.com'
 # End Config 
 
 logging.basicConfig(filename=LOGFILE, level=logging.INFO)

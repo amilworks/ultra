@@ -53,7 +53,7 @@ BQ::WebAccessDialog::WebAccessDialog() {
   webView->page()->settings()->setAttribute(QWebSettings::JavascriptCanOpenWindows, true);
 
   QSettings conf( QSettings::IniFormat, QSettings::UserScope, BQ_ORGANIZATION, BQ_APPLICATION );
-  ui.urlEdit->setText( conf.value( "url", "dough.ece.ucsb.edu" ).toString() );
+  ui.urlEdit->setText( conf.value( "url", "dough.example.com" ).toString() );
   ui.userEdit->setText( conf.value( "user", "" ).toString() );
   ui.passwordEdit->setText( conf.value( "passwd", "" ).toString() );
 

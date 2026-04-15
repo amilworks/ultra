@@ -231,7 +231,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <li><a href="upload-an-image.html#upload-an-image"><strong>Upload an Image</strong></a></li>
 </ul></li>
 <li class="divider"></li>
-<li><a href="https://bisque.ece.ucsb.edu/" target="blank">UCSB BisQue Cloud Platform</a></li>
+<li><a href="https://bisque.example.com/" target="blank">UCSB BisQue Cloud Platform</a></li>
 
 </ul>
 
@@ -296,15 +296,15 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="download-an-array.html#cb6-1" aria-hidden="true" tabindex="-1"></a>bq.init_local(user, pwd, bisque_root<span class="op">=</span>root)</span>
 <span id="cb6-2"><a href="download-an-array.html#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="co"># bq = BQSession().init_local(user, pwd, bisque_root=root)</span></span></code></pre></div>
 <p><strong>Inputs</strong></p>
-<p>If you do not have an account on BisQue, <a href="https://bisque.ece.ucsb.edu/registration//new">make an account here</a>.</p>
+<p>If you do not have an account on BisQue, <a href="https://bisque.example.com/registration//new">make an account here</a>.</p>
 <ul>
 <li><code>USER</code> BisQue Username</li>
 <li><code>PASSWORD</code> BisQue Password</li>
-<li><code>bisque_root</code> “<a href="https://bisque.ece.ucsb.edu" class="uri">https://bisque.ece.ucsb.edu</a>”</li>
+<li><code>bisque_root</code> “<a href="https://bisque.example.com" class="uri">https://bisque.example.com</a>”</li>
 </ul>
 <p><strong>Example.</strong></p>
 <div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="download-an-array.html#cb7-1" aria-hidden="true" tabindex="-1"></a>bq.init_local(user<span class="op">=</span>amil_khan, <span class="cf">pass</span><span class="op">=</span>bisque1234,</span>
-<span id="cb7-2"><a href="download-an-array.html#cb7-2" aria-hidden="true" tabindex="-1"></a>              bisque_root<span class="op">=</span><span class="st">&quot;https://bisque.ece.ucsb.edu&quot;</span>)</span></code></pre></div>
+<span id="cb7-2"><a href="download-an-array.html#cb7-2" aria-hidden="true" tabindex="-1"></a>              bisque_root<span class="op">=</span><span class="st">&quot;https://bisque.example.com&quot;</span>)</span></code></pre></div>
 </div>
 <div id="step-4.-instantiate-the-table-service" class="section level4 unnumbered">
 <h4>STEP 4. Instantiate the <code>table</code> service</h4>
@@ -323,9 +323,9 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 </ul>
 <p><strong>What is the <code>table_uniq</code></strong></p>
 <p>The <code>table_uniq</code> argument comes from how BisQue handles resources. Let’s say you upload an image of a cat. BisQue will automatically assign a unique ID or, <strong>URI</strong>, to that image. Here is an example image:</p>
-<pre><code>https://bisque.ece.ucsb.edu/client_service/view?resource=https://bisque.ece.ucsb.edu/data_service/00-s5b358UmuziTaUqqYtTcPF</code></pre>
+<pre><code>https://bisque.example.com/client_service/view?resource=https://bisque.example.com/data_service/00-s5b358UmuziTaUqqYtTcPF</code></pre>
 <p>The last portion of the url is the URI. This is what you need to use as the input to the <code>table_uniq</code> argument.</p>
-<pre><code>https://bisque.ece.ucsb.edu/data_service/00-s5b358UmuziTaUqqYtTcPF
+<pre><code>https://bisque.example.com/data_service/00-s5b358UmuziTaUqqYtTcPF
                                          ^-----------------------^
                                               COPY TABLE URI</code></pre>
 <p><strong>What is the <code>path</code></strong></p>
@@ -337,7 +337,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <div id="example.-functionalizing-the-boring-stuff-get_table" class="section level4 unnumbered">
 <h4>Example. Functionalizing the Boring Stuff: <code>get_table</code></h4>
 <p>Here we provide a full working example of how to functionalize the entire process. Overall, the structure is the same as the sum of its pieces, but now we can import many arrays into, say, our Jupyter Notebook for simple data processing tasks. You can also extend this example to upload the table back to BisQue once the data preprocessing is done.</p>
-<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="download-an-array.html#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_table(user,pwd, table_PATH, uri<span class="op">=</span><span class="va">None</span>,root<span class="op">=</span><span class="st">&#39;https://bisque.ece.ucsb.edu&#39;</span>):</span>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="download-an-array.html#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_table(user,pwd, table_PATH, uri<span class="op">=</span><span class="va">None</span>,root<span class="op">=</span><span class="st">&#39;https://bisque.example.com&#39;</span>):</span>
 <span id="cb13-2"><a href="download-an-array.html#cb13-2" aria-hidden="true" tabindex="-1"></a>    </span>
 <span id="cb13-3"><a href="download-an-array.html#cb13-3" aria-hidden="true" tabindex="-1"></a>    log <span class="op">=</span> logging.getLogger(<span class="st">&#39;get_table&#39;</span>)</span>
 <span id="cb13-4"><a href="download-an-array.html#cb13-4" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">&quot;Starting Session...&quot;</span>)</span>

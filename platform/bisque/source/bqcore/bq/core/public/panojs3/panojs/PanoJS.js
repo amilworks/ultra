@@ -14,7 +14,7 @@
    @author Dan Allen       <dan.allen@mojavelinux.com>
 
    GSV 3.0 : PanoJS3
-   @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>
+   @author Dmitry Fedorov  <fedorov@example.com>
 
  Images must be precut into tiles:
    a) tilemaker.py python library shipped with GSV 2.0
@@ -28,7 +28,7 @@
 
  Copyright (c) 2005 Michal Migurski <mike-gsv@teczno.com>
                     Dan Allen <dan.allen@mojavelinux.com>
-               2010 Dmitry Fedorov, Center for Bio-Image Informatics <fedorov@ece.ucsb.edu>
+               2010 Dmitry Fedorov, Center for Bio-Image Informatics <fedorov@example.com>
 
  Redistribution and use in source form, with or without modification,
  are permitted provided that the following conditions are met:

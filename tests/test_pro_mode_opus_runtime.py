@@ -224,7 +224,7 @@ def test_pro_mode_gateway_can_use_api_gateway_style_header_auth(tmp_path: Path) 
         llm_base_url="https://global-gateway.example/v1",
         llm_api_key="global-key",
         llm_model="gpt-oss-120b",
-        pro_mode_base_url="https://mpa10fscde.execute-api.us-east-1.amazonaws.com/api",
+        pro_mode_base_url="https://gateway.example/api",
         pro_mode_api_key="gateway-key",
         pro_mode_api_key_header="X-API-Key",
         pro_mode_api_key_prefix="",
@@ -235,7 +235,7 @@ def test_pro_mode_gateway_can_use_api_gateway_style_header_auth(tmp_path: Path) 
 
     model = runtime._build_pro_mode_model()
 
-    assert model.base_url == "https://mpa10fscde.execute-api.us-east-1.amazonaws.com/api"
+    assert model.base_url == "https://gateway.example/api"
     assert model.api_key == "EMPTY"
     assert model.default_headers["X-API-Key"] == "gateway-key"
     assert model.default_headers["anthropic-version"] == "bedrock-2023-05-31"
@@ -620,8 +620,8 @@ def test_strict_tool_workflow_executes_required_upload_tool_when_model_skips_it(
             "results": [
                 {
                     "file": "test-image.png",
-                    "resource_uri": "https://ultra.ece.ucsb.edu/data_service/01-upload",
-                    "client_view_url": "https://ultra.ece.ucsb.edu/client_service/view?resource=https://ultra.ece.ucsb.edu/data_service/01-upload",
+                    "resource_uri": "https://ultra.example.com/data_service/01-upload",
+                    "client_view_url": "https://ultra.example.com/client_service/view?resource=https://ultra.example.com/data_service/01-upload",
                 }
             ],
         }
@@ -682,7 +682,7 @@ def test_strict_tool_workflow_executes_required_search_tool_when_model_skips_it(
                 {
                     "name": "Prairie_Dog_Active_Learning",
                     "resource_type": "dataset",
-                    "client_view_url": "https://ultra.ece.ucsb.edu/client_service/view?resource=https://ultra.ece.ucsb.edu/data_service/00-dataset",
+                    "client_view_url": "https://ultra.example.com/client_service/view?resource=https://ultra.example.com/data_service/00-dataset",
                 }
             ],
             "count": 1,

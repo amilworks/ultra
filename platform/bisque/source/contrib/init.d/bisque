@@ -9,7 +9,7 @@
 # Description:       Start and stop a bisque server
 ### END INIT INFO
 
-# Author: Foo Bar <bisque-dev@bbiodev.ece.ucsb.edu>
+# Author: Foo Bar <bisque-dev@bbiodev.example.com>
 
 # Do NOT "set -e"
 

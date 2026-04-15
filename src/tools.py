@@ -1165,23 +1165,25 @@ def _science_output_root(*parts: str) -> str:
     return _ensure_dir(root)
 
 
-_MEGASEG_DEFAULT_BENCHMARK_ROOT = Path("/Users/macbook/Documents/phd/megaseg_final/benchmark")
+_TOOLS_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = _TOOLS_ROOT.parent
+_MEGASEG_DEFAULT_BENCHMARK_ROOT = _REPO_ROOT / "data" / "models" / "megaseg" / "benchmark"
 _MEGASEG_DEFAULT_CHECKPOINT = _MEGASEG_DEFAULT_BENCHMARK_ROOT / "checkpoints" / "epoch_650.ckpt"
 _MEGASEG_DEFAULT_ALIAS_CHECKPOINT = (
     _MEGASEG_DEFAULT_BENCHMARK_ROOT / "checkpoints" / "megaseg" / "dynunet.ckpt"
 )
-_MEGASEG_DEFAULT_PYTHON = Path("/Users/macbook/Documents/phd/cyto-dl/venv/bin/python")
 
 
 def _resolve_megaseg_runner_script() -> Path:
-    return (Path(__file__).resolve().parent / "science" / "megaseg_runner.py").resolve()
+    return (_TOOLS_ROOT / "science" / "megaseg_runner.py").resolve()
 
 
 def _resolve_megaseg_python() -> str | None:
+    active_venv = str(os.getenv("VIRTUAL_ENV") or "").strip()
     candidates = [
         str(os.getenv("MEGASEG_PYTHON") or "").strip(),
         str(os.getenv("CYTODL_PYTHON") or "").strip(),
-        str(_MEGASEG_DEFAULT_PYTHON),
+        str(Path(active_venv).expanduser() / "bin" / "python") if active_venv else "",
         str(Path(sys.executable).expanduser().resolve()),
     ]
     for candidate in candidates:

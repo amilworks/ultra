@@ -7,14 +7,14 @@ DAEMON_LIST = {{getv "/condor/daemons"}}
 ##  When something goes wrong with condor at your site, who should get
 ##  the email?
 
-CONDOR_ADMIN          = admin@biodev.ece.ucsb.edu
-#UID_DOMAIN            = ece.ucsb.edu
+CONDOR_ADMIN          = admin@biodev.example.com
+#UID_DOMAIN            = example.com
 #TRUST_UID_DOMAIN      = TRUE
 #SOFT_UID_DOMAIN       = TRUE
-#FILESYSTEM_DOMAIN     = barrel.ece.ucsb.edu
+#FILESYSTEM_DOMAIN     = storage.example.com
 ##  Do you want to use NFS for file access instead of remote system calls
-ALLOW_READ  = $(ALLOW_READ), 172.*, 10.*, 128.111.*, *.ece.ucsb.edu, *.cs.ucsb.edu
-ALLOW_WRITE = $(ALLOW_WRITE), 172.*, 10.*, 128.111.*, *.ece.ucsb.edu, *.cs.ucsb.edu
+ALLOW_READ  = $(ALLOW_READ), 172.*, 10.*, 128.111.*, *.example.com, *.example.org
+ALLOW_WRITE = $(ALLOW_WRITE), 172.*, 10.*, 128.111.*, *.example.com, *.example.org
 #ALLOW_ADMINISTRATOR   = 172.*, 10.*,128.111.*
 #ALLOW_CONFIG          = 172.*,10.*,128.111.*
 ALLOW_NEGOTIATOR      = 172.*, 10.*, 128.111.*

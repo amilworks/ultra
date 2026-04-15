@@ -471,7 +471,7 @@ class Settings(BaseSettings):
         default=None, description="OpenAI API key (optional for vLLM)"
     )
     openai_base_url: str = Field(
-        default="http://vrl-h200.ece.ucsb.edu:8000/v1",
+        default="http://localhost:8001/v1",
         description="OpenAI API base URL or vLLM endpoint",
     )
     openai_model: str = Field(default="gpt-oss-120b", description="Model name")
@@ -487,7 +487,7 @@ class Settings(BaseSettings):
     )
 
     # BisQue settings
-    bisque_root: str = Field(default="https://bisque.ece.ucsb.edu", description="BisQue root URL")
+    bisque_root: str = Field(default="http://localhost:8080", description="BisQue root URL")
     bisque_user: str | None = Field(default=None, description="BisQue username")
     bisque_password: str | None = Field(default=None, description="BisQue password")
     bisque_auth_mode: Literal["local", "oidc", "dual"] = Field(

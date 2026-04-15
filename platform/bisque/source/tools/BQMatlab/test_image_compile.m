@@ -1,4 +1,4 @@
-imurl = 'http://bisque.ece.ucsb.edu/data_service/image/161855';
+imurl = 'https://bisque.example.com/data_service/image/161855';
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % using bq.Image

@@ -3,7 +3,7 @@
   <http://www.bioimage.ucsb.edu/downloads/Bisque%20Database>
   
   GSV 3.0 : PanoJS3
-  @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>   
+  @author Dmitry Fedorov  <fedorov@example.com>
   
   Copyright (c) 2010 Dmitry Fedorov, Center for Bio-Image Informatics
 
@@ -94,4 +94,3 @@ BisqueISPyramid.prototype.tile_filename = function( level, x_coordinate, y_coord
     var y = y_coordinate;
     return 'tile=' + l + ',' + x + ',' + y + ',' + this.tilesize;
 }
-

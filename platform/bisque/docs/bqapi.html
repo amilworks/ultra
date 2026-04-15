@@ -231,7 +231,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <li><a href="upload-an-image.html#upload-an-image"><strong>Upload an Image</strong></a></li>
 </ul></li>
 <li class="divider"></li>
-<li><a href="https://bisque.ece.ucsb.edu/" target="blank">UCSB BisQue Cloud Platform</a></li>
+<li><a href="https://bisque.example.com/" target="blank">UCSB BisQue Cloud Platform</a></li>
 
 </ul>
 
@@ -254,7 +254,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <h1><span class="header-section-number">3</span> BQAPI</h1>
 <div id="pip-install" class="section level4 unnumbered">
 <h4>PIP Install</h4>
-<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="bqapi.html#cb1-1" aria-hidden="true" tabindex="-1"></a>pip install <span class="op">-</span>i https:<span class="op">//</span>biodev.ece.ucsb.edu<span class="op">/</span>py<span class="op">/</span>bisque<span class="op">/</span>prod<span class="op">/+</span>simple bisque_api</span></code></pre></div>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="bqapi.html#cb1-1" aria-hidden="true" tabindex="-1"></a>pip install <span class="op">-</span>i https:<span class="op">//</span>biodev.example.com<span class="op">/</span>py<span class="op">/</span>bisque<span class="op">/</span>prod<span class="op">/+</span>simple bisque_api</span></code></pre></div>
 <hr />
 <p>BQAPI provides bisque users with a means to extract features from resources using the feature service. Below is information on the Python API and a few example on how to use it.</p>
 <blockquote>
@@ -286,13 +286,13 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <span id="cb2-3"><a href="bqapi.html#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> bqapi.bqfeature <span class="im">import</span> Feature, FeatureResource</span>
 <span id="cb2-4"><a href="bqapi.html#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-5"><a href="bqapi.html#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="co"># initialize local session</span></span>
-<span id="cb2-6"><a href="bqapi.html#cb2-6" aria-hidden="true" tabindex="-1"></a>session <span class="op">=</span> BQSession().init_local(user, pwd, bisque_root<span class="op">=</span><span class="st">&#39;http://bisque.ece.ucsb.edu&#39;</span>) </span>
+<span id="cb2-6"><a href="bqapi.html#cb2-6" aria-hidden="true" tabindex="-1"></a>session <span class="op">=</span> BQSession().init_local(user, pwd, bisque_root<span class="op">=</span><span class="st">&#39;https://bisque.example.com&#39;</span>) </span>
 <span id="cb2-7"><a href="bqapi.html#cb2-7" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-8"><a href="bqapi.html#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="co">#post image to bisque and get the response</span></span>
 <span id="cb2-9"><a href="bqapi.html#cb2-9" aria-hidden="true" tabindex="-1"></a>response_xml <span class="op">=</span> session.postblob(<span class="st">&#39;myimage.jpg&#39;</span>) </span>
 <span id="cb2-10"><a href="bqapi.html#cb2-10" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-11"><a href="bqapi.html#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="co">#construct resource list of the image just uploaded</span></span>
-<span id="cb2-12"><a href="bqapi.html#cb2-12" aria-hidden="true" tabindex="-1"></a>resource_list <span class="op">=</span> [FeatureResource(image<span class="op">=</span><span class="st">&#39;http://bisque.ece.ucsb.edu/image_service/</span><span class="sc">%s</span><span class="st">&#39;</span> <span class="op">%</span> response_xml.attrib[<span class="st">&#39;resource_uniq&#39;</span>])]</span>
+<span id="cb2-12"><a href="bqapi.html#cb2-12" aria-hidden="true" tabindex="-1"></a>resource_list <span class="op">=</span> [FeatureResource(image<span class="op">=</span><span class="st">&#39;https://bisque.example.com/image_service/</span><span class="sc">%s</span><span class="st">&#39;</span> <span class="op">%</span> response_xml.attrib[<span class="st">&#39;resource_uniq&#39;</span>])]</span>
 <span id="cb2-13"><a href="bqapi.html#cb2-13" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-14"><a href="bqapi.html#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="co">#fetch features on image resource</span></span>
 <span id="cb2-15"><a href="bqapi.html#cb2-15" aria-hidden="true" tabindex="-1"></a>pytables_response <span class="op">=</span> Feature().fetch(session, <span class="st">&#39;HTD&#39;</span>, resource_list)</span>

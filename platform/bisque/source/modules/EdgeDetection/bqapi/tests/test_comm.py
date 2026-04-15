@@ -21,8 +21,8 @@ pytestmark = pytest.mark.functional
 def test_prepare_url_1(server):
     """
     """
-    check_url = 'http://bisque.ece.ucsb.edu/image/00-123456789?remap=gray&format=tiff'
-    url = 'http://bisque.ece.ucsb.edu/image/00-123456789'
+    check_url = 'https://bisque.example.com/image/00-123456789?remap=gray&format=tiff'
+    url = 'https://bisque.example.com/image/00-123456789'
     odict = OrderedDict([('remap','gray'),('format','tiff')])
     url = server.prepare_url(url, odict=odict)
     assert url == check_url
@@ -31,8 +31,8 @@ def test_prepare_url_1(server):
 def test_prepare_url_2(server):
     """
     """
-    check_url = 'http://bisque.ece.ucsb.edu/image/00-123456789?remap=gray&format=tiff'
-    url = 'http://bisque.ece.ucsb.edu/image/00-123456789'
+    check_url = 'https://bisque.example.com/image/00-123456789?remap=gray&format=tiff'
+    url = 'https://bisque.example.com/image/00-123456789'
     url = server.prepare_url(url, remap='gray', format='tiff')
     assert url == check_url
 
@@ -40,8 +40,8 @@ def test_prepare_url_2(server):
 def test_prepare_url_3(server):
     """
     """
-    check_url = 'http://bisque.ece.ucsb.edu/image/00-123456789?format=tiff&remap=gray'
-    url = 'http://bisque.ece.ucsb.edu/image/00-123456789'
+    check_url = 'https://bisque.example.com/image/00-123456789?format=tiff&remap=gray'
+    url = 'https://bisque.example.com/image/00-123456789'
     odict = OrderedDict([('remap','gray')])
     url = server.prepare_url(url, odict=odict, format='tiff')
     assert url == check_url

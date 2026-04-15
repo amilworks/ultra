@@ -3163,6 +3163,7 @@ def create_app() -> FastAPI:
                 "Only run segmentation/detection/depth when the user explicitly asks for those analyses. "
                 "Only use combined segmentation+evaluation workflows when label/ground-truth mask files are actually available. "
                 "For segmentation follow-ups, prefer quantitative outputs such as connected components, morphology, overlap, distance, or tabular summaries via execute_python_job instead of prose-only summaries. "
+                "If the user explicitly asks for Megaseg or DynUNet microscopy inference, call segment_image_megaseg. "
                 "If the user asks for automatic segmentation, call segment_image_sam2 first. "
                 "Only use segment_image_sam3 when the user explicitly asks for SAM3 or concept-prompt/region-guided segmentation. "
                 "If the user asks for depth estimation, call estimate_depth_pro first; "
@@ -3796,6 +3797,8 @@ def create_app() -> FastAPI:
         normalized = _normalize_search_text(value)
         if not normalized:
             return None
+        if any(token in normalized for token in ("segment_image_megaseg", "megaseg", "dynunet")):
+            return "segment_image_megaseg"
         if any(token in normalized for token in ("segment_image_sam3", "sam3")):
             return "segment_image_sam3"
         if any(
@@ -3831,7 +3834,9 @@ def create_app() -> FastAPI:
         if not normalized_prompt:
             return []
 
-        if re.search(r"\b(segment_image_sam3|sam3)\b", normalized_prompt):
+        if re.search(r"\b(segment_image_megaseg|megaseg|dynunet)\b", normalized_prompt):
+            selected.append("segment_image_megaseg")
+        elif re.search(r"\b(segment_image_sam3|sam3)\b", normalized_prompt):
             selected.append("segment_image_sam3")
         elif re.search(r"\b(segment_image_sam2|medsam2|medsam|segment|segmentation|mask|sam2|sam)\b", normalized_prompt):
             selected.append("segment_image_sam2")

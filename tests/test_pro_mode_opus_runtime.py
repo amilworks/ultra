@@ -564,6 +564,38 @@ def test_explicit_bisque_upload_turn_does_not_trigger_iterative_research_program
     )
 
 
+def test_megaseg_request_prefers_megaseg_tool_plan(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    plan = runtime._build_pro_mode_tool_plan(
+        user_text="Use only MegaSeg to segment this microscopy image and quantify the mask.",
+        uploaded_files=["/tmp/test-image.ome.tiff"],
+        selected_tool_names=[],
+        selection_context=None,
+        inferred_tool_names=["segment_image_sam2", "quantify_segmentation_masks"],
+        prior_pro_mode_state=None,
+    )
+
+    assert plan is not None
+    assert plan.category == "segmentation"
+    assert plan.selected_tool_names == ["segment_image_megaseg", "quantify_segmentation_masks"]
+    assert plan.strict_validation is True
+
+
+def test_megaseg_request_requires_megaseg_in_strict_tool_workflow(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    required, strict = runtime._tool_workflow_required_tools(
+        user_text="Run MegaSeg on this image and quantify the result.",
+        uploaded_files=["/tmp/test-image.ome.tiff"],
+        selection_context=None,
+        selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks", "segment_image_sam2"],
+    )
+
+    assert strict is True
+    assert required == ["segment_image_megaseg", "quantify_segmentation_masks"]
+
+
 def test_strict_tool_workflow_executes_required_upload_tool_when_model_skips_it(
     tmp_path: Path,
     monkeypatch,

@@ -52,6 +52,7 @@ from src.tooling.domains.chemistry import (
 from src.tooling.domains.vision import (
     BIOIO_LOAD_IMAGE_TOOL,
     DEPTH_PRO_ESTIMATE_TOOL,
+    MEGASEG_SEGMENT_TOOL,
     PREDICTION_STABILITY_TOOL,
     SAM3_SEGMENT_TOOL,
     SEGMENT_EVALUATE_BATCH_TOOL,
@@ -86,6 +87,7 @@ __all__ = [
     "SAM2_PROMPT_TOOL",
     "SAM2_VIDEO_TOOL",
     "SAM3_SEGMENT_TOOL",
+    "MEGASEG_SEGMENT_TOOL",
     "DEPTH_PRO_ESTIMATE_TOOL",
     "SEGMENT_EVALUATE_BATCH_TOOL",
     "SEGMENTATION_EVAL_TOOL",

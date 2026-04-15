@@ -432,6 +432,77 @@ DEPTH_PRO_ESTIMATE_TOOL = {
 }
 
 
+MEGASEG_SEGMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "segment_image_megaseg",
+        "description": (
+            "Run Megaseg DynUNet inference on multichannel microscopy images. "
+            "Use the structure channel for segmentation, optionally include a nucleus channel for context, "
+            "and return binary mask artifacts, probability volumes, overlays, quantitative summaries, and an aggregate report."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_paths": {
+                    "type": "array",
+                    "description": "List of microscopy image/volume paths to segment with Megaseg.",
+                    "items": {"type": "string"},
+                },
+                "structure_channel": {
+                    "type": "integer",
+                    "description": "Structure channel number supplied to Megaseg. Defaults to channel 4.",
+                    "default": 4,
+                    "minimum": 0,
+                },
+                "nucleus_channel": {
+                    "type": "integer",
+                    "description": "Optional nucleus channel number used for overlays and intensity context. Defaults to channel 6.",
+                    "default": 6,
+                    "minimum": 0,
+                },
+                "channel_index_base": {
+                    "type": "integer",
+                    "description": "Whether channel numbering is 1-based or 0-based.",
+                    "enum": [0, 1],
+                    "default": 1,
+                },
+                "mask_threshold": {
+                    "type": "number",
+                    "description": "Probability threshold used to convert Megaseg probabilities into a binary mask.",
+                    "default": 0.5,
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+                "save_visualizations": {
+                    "type": "boolean",
+                    "description": "Whether to save overlay previews (mid-Z and MIP). Default: true.",
+                    "default": True,
+                },
+                "generate_report": {
+                    "type": "boolean",
+                    "description": "Whether to save an aggregate Markdown report and CSV summary. Default: true.",
+                    "default": True,
+                },
+                "device": {
+                    "type": "string",
+                    "description": "Execution device override such as cpu, cuda, cuda:0, or mps. Default: auto.",
+                },
+                "checkpoint_path": {
+                    "type": "string",
+                    "description": "Optional Megaseg checkpoint override. Defaults to the configured local benchmark checkpoint.",
+                },
+                "structure_name": {
+                    "type": "string",
+                    "description": "Optional label used in technical summaries, for example 'NPM1 structure' or 'Golgi'.",
+                },
+            },
+            "required": ["file_paths"],
+        },
+    },
+}
+
+
 SEGMENTATION_EVAL_TOOL = {
     "type": "function",
     "function": {
@@ -836,6 +907,7 @@ VISION_TOOL_SCHEMAS = [
     SAM2_PROMPT_TOOL,
     SAM2_VIDEO_TOOL,
     SAM3_SEGMENT_TOOL,
+    MEGASEG_SEGMENT_TOOL,
     DEPTH_PRO_ESTIMATE_TOOL,
     SEGMENTATION_EVAL_TOOL,
     SEGMENT_EVALUATE_BATCH_TOOL,
@@ -853,6 +925,7 @@ __all__ = [
     "SAM2_PROMPT_TOOL",
     "SAM2_VIDEO_TOOL",
     "SAM3_SEGMENT_TOOL",
+    "MEGASEG_SEGMENT_TOOL",
     "DEPTH_PRO_ESTIMATE_TOOL",
     "SEGMENTATION_EVAL_TOOL",
     "SEGMENT_EVALUATE_BATCH_TOOL",

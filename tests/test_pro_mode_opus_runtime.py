@@ -596,6 +596,33 @@ def test_megaseg_request_requires_megaseg_in_strict_tool_workflow(tmp_path: Path
     assert required == ["segment_image_megaseg", "quantify_segmentation_masks"]
 
 
+def test_megaseg_strict_workflow_requires_quantification_completion(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    assert (
+        runtime._tool_workflow_satisfied(
+            tool_invocations=[
+                {"tool": "segment_image_megaseg", "status": "completed"},
+            ],
+            required_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            strict_validation=True,
+        )
+        is False
+    )
+
+    assert (
+        runtime._tool_workflow_satisfied(
+            tool_invocations=[
+                {"tool": "segment_image_megaseg", "status": "completed"},
+                {"tool": "quantify_segmentation_masks", "status": "completed"},
+            ],
+            required_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            strict_validation=True,
+        )
+        is True
+    )
+
+
 def test_strict_tool_workflow_executes_required_upload_tool_when_model_skips_it(
     tmp_path: Path,
     monkeypatch,

@@ -2570,7 +2570,7 @@ class AgnoChatRuntime:
     @staticmethod
     def _is_segmentation_request(user_text: str) -> bool:
         lowered = str(user_text or "").strip().lower()
-        return bool(re.search(r"\b(segment|segmentation|sam2|sam3|mask)\b", lowered))
+        return bool(re.search(r"\b(segment|segmentation|sam2|sam3|megaseg|dynunet|mask)\b", lowered))
 
     @staticmethod
     def _prefers_megaseg_segmentation(user_text: str) -> bool:
@@ -4187,21 +4187,7 @@ class AgnoChatRuntime:
         if not required:
             return bool(used_tool_names) or not strict_validation
         if strict_validation:
-            if "codegen_python_plan" in required and "execute_python_job" in required:
-                return {
-                    "codegen_python_plan",
-                    "execute_python_job",
-                }.issubset(used_tool_names)
-            if "estimate_depth_pro" in required and (
-                "segment_image_sam2" in required or "segment_image_sam3" in required
-            ):
-                return set(required).issubset(used_tool_names)
-            if (
-                "quantify_segmentation_masks" in required
-                and ("segment_image_sam2" in required or "segment_image_sam3" in required)
-            ):
-                return set(required).issubset(used_tool_names)
-            return any(tool_name in used_tool_names for tool_name in required)
+            return set(required).issubset(used_tool_names)
         return bool(used_tool_names.intersection(required))
 
     def _stabilize_pro_mode_intake_decision(

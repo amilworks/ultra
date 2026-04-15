@@ -348,19 +348,19 @@ sudo ULTRA_RELEASE_ROOT=/srv/ultra ./scripts/deploy_ultra_frontend.sh <git-sha>
 
 ## GitHub Actions
 
-Automatic deploys are split by concern:
+GitHub Actions are currently split into lightweight verification plus manual platform operations:
 
 - `deploy-ultra-frontend.yml`
-  - triggers on `frontend/**`
-  - ships static assets only
+  - triggers on frontend changes for pushes and pull requests
+  - installs dependencies and builds the frontend
 - `deploy-ultra-backend.yml`
-  - triggers on `src/**`, `pyproject.toml`, `uv.lock`, and backend deploy scripts
-  - ships the backend release only
+  - triggers on backend changes for pushes and pull requests
+  - syncs the Python environment, compiles key modules, and runs focused backend tests
 - `deploy-platform-manual.yml`
-  - runs only when you dispatch it manually
+  - runs only when you dispatch it manually or trigger `repository_dispatch`
   - syncs BisQue/Keycloak/platform changes and runs the platform deploy script
 
-Normal pushes to `main` do not redeploy BisQue. The platform workflow targets the platform node explicitly and is manual by design.
+Normal pushes do not auto-roll production anymore. App deploys happen manually from an operator shell, and the platform workflow targets the platform node explicitly when you choose to run it.
 
 ## GitHub Secrets And Variables
 
@@ -368,10 +368,11 @@ Set these in GitHub:
 
 ### Secrets
 
-- `DEPLOY_SSH_PRIVATE_KEY`
-- `DEPLOY_SSH_HOST`
-- `DEPLOY_SSH_USER`
-- `DEPLOY_SSH_KNOWN_HOSTS`
+- `PLATFORM_DEPLOY_SSH_PRIVATE_KEY`
+- `PLATFORM_DEPLOY_SSH_HOST`
+- `PLATFORM_DEPLOY_SSH_USER`
+- `PLATFORM_DEPLOY_SSH_KNOWN_HOSTS`
+- `PLATFORM_DEPLOY_SSH_JUMP_HOST`
 
 ### Variables
 

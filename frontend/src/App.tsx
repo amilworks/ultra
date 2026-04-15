@@ -93,6 +93,11 @@ import {
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { formatBytes } from "./lib/format";
+import {
+  DEFAULT_THINKING_TEXT,
+  getPhaseThinkingText,
+  getToolStatusThinkingText,
+} from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
 import type {
   AdminIssueRecord,
@@ -1809,7 +1814,7 @@ const ConversationMessageRow = memo(
     if (!isAssistant) {
       return (
         <Message
-          className="chat-width-frame mx-auto w-full px-6 justify-end"
+          className="chat-width-frame mx-auto w-full justify-end px-4 sm:px-6"
         >
           <div className="group flex w-full flex-col items-end gap-1">
             <MessageContent className="max-w-full bg-muted text-primary rounded-3xl px-5 py-2.5">
@@ -1874,7 +1879,7 @@ const ConversationMessageRow = memo(
 
     return (
       <Message
-        className="chat-width-frame mx-auto w-full px-6 justify-start"
+        className="chat-width-frame mx-auto w-full justify-start px-4 sm:px-6"
       >
         <div className="group flex w-full flex-1 flex-col gap-2">
           {thinkingBarText ? (
@@ -2314,7 +2319,7 @@ const ConversationTranscript = memo(
   }: ConversationTranscriptProps) {
     return (
       <ChatContainerContent
-        className="space-y-0 px-6 py-14"
+        className="space-y-0 px-4 py-8 sm:px-6 sm:py-14"
         scrollClassName="h-full min-h-0 overscroll-y-contain"
       >
         {!conversationHydrated ? (
@@ -5540,72 +5545,43 @@ const thinkingBarTextForRunEvents = (
     const phase = String(payload.phase || "").trim().toLowerCase();
     const status = String(payload.status || "").trim().toLowerCase();
     if (eventType === "memory.retrieved" || phase === "memory") {
-      return "Loading scientific memory";
+      return getPhaseThinkingText("memory") ?? DEFAULT_THINKING_TEXT;
     }
     if (eventType === "knowledge.retrieved" || phase === "knowledge") {
-      return "Loading scientific context";
+      return getPhaseThinkingText("knowledge") ?? DEFAULT_THINKING_TEXT;
     }
     if (eventType === "learning.promoted" || eventType === "learning.skipped" || phase === "learning") {
-      return "Updating reusable notes";
+      return getPhaseThinkingText("learning") ?? DEFAULT_THINKING_TEXT;
     }
-    if (eventType === "tool_event") {
-      if (status === "started") {
-        return "Running tools";
-      }
-      if (status === "failed") {
-        return "Recovering from a tool failure";
-      }
-      if (status === "completed") {
-        return "Integrating tool results";
-      }
+    if (
+      eventType === "tool_event" ||
+      eventType === "pro_mode.tool_requested" ||
+      eventType === "pro_mode.tool_completed"
+    ) {
+      const toolStatus =
+        status ||
+        (eventType === "pro_mode.tool_requested"
+          ? "started"
+          : eventType === "pro_mode.tool_completed"
+            ? "completed"
+            : "");
+      return getToolStatusThinkingText(toolStatus) ?? DEFAULT_THINKING_TEXT;
     }
-    if (eventType !== "graph_event") {
+    if (
+      eventType !== "graph_event" &&
+      eventType !== "pro_mode.phase_started" &&
+      eventType !== "pro_mode.phase_completed" &&
+      eventType !== "pro_mode.convergence_updated" &&
+      eventType !== "pro_mode.verifier_result"
+    ) {
       continue;
     }
-    if (phase === "preflight") {
-      return "Preparing request";
-    }
-    if (phase === "private_memos") {
-      return "Developing private council views";
-    }
-    if (phase === "targeted_critiques") {
-      return "Cross-examining council views";
-    }
-    if (phase === "calculator_evidence") {
-      return "Running calculator checks";
-    }
-    if (phase === "reconciliation") {
-      return "Reconciling council views";
-    }
-    if (phase === "route" || phase === "deliberation" || phase === "triage") {
-      return "Choosing execution path";
-    }
-    if (phase === "solve") {
-      return "Generating answer";
-    }
-    if (phase === "model_request") {
-      return "Requesting model response";
-    }
-    if (phase === "reasoning") {
-      return "Reasoning through the problem";
-    }
-    if (phase === "verify") {
-      return "Checking result";
-    }
-    if (phase === "verifier" || phase === "verifier_retry") {
-      return "Verifying synthesis";
-    }
-    if (phase === "code_verify") {
-      return "Verifying with code";
-    }
-    if (phase === "approval") {
-      return "Waiting for approval";
-    }
-    if (phase === "synthesize" || phase === "finalize") {
-      return "Finalizing response";
+    const phaseThinkingText = getPhaseThinkingText(phase);
+    if (phaseThinkingText) {
+      return phaseThinkingText;
     }
   }
-  return isStreaming ? "Thinking" : null;
+  return isStreaming ? DEFAULT_THINKING_TEXT : null;
 };
 
 const summaryModeLabelForMessage = (message: UiMessage): string | null => {
@@ -11434,19 +11410,21 @@ export function App() {
       </Sidebar>
 
       <SidebarInset ref={sidebarInsetRef}>
-        <main className="flex h-screen flex-col overflow-hidden">
-          <header className="bg-background z-10 flex h-16 w-full shrink-0 items-center gap-2 border-b px-4">
-            <SidebarTrigger className="-ml-1" />
-            <div className="app-header-title text-foreground flex items-center gap-2">
-              <span>{headerTitle}</span>
-              {activePanel === "chat" && authMode === "guest" ? (
-                <Badge variant="secondary">Guest</Badge>
-              ) : null}
-              {activePanel === "chat" && activeSending ? (
-                <RunningStatusPill />
-              ) : null}
+        <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
+          <header className="app-shell-header bg-background z-10 flex w-full shrink-0 items-center gap-2 border-b px-3 sm:px-4">
+            <SidebarTrigger className="-ml-1 shrink-0" />
+            <div className="app-header-title text-foreground flex min-w-0 flex-1 items-center gap-2">
+              <span className="app-header-title-text">{headerTitle}</span>
+              <div className="app-header-meta">
+                {activePanel === "chat" && authMode === "guest" ? (
+                  <Badge variant="secondary">Guest</Badge>
+                ) : null}
+                {activePanel === "chat" && activeSending ? (
+                  <RunningStatusPill className="app-header-running" />
+                ) : null}
+              </div>
             </div>
-            <div className="ml-auto">
+            <div className="ml-auto shrink-0">
               <AboutBisqueHoverCard />
             </div>
           </header>
@@ -11570,7 +11548,7 @@ export function App() {
                   actions={transcriptActions}
                 />
                 <ChatContainerScrollAnchor />
-                <div className="absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-5">
+                <div className="app-scroll-button-shell absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-3 sm:px-5">
                   <div className="chat-width-frame flex justify-end">
                     <ScrollButton
                       aria-label="Jump to latest"
@@ -11583,7 +11561,7 @@ export function App() {
               </ChatContainerRoot>
             </div>
 
-          <div className="bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
+          <div className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
                 <SystemMessage variant="error" fill className="mb-3">
@@ -11915,7 +11893,7 @@ export function App() {
                               variant="ghost"
                               size="icon"
                               aria-label="Attach files"
-                              className="composer-attach-button size-9 rounded-full"
+                              className="composer-attach-button size-11 rounded-full sm:size-9"
                               disabled={!activeConversationHydrated}
                             >
                               <Plus size={18} />
@@ -11951,7 +11929,7 @@ export function App() {
                             onClick={stopActiveConversation}
                             aria-label="Stop response"
                             title="Stop response"
-                            className="size-9 rounded-full"
+                            className="size-11 rounded-full sm:size-9"
                           >
                             <Square className="size-3.5 fill-current" />
                           </Button>
@@ -11962,7 +11940,7 @@ export function App() {
                             disabled={!activeConversationHydrated || !activePrompt.trim() || slashMenuOpen}
                             aria-label="Send message"
                             title="Send message"
-                            className="size-9 rounded-full"
+                            className="size-11 rounded-full sm:size-9"
                           >
                             <ArrowUp size={18} />
                           </Button>

@@ -17,7 +17,15 @@ if [ ! -d "$RELEASE_DIR" ]; then
 fi
 
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
-nginx -t
-systemctl reload nginx
+
+if command -v nginx >/dev/null 2>&1; then
+  nginx -t
+  systemctl reload nginx
+elif command -v caddy >/dev/null 2>&1; then
+  caddy validate --config /etc/caddy/Caddyfile
+  systemctl reload caddy
+else
+  echo "No supported frontend web server found; updated $CURRENT_LINK only" >&2
+fi
 
 echo "Frontend deploy complete for $RELEASE_SHA"

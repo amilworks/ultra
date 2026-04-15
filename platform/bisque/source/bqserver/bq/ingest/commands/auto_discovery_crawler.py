@@ -227,7 +227,7 @@ def main():
     config = read_config_file(config)
 
     if "bisque_url" not in config:
-        config["bisque_url"] = "http://dough.ece.ucsb.edu"
+        config["bisque_url"] = "http://localhost:8080"
     
     if "access_key_id" not in config or "secret_access_key" not in config or "bisque_user" not in config or "bisque_pw" not in config:
         usage()

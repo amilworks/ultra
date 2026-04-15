@@ -212,7 +212,7 @@ RUNTIME_CFG = None
 
 PYTHON = sys.executable
 EXT_SERVER = (
-    # "https://vat.ece.ucsb.edu/binaries/depot/"  # EXTERNAL host server DIRS['depot']
+    # "https://vat.example.com/binaries/depot/"  # EXTERNAL host server DIRS['depot']
     "https://files.wskoly.xyz/binaries/depot/" # !!! temporary added to build and debug faster
 )
 
@@ -720,7 +720,7 @@ DOCKER_QUESTIONS = [
     (
         "docker.hub",
         "A docker image repository to store locally built images",
-        "biodev.ece.ucsb.edu:5000",
+        "registry.example.com",
     ),
     (
         "docker.hub.user",
@@ -1075,7 +1075,7 @@ def install_driver(DBURL):
                 )
                 print("are not available. Please check the Bisque Wiki")
                 print(
-                    "http://biodev.ece.ucsb.edu/projects/bisquik/wiki/AdvancedInstalls"
+                    "https://docs.example.com/bisque/advanced-installs"
                 )
 
                 log.exception("Failed to install package %s.", str(ei_drname))
@@ -1392,7 +1392,7 @@ def install_matlabwrap(params):
 
     Please visit for more information:
 
-    http://biodev.ece.ucsb.edu/projects/bisquik/wiki/RequiredAndSuggestedSoftware
+    https://docs.example.com/bisque/requirements
 
     """
     )
@@ -1972,7 +1972,7 @@ def install_server_defaults(params, runtime_params):
         getanswer(
             "Do you want to create new server configuations",
             "Y",
-            "Use an editor to edit the server section (see http://biodev.ece.ucsb.edu/projects/bisquik/wiki/Installation/ParsingSiteCfg )",
+            "Use an editor to edit the server section (see https://docs.example.com/bisque/site-config )",
         )
         == "Y"
     ):
@@ -2090,7 +2090,7 @@ def install_proxy(params, runtime_params):
         print(
             "See site.cfg comments and contrib/apache/proxy-{http,ssl} "
             "for details. Also see the website "
-            "http://biodev.ece.ucsb.edu/projects/bisquik/wiki/AdvancedInstalls"
+            "https://docs.example.com/bisque/advanced-installs"
         )
     return params, runtime_params
 
@@ -2157,7 +2157,7 @@ def check_condor(params, runtime_params, cfg=None):
         but please check that this is operating correctly for your
         installation
 
-        Please check the wiki at biodev.ece.ucsb.edu/projects/bisquik/wiki/AdvancedInstalls#CondorConfiguration
+        Please check the wiki at biodev.example.com/projects/bisquik/wiki/AdvancedInstalls#CondorConfiguration
         """
         )
 
@@ -2887,7 +2887,7 @@ def install_imgcnv():
     if not os.path.exists(filename_zip):
         print(
             """No pre-compiled version of imgcnv exists for your system
-        Please visit biodev.ece.ucsb.edu/projects/imgcnv
+        Please visit biodev.example.com/projects/imgcnv
         or visit our mailing list https://groups.google.com/forum/#!forum/bisque-bioimage
         for help"""
         )
@@ -3403,7 +3403,7 @@ def send_installation_report(params):
 
     try:
         msg = mailer.Message(
-            sender_email, "bisque-install@biodev.ece.ucsb.edu", "Installation report"
+            sender_email, "bisque-install@biodev.example.com", "Installation report"
         )
 
         msg.plain = "\n-----------\n".join(parts)
@@ -3414,13 +3414,13 @@ def send_installation_report(params):
         print(text)
         print("----------------------------------------")
         print(
-            "Please send your installation log to the bisque-help@biodev.ece.ucsb.edu"
+            "Please send your installation log to the bisque-help@biodev.example.com"
         )
 
     print(
         """Please join the bisque mailing list at:
     User Group:    http://groups.google.com/group/bisque-bioimage
-    Developer :    http://biodev.ece.ucsb.edu/cgi-bin/mailman/listinfo/bisque-dev
+    Developer :    https://community.example.com/bisque-dev
     """
     )
 

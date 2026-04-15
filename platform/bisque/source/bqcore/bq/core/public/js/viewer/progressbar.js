@@ -1,7 +1,7 @@
 /*******************************************************************************
   ProgressBar - shows progress of executing actions
   
-  @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>   
+  @author Dmitry Fedorov  <fedorov@example.com>
   
   Copyright (c) 2011 Dmitry Fedorov, Center for Bio-Image Informatics
 
@@ -55,4 +55,3 @@ ProgressBar.prototype.end = function ( o ) {
     this.p = null;
   }
 }
-

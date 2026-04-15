@@ -316,7 +316,7 @@ class ResourceAuth(Resource):
             delauth = _aclelem (resource, user, acl)
             resource_acl (resource, delauth, user, acl, action="delete")
 
-    # <auth action="read" email="kkvilekval+12@gmail.com" user="http://loup.ece.ucsb.edu:8888/data_service/00-B4AJtjWbBbuiiQSZH9hTPY"/>
+    # <auth action="read" email="kkvilekval+12@gmail.com" user="https://bisque.example.com:8888/data_service/00-B4AJtjWbBbuiiQSZH9hTPY"/>
     def new(self, factory,  xml, notify=True, **kw):
         'Create/Modify resource auth records'
         response = etree.Element('resource', uri=request.url)

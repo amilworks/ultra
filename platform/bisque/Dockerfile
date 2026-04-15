@@ -306,14 +306,14 @@ COPY boot/ /builder/boot-scripts.d/
 ########################################################################################
 
 RUN /builder/virtualenv.sh
-# ENV PY_INDEX=https://vat.ece.ucsb.edu/py/bisque/xenial/+simple
+# ENV PY_INDEX=https://vat.example.com/py/bisque/xenial/+simple
 
 # Set custom Python package index and configure pip
-# ENV PY_INDEX=https://vat.ece.ucsb.edu/py/bisque/xenial/+simple
+# ENV PY_INDEX=https://vat.example.com/py/bisque/xenial/+simple
 # RUN mkdir -p /root/.pip && echo "\
 # [global]\n\
 # index-url = $PY_INDEX\n\
-# trusted-host = biodev.ece.ucsb.edu\n" > /root/.pip/pip.conf
+# trusted-host = biodev.example.com\n" > /root/.pip/pip.conf
 
 # # Install certifi for updated CA certificates
 # RUN pip install certif

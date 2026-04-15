@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-ROOT = Path("/Users/macbook/Documents/phd/bisque_ultra_production_repo")
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_auth_service_reconciles_missing_bq_user() -> None:

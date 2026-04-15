@@ -1,6 +1,6 @@
 FROM debian:jessie
 #FROM phusion/baseimage
-MAINTAINER Kris Kvilekval<kris@cs.ucsb.edu>
+MAINTAINER Kris Kvilekval<kris@example.org>
 RUN apt-get update && apt-get install -yq python  unzip wget libxext6 libxt6
 
 ENV MCR_URL  http://www.mathworks.com/supportfiles/downloads/R2015b/deployment_files/R2015b/installers/glnxa64/MCR_R2015b_glnxa64_installer.zip

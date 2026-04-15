@@ -6,7 +6,7 @@
 
 
 # Setup some paramaters for your local installation
-my $BQ="https://loup.ece.ucsb.edu/";
+my $BQ="https://bisque.example.com/";
 my $USER = "kgk";
 my $PASS = "testme";
 my $TAG_QUERY='experiment:"growth parameters"';

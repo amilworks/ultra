@@ -274,7 +274,7 @@ class ArchiveStreamer():
             #httpReader = httplib2.Http( disable_ssl_certificate_validation=True)
             #httpReader = requests
             # This hack gets around bisque internal authentication mechanisms
-            # please refer to http://biodev.ece.ucsb.edu/projects/bisquik/ticket/597
+            # please refer to https://docs.example.com/bisque/ticket/597
             headers  = dict ( (name, request.headers.get(name,'')) for name in ['Authorization', 'Mex', 'Cookie' ]
                               if name in request.headers)
 

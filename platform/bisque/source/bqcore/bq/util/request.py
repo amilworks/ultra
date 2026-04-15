@@ -9,7 +9,7 @@ from tg import  config
 log = logging.getLogger('bq.core')
 
 
-proxy = make_proxy(config, 'http://loup.ece.ucsb.edu:9090')
+proxy = make_proxy(config, 'http://localhost:9090')
 
 class Request(object):
 

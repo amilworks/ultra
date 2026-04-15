@@ -64,7 +64,7 @@ class usageController(ServiceController):
         return resource
 
 
-    #http://loup.ece.ucsb.edu:9090/data_service/images?ts=%3E2010-06-01T12:00:00&ts=%3C2011-06-01T12:00:00&view=count
+    #http://localhost:9090/data_service/images?ts=%3E2010-06-01T12:00:00&ts=%3C2011-06-01T12:00:00&view=count
     #<resource>
     #<image count="3673"/>
     #</resource>

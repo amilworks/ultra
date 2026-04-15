@@ -80,7 +80,7 @@ RUN APT_INSTALL="apt-get install -y --no-install-recommends" && \
         nibabel \
         nilearn \
         && \
-    $PIP2_INSTALL -i https://biodev.ece.ucsb.edu/py/bisque/prod/+simple \
+    $PIP2_INSTALL -i https://packages.example.com/py/bisque/prod/+simple \
         bisque-api==0.5.9 \
         && \
     $PIP2_INSTALL \

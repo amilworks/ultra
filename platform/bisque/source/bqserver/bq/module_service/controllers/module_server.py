@@ -54,7 +54,7 @@ DESCRIPTION
 
    Clients can request an execution of a particular module by
    preparing a MEX document
-   (see http://biodev.ece.ucsb.edu/projects/bisquik/wiki/Developer/ModuleSystem/MexRequestSpecification)
+   (see https://docs.example.com/bisque/mex-request-spec)
    and POST it the module server.
    The module server finds an appropiate engine (i.e. a node that can
    actually execute the module), registers the MEX and launches it on

@@ -1,4 +1,4 @@
-url = 'http://bisque.ece.ucsb.edu/client_service/view?resource=http://bisque.ece.ucsb.edu/data_service/00-VjBR9bmZNwuXC9xFri7xxR';
+url = 'https://bisque.example.com/client_service/view?resource=https://bisque.example.com/data_service/00-VjBR9bmZNwuXC9xFri7xxR';
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% testing basic functionality

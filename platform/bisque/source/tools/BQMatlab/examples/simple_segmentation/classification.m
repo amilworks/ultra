@@ -1,6 +1,6 @@
 user = 'my_user';
 pass = 'my_pass';
-bisque_root = 'http://bisque.ece.ucsb.edu';
+bisque_root = 'https://bisque.example.com';
 image_url = [bisque_root '/data_service/00-dcJZKvcHcmKLwQoktSgnfP'];
 
 s = bq.Session(user, pass, bisque_root);

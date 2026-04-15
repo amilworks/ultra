@@ -9,7 +9,7 @@
 |**Code**                       | ![](https://img.shields.io/badge/BisQue%20Stable%20Release-v1.0.0-brightgreen) |
 | **Continuous Integration**    | [![Build Status](https://github.com/UCSB-VRL/bisqueUCSB/actions/workflows/docker-image.yml/badge.svg)](https://github.com/UCSB-VRL/bisqueUCSB/actions/workflows/docker-image.yml/badge.svg) |
 | **Documentation**             | [![Docs](https://img.shields.io/badge/docs-website-blue?style=flat)](https://bisque.gitbook.io/docs/) |
-| **Community**              | [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-yellow.svg?style=flat)](https://bisqueUCSB.github.io/contributing.html) [![Discourse](https://img.shields.io/badge/Discourse-v2.9.0-blue)](https://community.bisque2.ece.ucsb.edu/) |
+| **Community**              | [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-yellow.svg?style=flat)](https://bisqueUCSB.github.io/contributing.html) [![Discourse](https://img.shields.io/badge/Discourse-v2.9.0-blue)](https://community.example.com/) |
 
 #### 🌟 User Feedback and Supported Environments
 We are excited to share that BisQue is actively enabling cutting-edge research across a wide range of disciplines. Thanks to valuable feedback from our users, BisQue continues to support advancements in the following fields:
@@ -20,7 +20,7 @@ We are excited to share that BisQue is actively enabling cutting-edge research a
 * **Marine Science Research:** Supporting studies on ocean biodiversity and environmental changes.
 * **Materials Science:** Facilitating breakthroughs in material characterization and development.
 
-Keep in touch with the community by joining us on our discourse community platform [here](https://community.bisque2.ece.ucsb.edu/)
+Keep in touch with the community by joining us on our discourse community platform [here](https://community.example.com/)
 
 ## 🚀 Getting Started
 
@@ -39,7 +39,7 @@ Welcome to BisQue! 🎉 Here's a quick glimpse of BisQue in action:
 ✨ **Wide Format Compatibility:** Supports 100+ biological image formats.   
 ✨ **Large Image Processing:** Easily handle massive 5D images (100+ GB).   
 
-Explore BisQue on our [web platform](https://bisque2.ece.ucsb.edu), and [request an account](https://docs.google.com/forms/d/e/1FAIpQLSfUCwOdl8Gd1KErPXbLWSPvF74ApT7M142sYQVdwluDUJXMAg/viewform) to sign in!
+Explore BisQue on our [web platform](https://bisque.example.com), and [request an account](https://docs.google.com/forms/d/e/1FAIpQLSfUCwOdl8Gd1KErPXbLWSPvF74ApT7M142sYQVdwluDUJXMAg/viewform) to sign in!
 
 ## ✅ Quick Setup
 
@@ -59,7 +59,7 @@ Start using **BisQue** locally with Docker by following these simple steps:
    ```bash
    docker run --name bisque --rm -p 8080:8080 amilworks/bisque-module-dev:git
    ```
-   Open your browser and navigate to http://localhost:8080. You should see a homepage similar to [BisQue Web](https://bisque2.ece.ucsb.edu).
+   Open your browser and navigate to http://localhost:8080. You should see a homepage similar to [BisQue Web](https://bisque.example.com).
 
    **Troubleshooting:** Ensure port 8080 is not occupied by another application.
 
@@ -82,7 +82,7 @@ Start using **BisQue** locally with Docker by following these simple steps:
 Open your browser and go to http://localhost:8080.
 
 ## 💬 Need Help?
-To further develop modules with BisQue or for queries, reach out to us on [Discourse](https://community.bisque2.ece.ucsb.edu/).
+To further develop modules with BisQue or for queries, reach out to us on [Discourse](https://community.example.com/).
 
 ## 📰 Publications Featuring BisQue
 

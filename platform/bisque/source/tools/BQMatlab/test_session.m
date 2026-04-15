@@ -3,7 +3,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 user = 'XXXX';
 pass = 'XXXX';
-bisque_root = 'http://bisque.ece.ucsb.edu';
+bisque_root = 'https://bisque.example.com';
 s = bq.Session(user, pass, bisque_root);
 
 % list 10 most recent images
@@ -22,7 +22,7 @@ m.values()
 
 %% shares
 
-image = s.fetch('http://bisque.ece.ucsb.edu/data_service/00-7oisD8Jqm3YerdDMxfdQSj');
+image = s.fetch('https://bisque.example.com/data_service/00-7oisD8Jqm3YerdDMxfdQSj');
 
 %share an image with another user
 image.share('dima1', 'read');
@@ -39,7 +39,7 @@ image.share('dima1');
 
 
 % initing session
-s = bq.Session('http://vidi.ece.ucsb.edu:9090/data_service/mex/981', 'XXXXXX');
+s = bq.Session('http://localhost:9090/data_service/mex/981', 'XXXXXX');
 
 % while running
 s.update('RUNNING');

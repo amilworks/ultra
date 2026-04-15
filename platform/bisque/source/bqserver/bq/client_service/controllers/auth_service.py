@@ -522,7 +522,7 @@ class AuthenticationServer(ServiceController):
     @expose()
     def openid_login_handler(self, **kw):
         log.error("openid_login_handler keys=%s", sorted(kw.keys()))
-        redirect(update_url("https://bisque-md.ece.ucsb.edu/", dict(redirect_uri="https://bisque2.ece.ucsb.edu/")))
+        redirect(update_url("https://metadata.example.com/", dict(redirect_uri="https://bisque.example.com/")))
        # log.debug ("openid_login_handler %s" % kw)
        # return self.login(**kw)
 

@@ -3,7 +3,7 @@
   <http://www.bioimage.ucsb.edu/downloads/BioImage%20Convert>
   
   GSV 3.0 : PanoJS3
-  @author Dmitry Fedorov  <fedorov@ece.ucsb.edu>   
+  @author Dmitry Fedorov  <fedorov@example.com>
   
   Copyright (c) 2010 Dmitry Fedorov, Center for Bio-Image Informatics
 
@@ -93,4 +93,3 @@ ImgcnvPyramid.prototype.tile_filename = function( level, x_coordinate, y_coordin
     var y = formatInt(y_coordinate, 3);    
     return "" + l + "_" + x + "_" + y + ".jpg";//?"+level;    
 }
-

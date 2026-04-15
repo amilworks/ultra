@@ -15,7 +15,7 @@ install_requires = [
         "boto",
         "numpy",
         "ordereddict",
-        # Installed from http://biodev.ece.ucsb.edu/binaries/depot
+        # Installed from https://packages.example.com/binaries/depot
         # "tw.recaptcha", # !!! was in the py2 version
         # "tgext.registration2", # !!! was in the py2 version
         # "tw.output", #https://bitbucket.org/alexbodn/twoutput/get/af6904c504cf.zip #!!! was in the py2 version
@@ -35,7 +35,7 @@ The bisque server
       classifiers=[], # Get strings from http://pypi.python.org/pypi?%3Aaction=list_classifiers
       keywords='bioinformatics, image, database',
       author='Center for Bioinformatics',
-      author_email='cbi@biodev.ece.ucsb.edu',
+      author_email='cbi@biodev.example.com',
       url='http://bioimage.ucsb.edu',
       license='BSD',
       packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),

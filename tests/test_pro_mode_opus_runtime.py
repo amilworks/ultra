@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sys
+import types
 
 import src.agno_backend.runtime as runtime_module
-from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeWorkflowResult
+import src.agno_backend.pro_mode as pro_mode_module
+from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeVerifierReport, ProModeWorkflowResult
 from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan
 from src.config import Settings
 
@@ -73,6 +76,23 @@ def test_pro_mode_settings_accept_custom_gateway_headers() -> None:
     assert settings.pro_mode_api_key_prefix == ""
     assert settings.pro_mode_default_headers == {"anthropic-version": "bedrock-2023-05-31"}
     assert settings.pro_mode_default_query == {"profile": "opus"}
+
+
+def test_pro_mode_settings_accept_native_bedrock_values() -> None:
+    settings = Settings(
+        _env_file=None,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="global.anthropic.claude-opus-4-1-20250805-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_sso_auth=True,
+    )
+
+    assert settings.pro_mode_transport == "aws_bedrock_claude"
+    assert settings.resolved_pro_mode_model == "global.anthropic.claude-opus-4-1-20250805-v1:0"
+    assert settings.resolved_pro_mode_aws_region == "us-east-1"
+    assert settings.resolved_pro_mode_aws_profile == "ucsb-sandbox"
+    assert settings.pro_mode_aws_sso_auth is True
 
 
 def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: Path) -> None:
@@ -223,6 +243,84 @@ def test_pro_mode_gateway_can_use_api_gateway_style_header_auth(tmp_path: Path) 
     assert model.id == "claude-opus-4-5"
 
 
+def test_native_bedrock_transport_builds_claude_model(tmp_path: Path, monkeypatch) -> None:
+    fake_module = types.ModuleType("agno.models.aws")
+
+    class FakeClaude:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.id = kwargs["id"]
+
+    fake_module.Claude = FakeClaude
+    monkeypatch.setitem(sys.modules, "agno.models.aws", fake_module)
+
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="global.anthropic.claude-opus-4-1-20250805-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_access_key_id="AKIA_TEST",
+        pro_mode_aws_secret_access_key="secret-test",
+    )
+
+    model = runtime._build_pro_mode_model(max_runtime_seconds=45)
+
+    assert isinstance(model, FakeClaude)
+    assert model.kwargs["id"] == "global.anthropic.claude-opus-4-1-20250805-v1:0"
+    assert model.kwargs["aws_region"] == "us-east-1"
+    assert model.kwargs["aws_access_key"] == "AKIA_TEST"
+    assert model.kwargs["aws_secret_key"] == "secret-test"
+    assert model.kwargs["timeout"] >= 60
+
+
+def test_native_bedrock_transport_uses_boto3_session_for_sso(tmp_path: Path, monkeypatch) -> None:
+    fake_aws_module = types.ModuleType("agno.models.aws")
+
+    class FakeClaude:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_aws_module.Claude = FakeClaude
+    monkeypatch.setitem(sys.modules, "agno.models.aws", fake_aws_module)
+
+    fake_boto3_session_module = types.ModuleType("boto3.session")
+
+    class FakeSession:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_boto3_session_module.Session = FakeSession
+    monkeypatch.setitem(sys.modules, "boto3.session", fake_boto3_session_module)
+
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="global.anthropic.claude-opus-4-1-20250805-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_sso_auth=True,
+    )
+
+    model = runtime._build_pro_mode_model(max_runtime_seconds=45)
+
+    assert isinstance(model, FakeClaude)
+    assert isinstance(model.kwargs["session"], FakeSession)
+    assert model.kwargs["session"].kwargs == {
+        "profile_name": "ucsb-sandbox",
+        "region_name": "us-east-1",
+    }
+    assert model.kwargs["aws_region"] == "us-east-1"
+
+
+def test_native_bedrock_transport_classifies_missing_credentials_for_fallback(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path, pro_mode_transport="aws_bedrock_claude")
+
+    assert (
+        runtime._classify_pro_mode_failure("AWS credentials not found for Bedrock Claude request")
+        == "transport_or_availability_failure"
+    )
+
+
 def test_published_api_transport_extracts_text_blocks() -> None:
     payload = {
         "conversationId": "conv-1",
@@ -308,6 +406,105 @@ def test_published_api_keeps_structured_agent_phases_on_tool_capable_model(tmp_p
 
     assert model.id == "gpt-oss-120b"
     assert model.base_url == "https://global-gateway.example/v1"
+
+
+def test_structured_phase_uses_hybrid_reasoning_for_deep_phases(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs) -> None:
+            captured.append(kwargs)
+            self.output_schema = kwargs["output_schema"]
+
+        async def arun(self, *_args, **_kwargs):
+            return self.output_schema()
+
+    def fake_builder(**kwargs):
+        return {"builder": "pro_mode", **kwargs}
+
+    monkeypatch.setattr(pro_mode_module, "Agent", FakeAgent)
+
+    runner = pro_mode_module.ProModeWorkflowRunner(model_builder=fake_builder)
+    result = asyncio.run(
+        runner._run_structured_phase(
+            role="Verifier",
+            phase_name="verifier",
+            schema=ProModeVerifierReport,
+            prompt="Check the answer.",
+            fallback=ProModeVerifierReport(),
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            reasoning_mode="deep",
+            max_runtime_seconds=120,
+            debug=False,
+        )
+    )
+
+    assert isinstance(result, ProModeVerifierReport)
+    assert len(captured) == 1
+    kwargs = captured[0]
+    assert kwargs["reasoning"] is True
+    assert kwargs["reasoning_min_steps"] == 3
+    assert kwargs["reasoning_max_steps"] == 8
+    assert kwargs["model"] == {
+        "builder": "pro_mode",
+        "reasoning_mode": "deep",
+        "reasoning_effort_override": "high",
+        "max_runtime_seconds": 120,
+    }
+    assert kwargs["reasoning_model"] == {
+        "builder": "pro_mode",
+        "reasoning_mode": "deep",
+        "reasoning_effort_override": "high",
+        "max_runtime_seconds": 120,
+    }
+
+
+def test_structured_phase_keeps_intake_on_lightweight_path(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs) -> None:
+            captured.append(kwargs)
+            self.output_schema = kwargs["output_schema"]
+
+        async def arun(self, *_args, **_kwargs):
+            return self.output_schema()
+
+    def fake_builder(**kwargs):
+        return {"builder": "pro_mode", **kwargs}
+
+    monkeypatch.setattr(pro_mode_module, "Agent", FakeAgent)
+
+    runner = pro_mode_module.ProModeWorkflowRunner(model_builder=fake_builder)
+    result = asyncio.run(
+        runner._run_structured_phase(
+            role="intake",
+            phase_name="intake",
+            schema=ProModeIntakeDecision,
+            prompt="Route this turn.",
+            fallback=ProModeIntakeDecision(),
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            reasoning_mode="deep",
+            max_runtime_seconds=60,
+            debug=False,
+        )
+    )
+
+    assert isinstance(result, ProModeIntakeDecision)
+    assert len(captured) == 1
+    kwargs = captured[0]
+    assert "reasoning_model" not in kwargs
+    assert "reasoning" not in kwargs
+    assert kwargs["model"] == {
+        "builder": "pro_mode",
+        "reasoning_mode": "fast",
+        "reasoning_effort_override": "low",
+        "max_runtime_seconds": 60,
+    }
 
 
 def test_conceptual_tool_discussion_does_not_force_tool_workflow() -> None:
@@ -567,3 +764,87 @@ def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Pat
     assert payload["model"] == "claude-v4.5-opus"
     assert metadata["pro_mode"]["execution_path"] == "direct_response"
     assert metadata["pro_mode"]["model_route"]["transport"] == "bedrock_published_api"
+
+
+def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        llm_provider="openai",
+        llm_base_url="https://global-gateway.example/v1",
+        llm_api_key="global-key",
+        llm_model="gpt-oss-120b",
+        pro_mode_transport="bedrock_published_api",
+        pro_mode_base_url="https://published.example/api",
+        pro_mode_api_key="published-key",
+        pro_mode_api_key_header="X-API-Key",
+        pro_mode_api_key_prefix="",
+        pro_mode_model="claude-v4.5-opus",
+        pro_mode_fallback_enabled=False,
+    )
+
+    async def fake_intake(**_kwargs):
+        return ProModeIntakeDecision(
+            route="direct_response",
+            execution_regime="fast_dialogue",
+            reason="Simple conceptual answer.",
+            direct_response="Draft answer from intake.",
+        )
+
+    async def fake_fast_dialogue(**_kwargs):
+        return ProModeWorkflowResult(
+            response_text="Draft answer from intake.",
+            metadata={
+                "pro_mode": {
+                    "execution_path": "direct_response",
+                    "runtime_status": "failed",
+                    "model_route": {
+                        "active_model": "gpt-oss-120b",
+                        "transport": "bedrock_published_api",
+                        "fallback_used": False,
+                        "fallback_reason": "published_api_failure",
+                    },
+                }
+            },
+            runtime_status="failed",
+            runtime_error="403 Forbidden",
+        )
+
+    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
+    runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    async def _collect() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in runtime.stream(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Explain the tradeoffs between Otsu thresholding and watershed segmentation.",
+                }
+            ],
+            uploaded_files=[],
+            conversation_id="conv-1",
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            reasoning_mode="deep",
+            user_id="user-1",
+            run_id="run-1",
+            debug=True,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    done_event = next(event for event in events if event.get("event") == "done")
+    payload = dict(done_event.get("data") or {})
+    metadata = dict(payload.get("metadata") or {})
+
+    assert payload["response_text"] == "Draft answer from intake."
+    assert payload["model"] == "gpt-oss-120b"
+    assert metadata["pro_mode"]["runtime_status"] == "failed"
+    assert metadata["pro_mode"]["summary"] == (
+        "Returned the intake draft because the dedicated Pro Mode reasoning model path did not complete."
+    )
+    assert metadata["pro_mode"]["verifier"]["passed"] is False
+    assert metadata["pro_mode"]["model_route"]["active_model"] == "gpt-oss-120b"

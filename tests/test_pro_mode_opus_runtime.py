@@ -8,7 +8,7 @@ import types
 import src.agno_backend.runtime as runtime_module
 import src.agno_backend.pro_mode as pro_mode_module
 from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeVerifierReport, ProModeWorkflowResult
-from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan
+from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan, ToolProgramSynthesis
 from src.config import Settings
 
 
@@ -688,6 +688,136 @@ def test_strict_tool_workflow_executes_required_search_tool_when_model_skips_it(
     assert result["response_text"] != "I can help search BisQue if you want."
 
 
+def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    executed_tools: list[str] = []
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "I can write some Python if you want.",
+                "metadata": {"tool_invocations": []},
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **_kwargs):
+        executed_tools.append(tool_name)
+        assert args == {}
+        if tool_name == "codegen_python_plan":
+            return {
+                "success": True,
+                "job_id": "job-123",
+                "summary": "Prepared a deterministic Python analysis job.",
+            }
+        assert tool_name == "execute_python_job"
+        return {
+            "success": True,
+            "status": "completed",
+            "job_id": "job-123",
+            "summary": "Executed the prepared Python analysis job successfully.",
+            "artifacts": ["plots/result.png"],
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[{"role": "user", "content": "Write Python to analyze this image and run it."}],
+            latest_user_text="Write Python to analyze this image and run it.",
+            uploaded_files=["/tmp/test-image.png"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["codegen_python_plan", "execute_python_job"],
+            tool_plan_category="programmatic_experiment",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert executed_tools == ["codegen_python_plan", "execute_python_job"]
+    assert [item["tool"] for item in result["tool_invocations"]] == [
+        "codegen_python_plan",
+        "execute_python_job",
+    ]
+    assert result["response_text"] != "I can write some Python if you want."
+
+
+def test_tool_program_phase_records_native_bedrock_model_route_in_compression_stats(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_sso_auth=True,
+    )
+    session_state: dict[str, object] = {}
+
+    async def fake_arun_with_optional_pro_mode_fallback(**_kwargs):
+        return types.SimpleNamespace(
+            final_output=ToolProgramSynthesis(
+                response_text="Tool synthesis complete.",
+                evidence_basis=["measured evidence"],
+                unresolved_points=[],
+                confidence="high",
+            )
+        ), {
+            "transport": "aws_bedrock_claude",
+            "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+            "fallback_used": False,
+        }
+
+    monkeypatch.setattr(
+        runtime,
+        "_arun_with_optional_pro_mode_fallback",
+        fake_arun_with_optional_pro_mode_fallback,
+    )
+
+    result = asyncio.run(
+        runtime._run_tool_program_phase(
+            phase_name="unit_test_phase",
+            schema=ToolProgramSynthesis,
+            prompt="Return the final synthesis.",
+            fallback=ToolProgramSynthesis(
+                response_text="fallback",
+                evidence_basis=[],
+                unresolved_points=[],
+                confidence="low",
+            ),
+            session_state=session_state,
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            reasoning_mode="deep",
+            max_runtime_seconds=60,
+            debug=False,
+        )
+    )
+
+    assert result.response_text == "Tool synthesis complete."
+    assert session_state["compression_stats"]["unit_test_phase"]["model_route"]["transport"] == (
+        "aws_bedrock_claude"
+    )
+
+
 def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Path) -> None:
     runtime = _make_runtime(
         tmp_path,
@@ -848,3 +978,104 @@ def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(tmp
     )
     assert metadata["pro_mode"]["verifier"]["passed"] is False
     assert metadata["pro_mode"]["model_route"]["active_model"] == "gpt-oss-120b"
+
+
+def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_sso_auth=True,
+    )
+
+    async def fake_intake(**_kwargs):
+        return ProModeIntakeDecision(
+            route="tool_workflow",
+            execution_regime="validated_tool",
+            reason="Need deterministic tool use.",
+            selected_tool_names=["execute_python_job"],
+        )
+
+    async def fake_tool_workflow(**_kwargs):
+        return {
+            "response_text": "Measured output is ready.",
+            "tool_invocations": [
+                {"tool": "execute_python_job", "status": "completed", "output_summary": {"success": True}}
+            ],
+            "metadata": {
+                "research_program": {
+                    "iterations": 1,
+                    "evidence_summaries": ["Executed the Python analysis job."],
+                    "handles": {"analysis_table_paths": ["/tmp/result.json"]},
+                    "requirements": {"required_families": ["code"]},
+                    "executed_families": ["code"],
+                    "compression_stats": {
+                        "research_program_synthesis": {
+                            "model_route": {
+                                "transport": "aws_bedrock_claude",
+                                "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+                                "fallback_used": False,
+                            }
+                        }
+                    },
+                }
+            },
+            "model": "gpt-oss-120b",
+            "selected_domains": ["core"],
+            "runtime_status": "completed",
+            "runtime_error": None,
+            "selected_tool_names": ["execute_python_job"],
+            "attempted_tool_sets": [["execute_python_job"]],
+        }
+
+    async def fake_final_writer(**_kwargs):
+        return "Measured output is ready.", {
+            "model_route": {
+                "transport": "aws_bedrock_claude",
+                "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+                "fallback_used": False,
+            }
+        }
+
+    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime._run_pro_mode_tool_workflow = fake_tool_workflow  # type: ignore[method-assign]
+    runtime._run_pro_mode_final_writer = fake_final_writer  # type: ignore[method-assign]
+    runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    async def _collect() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in runtime.stream(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run Python analysis on this file and summarize the result.",
+                }
+            ],
+            uploaded_files=["/tmp/test-image.png"],
+            conversation_id="conv-1",
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            reasoning_mode="deep",
+            user_id="user-1",
+            run_id="run-1",
+            debug=True,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    done_event = next(event for event in events if event.get("event") == "done")
+    payload = dict(done_event.get("data") or {})
+    metadata = dict(payload.get("metadata") or {})
+
+    assert payload["model"] == "gpt-oss-120b"
+    assert metadata["pro_mode"]["tool_runtime_model"] == "gpt-oss-120b"
+    assert metadata["pro_mode"]["model_routes"]["research_program_synthesis"]["transport"] == (
+        "aws_bedrock_claude"
+    )
+    assert metadata["pro_mode"]["model_routes"]["pro_mode_final_writer"]["transport"] == (
+        "aws_bedrock_claude"
+    )

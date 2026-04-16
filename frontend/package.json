@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "mobile:smoke": "node scripts/mobile-smoke.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
@@ -41,6 +42,7 @@
     "@types/react-dom": "^19.2.2",
     "@types/three": "^0.182.0",
     "@vitejs/plugin-react-swc": "^3.11.0",
+    "playwright": "^1.58.2",
     "shadcn": "3.8.4",
     "tailwindcss": "^4.1.18",
     "tw-animate-css": "^1.4.0",

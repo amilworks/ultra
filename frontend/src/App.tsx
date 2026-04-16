@@ -4,6 +4,7 @@ import {
   memo,
   type CSSProperties,
   type ComponentType,
+  type MutableRefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -73,6 +74,7 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
+  SidebarInput,
   SidebarMenuAction,
   SidebarMenu,
   SidebarMenuButton,
@@ -81,6 +83,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { ApiClient, ApiError } from "./lib/api";
 import {
@@ -458,6 +461,11 @@ type ConversationState = {
   streamingMessageId: string | null;
 };
 
+type ConversationScrollMemory = {
+  scrollTop: number;
+  wasNearBottom: boolean;
+};
+
 const mobileSidebarCloseProps = {
   "data-sidebar-close-mobile": "true",
 } as const;
@@ -468,6 +476,18 @@ const mobileSidebarKeepOpenProps = {
 
 const CONVERSATION_QUERY_PARAM = "conversation";
 const CONVERSATION_PAGE_SIZE = 25;
+const SCROLL_RESTORE_BOTTOM_THRESHOLD_PX = 280;
+
+const captureConversationScrollMemory = (
+  scrollElement: HTMLElement
+): ConversationScrollMemory => {
+  const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
+  const scrollTop = Math.min(Math.max(scrollElement.scrollTop, 0), maxScrollTop);
+  return {
+    scrollTop,
+    wasNearBottom: maxScrollTop - scrollTop <= SCROLL_RESTORE_BOTTOM_THRESHOLD_PX,
+  };
+};
 
 const readConversationIdFromLocation = (): string | null => {
   if (typeof window === "undefined") {
@@ -623,7 +643,7 @@ const ConversationHistoryActions = ({
             size="icon"
             aria-label={`Conversation actions for ${conversationTitle}`}
             disabled={deleting}
-            className="size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+            className="app-history-action-button size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
           >
             <MoreHorizontal />
             <span className="sr-only">Conversation actions</span>
@@ -1675,29 +1695,78 @@ function ChatAutoScroll({
   conversationId,
   conversationHydrated,
   scrollRequestKey,
+  scrollMemoryRef,
+  scrollElementRef,
+  scrollWriteBlockRef,
 }: {
   conversationId: string | null;
   conversationHydrated: boolean;
   scrollRequestKey: number;
+  scrollMemoryRef: MutableRefObject<Record<string, ConversationScrollMemory>>;
+  scrollElementRef: MutableRefObject<HTMLElement | null>;
+  scrollWriteBlockRef: MutableRefObject<string | null>;
 }) {
-  const { scrollToBottom } = useStickToBottomContext();
-  const previousConversationIdRef = useRef<string | null>(null);
+  const { scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
+  const restoredConversationIdRef = useRef<string | null>(null);
+  const liveConversationIdRef = useRef<string | null>(conversationId);
   const previousScrollRequestKeyRef = useRef(scrollRequestKey);
 
-  useEffect(() => {
+  const rememberScrollPosition = useCallback(
+    (targetConversationId: string | null) => {
+      const scrollElement = scrollRef.current;
+      if (!targetConversationId || !scrollElement) {
+        return;
+      }
+      scrollMemoryRef.current[targetConversationId] = captureConversationScrollMemory(scrollElement);
+    },
+    [scrollMemoryRef, scrollRef]
+  );
+
+  useLayoutEffect(() => {
+    liveConversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  useLayoutEffect(() => {
+    scrollElementRef.current = scrollRef.current;
+    return () => {
+      if (scrollElementRef.current === scrollRef.current) {
+        scrollElementRef.current = null;
+      }
+    };
+  }, [scrollElementRef, scrollRef]);
+
+  useLayoutEffect(() => {
     if (!conversationId) {
-      previousConversationIdRef.current = null;
+      restoredConversationIdRef.current = null;
       return;
     }
-    if (!conversationHydrated || previousConversationIdRef.current === conversationId) {
+    if (!conversationHydrated || restoredConversationIdRef.current === conversationId) {
       return;
     }
-    previousConversationIdRef.current = conversationId;
+    restoredConversationIdRef.current = conversationId;
     let rafIdOne = 0;
     let rafIdTwo = 0;
     rafIdOne = requestAnimationFrame(() => {
       rafIdTwo = requestAnimationFrame(() => {
+        const remembered = scrollMemoryRef.current[conversationId];
+        if (remembered && !remembered.wasNearBottom) {
+          const scrollElement = scrollRef.current;
+          if (!scrollElement) {
+            return;
+          }
+          stopScroll();
+          const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
+          scrollElement.scrollTop = Math.min(remembered.scrollTop, maxScrollTop);
+          rememberScrollPosition(conversationId);
+          if (scrollWriteBlockRef.current === conversationId) {
+            scrollWriteBlockRef.current = null;
+          }
+          return;
+        }
         scrollToBottom({ animation: "instant", ignoreEscapes: true });
+        if (scrollWriteBlockRef.current === conversationId) {
+          scrollWriteBlockRef.current = null;
+        }
       });
     });
     return () => {
@@ -1708,7 +1777,38 @@ function ChatAutoScroll({
         cancelAnimationFrame(rafIdTwo);
       }
     };
-  }, [conversationHydrated, conversationId, scrollToBottom]);
+  }, [
+    conversationHydrated,
+    conversationId,
+    rememberScrollPosition,
+    scrollMemoryRef,
+    scrollRef,
+    scrollToBottom,
+    stopScroll,
+  ]);
+
+  useEffect(() => {
+    if (!conversationId || !conversationHydrated) {
+      return;
+    }
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) {
+      return;
+    }
+    const handleScroll = () => {
+      if (
+        liveConversationIdRef.current !== conversationId ||
+        scrollWriteBlockRef.current === conversationId
+      ) {
+        return;
+      }
+      rememberScrollPosition(conversationId);
+    };
+    scrollElement.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      scrollElement.removeEventListener("scroll", handleScroll);
+    };
+  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef]);
 
   useEffect(() => {
     if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
@@ -7001,6 +7101,7 @@ export function App() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authOidcEnabled, setAuthOidcEnabled] = useState(true);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
+  const isPhoneView = useBreakpoint(641);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
   const [conversationListOffset, setConversationListOffset] = useState(0);
@@ -7026,6 +7127,7 @@ export function App() {
   const [resources, setResources] = useState<ResourceRecord[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
   const [composerResources, setComposerResources] = useState<ResourceRecord[]>([]);
@@ -7055,6 +7157,12 @@ export function App() {
   const [adminRunQuery, setAdminRunQuery] = useState("");
   const [adminUserQuery, setAdminUserQuery] = useState("");
   const [adminRefreshToken, setAdminRefreshToken] = useState(0);
+
+  useEffect(() => {
+    if (!isPhoneView) {
+      setMobileConversationQuery("");
+    }
+  }, [isPhoneView]);
   const [adminRunCancellingById, setAdminRunCancellingById] = useState<Record<string, boolean>>(
     {}
   );
@@ -7075,6 +7183,9 @@ export function App() {
 
   const sidebarInsetRef = useRef<HTMLElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const activeChatScrollElementRef = useRef<HTMLElement | null>(null);
+  const conversationScrollMemoryRef = useRef<Record<string, ConversationScrollMemory>>({});
+  const conversationScrollWriteBlockRef = useRef<string | null>(null);
   const persistedConversationHashesRef = useRef<Record<string, string>>({});
   const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
   const hydratingConversationIdsRef = useRef<Set<string>>(new Set());
@@ -7861,6 +7972,17 @@ export function App() {
     });
   }, []);
 
+  const rememberActiveConversationScrollPosition = useCallback((): void => {
+    const conversationId = activeConversation?.id ?? null;
+    const scrollElement = activeChatScrollElementRef.current;
+    if (!conversationId || !scrollElement) {
+      return;
+    }
+    conversationScrollMemoryRef.current[conversationId] =
+      captureConversationScrollMemory(scrollElement);
+    conversationScrollWriteBlockRef.current = conversationId;
+  }, [activeConversation?.id]);
+
   const clearActiveComposerWorkflowPreset = useCallback((): void => {
     if (!activeConversation) {
       return;
@@ -7894,6 +8016,7 @@ export function App() {
   const createNewConversation = useCallback((): void => {
     const nextConversation = createConversationState();
     optimisticConversationIdsRef.current.add(nextConversation.id);
+    rememberActiveConversationScrollPosition();
     flushSync(() => {
       setConversations((previous) => [nextConversation, ...previous]);
       setActiveConversationId(nextConversation.id);
@@ -7907,21 +8030,23 @@ export function App() {
       setDismissedSlashPrompt(null);
       setUiErrorBanner(null);
     });
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openResourcesPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
     setActivePanel("resources");
     setViewerOpen(false);
     setResourceViewerContext(null);
     setResourceRefreshToken((value) => value + 1);
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openTrainingPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
     setActivePanel("training");
     setViewerOpen(false);
     setResourceViewerContext(null);
     setResourceRefreshToken((value) => value + 1);
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openBisqueHome = useCallback((): void => {
     const homeUrl = String(bisqueNavLinks?.home ?? "").trim();
@@ -10980,6 +11105,16 @@ export function App() {
         };
       });
   }, [conversations]);
+  const normalizedMobileConversationQuery = mobileConversationQuery.trim().toLowerCase();
+  const filteredHistoryItems = useMemo(() => {
+    if (!normalizedMobileConversationQuery) {
+      return historyItems;
+    }
+    return historyItems.filter((item) => {
+      const haystack = `${item.title} ${item.preview}`.toLowerCase();
+      return haystack.includes(normalizedMobileConversationQuery);
+    });
+  }, [historyItems, normalizedMobileConversationQuery]);
 
   const periodOrder: HistoryPeriod[] = [
     "Today",
@@ -10990,9 +11125,10 @@ export function App() {
   const historyGroups = periodOrder
     .map((period) => ({
       period,
-      conversations: historyItems.filter((item) => item.period === period),
+      conversations: filteredHistoryItems.filter((item) => item.period === period),
     }))
     .filter((group) => group.conversations.length > 0);
+  const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
   const activeConversationTitle = activeConversation?.title ?? "New conversation";
   const pendingReuseCandidate = pendingReusePrompt?.candidate ?? null;
   const pendingReuseToolLabels = pendingReuseCandidate
@@ -11044,7 +11180,10 @@ export function App() {
   }
 
   return (
-    <SidebarProvider style={{ "--sidebar-width": "260px" } as CSSProperties}>
+    <SidebarProvider
+      className="app-shell h-dvh overflow-hidden"
+      style={{ "--sidebar-width": "260px" } as CSSProperties}
+    >
       <Sidebar className="app-sidebar">
         <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
           <div className="flex min-w-0 flex-row items-center gap-2 px-1">
@@ -11058,7 +11197,7 @@ export function App() {
           <div className="flex items-center gap-1">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="size-8">
+                <Button variant="ghost" className="app-theme-menu-button size-11 md:size-8">
                   {resolvedTheme === "dark" ? (
                     <Moon className="size-4" />
                   ) : (
@@ -11106,7 +11245,7 @@ export function App() {
                   <PlusIcon className="size-4" />
                   <span>New Chat</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/new-chat:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/new-chat:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11130,7 +11269,7 @@ export function App() {
                   <FolderOpen className="size-4" />
                   <span>Resources</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/resources:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/resources:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11154,7 +11293,7 @@ export function App() {
                   <Database className="size-4" />
                   <span>Training</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/training:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/training:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11171,6 +11310,7 @@ export function App() {
                   variant={activePanel === "admin" ? "secondary" : "ghost"}
                   className="app-resource-browser-button mb-1 flex w-full items-center gap-2"
                   onClick={() => {
+                    rememberActiveConversationScrollPosition();
                     setActivePanel("admin");
                     setViewerOpen(false);
                     setResourceViewerContext(null);
@@ -11182,6 +11322,14 @@ export function App() {
                   <span>Admin</span>
                 </Button>
               ) : null}
+            </div>
+            <div className="app-sidebar-history-search md:hidden">
+              <SidebarInput
+                value={mobileConversationQuery}
+                onChange={(event) => setMobileConversationQuery(event.target.value)}
+                placeholder="Search chats"
+                aria-label="Search chats"
+              />
             </div>
             <SidebarGroup className="app-bisque-group">
               <SidebarGroupLabel>BisQue</SidebarGroupLabel>
@@ -11201,9 +11349,11 @@ export function App() {
                           aria-keyshortcuts="Control+Shift+O Meta+Shift+O"
                           {...mobileSidebarCloseProps}
                         >
-                          <BisqueMarkIcon className="size-4 shrink-0" />
-                          <span>Go to BisQue</span>
-                          <div className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/bisque-shortcut:opacity-100">
+                          <span className="app-bisque-link-main flex min-w-0 items-center gap-2">
+                            <BisqueMarkIcon className="size-4 shrink-0" />
+                            <span className="truncate">Go to BisQue</span>
+                          </span>
+                          <div className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/bisque-shortcut:opacity-100">
                             <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                               ⌘
                             </kbd>
@@ -11272,11 +11422,15 @@ export function App() {
           <div className="app-sidebar-history-scroll">
             {historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
-                <SidebarGroupLabel>Today</SidebarGroupLabel>
+                <SidebarGroupLabel>
+                  {isMobileConversationSearchActive ? "Search results" : "Today"}
+                </SidebarGroupLabel>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton className="app-history-button" disabled>
-                      <span>No history yet</span>
+                      <span>
+                        {isMobileConversationSearchActive ? "No chats match" : "No history yet"}
+                      </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 </SidebarMenu>
@@ -11355,6 +11509,7 @@ export function App() {
 	                              }
 	                              className="app-history-button group/history h-auto py-2"
 	                              onClick={() => {
+	                                rememberActiveConversationScrollPosition();
 	                                setActivePanel(conversation.panel);
 	                                setActiveConversationId(conversation.id);
 	                                setViewerOpen(false);
@@ -11412,7 +11567,7 @@ export function App() {
       <SidebarInset ref={sidebarInsetRef}>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
           <header className="app-shell-header bg-background z-10 flex w-full shrink-0 items-center gap-2 border-b px-3 sm:px-4">
-            <SidebarTrigger className="-ml-1 shrink-0" />
+            <SidebarTrigger className="app-sidebar-trigger -ml-1 shrink-0" />
             <div className="app-header-title text-foreground flex min-w-0 flex-1 items-center gap-2">
               <span className="app-header-title-text">{headerTitle}</span>
               <div className="app-header-meta">
@@ -11527,13 +11682,15 @@ export function App() {
             <>
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <ChatContainerRoot
-                key={activeConversation?.id ?? "chat"}
                 className="relative h-full min-h-0 flex-col"
               >
                 <ChatAutoScroll
                   conversationId={activeConversation?.id ?? null}
                   conversationHydrated={activeConversationHydrated}
                   scrollRequestKey={chatScrollRequestKey}
+                  scrollMemoryRef={conversationScrollMemoryRef}
+                  scrollElementRef={activeChatScrollElementRef}
+                  scrollWriteBlockRef={conversationScrollWriteBlockRef}
                 />
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
@@ -11584,7 +11741,7 @@ export function App() {
                   onSubmit={() => {
                     void handleSubmit();
                   }}
-                  className="border-input bg-popover relative z-10 w-full rounded-3xl border p-0 pt-1 shadow-xs"
+                  className="app-composer-card relative z-10 w-full"
                 >
                   {slashMenuOpen ? (
                     <ComposerSlashMenu
@@ -11611,7 +11768,7 @@ export function App() {
                       onCancelResourcePicker={cancelComposerResourcePicker}
                     />
                   ) : null}
-                  <div className="flex flex-col">
+                  <div className="app-composer-card-body">
                     {activeSending ? (
                       <div className="composer-running">
                         <Loader size="sm" text="BisQue Ultra is processing" />
@@ -11620,7 +11777,7 @@ export function App() {
                     <PromptInputTextarea
                       ref={composerTextareaRef}
                       placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
-                      className="min-h-[40px] px-4 pt-2.5 text-base leading-[1.32] sm:text-base md:text-base"
+                      className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
                       onKeyDown={(event) => {
                         if (
@@ -11880,12 +12037,9 @@ export function App() {
                     ) : null}
 
                     <PromptInputActions
-                      className={cn(
-                        "flex w-full items-center justify-between gap-2 px-3 pb-2.5",
-                        hasComposerContextPreview || activeComposerWorkflowPreset ? "mt-2.5" : "mt-4"
-                      )}
+                      className="app-composer-actions"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="app-composer-actions-start">
                         <PromptInputAction tooltip="Attach files">
                           <FileUploadTrigger asChild>
                             <Button
@@ -11893,7 +12047,7 @@ export function App() {
                               variant="ghost"
                               size="icon"
                               aria-label="Attach files"
-                              className="composer-attach-button size-11 rounded-full sm:size-9"
+                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
                               disabled={!activeConversationHydrated}
                             >
                               <Plus size={18} />
@@ -11908,7 +12062,7 @@ export function App() {
                           data-active={isProModeComposerActive ? "true" : "false"}
                           aria-pressed={isProModeComposerActive}
                           aria-label={isProModeComposerActive ? "Disable Pro Mode" : "Enable Pro Mode"}
-                          className="composer-pro-button"
+                          className="app-composer-mode-button composer-pro-button"
                           disabled={!activeConversationHydrated}
                           onClick={handleToggleComposerProMode}
                         >
@@ -11920,7 +12074,7 @@ export function App() {
                           <span>Pro</span>
                         </Button>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="app-composer-actions-end">
                         {activeSending ? (
                           <Button
                             size="icon"
@@ -11929,7 +12083,7 @@ export function App() {
                             onClick={stopActiveConversation}
                             aria-label="Stop response"
                             title="Stop response"
-                            className="size-11 rounded-full sm:size-9"
+                            className="app-composer-stop-button size-11 rounded-full sm:size-10"
                           >
                             <Square className="size-3.5 fill-current" />
                           </Button>
@@ -11940,7 +12094,7 @@ export function App() {
                             disabled={!activeConversationHydrated || !activePrompt.trim() || slashMenuOpen}
                             aria-label="Send message"
                             title="Send message"
-                            className="size-11 rounded-full sm:size-9"
+                            className="app-composer-submit-button size-11 rounded-full sm:size-10"
                           >
                             <ArrowUp size={18} />
                           </Button>

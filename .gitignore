@@ -5,6 +5,7 @@
 !.env.example
 .claude/
 .clause/
+docs/
 
 # Python
 __pycache__/

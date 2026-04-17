@@ -287,6 +287,9 @@ export const buildScientificResultGroups = ({
                 artifactLookupKeys(path).some((key) =>
                   artifactLookupKeys(artifact.path).includes(key)
                 ) ||
+                artifactLookupKeys(path).some((key) =>
+                  artifactLookupKeys(firstString(artifact.sourcePath)).includes(key)
+                ) ||
                 artifactLookupKeys(firstString(figure.file)).some((key) =>
                   artifactLookupKeys(firstString(artifact.sourcePath)).includes(key)
                 )

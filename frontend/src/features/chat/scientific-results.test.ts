@@ -192,4 +192,54 @@ describe("buildScientificResultGroups", () => {
       "/v1/artifacts/run_456/download?path=%2Fsrv%2Fultra%2Fshared%2Fscience%2Fmegaseg_results%2Fexample_overlay_mip.png"
     );
   });
+
+  it("prefers hydrated run artifacts when the copied artifact keeps the original figure path in source_path", () => {
+    const originalFigurePath =
+      "/srv/ultra/shared/science/megaseg_results/example/example__megaseg_overlay_mip.png";
+
+    const groups = buildScientificResultGroups({
+      progressEvents: [],
+      toolInvocations: [
+        {
+          tool: "segment_image_megaseg",
+          status: "completed",
+          output_envelope: {
+            success: true,
+            result_group_id: "megaseg-group-3",
+            visualization_paths: [
+              {
+                kind: "overlay_mip",
+                title: "Megaseg overlay (MIP)",
+                path: originalFigurePath,
+                file: "example.ome.tiff",
+              },
+            ],
+          },
+        },
+      ],
+      runArtifacts: [
+        {
+          path: "tool_outputs/56e8b3330041__example_megaseg_overlay_mip.png",
+          title: "Megaseg overlay (MIP)",
+          sourcePath: originalFigurePath,
+          url: "/v1/artifacts/run_789/download?path=tool_outputs%2F56e8b3330041__example_megaseg_overlay_mip.png",
+          downloadUrl:
+            "/v1/artifacts/run_789/download?path=tool_outputs%2F56e8b3330041__example_megaseg_overlay_mip.png",
+          previewable: true,
+          resultGroupId: "megaseg-group-3",
+        },
+      ],
+      runId: "run_789",
+      buildArtifactDownloadUrl: (runId, path) =>
+        `/v1/artifacts/${runId}/download?path=${encodeURIComponent(path)}`,
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].heroFigure?.url).toBe(
+      "/v1/artifacts/run_789/download?path=tool_outputs%2F56e8b3330041__example_megaseg_overlay_mip.png"
+    );
+    expect(groups[0].heroFigure?.downloadUrl).toBe(
+      "/v1/artifacts/run_789/download?path=tool_outputs%2F56e8b3330041__example_megaseg_overlay_mip.png"
+    );
+  });
 });

@@ -21,6 +21,8 @@ BisQue Ultra gives you one local surface for scientific images, datasets, metada
 
 If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a local scientific workbench whose storage layer is BisQue, whose control plane is FastAPI, whose interface is React, and whose language model can come from any OpenAI-compatible server.
 
+For production rollout guidance, release topology, and operator-facing verification, use [docs/production-deployment.md](docs/production-deployment.md).
+
 ## What You Are Launching
 
 You are starting four layers:
@@ -344,6 +346,26 @@ The absence of those assets does not stop the web stack from booting. It only na
 - `frontend/`: React and Vite client
 - `platform/bisque/`: absorbed BisQue platform, Docker build context, Keycloak assets
 - `scripts/`: startup and smoke-check helpers
+
+## Workflow-Equivalent Checks
+
+These are the local checks that mirror the active GitHub verification workflows:
+
+```bash
+uv sync --frozen --extra dev
+pnpm --dir frontend install --frozen-lockfile
+make quality
+uv run pytest -q
+pnpm --dir frontend lint
+pnpm --dir frontend typecheck
+pnpm --dir frontend test:unit
+pnpm --dir frontend build
+pnpm --dir frontend bundle:check
+pnpm --dir frontend test:smoke
+./scripts/release_codescan.sh
+```
+
+`./scripts/release_codescan.sh` is the public-release hygiene pass. It scans first-party repo surfaces for secrets, internal-style hostnames, operator-specific storage roots, and other values that should stay in private runbooks instead of the public tree.
 
 ## The Shortest Path to a Working System
 

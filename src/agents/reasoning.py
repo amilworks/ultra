@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _MCQ_OPTION_LINE_RE = re.compile(r"(?mi)^\s*([A-D])\s*[\.\)]\s*(.+?)\s*$")
 _FINAL_ANSWER_RE = re.compile(r"FINAL_ANSWER\s*:\s*([ABCD])\b", re.IGNORECASE)
 _ANSWER_HINT_RE = re.compile(

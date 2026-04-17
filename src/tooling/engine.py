@@ -7,19 +7,26 @@ import queue
 import re
 import threading
 import time
-from datetime import datetime
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 from src.logger import logger
-from src.tooling.progress import encode_progress_chunk, reset_progress_callback, set_progress_callback
+from src.tooling.progress import (
+    encode_progress_chunk,
+    reset_progress_callback,
+    set_progress_callback,
+)
 
 _STREAMING_TOOLS = {"yolo_finetune_detect"}
 
 
-def _derive_bisque_client_view_url(resource_uri: str | None, existing_url: str | None = None) -> str | None:
+def _derive_bisque_client_view_url(
+    resource_uri: str | None, existing_url: str | None = None
+) -> str | None:
     candidate = str(existing_url or "").strip()
     if candidate:
         return candidate
@@ -39,6 +46,7 @@ def _derive_bisque_client_view_url(resource_uri: str | None, existing_url: str |
         return None
     return f"{parsed.scheme}://{parsed.netloc}/client_service/view?resource={normalized}"
 
+
 @dataclass
 class ToolState:
     """Minimal shared state for chaining and summarization."""
@@ -56,10 +64,7 @@ class ToolState:
             sample = self.last_search[:3]
             parts.append(
                 "Recent BisQue search results (sample):\n"
-                + "\n".join(
-                    f"- {r.get('name') or r.get('uri') or 'resource'}"
-                    for r in sample
-                )
+                + "\n".join(f"- {r.get('name') or r.get('uri') or 'resource'}" for r in sample)
             )
         if self.last_resource:
             parts.append(f"Last resource URI: {self.last_resource}")
@@ -115,12 +120,16 @@ def _looks_like_mask_path(path: str) -> bool:
     words = set(normalized.split())
     if "mask" in words or "segmentation" in words or "pred" in words or "prediction" in words:
         return True
-    if lowered.endswith(".nii.gz") and words.intersection({"mask", "label", "labels", "gt", "target", "truth"}):
+    if lowered.endswith(".nii.gz") and words.intersection(
+        {"mask", "label", "labels", "gt", "target", "truth"}
+    ):
         return True
     if lowered.endswith((".npy", ".npz", ".nii")):
         return True
     if lowered.endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".webp")):
-        return bool(words.intersection({"mask", "label", "labels", "gt", "target", "truth", "segmentation"}))
+        return bool(
+            words.intersection({"mask", "label", "labels", "gt", "target", "truth", "segmentation"})
+        )
     return False
 
 
@@ -338,7 +347,10 @@ class ToolEngine:
                 if delta.tool_calls:
                     for tool_call_delta in delta.tool_calls:
                         if tool_call_delta.index is not None:
-                            if current_tool_call is None or tool_call_delta.index != current_tool_call.get("index"):
+                            if (
+                                current_tool_call is None
+                                or tool_call_delta.index != current_tool_call.get("index")
+                            ):
                                 if current_tool_call:
                                     tool_calls.append(current_tool_call)
                                 current_tool_call = {
@@ -351,7 +363,9 @@ class ToolEngine:
                                 }
                             else:
                                 if tool_call_delta.function.arguments:
-                                    current_tool_call["function"]["arguments"] += tool_call_delta.function.arguments
+                                    current_tool_call["function"]["arguments"] += (
+                                        tool_call_delta.function.arguments
+                                    )
 
             if current_tool_call:
                 tool_calls.append(current_tool_call)
@@ -412,7 +426,9 @@ class ToolEngine:
                 cached_result = tool_result_cache.get(tool_fingerprint)
                 if cached_result is not None:
                     result_dict, tool_content = cached_result
-                    tool_failed = isinstance(result_dict, dict) and result_dict.get("success") is False
+                    tool_failed = (
+                        isinstance(result_dict, dict) and result_dict.get("success") is False
+                    )
                     progress_artifacts = _progress_artifacts_from_result(result_dict)
                     progress_summary = _progress_summary_from_result(tool_name, result_dict)
                     if tool_failed:
@@ -604,7 +620,9 @@ class ToolEngine:
                 )
 
                 messages.append(assistant_message)
-                messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": tool_content})
+                messages.append(
+                    {"role": "tool", "tool_call_id": tool_call["id"], "content": tool_content}
+                )
                 assistant_message = {"role": "assistant", "content": None, "tool_calls": []}
 
             _push_ui_artifacts(tool_results_with_viz)
@@ -709,7 +727,9 @@ def _collect_ui_artifacts(result: dict[str, Any], sink: list[dict[str, Any]]) ->
                     "path": img_path,
                     "file": img_path.split("/")[-1],
                     "caption": (
-                        f"🛰️ YOLO detections ({pretty_counts})" if pretty_counts else "🛰️ YOLO detections"
+                        f"🛰️ YOLO detections ({pretty_counts})"
+                        if pretty_counts
+                        else "🛰️ YOLO detections"
                     ),
                 }
             )
@@ -769,7 +789,11 @@ def _progress_artifacts_from_result(result: dict[str, Any]) -> list[dict[str, An
         for item in ui_artifacts[:80]:
             if not isinstance(item, dict):
                 continue
-            _add(item.get("path"), title=str(item.get("title") or "").strip() or None, kind=item.get("type"))
+            _add(
+                item.get("path"),
+                title=str(item.get("title") or "").strip() or None,
+                kind=item.get("type"),
+            )
 
     visualization_paths = result.get("visualization_paths")
     if isinstance(visualization_paths, list):
@@ -806,7 +830,8 @@ def _progress_artifacts_from_result(result: dict[str, Any]) -> list[dict[str, An
                     if isinstance(item, dict):
                         _add(
                             item.get("path"),
-                            title=str(item.get("title") or item.get("caption") or "").strip() or None,
+                            title=str(item.get("title") or item.get("caption") or "").strip()
+                            or None,
                             kind=item.get("kind"),
                         )
                     else:
@@ -839,10 +864,14 @@ def _resource_rows_for_summary(resources: Any, *, limit: int = 10) -> list[dict[
         if not isinstance(resource, dict):
             continue
         resource_uri = str(resource.get("resource_uri") or resource.get("uri") or "").strip()
-        client_view_url = _derive_bisque_client_view_url(
-            str(resource.get("resource_uri") or resource.get("uri") or "").strip(),
-            str(resource.get("client_view_url") or resource.get("view_url") or "").strip() or None,
-        ) or ""
+        client_view_url = (
+            _derive_bisque_client_view_url(
+                str(resource.get("resource_uri") or resource.get("uri") or "").strip(),
+                str(resource.get("client_view_url") or resource.get("view_url") or "").strip()
+                or None,
+            )
+            or ""
+        )
         image_service_url = str(resource.get("image_service_url") or "").strip()
         display_uri = client_view_url or resource_uri
         raw_name = str(resource.get("name") or resource.get("file") or "").strip()
@@ -851,7 +880,9 @@ def _resource_rows_for_summary(resources: Any, *, limit: int = 10) -> list[dict[
         owner = str(resource.get("owner") or "").strip()
         if owner:
             row["owner"] = owner
-        created = _format_timestamp(str(resource.get("created") or resource.get("ts") or "").strip() or None)
+        created = _format_timestamp(
+            str(resource.get("created") or resource.get("ts") or "").strip() or None
+        )
         if created:
             row["created"] = created
         resource_type = str(resource.get("resource_type") or resource.get("type") or "").strip()
@@ -879,10 +910,13 @@ def _download_rows_for_summary(downloads: Any, *, limit: int = 10) -> list[dict[
         if not isinstance(item, dict):
             continue
         resource_uri = str(item.get("resource_uri") or item.get("uri") or "").strip()
-        client_view_url = _derive_bisque_client_view_url(
-            str(item.get("resource_uri") or item.get("uri") or "").strip(),
-            str(item.get("client_view_url") or item.get("view_url") or "").strip() or None,
-        ) or ""
+        client_view_url = (
+            _derive_bisque_client_view_url(
+                str(item.get("resource_uri") or item.get("uri") or "").strip(),
+                str(item.get("client_view_url") or item.get("view_url") or "").strip() or None,
+            )
+            or ""
+        )
         image_service_url = str(item.get("image_service_url") or "").strip()
         output_path = str(item.get("output_path") or item.get("path") or "").strip()
         success = bool(item.get("success"))
@@ -945,7 +979,9 @@ def _bisque_query_scope_text(query: dict[str, Any] | None) -> str:
         parts.append(f"type '{resolved_type}'")
     text_value = payload.get("text")
     if isinstance(text_value, list):
-        rendered_text = ", ".join(str(item).strip() for item in text_value[:8] if str(item or "").strip())
+        rendered_text = ", ".join(
+            str(item).strip() for item in text_value[:8] if str(item or "").strip()
+        )
     else:
         rendered_text = str(text_value or "").strip()
     if rendered_text:
@@ -970,7 +1006,8 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
             "dataset_name": result.get("dataset_name"),
             "dataset_uri": result.get("dataset_uri"),
             "dataset_members_added": result.get("dataset_members_added"),
-            "dataset_client_view_url": str(result.get("dataset_client_view_url") or "").strip() or None,
+            "dataset_client_view_url": str(result.get("dataset_client_view_url") or "").strip()
+            or None,
             "rows": _resource_rows_for_summary(result.get("results"), limit=12),
         }
         error_text = str(result.get("error") or "").strip()
@@ -978,13 +1015,22 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
             summary["error"] = error_text
         return summary
     if tool_name == "delete_bisque_resource":
-        deleted_uri = str(result.get("deleted_uri") or result.get("resource_uri") or "").strip() or None
+        deleted_uri = (
+            str(result.get("deleted_uri") or result.get("resource_uri") or "").strip() or None
+        )
         deleted_client_view_url = _derive_bisque_client_view_url(
             deleted_uri,
-            str(result.get("deleted_client_view_url") or result.get("client_view_url") or "").strip() or None,
+            str(
+                result.get("deleted_client_view_url") or result.get("client_view_url") or ""
+            ).strip()
+            or None,
         )
         resource_name = str(result.get("resource_name") or "").strip() or None
-        dataset_cleanup = result.get("dataset_cleanup") if isinstance(result.get("dataset_cleanup"), dict) else None
+        dataset_cleanup = (
+            result.get("dataset_cleanup")
+            if isinstance(result.get("dataset_cleanup"), dict)
+            else None
+        )
         rows = _resource_rows_for_summary(
             [
                 {
@@ -1073,12 +1119,18 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
         }
 
     if tool_name == "yolo_detect":
-        counts = result.get("counts_by_class") if isinstance(result.get("counts_by_class"), dict) else {}
+        counts = (
+            result.get("counts_by_class") if isinstance(result.get("counts_by_class"), dict) else {}
+        )
         counts_rows = [
             {"class_name": str(name), "count": int(value)}
-            for name, value in sorted(counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:10]
+            for name, value in sorted(
+                counts.items(), key=lambda item: (-int(item[1]), str(item[0]))
+            )[:10]
         ]
-        predictions = result.get("predictions") if isinstance(result.get("predictions"), list) else []
+        predictions = (
+            result.get("predictions") if isinstance(result.get("predictions"), list) else []
+        )
         detections: list[dict[str, Any]] = []
         for pred in predictions[:4]:
             if not isinstance(pred, dict):
@@ -1167,7 +1219,11 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
     if tool_name == "quantify_segmentation_masks":
         summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
         evaluation = result.get("evaluation") if isinstance(result.get("evaluation"), dict) else {}
-        metrics_mean = evaluation.get("metrics_mean") if isinstance(evaluation.get("metrics_mean"), dict) else {}
+        metrics_mean = (
+            evaluation.get("metrics_mean")
+            if isinstance(evaluation.get("metrics_mean"), dict)
+            else {}
+        )
         rows = result.get("rows") if isinstance(result.get("rows"), list) else []
         return {
             "success": True,
@@ -1179,7 +1235,11 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
         }
 
     if tool_name == "structure_report":
-        functional_groups = result.get("functional_groups") if isinstance(result.get("functional_groups"), dict) else {}
+        functional_groups = (
+            result.get("functional_groups")
+            if isinstance(result.get("functional_groups"), dict)
+            else {}
+        )
         nonzero_groups = [
             {"name": str(name), "count": int(count)}
             for name, count in functional_groups.items()
@@ -1251,7 +1311,9 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
         payload = {
             "success": True,
             "kind": "bisque_search",
-            "count": _coerce_result_count(result, len(resources) if isinstance(resources, list) else 0),
+            "count": _coerce_result_count(
+                result, len(resources) if isinstance(resources, list) else 0
+            ),
             "resource_type": resource_type,
             "rows": rows,
         }
@@ -1267,14 +1329,14 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
         payload = {
             "success": True,
             "kind": "bisque_find_assets",
-            "count": _coerce_result_count(result, len(resources) if isinstance(resources, list) else 0),
+            "count": _coerce_result_count(
+                result, len(resources) if isinstance(resources, list) else 0
+            ),
             "rows": _resource_rows_for_summary(resources, limit=12),
             "metadata_loaded": len(metadata) if isinstance(metadata, list) else 0,
             "downloads_total": len(downloads_list),
             "downloads_success": sum(
-                1
-                for item in downloads_list
-                if isinstance(item, dict) and bool(item.get("success"))
+                1 for item in downloads_list if isinstance(item, dict) and bool(item.get("success"))
             ),
             "download_rows": _download_rows_for_summary(downloads_list, limit=12),
         }
@@ -1284,7 +1346,9 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
     if tool_name == "load_bisque_resource":
         resource = result.get("resource") if isinstance(result.get("resource"), dict) else {}
         tags = resource.get("tags") if isinstance(resource.get("tags"), list) else []
-        dimensions = resource.get("dimensions") if isinstance(resource.get("dimensions"), dict) else {}
+        dimensions = (
+            resource.get("dimensions") if isinstance(resource.get("dimensions"), dict) else {}
+        )
         rows = _resource_rows_for_summary(
             [
                 {
@@ -1360,7 +1424,8 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
             "action": result.get("action"),
             "dataset_name": result.get("dataset_name"),
             "dataset_uri": result.get("dataset_uri"),
-            "dataset_client_view_url": str(result.get("dataset_client_view_url") or "").strip() or None,
+            "dataset_client_view_url": str(result.get("dataset_client_view_url") or "").strip()
+            or None,
             "members": result.get("members"),
             "added": result.get("added"),
             "total_resources": result.get("total_resources"),
@@ -1597,9 +1662,7 @@ def _update_tool_state(state: ToolState, tool_name: str, result: Any) -> None:
         model_name = result.get("model_name")
         model_path = result.get("model_path")
         if model_name or model_path:
-            state.last_yolo_models = [
-                {"model_name": model_name, "model_path": model_path}
-            ]
+            state.last_yolo_models = [{"model_name": model_name, "model_path": model_path}]
     if tool_name in {"yolo_detect"}:
         model_name = result.get("model_name")
         model_path = result.get("model_path")
@@ -1639,9 +1702,9 @@ def _update_tool_state(state: ToolState, tool_name: str, result: Any) -> None:
 
         if deduped_mask_paths:
             state.latest_result_refs[f"{tool_name}.mask_paths"] = deduped_mask_paths[:24]
-            state.latest_result_refs[f"{tool_name}.preferred_upload_paths"] = (
-                deduped_mask_paths[:24]
-            )
+            state.latest_result_refs[f"{tool_name}.preferred_upload_paths"] = deduped_mask_paths[
+                :24
+            ]
             state.latest_result_refs[f"{tool_name}.latest_mask_path"] = deduped_mask_paths[0]
             state.latest_result_refs["latest_segmentation_mask_paths"] = deduped_mask_paths[:24]
             state.latest_result_refs["latest_segmentation_mask_path"] = deduped_mask_paths[0]
@@ -1703,7 +1766,9 @@ def _tool_call_fingerprint(tool_name: str, tool_args: Any) -> str:
         else:
             args_value = ""
     try:
-        args_text = json.dumps(args_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        args_text = json.dumps(
+            args_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
     except Exception:
         args_text = str(args_value)
     return f"{str(tool_name or '').strip()}|{args_text}"
@@ -1796,7 +1861,9 @@ def _summarize_tool_output(tool_name: str, result: Any) -> str:
         meta = result.get("metadata") or []
         downloads = result.get("downloads") or []
         query = result.get("query") if isinstance(result.get("query"), dict) else {}
-        lines = [f"- Matches: {_coerce_result_count(result, len(resources) if isinstance(resources, list) else 0)}"]
+        lines = [
+            f"- Matches: {_coerce_result_count(result, len(resources) if isinstance(resources, list) else 0)}"
+        ]
         scope_text = _bisque_query_scope_text(query)
         if scope_text:
             lines.append(f"- Search scope: {scope_text}")
@@ -1899,14 +1966,11 @@ def _summarize_tool_output(tool_name: str, result: Any) -> str:
             lines.append(f"- Command: {command}")
         dependencies = result.get("dependencies")
         if isinstance(dependencies, list) and dependencies:
-            lines.append(
-                "- Dependencies: " + ", ".join(str(item) for item in dependencies[:10])
-            )
+            lines.append("- Dependencies: " + ", ".join(str(item) for item in dependencies[:10]))
         expected_outputs = result.get("expected_outputs")
         if isinstance(expected_outputs, list) and expected_outputs:
             lines.append(
-                "- Expected outputs: "
-                + ", ".join(str(item) for item in expected_outputs[:10])
+                "- Expected outputs: " + ", ".join(str(item) for item in expected_outputs[:10])
             )
         attempt_index = result.get("attempt_index")
         if isinstance(attempt_index, int):
@@ -1962,9 +2026,7 @@ def _summarize_tool_output(tool_name: str, result: Any) -> str:
                 for item in analysis_outputs
                 if isinstance(item, dict) and str(item.get("parse_status") or "") == "ok"
             )
-            lines.append(
-                f"- Parsed JSON output summaries: {parsed_ok}/{len(analysis_outputs)}"
-            )
+            lines.append(f"- Parsed JSON output summaries: {parsed_ok}/{len(analysis_outputs)}")
         return "\n".join(lines) if lines else "- Python sandbox execution completed."
 
     if tool_name in {"segment_image_sam3", "segment_image_sam2", "sam2_prompt_image"}:
@@ -2002,7 +2064,10 @@ def _summarize_tool_output(tool_name: str, result: Any) -> str:
                 "- Instance counts (reported/measured): "
                 f"{int(instance_count_reported_total or 0)} / {int(instance_count_measured_total or 0)}"
             )
-        if isinstance(instance_count_mismatch_files, (int, float)) and int(instance_count_mismatch_files) > 0:
+        if (
+            isinstance(instance_count_mismatch_files, (int, float))
+            and int(instance_count_mismatch_files) > 0
+        ):
             lines.append(
                 f"- Files with reported-vs-measured count mismatch: {int(instance_count_mismatch_files)}"
             )
@@ -2101,15 +2166,21 @@ def _summarize_tool_output(tool_name: str, result: Any) -> str:
                 continue
         display_value = value
         if key == "resource_uri":
-            display_value = _derive_bisque_client_view_url(
-                value,
-                str(result.get("client_view_url") or "").strip() or None,
-            ) or value
+            display_value = (
+                _derive_bisque_client_view_url(
+                    value,
+                    str(result.get("client_view_url") or "").strip() or None,
+                )
+                or value
+            )
         elif key == "output_resource_uri":
-            display_value = _derive_bisque_client_view_url(
-                value,
-                str(result.get("output_client_view_url") or "").strip() or None,
-            ) or value
+            display_value = (
+                _derive_bisque_client_view_url(
+                    value,
+                    str(result.get("output_client_view_url") or "").strip() or None,
+                )
+                or value
+            )
         generic_lines.append(f"- {label}: {display_value}")
 
     list_keys: list[tuple[str, str]] = [

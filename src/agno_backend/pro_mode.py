@@ -4,8 +4,9 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from agno.agent import Agent
@@ -331,7 +332,10 @@ class ProModeWorkflowRunner:
             normalized.execution_regime = "fast_dialogue"
             if normalized.task_regime == "conceptual_high_uncertainty":
                 normalized.task_regime = "phatic_or_small_talk"
-            if normalized.context_policy.history_window != 0 or normalized.context_policy.load_memory:
+            if (
+                normalized.context_policy.history_window != 0
+                or normalized.context_policy.load_memory
+            ):
                 normalized.context_policy = ProModeContextPolicy(
                     load_memory=False,
                     load_knowledge=False,
@@ -343,7 +347,9 @@ class ProModeWorkflowRunner:
             if normalized.execution_regime not in {"validated_tool", "iterative_research"}:
                 normalized.execution_regime = "validated_tool"
             if normalized.context_policy.history_window <= 0:
-                normalized.context_policy.history_window = max(1, int(normalized.recent_history_turns or 1))
+                normalized.context_policy.history_window = max(
+                    1, int(normalized.recent_history_turns or 1)
+                )
         else:
             if not self._enable_expert_council and normalized.execution_regime == "expert_council":
                 normalized.execution_regime = "reasoning_solver"
@@ -356,10 +362,14 @@ class ProModeWorkflowRunner:
             }:
                 normalized.execution_regime = self._default_deep_execution_regime()
             if normalized.context_policy.history_window <= 0:
-                normalized.context_policy.history_window = max(1, int(normalized.recent_history_turns or 2))
+                normalized.context_policy.history_window = max(
+                    1, int(normalized.recent_history_turns or 2)
+                )
         normalized.load_memory = bool(normalized.context_policy.load_memory)
         normalized.load_knowledge = bool(normalized.context_policy.load_knowledge)
-        normalized.recent_history_turns = int(normalized.context_policy.history_window or normalized.recent_history_turns or 0)
+        normalized.recent_history_turns = int(
+            normalized.context_policy.history_window or normalized.recent_history_turns or 0
+        )
         return normalized
 
     async def intake(
@@ -375,7 +385,9 @@ class ProModeWorkflowRunner:
         debug: bool,
     ) -> ProModeIntakeDecision:
         prompt = self._intake_prompt(messages=messages, latest_user_text=latest_user_text)
-        fallback = self._fallback_intake_decision(messages=messages, latest_user_text=latest_user_text)
+        fallback = self._fallback_intake_decision(
+            messages=messages, latest_user_text=latest_user_text
+        )
         decision = await self._run_structured_phase(
             role="intake",
             phase_name="intake",
@@ -385,7 +397,9 @@ class ProModeWorkflowRunner:
             conversation_id=conversation_id,
             run_id=run_id,
             user_id=user_id,
-            reasoning_mode="fast" if str(reasoning_mode or "").strip().lower() == "fast" else "auto",
+            reasoning_mode="fast"
+            if str(reasoning_mode or "").strip().lower() == "fast"
+            else "auto",
             max_runtime_seconds=max(20, min(int(max_runtime_seconds), 90)),
             debug=debug,
         )
@@ -420,10 +434,13 @@ class ProModeWorkflowRunner:
         phase_started: set[str] = set()
         phase_completed: set[str] = set()
         phase_counters: dict[str, int] = {}
-        provided_intake = self._normalize_intake_decision(intake_decision or self._fallback_intake_decision(
-            messages=messages,
-            latest_user_text=latest_user_text,
-        ))
+        provided_intake = self._normalize_intake_decision(
+            intake_decision
+            or self._fallback_intake_decision(
+                messages=messages,
+                latest_user_text=latest_user_text,
+            )
+        )
         shared_context = dict(shared_context or {})
 
         discussion_step_cap_seconds = self._step_soft_cap_seconds(
@@ -471,7 +488,9 @@ class ProModeWorkflowRunner:
                 }
             )
 
-        async def emit_phase_completed(phase: str, message: str, payload: dict[str, Any] | None = None) -> None:
+        async def emit_phase_completed(
+            phase: str, message: str, payload: dict[str, Any] | None = None
+        ) -> None:
             async with workflow_lock:
                 if phase in phase_completed:
                     return
@@ -514,9 +533,11 @@ class ProModeWorkflowRunner:
                 "private_memos"
                 if message.message_kind == "private_memo"
                 else "socratic_review"
-                if message.sender_role == ROLE_LABELS["socratic_crux_examiner"] and int(message.round_index) == 0
+                if message.sender_role == ROLE_LABELS["socratic_crux_examiner"]
+                and int(message.round_index) == 0
                 else "tool_broker"
-                if message.sender_role == ROLE_LABELS["tool_broker"] and int(message.round_index) == 0
+                if message.sender_role == ROLE_LABELS["tool_broker"]
+                and int(message.round_index) == 0
                 else f"critique_round_{message.round_index}"
             )
             async with workflow_lock:
@@ -562,16 +583,12 @@ class ProModeWorkflowRunner:
         def current_messages(step_input: StepInput | None) -> list[CouncilMessage]:
             state = state_from_input(step_input)
             return [
-                CouncilMessage.model_validate(item)
-                for item in list(state.get("messages") or [])
+                CouncilMessage.model_validate(item) for item in list(state.get("messages") or [])
             ]
 
         def current_rounds(step_input: StepInput | None) -> list[CouncilRound]:
             state = state_from_input(step_input)
-            return [
-                CouncilRound.model_validate(item)
-                for item in list(state.get("rounds") or [])
-            ]
+            return [CouncilRound.model_validate(item) for item in list(state.get("rounds") or [])]
 
         def calculator_results(step_input: StepInput | None) -> list[ProModeCalculatorResult]:
             state = state_from_input(step_input)
@@ -596,7 +613,9 @@ class ProModeWorkflowRunner:
             rounds = current_rounds(step_input)
             return rounds[-1] if rounds else None
 
-        def latest_message_from_role(step_input: StepInput | None, role: ProModeRole) -> CouncilMessage | None:
+        def latest_message_from_role(
+            step_input: StepInput | None, role: ProModeRole
+        ) -> CouncilMessage | None:
             target = ROLE_LABELS[role]
             for message in reversed(current_messages(step_input)):
                 if message.sender_role == target:
@@ -607,12 +626,18 @@ class ProModeWorkflowRunner:
             async with workflow_lock:
                 state = state_from_input(step_input)
                 rounds = list(state.get("rounds") or [])
-                rounds = [item for item in rounds if int(dict(item).get("round_index") or -1) != round_data.round_index]
+                rounds = [
+                    item
+                    for item in rounds
+                    if int(dict(item).get("round_index") or -1) != round_data.round_index
+                ]
                 rounds.append(round_data.model_dump(mode="json"))
                 rounds.sort(key=lambda item: int(dict(item).get("round_index") or 0))
                 state["rounds"] = rounds
                 state["round_count"] = len(rounds)
-                state["convergence"] = self._convergence_from_messages(round_data.messages).model_dump(mode="json")
+                state["convergence"] = self._convergence_from_messages(
+                    round_data.messages
+                ).model_dump(mode="json")
 
         async def set_calculator_results(
             step_input: StepInput | None,
@@ -628,7 +653,9 @@ class ProModeWorkflowRunner:
             ]
             evidence_message = CouncilMessage(
                 message_id=str(uuid4()),
-                round_index=(latest_round(step_input).round_index if latest_round(step_input) else 1),
+                round_index=(
+                    latest_round(step_input).round_index if latest_round(step_input) else 1
+                ),
                 sender_role=ROLE_LABELS["tool_broker"],
                 recipient_roles=[ROLE_LABELS[role] for role in DISCUSSION_ROLES],
                 reply_to_ids=[],
@@ -675,7 +702,9 @@ class ProModeWorkflowRunner:
                 state = state_from_input(step_input)
                 state["verifier"] = report.model_dump(mode="json")
 
-        async def initialize_state(step_input: StepInput, profile: ProModeTaskProfile, snapshot: str) -> None:
+        async def initialize_state(
+            step_input: StepInput, profile: ProModeTaskProfile, snapshot: str
+        ) -> None:
             async with workflow_lock:
                 state = state_from_input(step_input)
                 state["task_profile"] = profile.model_dump(mode="json")
@@ -693,7 +722,9 @@ class ProModeWorkflowRunner:
                     list(PRO_MODE_PHASE_ORDER),
                 )
 
-        async def set_intake_decision_state(step_input: StepInput, decision: ProModeIntakeDecision) -> None:
+        async def set_intake_decision_state(
+            step_input: StepInput, decision: ProModeIntakeDecision
+        ) -> None:
             async with workflow_lock:
                 state = state_from_input(step_input)
                 state["intake_decision"] = decision.model_dump(mode="json")
@@ -730,7 +761,9 @@ class ProModeWorkflowRunner:
             return StepOutput(content=provided_intake.model_dump(mode="json"))
 
         async def direct_response(step_input: StepInput) -> StepOutput:
-            await emit_phase_started("direct_response", "Answering directly without expert escalation.")
+            await emit_phase_started(
+                "direct_response", "Answering directly without expert escalation."
+            )
             decision = intake_from_state(step_input)
             text = str(decision.direct_response or "").strip() or "Hello! How can I help you today?"
             synthesis_result = ProModeSynthesis(
@@ -759,7 +792,9 @@ class ProModeWorkflowRunner:
 
         async def context_policy_step(step_input: StepInput) -> StepOutput:
             decision = intake_from_state(step_input)
-            await emit_phase_started("context_policy", "Applying the explicit Pro Mode context policy.")
+            await emit_phase_started(
+                "context_policy", "Applying the explicit Pro Mode context policy."
+            )
             await emit_phase_completed(
                 "context_policy",
                 "Context loading policy resolved for this turn.",
@@ -769,7 +804,9 @@ class ProModeWorkflowRunner:
 
         async def execution_router_step(step_input: StepInput) -> StepOutput:
             decision = intake_from_state(step_input)
-            await emit_phase_started("execution_router", "Choosing the internal Pro Mode execution regime.")
+            await emit_phase_started(
+                "execution_router", "Choosing the internal Pro Mode execution regime."
+            )
             await emit_phase_completed(
                 "execution_router",
                 f"Selected the `{decision.execution_regime}` regime.",
@@ -812,7 +849,9 @@ class ProModeWorkflowRunner:
 
         def make_private_memo_step(role: ProModeRole) -> Step:
             async def _executor(step_input: StepInput) -> StepOutput:
-                await emit_phase_started("private_memos", "Exploring distinct internal perspectives.")
+                await emit_phase_started(
+                    "private_memos", "Exploring distinct internal perspectives."
+                )
                 profile = task_profile(step_input)
                 snapshot = context_pre_read(step_input)
                 start = time.monotonic()
@@ -829,7 +868,9 @@ class ProModeWorkflowRunner:
                     debug=debug,
                 )
                 elapsed = time.monotonic() - start
-                await record_model_call(step_input, role=role_label(role), phase="private_memos", elapsed=elapsed)
+                await record_model_call(
+                    step_input, role=role_label(role), phase="private_memos", elapsed=elapsed
+                )
                 message = CouncilMessage(
                     message_id=str(uuid4()),
                     round_index=0,
@@ -843,7 +884,11 @@ class ProModeWorkflowRunner:
                     requested_actions=list(memo.open_questions),
                     ready_to_finalize=False,
                     vote="needs_revision",
-                    central_cruxes=list(memo.open_questions[:2] if role != "socratic_crux_examiner" else memo.open_questions[:3]),
+                    central_cruxes=list(
+                        memo.open_questions[:2]
+                        if role != "socratic_crux_examiner"
+                        else memo.open_questions[:3]
+                    ),
                     resolved_cruxes=[],
                     tool_requests=[],
                     confidence=memo.confidence,
@@ -925,10 +970,14 @@ class ProModeWorkflowRunner:
                 phase_name = "retry_round" if retry else f"critique_round_{round_index}"
                 await emit_phase_started(
                     phase_name,
-                    "Running a retry discussion round." if retry else f"Running discussion round {round_index}.",
+                    "Running a retry discussion round."
+                    if retry
+                    else f"Running discussion round {round_index}.",
                 )
                 profile = task_profile(step_input)
-                memo_message = self._private_memo_for_role(messages=current_messages(step_input), role_label=role_label(role))
+                memo_message = self._private_memo_for_role(
+                    messages=current_messages(step_input), role_label=role_label(role)
+                )
                 target_messages = self._discussion_inputs_for_role(
                     role=role,
                     round_index=round_index,
@@ -956,7 +1005,9 @@ class ProModeWorkflowRunner:
                     debug=debug,
                 )
                 elapsed = time.monotonic() - start
-                await record_model_call(step_input, role=role_label(role), phase=phase_name, elapsed=elapsed)
+                await record_model_call(
+                    step_input, role=role_label(role), phase=phase_name, elapsed=elapsed
+                )
                 message = CouncilMessage(
                     message_id=str(uuid4()),
                     round_index=round_index,
@@ -980,7 +1031,9 @@ class ProModeWorkflowRunner:
                     vote=reply.vote,
                     central_cruxes=list(reply.central_cruxes),
                     resolved_cruxes=list(reply.resolved_cruxes),
-                    tool_requests=self._normalize_tool_requests(role=role, requests=reply.tool_requests),
+                    tool_requests=self._normalize_tool_requests(
+                        role=role, requests=reply.tool_requests
+                    ),
                     confidence=reply.confidence,
                     ts=time.time(),
                 )
@@ -999,7 +1052,9 @@ class ProModeWorkflowRunner:
                 )
                 return StepOutput(content=message.model_dump(mode="json"))
 
-            return Step(name=role_step_name(f"discussion_round_{round_index}", role), executor=_executor)
+            return Step(
+                name=role_step_name(f"discussion_round_{round_index}", role), executor=_executor
+            )
 
         async def tool_broker_review(step_input: StepInput) -> StepOutput:
             await emit_phase_started("tool_broker", "Deciding whether external evidence is needed.")
@@ -1007,7 +1062,12 @@ class ProModeWorkflowRunner:
             target_messages = [
                 *(
                     [socratic_message]
-                    if (socratic_message := latest_message_from_role(step_input, "socratic_crux_examiner")) is not None
+                    if (
+                        socratic_message := latest_message_from_role(
+                            step_input, "socratic_crux_examiner"
+                        )
+                    )
+                    is not None
                     else []
                 ),
                 *self._messages_for_round(current_messages(step_input), round_index=1),
@@ -1052,7 +1112,9 @@ class ProModeWorkflowRunner:
                 vote=reply.vote,
                 central_cruxes=list(reply.central_cruxes),
                 resolved_cruxes=list(reply.resolved_cruxes),
-                tool_requests=self._normalize_tool_requests(role="tool_broker", requests=reply.tool_requests),
+                tool_requests=self._normalize_tool_requests(
+                    role="tool_broker", requests=reply.tool_requests
+                ),
                 confidence=reply.confidence,
                 ts=time.time(),
             )
@@ -1122,7 +1184,9 @@ class ProModeWorkflowRunner:
                     "results": [item.model_dump(mode="json") for item in results],
                 },
             )
-            return StepOutput(content={"results": [item.model_dump(mode="json") for item in results]})
+            return StepOutput(
+                content={"results": [item.model_dump(mode="json") for item in results]}
+            )
 
         def should_run_round_two(step_input: StepInput) -> bool:
             round_payload = step_input.get_step_content("collect_round_one")
@@ -1176,18 +1240,24 @@ class ProModeWorkflowRunner:
                 verifier_feedback=[],
             )
             elapsed = time.monotonic() - start
-            await record_model_call(step_input, role=ROLE_LABELS["synthesizer"], phase="synthesis", elapsed=elapsed)
+            await record_model_call(
+                step_input, role=ROLE_LABELS["synthesizer"], phase="synthesis", elapsed=elapsed
+            )
             await set_synthesis(step_input, synthesis_result)
             await emit_phase_completed(
                 "synthesis",
                 "Synthesizer prepared the final draft.",
-                payload={"agreement_reached": synthesis_result.agreement_reached or convergence.ready},
+                payload={
+                    "agreement_reached": synthesis_result.agreement_reached or convergence.ready
+                },
             )
             return StepOutput(content=synthesis_result.model_dump(mode="json"))
 
         async def verifier(step_input: StepInput) -> StepOutput:
             await emit_phase_started("verifier", "Verifying the council draft.")
-            synthesis_payload = ProModeSynthesis.model_validate(dict(state_from_input(step_input).get("synthesis") or {}))
+            synthesis_payload = ProModeSynthesis.model_validate(
+                dict(state_from_input(step_input).get("synthesis") or {})
+            )
             start = time.monotonic()
             report = await self._run_verifier(
                 latest_user_text=latest_user_text,
@@ -1225,7 +1295,9 @@ class ProModeWorkflowRunner:
             if isinstance(verifier_payload, dict):
                 report = ProModeVerifierReport.model_validate(verifier_payload)
             else:
-                report = ProModeVerifierReport.model_validate(dict(state_from_input(step_input).get("verifier") or {}))
+                report = ProModeVerifierReport.model_validate(
+                    dict(state_from_input(step_input).get("verifier") or {})
+                )
             return not report.passed
 
         async def collect_retry_round(step_input: StepInput) -> StepOutput:
@@ -1269,12 +1341,16 @@ class ProModeWorkflowRunner:
                 verifier_feedback=feedback,
             )
             elapsed = time.monotonic() - start
-            await record_model_call(step_input, role=ROLE_LABELS["synthesizer"], phase="retry_round", elapsed=elapsed)
+            await record_model_call(
+                step_input, role=ROLE_LABELS["synthesizer"], phase="retry_round", elapsed=elapsed
+            )
             await set_synthesis(step_input, synthesis_result)
             return StepOutput(content=synthesis_result.model_dump(mode="json"))
 
         async def verifier_retry(step_input: StepInput) -> StepOutput:
-            synthesis_payload = ProModeSynthesis.model_validate(dict(state_from_input(step_input).get("synthesis") or {}))
+            synthesis_payload = ProModeSynthesis.model_validate(
+                dict(state_from_input(step_input).get("synthesis") or {})
+            )
             start = time.monotonic()
             report = await self._run_verifier(
                 latest_user_text=latest_user_text,
@@ -1288,7 +1364,9 @@ class ProModeWorkflowRunner:
                 debug=debug,
             )
             elapsed = time.monotonic() - start
-            await record_model_call(step_input, role="Verifier", phase="retry_round", elapsed=elapsed)
+            await record_model_call(
+                step_input, role="Verifier", phase="retry_round", elapsed=elapsed
+            )
             await set_verifier(step_input, report)
             emit(
                 {
@@ -1311,7 +1389,9 @@ class ProModeWorkflowRunner:
             await emit_phase_started("finalize", "Preparing the final Pro Mode answer.")
             state = state_from_input(step_input)
             synthesis_payload = ProModeSynthesis.model_validate(dict(state.get("synthesis") or {}))
-            verifier_payload = ProModeVerifierReport.model_validate(dict(state.get("verifier") or {}))
+            verifier_payload = ProModeVerifierReport.model_validate(
+                dict(state.get("verifier") or {})
+            )
             finalized = self._finalize_payload(
                 synthesis=synthesis_payload,
                 verifier_report=verifier_payload,
@@ -1374,7 +1454,10 @@ class ProModeWorkflowRunner:
                     steps=[
                         Parallel(
                             "critique_round_2",
-                            *[make_discussion_step(role, round_index=2) for role in DISCUSSION_ROLES],
+                            *[
+                                make_discussion_step(role, round_index=2)
+                                for role in DISCUSSION_ROLES
+                            ],
                         ),
                         timed_step("collect_round_two", collect_round_two),
                     ],
@@ -1388,7 +1471,10 @@ class ProModeWorkflowRunner:
                     steps=[
                         Parallel(
                             "retry_round",
-                            *[make_discussion_step(role, round_index=3, retry=True) for role in DISCUSSION_ROLES],
+                            *[
+                                make_discussion_step(role, round_index=3, retry=True)
+                                for role in DISCUSSION_ROLES
+                            ],
                         ),
                         timed_step("collect_retry_round", collect_retry_round),
                         timed_step("calculator_evidence_retry", calculator_evidence_retry),
@@ -1400,13 +1486,17 @@ class ProModeWorkflowRunner:
             ],
         )
 
-        def execution_route_selector(step_input: StepInput, session_state: dict[str, Any] | None = None):
+        def execution_route_selector(
+            step_input: StepInput, session_state: dict[str, Any] | None = None
+        ):
             payload = step_input.get_step_content("intake")
             if isinstance(payload, dict) and payload:
                 decision = ProModeIntakeDecision.model_validate(payload)
             else:
                 pro_mode_state = dict((session_state or {}).get("pro_mode_state") or {})
-                decision = ProModeIntakeDecision.model_validate(dict(pro_mode_state.get("intake_decision") or {}))
+                decision = ProModeIntakeDecision.model_validate(
+                    dict(pro_mode_state.get("intake_decision") or {})
+                )
             return direct_branch if decision.route == "direct_response" else deep_branch
 
         workflow = Workflow(
@@ -1538,7 +1628,9 @@ class ProModeWorkflowRunner:
             calculator_results=calculator_results,
             verifier_feedback=verifier_feedback,
         )
-        fallback = self._fallback_discussion_reply(role=role, round_index=round_index, target_messages=target_messages)
+        fallback = self._fallback_discussion_reply(
+            role=role, round_index=round_index, target_messages=target_messages
+        )
         return await self._run_structured_phase(
             role=role,
             phase_name=f"critique_round_{round_index}" if round_index < 3 else "retry_round",
@@ -1575,7 +1667,9 @@ class ProModeWorkflowRunner:
             round_data=round_data,
             verifier_feedback=verifier_feedback,
         )
-        fallback = self._fallback_synthesis(latest_user_text=latest_user_text, blackboard=blackboard)
+        fallback = self._fallback_synthesis(
+            latest_user_text=latest_user_text, blackboard=blackboard
+        )
         return await self._run_structured_phase(
             role="synthesizer",
             phase_name="synthesis" if not verifier_feedback else "retry_round",
@@ -1623,7 +1717,9 @@ class ProModeWorkflowRunner:
             conversation_id=conversation_id,
             run_id=run_id,
             user_id=user_id,
-            reasoning_mode="deep" if str(reasoning_mode or "").strip().lower() != "fast" else "fast",
+            reasoning_mode="deep"
+            if str(reasoning_mode or "").strip().lower() != "fast"
+            else "fast",
             max_runtime_seconds=max_runtime_seconds,
             debug=debug,
         )
@@ -1733,7 +1829,9 @@ class ProModeWorkflowRunner:
                 )
             except Exception:
                 return fallback
-            return self._coerce_schema_output(schema=schema, result=fallback_result, fallback=fallback)
+            return self._coerce_schema_output(
+                schema=schema, result=fallback_result, fallback=fallback
+            )
         return self._coerce_schema_output(schema=schema, result=result, fallback=fallback)
 
     @staticmethod
@@ -1770,7 +1868,9 @@ class ProModeWorkflowRunner:
         return fallback
 
     @staticmethod
-    def _phase_session_token(*, conversation_id: str | None, run_id: str | None, phase_name: str) -> str:
+    def _phase_session_token(
+        *, conversation_id: str | None, run_id: str | None, phase_name: str
+    ) -> str:
         root = str(conversation_id or "").strip() or str(run_id or "").strip() or "ephemeral"
         return f"{root}::pro::{phase_name}"
 
@@ -1786,7 +1886,9 @@ class ProModeWorkflowRunner:
         return normalized if normalized in {"auto", "deep"} else "auto"
 
     @staticmethod
-    def _role_reasoning_effort_override(*, phase_name: str, role: str, requested: str | None) -> str | None:
+    def _role_reasoning_effort_override(
+        *, phase_name: str, role: str, requested: str | None
+    ) -> str | None:
         normalized = str(requested or "auto").strip().lower() or "auto"
         if phase_name == "intake" or role == "intake":
             return "low"
@@ -1872,7 +1974,10 @@ class ProModeWorkflowRunner:
             )
         )
         exactness_priority = bool(
-            re.search(r"(exact|distinct|how many|count|calculate|which product|identify|derive|balance)", lowered)
+            re.search(
+                r"(exact|distinct|how many|count|calculate|which product|identify|derive|balance)",
+                lowered,
+            )
         )
         if calculator_candidate and re.search(r"(product|reaction|mechanism|identify)", lowered):
             task_type: TaskType = "mechanistic"
@@ -1916,11 +2021,19 @@ class ProModeWorkflowRunner:
         )
 
     @staticmethod
-    def _messages_for_round(messages: list[CouncilMessage], *, round_index: int) -> list[CouncilMessage]:
-        return [message for message in messages if int(message.round_index) == round_index and message.message_kind != "private_memo"]
+    def _messages_for_round(
+        messages: list[CouncilMessage], *, round_index: int
+    ) -> list[CouncilMessage]:
+        return [
+            message
+            for message in messages
+            if int(message.round_index) == round_index and message.message_kind != "private_memo"
+        ]
 
     @staticmethod
-    def _private_memo_for_role(messages: list[CouncilMessage], *, role_label: str) -> CouncilMessage | None:
+    def _private_memo_for_role(
+        messages: list[CouncilMessage], *, role_label: str
+    ) -> CouncilMessage | None:
         for message in reversed(messages):
             if message.message_kind == "private_memo" and message.sender_role == role_label:
                 return message
@@ -1973,7 +2086,9 @@ class ProModeWorkflowRunner:
                 ),
                 None,
             )
-            return ([socratic_message] if socratic_message is not None else []) + private_targets[:4]
+            return ([socratic_message] if socratic_message is not None else []) + private_targets[
+                :4
+            ]
         own_label = ROLE_LABELS[role]
         direct = [
             message
@@ -2008,10 +2123,16 @@ class ProModeWorkflowRunner:
             for message in messages
             if own_label in message.recipient_roles and message.round_index == round_index - 1
         }
-        return sorted(addressed_by) if addressed_by else [ROLE_LABELS[target] for target in ROUND_ONE_TARGETS.get(role, ())]
+        return (
+            sorted(addressed_by)
+            if addressed_by
+            else [ROLE_LABELS[target] for target in ROUND_ONE_TARGETS.get(role, ())]
+        )
 
     @staticmethod
-    def _reply_to_ids_for_round(*, role: ProModeRole, round_index: int, messages: list[CouncilMessage]) -> list[str]:
+    def _reply_to_ids_for_round(
+        *, role: ProModeRole, round_index: int, messages: list[CouncilMessage]
+    ) -> list[str]:
         if round_index == 1:
             targets = {ROLE_LABELS[target] for target in ROUND_ONE_TARGETS.get(role, ())}
             reply_ids = [
@@ -2028,7 +2149,9 @@ class ProModeWorkflowRunner:
                 ),
                 None,
             )
-            return ([socratic_message.message_id] if socratic_message is not None else []) + reply_ids
+            return (
+                [socratic_message.message_id] if socratic_message is not None else []
+            ) + reply_ids
         own_label = ROLE_LABELS[role]
         return [
             message.message_id
@@ -2037,7 +2160,9 @@ class ProModeWorkflowRunner:
         ][:4]
 
     @staticmethod
-    def _tool_requests_from_broker_message(message: CouncilMessage | None) -> list[ProModeCalculatorRequest]:
+    def _tool_requests_from_broker_message(
+        message: CouncilMessage | None,
+    ) -> list[ProModeCalculatorRequest]:
         if message is None or message.sender_role != ROLE_LABELS["tool_broker"]:
             return []
         return list(message.tool_requests or [])[:4]
@@ -2046,9 +2171,7 @@ class ProModeWorkflowRunner:
     def _build_round(*, round_index: int, messages: list[CouncilMessage]) -> CouncilRound:
         convergence = ProModeWorkflowRunner._convergence_from_messages(messages)
         resolved = ProModeWorkflowRunner._unique_text(
-            item
-            for message in messages
-            for item in message.resolved_cruxes
+            item for message in messages for item in message.resolved_cruxes
         )
         unresolved = convergence.central_blockers
         return CouncilRound(
@@ -2080,13 +2203,19 @@ class ProModeWorkflowRunner:
                 continue
             if previous is None or previous == "agree":
                 votes[sender] = current
-        ready = bool(votes) and all(vote in {"agree", "agree_with_reservation"} for vote in votes.values()) and not blockers
+        ready = (
+            bool(votes)
+            and all(vote in {"agree", "agree_with_reservation"} for vote in votes.values())
+            and not blockers
+        )
         consensus_level: ConsensusLevel = "low"
         if ready and all(vote == "agree" for vote in votes.values()):
             consensus_level = "high"
         elif ready:
             consensus_level = "medium"
-        elif votes and sum(1 for vote in votes.values() if vote != "needs_revision") >= max(1, len(votes) - 2):
+        elif votes and sum(1 for vote in votes.values() if vote != "needs_revision") >= max(
+            1, len(votes) - 2
+        ):
             consensus_level = "medium"
         return ConvergenceState(
             per_role_vote=votes,
@@ -2112,11 +2241,12 @@ class ProModeWorkflowRunner:
     def _blackboard_from_state(self, step_input: StepInput | None) -> CouncilBlackboard:
         state = {}
         if step_input is not None and step_input.workflow_session is not None:
-            state = dict((step_input.workflow_session.session_data or {}).get("pro_mode_state") or {})
+            state = dict(
+                (step_input.workflow_session.session_data or {}).get("pro_mode_state") or {}
+            )
         profile = ProModeTaskProfile.model_validate(dict(state.get("task_profile") or {}))
         messages = [
-            CouncilMessage.model_validate(item)
-            for item in list(state.get("messages") or [])
+            CouncilMessage.model_validate(item) for item in list(state.get("messages") or [])
         ]
         claim_map = dict(state.get("claim_map") or {})
         crux_map = dict(state.get("crux_map") or {})
@@ -2125,7 +2255,9 @@ class ProModeWorkflowRunner:
             ProModeCalculatorResult.model_validate(item)
             for item in list(state.get("calculator_results") or [])
         ]
-        convergence = self._convergence_from_messages([message for message in messages if message.message_kind != "private_memo"])
+        convergence = self._convergence_from_messages(
+            [message for message in messages if message.message_kind != "private_memo"]
+        )
         return CouncilBlackboard(
             task_profile=profile,
             context_pre_read=str(state.get("context_pre_read") or "").strip(),
@@ -2140,7 +2272,11 @@ class ProModeWorkflowRunner:
         if step_input is None or step_input.workflow_session is None:
             return []
         state = dict((step_input.workflow_session.session_data or {}).get("pro_mode_state") or {})
-        verifier = ProModeVerifierReport.model_validate(dict(state.get("verifier") or {})) if state.get("verifier") else None
+        verifier = (
+            ProModeVerifierReport.model_validate(dict(state.get("verifier") or {}))
+            if state.get("verifier")
+            else None
+        )
         if verifier is None:
             return []
         return list(verifier.issues or verifier.suggested_changes)
@@ -2248,7 +2384,9 @@ class ProModeWorkflowRunner:
                     compression_required=False,
                 ),
             )
-        history_needed = bool(re.search(r"\b(that|this|it|those|these|previous|earlier|above)\b", lowered))
+        history_needed = bool(
+            re.search(r"\b(that|this|it|those|these|previous|earlier|above)\b", lowered)
+        )
         return ProModeIntakeDecision(
             route="deep_reasoning",
             execution_regime=self._default_deep_execution_regime(),
@@ -2314,8 +2452,14 @@ class ProModeWorkflowRunner:
         calculator_results: list[ProModeCalculatorResult],
         verifier_feedback: list[str],
     ) -> str:
-        target_block = json.dumps([item.model_dump(mode="json") for item in target_messages], ensure_ascii=False, indent=2)
-        calc_block = json.dumps([item.model_dump(mode="json") for item in calculator_results], ensure_ascii=False, indent=2)
+        target_block = json.dumps(
+            [item.model_dump(mode="json") for item in target_messages], ensure_ascii=False, indent=2
+        )
+        calc_block = json.dumps(
+            [item.model_dump(mode="json") for item in calculator_results],
+            ensure_ascii=False,
+            indent=2,
+        )
         feedback_block = json.dumps(verifier_feedback, ensure_ascii=False, indent=2)
         tool_rule = (
             "You may request up to three calculator calls only if they materially resolve the central crux."
@@ -2401,7 +2545,9 @@ class ProModeWorkflowRunner:
             "Return a verifier report. Do not rewrite the answer yourself."
         )
 
-    def _fallback_private_memo(self, *, role: ProModeRole, latest_user_text: str) -> ProModeRoleMemo:
+    def _fallback_private_memo(
+        self, *, role: ProModeRole, latest_user_text: str
+    ) -> ProModeRoleMemo:
         return ProModeRoleMemo(
             role=ROLE_LABELS[role],
             headline=f"{ROLE_LABELS[role]} fallback memo for: {latest_user_text[:100]}",
@@ -2418,7 +2564,9 @@ class ProModeWorkflowRunner:
         round_index: int,
         target_messages: list[CouncilMessage],
     ) -> ProModeDiscussionReply:
-        recipient_roles = ", ".join(item.sender_role for item in target_messages[:2]) or "the relevant peers"
+        recipient_roles = (
+            ", ".join(item.sender_role for item in target_messages[:2]) or "the relevant peers"
+        )
         return ProModeDiscussionReply(
             content=f"{ROLE_LABELS[role]} responds to {recipient_roles} with a conservative fallback.",
             claims=[f"Review the key claim from {recipient_roles} before finalizing."],
@@ -2426,14 +2574,18 @@ class ProModeWorkflowRunner:
             requested_actions=["Tighten the argument using the strongest available evidence."],
             ready_to_finalize=(round_index > 1),
             vote=("agree_with_reservation" if round_index > 1 else "needs_revision"),
-            central_cruxes=([] if round_index > 1 else ["Fallback path could not resolve the main crux."]),
+            central_cruxes=(
+                [] if round_index > 1 else ["Fallback path could not resolve the main crux."]
+            ),
             resolved_cruxes=[],
             tool_requests=[],
             confidence="low",
         )
 
     @staticmethod
-    def _fallback_synthesis(*, latest_user_text: str, blackboard: CouncilBlackboard) -> ProModeSynthesis:
+    def _fallback_synthesis(
+        *, latest_user_text: str, blackboard: CouncilBlackboard
+    ) -> ProModeSynthesis:
         blockers = list(blackboard.convergence.central_blockers[:2])
         answer = (
             "I could not fully stabilize the internal council, so this answer carries explicit uncertainty."
@@ -2448,7 +2600,9 @@ class ProModeWorkflowRunner:
             consensus_level=blackboard.convergence.consensus_level,
             confidence="low",
             unresolved_points=blockers,
-            minority_view=("The council still disagreed on one or more central points." if blockers else None),
+            minority_view=(
+                "The council still disagreed on one or more central points." if blockers else None
+            ),
             agreement_reached=bool(blackboard.convergence.ready),
         )
 
@@ -2463,11 +2617,15 @@ class ProModeWorkflowRunner:
         changed = False
         for bad, good in alias_map.items():
             if re.search(rf"(?<![A-Za-z0-9_]){re.escape(bad)}(?![A-Za-z0-9_])", repaired):
-                repaired = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(bad)}(?![A-Za-z0-9_])", good, repaired)
+                repaired = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(bad)}(?![A-Za-z0-9_])", good, repaired
+                )
                 changed = True
         if not changed:
             return None
-        return ProModeCalculatorRequest(purpose=request.purpose, expression=repaired, variables=variables)
+        return ProModeCalculatorRequest(
+            purpose=request.purpose, expression=repaired, variables=variables
+        )
 
     def _execute_calculator_requests(
         self,
@@ -2486,10 +2644,15 @@ class ProModeWorkflowRunner:
                         "status": "started",
                         "tool_name": "numpy_calculator",
                         "message": f"Running calculator for {request.purpose}.",
-                        "payload": {"tool": "numpy_calculator", "args": request.model_dump(mode="json")},
+                        "payload": {
+                            "tool": "numpy_calculator",
+                            "args": request.model_dump(mode="json"),
+                        },
                     }
                 )
-            raw_result = numpy_calculator(expression=request.expression, variables=dict(request.variables or {}))
+            raw_result = numpy_calculator(
+                expression=request.expression, variables=dict(request.variables or {})
+            )
             if not bool(raw_result.get("success")):
                 repaired_request = self._repair_calculator_request(request)
                 if repaired_request is not None:
@@ -2558,9 +2721,21 @@ class ProModeWorkflowRunner:
         intake_decision: ProModeIntakeDecision,
     ) -> dict[str, Any]:
         if intake_decision.route == "direct_response":
-            phase_order = ["intake", "context_policy", "execution_router", "direct_response", "finalize"]
+            phase_order = [
+                "intake",
+                "context_policy",
+                "execution_router",
+                "direct_response",
+                "finalize",
+            ]
         elif intake_decision.route == "tool_workflow":
-            phase_order = ["intake", "context_policy", "execution_router", "tool_workflow", "finalize"]
+            phase_order = [
+                "intake",
+                "context_policy",
+                "execution_router",
+                "tool_workflow",
+                "finalize",
+            ]
         else:
             phase_order = [
                 phase
@@ -2639,11 +2814,17 @@ class ProModeWorkflowRunner:
                     "calculator": {
                         "used": bool(tool_invocations),
                         "call_count": len(tool_invocations),
-                        "results": [item.model_dump(mode="json") for item in blackboard.calculator_results],
+                        "results": [
+                            item.model_dump(mode="json") for item in blackboard.calculator_results
+                        ],
                     },
                     "verifier": verifier_report.model_dump(mode="json"),
                     "summary": summary,
-                    **({"dev_conversation": dev_conversation} if isinstance(dev_conversation, dict) else {}),
+                    **(
+                        {"dev_conversation": dev_conversation}
+                        if isinstance(dev_conversation, dict)
+                        else {}
+                    ),
                 },
             },
         }
@@ -2661,7 +2842,9 @@ class ProModeWorkflowRunner:
         structured = {
             "messages": [message.model_dump(mode="json") for message in messages],
             "rounds": [round_item.model_dump(mode="json") for round_item in rounds],
-            "calculator_results": [item.model_dump(mode="json") for item in blackboard.calculator_results],
+            "calculator_results": [
+                item.model_dump(mode="json") for item in blackboard.calculator_results
+            ],
             "synthesis": synthesis.model_dump(mode="json"),
             "verifier": verifier_report.model_dump(mode="json"),
             "convergence": blackboard.convergence.model_dump(mode="json"),
@@ -2747,7 +2930,9 @@ class ProModeWorkflowRunner:
         )
         if blackboard.calculator_results:
             for item in blackboard.calculator_results:
-                lines.append(f"- {item.purpose}: {item.formatted_result or item.error or 'No result'}")
+                lines.append(
+                    f"- {item.purpose}: {item.formatted_result or item.error or 'No result'}"
+                )
         else:
             lines.append("- No calculator call was used.")
         lines.extend(

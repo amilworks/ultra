@@ -35,7 +35,7 @@ class AgnoV3Services:
     artifacts: ArtifactRepository
     approvals: ApprovalRepository
     notes: ScientificNoteRepository
-    orchestrator: "AgnoV3WorkflowService"
+    orchestrator: AgnoV3WorkflowService
 
 
 class AgnoV3WorkflowService:
@@ -72,9 +72,15 @@ class AgnoV3WorkflowService:
         run_id: str | None = None,
         session_title: str | None = None,
     ) -> dict[str, Any]:
-        title = str(
-            session_title or request.goal or self._latest_user_text(request.messages) or "New session"
-        ).strip() or "New session"
+        title = (
+            str(
+                session_title
+                or request.goal
+                or self._latest_user_text(request.messages)
+                or "New session"
+            ).strip()
+            or "New session"
+        )
         existing_session = self.sessions.get_session(session_id=session_id, user_id=user_id) or {}
         resolved_memory_policy = ScientificMemoryPolicy.model_validate(
             dict(existing_session.get("memory_policy") or {})
@@ -90,7 +96,9 @@ class AgnoV3WorkflowService:
             knowledge_scope=resolved_knowledge_scope.model_dump(mode="json"),
             metadata={"runtime": "agno"},
         )
-        self._sync_request_messages(session_id=session_id, user_id=user_id, messages=request.messages)
+        self._sync_request_messages(
+            session_id=session_id, user_id=user_id, messages=request.messages
+        )
 
         resolved_run_id = str(run_id or uuid4().hex)
         route_context = {
@@ -114,7 +122,11 @@ class AgnoV3WorkflowService:
             checkpoint_state={"phase": "queued", **route_context},
             budget_state=self._budget_state(request),
             trace_group_id=session_id,
-            metadata={"runtime": "agno", "planner_version": "agno_v1", **dict(request.metadata or {})},
+            metadata={
+                "runtime": "agno",
+                "planner_version": "agno_v1",
+                **dict(request.metadata or {}),
+            },
         )
         self.events.append_event(
             run_id=resolved_run_id,
@@ -151,24 +163,39 @@ class AgnoV3WorkflowService:
         run = self.runs.get_run(run_id=run_id, user_id=user_id)
         if run is None:
             raise ValueError(f"Run not found: {run_id}")
-        checkpoint_state = dict(run.get("checkpoint_state") or {}) if isinstance(run.get("checkpoint_state"), dict) else {}
-        pending_hitl = dict(checkpoint_state.get("pending_hitl") or {}) if isinstance(checkpoint_state.get("pending_hitl"), dict) else {}
+        checkpoint_state = (
+            dict(run.get("checkpoint_state") or {})
+            if isinstance(run.get("checkpoint_state"), dict)
+            else {}
+        )
+        pending_hitl = (
+            dict(checkpoint_state.get("pending_hitl") or {})
+            if isinstance(checkpoint_state.get("pending_hitl"), dict)
+            else {}
+        )
         if not pending_hitl:
             raise ValueError("Run is missing pending approval state")
 
         normalized_decision = str(decision or "").strip().lower() or "approve"
-        approval = self.approvals.update_approval(
-            approval_id=approval_id,
-            user_id=user_id,
-            status=("approved" if normalized_decision == "approve" else "rejected"),
-            resolution={
-                "decision": normalized_decision,
-                "note": str(note or "").strip() or None,
-                "metadata": dict(metadata or {}),
-            },
-        ) or approval
+        approval = (
+            self.approvals.update_approval(
+                approval_id=approval_id,
+                user_id=user_id,
+                status=("approved" if normalized_decision == "approve" else "rejected"),
+                resolution={
+                    "decision": normalized_decision,
+                    "note": str(note or "").strip() or None,
+                    "metadata": dict(metadata or {}),
+                },
+            )
+            or approval
+        )
 
-        request_payload = dict(approval.get("request_payload") or {}) if isinstance(approval.get("request_payload"), dict) else {}
+        request_payload = (
+            dict(approval.get("request_payload") or {})
+            if isinstance(approval.get("request_payload"), dict)
+            else {}
+        )
         request_model = AgenticRunRequest.model_validate(
             dict(request_payload.get("request") or {})
             if isinstance(request_payload.get("request"), dict)
@@ -176,7 +203,9 @@ class AgnoV3WorkflowService:
                 "messages": [],
                 "selected_tool_names": list(pending_hitl.get("selected_tool_names") or []),
                 "workflow_hint": dict(pending_hitl.get("workflow_hint") or {}),
-                "reasoning_mode": str((run.get("budget_state") or {}).get("reasoning_mode") or "deep"),
+                "reasoning_mode": str(
+                    (run.get("budget_state") or {}).get("reasoning_mode") or "deep"
+                ),
                 "budgets": self._budget_state_from_row(run),
             }
         )
@@ -219,14 +248,17 @@ class AgnoV3WorkflowService:
             explicit_type = str(payload.get("event_type") or "").strip()
             phase = str(payload.get("phase") or "").strip().lower()
             status = str(payload.get("status") or "").strip().lower()
-            event_type = explicit_type or (f"{phase}.{status}" if phase and status else f"{event_kind}.updated")
+            event_type = explicit_type or (
+                f"{phase}.{status}" if phase and status else f"{event_kind}.updated"
+            )
             self.events.append_event(
                 run_id=run_id,
                 session_id=session_id,
                 user_id=user_id,
                 event_kind=event_kind,
                 event_type=event_type,
-                tool_name=str(payload.get("tool_name") or payload.get("tool") or "").strip() or None,
+                tool_name=str(payload.get("tool_name") or payload.get("tool") or "").strip()
+                or None,
                 payload=payload,
             )
 
@@ -281,7 +313,11 @@ class AgnoV3WorkflowService:
         debug = dict(metadata.get("debug") or {}) if isinstance(metadata.get("debug"), dict) else {}
         interrupted = bool(metadata.get("interrupted"))
         resume_decision = str(metadata.get("resume_decision") or "").strip().lower()
-        pending_hitl = dict(metadata.get("pending_hitl") or {}) if isinstance(metadata.get("pending_hitl"), dict) else {}
+        pending_hitl = (
+            dict(metadata.get("pending_hitl") or {})
+            if isinstance(metadata.get("pending_hitl"), dict)
+            else {}
+        )
         checkpoint_state = {
             "selected_tool_names": list(request.selected_tool_names or []),
             "workflow_hint": dict(request.workflow_hint or {}),
@@ -432,7 +468,9 @@ class AgnoV3WorkflowService:
                 user_id=user_id,
                 role=str(message.role or "user"),
                 content=str(message.content or ""),
-                attachments=[item.model_dump(mode="json") for item in list(message.attachments or [])],
+                attachments=[
+                    item.model_dump(mode="json") for item in list(message.attachments or [])
+                ],
                 metadata=dict(message.metadata or {}),
             )
 
@@ -460,7 +498,9 @@ class AgnoV3WorkflowService:
 
     @staticmethod
     def _budget_state_from_row(run: dict[str, Any]) -> dict[str, Any]:
-        return dict(run.get("budget_state") or {}) if isinstance(run.get("budget_state"), dict) else {}
+        return (
+            dict(run.get("budget_state") or {}) if isinstance(run.get("budget_state"), dict) else {}
+        )
 
     @staticmethod
     def _context_message(label: str, payload: dict[str, Any] | list[str]) -> dict[str, str] | None:
@@ -483,7 +523,9 @@ class AgnoV3WorkflowService:
         session_id: str,
         user_id: str,
     ) -> list[dict[str, str]]:
-        stored_messages = self.sessions.list_messages(session_id=session_id, user_id=user_id, limit=200)
+        stored_messages = self.sessions.list_messages(
+            session_id=session_id, user_id=user_id, limit=200
+        )
         messages = [
             {
                 "role": str(message.get("role") or "user"),
@@ -492,7 +534,9 @@ class AgnoV3WorkflowService:
             for message in stored_messages
             if str(message.get("content") or "").strip()
         ]
-        attachments = [item.model_dump(mode="json") for item in self._attachments_for_request(request)]
+        attachments = [
+            item.model_dump(mode="json") for item in self._attachments_for_request(request)
+        ]
         context_messages = [
             self._context_message("Attachments", attachments),
         ]
@@ -518,7 +562,10 @@ def build_agno_v3_services(
     artifact_root: Path,
     runtime: AgnoChatRuntime | None = None,
 ) -> AgnoV3Services:
-    db_target = str(getattr(settings, "run_store_path", "data/runs.db") or "data/runs.db").strip() or "data/runs.db"
+    db_target = (
+        str(getattr(settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
+        or "data/runs.db"
+    )
     db = AgenticDb(db_target)
     sessions = SessionRepository(db)
     runs = RunRepository(db)

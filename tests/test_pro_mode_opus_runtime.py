@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
-import src.agno_backend.runtime as runtime_module
 import src.agno_backend.pro_mode as pro_mode_module
-from src.agno_backend.pro_mode import ProModeIntakeDecision, ProModeVerifierReport, ProModeWorkflowResult
+import src.agno_backend.runtime as runtime_module
+from src.agno_backend.pro_mode import (
+    ProModeIntakeDecision,
+    ProModeVerifierReport,
+    ProModeWorkflowResult,
+)
 from src.agno_backend.runtime import AgnoChatRuntime, ProModeToolPlan, ToolProgramSynthesis
 from src.config import Settings
 
@@ -84,15 +88,124 @@ def test_pro_mode_settings_accept_native_bedrock_values() -> None:
         pro_mode_transport="aws_bedrock_claude",
         pro_mode_model="global.anthropic.claude-opus-4-1-20250805-v1:0",
         pro_mode_aws_region="us-east-1",
-        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_profile="sandbox-profile",
         pro_mode_aws_sso_auth=True,
+        pro_mode_max_tokens=12288,
+        pro_mode_temperature=0.15,
+        pro_mode_top_p=0.92,
+        pro_mode_top_k=32,
+        pro_mode_claude_thinking_enabled=True,
+        pro_mode_claude_thinking_budget_tokens=8192,
+        pro_mode_claude_thinking_display="summarized",
     )
 
     assert settings.pro_mode_transport == "aws_bedrock_claude"
     assert settings.resolved_pro_mode_model == "global.anthropic.claude-opus-4-1-20250805-v1:0"
     assert settings.resolved_pro_mode_aws_region == "us-east-1"
-    assert settings.resolved_pro_mode_aws_profile == "ucsb-sandbox"
+    assert settings.resolved_pro_mode_aws_profile == "sandbox-profile"
     assert settings.pro_mode_aws_sso_auth is True
+    assert settings.pro_mode_max_tokens == 12288
+    assert settings.pro_mode_temperature == 0.15
+    assert settings.pro_mode_top_p == 0.92
+    assert settings.pro_mode_top_k == 32
+    assert settings.pro_mode_claude_thinking_enabled is True
+    assert settings.pro_mode_claude_thinking_budget_tokens == 8192
+    assert settings.pro_mode_claude_thinking_display == "summarized"
+
+
+def test_pro_mode_settings_resolve_native_bedrock_bearer_token(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-bearer-token")
+    settings = Settings(_env_file=None, pro_mode_transport="aws_bedrock_claude")
+
+    assert settings.resolved_pro_mode_aws_bearer_token == "bedrock-bearer-token"
+
+
+def test_megaseg_settings_resolve_runtime_paths_from_fields(tmp_path: Path) -> None:
+    runtime_python = tmp_path / "venvs" / "cyto-dl" / "bin" / "python"
+    checkpoint = tmp_path / "weights" / "epoch_650.ckpt"
+    runtime_python.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    runtime_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    checkpoint.write_text("checkpoint", encoding="utf-8")
+
+    settings = Settings(
+        _env_file=None,
+        megaseg_python=str(runtime_python),
+        megaseg_checkpoint_path=str(checkpoint),
+        megaseg_benchmark_root=str(tmp_path / "benchmark"),
+    )
+
+    assert settings.resolved_megaseg_python == str(runtime_python)
+    assert settings.resolved_megaseg_checkpoint_path == str(checkpoint)
+    assert settings.resolved_megaseg_benchmark_root == str(tmp_path / "benchmark")
+
+
+def test_fallback_research_presentation_contract_extracts_measurements(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    contract = runtime._fallback_research_presentation_contract(
+        user_text="Interpret the segmentation and suggest what to validate next.",
+        response_text=(
+            "The segmentation is sparse and occupies only a small fraction of the volume, "
+            "with signal concentrated in a subset of z-slices."
+        ),
+        metadata={
+            "pro_mode": {
+                "research_program": {
+                    "evidence_summaries": ["Coverage remained below 1% across the analyzed stack."]
+                }
+            }
+        },
+        tool_invocations=[
+            {
+                "tool": "quantify_segmentation_masks",
+                "status": "completed",
+                "run_id": "run-123",
+                "preferred_upload_paths": ["/tmp/overlay.png"],
+                "output_summary": {
+                    "coverage_percent": 0.54,
+                    "object_count": 112,
+                    "active_slice_count": 25,
+                    "z_slice_count": 65,
+                },
+            }
+        ],
+    )
+
+    assert contract["result"].startswith("The segmentation is sparse")
+    assert any(item["source"] == "quantify segmentation masks" for item in contract["evidence"])
+    assert any(item["name"] == "coverage percent" for item in contract["measurements"])
+    assert any(item["name"] == "object count" for item in contract["measurements"])
+    assert contract["confidence"]["level"] in {"medium", "high"}
+    assert len(contract["next_steps"]) >= 1
+
+
+def test_analysis_session_state_payload_includes_contract_brief_fields(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    payload = runtime._analysis_session_state_payload(
+        analysis_state={
+            "last_answer_summary": "The mask is sparse and concentrated in a limited set of slices.",
+            "last_measurements": ["coverage percent: 0.54 %", "object count: 112"],
+            "last_next_steps": ["Compare the same metric against a matched control."],
+            "last_limitations": ["Only one field of view was analyzed."],
+            "evidence_summaries": ["answer_summary: The mask is sparse."],
+            "handles": {"mask_paths": ["/tmp/mask.tiff"]},
+        },
+        selection_context=None,
+        uploaded_files=[],
+    )
+
+    analysis_state = payload["analysis_state"]
+    assert analysis_state["last_answer_summary"].startswith("The mask is sparse")
+    assert analysis_state["key_measurements"] == [
+        "coverage percent: 0.54 %",
+        "object count: 112",
+    ]
+    assert analysis_state["recommended_next_steps"] == [
+        "Compare the same metric against a matched control."
+    ]
+    assert analysis_state["open_limits"] == ["Only one field of view was analyzed."]
 
 
 def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: Path) -> None:
@@ -113,7 +226,9 @@ def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: P
 
 def test_report_like_turns_stay_on_reasoning_solver_by_default(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path, pro_mode_expert_council_enabled=True)
-    prompt = "Write a report comparing the main approaches to segmentation in fluorescence microscopy."
+    prompt = (
+        "Write a report comparing the main approaches to segmentation in fluorescence microscopy."
+    )
 
     decision = ProModeIntakeDecision(
         route="deep_reasoning",
@@ -132,6 +247,44 @@ def test_report_like_turns_stay_on_reasoning_solver_by_default(tmp_path: Path) -
 
     assert stabilized.execution_regime == "reasoning_solver"
     assert stabilized.task_regime == "conceptual_high_uncertainty"
+
+
+def test_methods_style_microscopy_analysis_stays_on_reasoning_solver(tmp_path: Path) -> None:
+    runtime = _make_runtime(tmp_path)
+    prompt = (
+        "Write a graduate-level technical analysis for a computational biology audience explaining "
+        "the difference between aleatoric and epistemic uncertainty in microscopy image segmentation. "
+        "Keep the tone like a methods discussion section."
+    )
+
+    plan = runtime._build_pro_mode_tool_plan(
+        user_text=prompt,
+        uploaded_files=[],
+        selected_tool_names=[],
+        selection_context=None,
+        inferred_tool_names=[],
+        prior_pro_mode_state=None,
+    )
+
+    assert plan is None
+
+    decision = ProModeIntakeDecision(
+        route="tool_workflow",
+        execution_regime="validated_tool",
+        reason="Initial intake suggested a research-program workflow.",
+    )
+    stabilized = runtime._stabilize_pro_mode_intake_decision(
+        decision=decision,
+        messages=[{"role": "user", "content": prompt}],
+        latest_user_text=prompt,
+        uploaded_files=[],
+        selected_tool_names=None,
+        selection_context=None,
+        prior_pro_mode_state=None,
+    )
+
+    assert stabilized.route == "deep_reasoning"
+    assert stabilized.execution_regime == "reasoning_solver"
 
 
 def test_proof_like_turns_stay_on_reasoning_solver_by_default(tmp_path: Path) -> None:
@@ -159,7 +312,9 @@ def test_proof_like_turns_stay_on_reasoning_solver_by_default(tmp_path: Path) ->
 
 def test_benchmark_force_can_still_select_benchmark_only_regimes(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
-    base_decision = ProModeIntakeDecision(route="deep_reasoning", execution_regime="reasoning_solver")
+    base_decision = ProModeIntakeDecision(
+        route="deep_reasoning", execution_regime="reasoning_solver"
+    )
 
     overridden = runtime._force_pro_mode_execution_regime(
         decision=base_decision,
@@ -261,9 +416,20 @@ def test_native_bedrock_transport_builds_claude_model(tmp_path: Path, monkeypatc
         pro_mode_aws_region="us-east-1",
         pro_mode_aws_access_key_id="AKIA_TEST",
         pro_mode_aws_secret_access_key="secret-test",
+        pro_mode_max_tokens=12288,
+        pro_mode_temperature=0.2,
+        pro_mode_top_p=0.9,
+        pro_mode_top_k=24,
+        pro_mode_claude_thinking_enabled=True,
+        pro_mode_claude_thinking_budget_tokens=8192,
+        pro_mode_claude_thinking_display="summarized",
     )
 
-    model = runtime._build_pro_mode_model(max_runtime_seconds=45)
+    model = runtime._build_pro_mode_model(
+        reasoning_mode="deep",
+        reasoning_effort_override="high",
+        max_runtime_seconds=45,
+    )
 
     assert isinstance(model, FakeClaude)
     assert model.kwargs["id"] == "global.anthropic.claude-opus-4-1-20250805-v1:0"
@@ -271,6 +437,15 @@ def test_native_bedrock_transport_builds_claude_model(tmp_path: Path, monkeypatc
     assert model.kwargs["aws_access_key"] == "AKIA_TEST"
     assert model.kwargs["aws_secret_key"] == "secret-test"
     assert model.kwargs["timeout"] >= 60
+    assert model.kwargs["max_tokens"] == 12288
+    assert model.kwargs["temperature"] == 0.2
+    assert model.kwargs["top_p"] == 0.9
+    assert model.kwargs["top_k"] == 24
+    assert model.kwargs["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 8192,
+        "display": "summarized",
+    }
 
 
 def test_native_bedrock_transport_uses_boto3_session_for_sso(tmp_path: Path, monkeypatch) -> None:
@@ -297,7 +472,7 @@ def test_native_bedrock_transport_uses_boto3_session_for_sso(tmp_path: Path, mon
         pro_mode_transport="aws_bedrock_claude",
         pro_mode_model="global.anthropic.claude-opus-4-1-20250805-v1:0",
         pro_mode_aws_region="us-east-1",
-        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_profile="sandbox-profile",
         pro_mode_aws_sso_auth=True,
     )
 
@@ -306,13 +481,68 @@ def test_native_bedrock_transport_uses_boto3_session_for_sso(tmp_path: Path, mon
     assert isinstance(model, FakeClaude)
     assert isinstance(model.kwargs["session"], FakeSession)
     assert model.kwargs["session"].kwargs == {
-        "profile_name": "ucsb-sandbox",
+        "profile_name": "sandbox-profile",
         "region_name": "us-east-1",
     }
     assert model.kwargs["aws_region"] == "us-east-1"
 
 
-def test_native_bedrock_transport_classifies_missing_credentials_for_fallback(tmp_path: Path) -> None:
+def test_native_bedrock_transport_builds_claude_model_with_bearer_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fake_aws_module = types.ModuleType("agno.models.aws")
+
+    class FakeClaude:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_aws_module.Claude = FakeClaude
+    monkeypatch.setitem(sys.modules, "agno.models.aws", fake_aws_module)
+
+    fake_bedrock_module = types.ModuleType("anthropic.lib.bedrock")
+
+    class FakeAnthropicBedrock:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class FakeAsyncAnthropicBedrock:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_bedrock_module.AnthropicBedrock = FakeAnthropicBedrock
+    fake_bedrock_module.AsyncAnthropicBedrock = FakeAsyncAnthropicBedrock
+    monkeypatch.setitem(sys.modules, "anthropic.lib.bedrock", fake_bedrock_module)
+
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_bearer_token="bedrock-bearer-token",
+        pro_mode_max_tokens=8192,
+    )
+
+    model = runtime._build_pro_mode_model(max_runtime_seconds=45)
+
+    assert isinstance(model, FakeClaude)
+    assert isinstance(model.kwargs["client"], FakeAnthropicBedrock)
+    assert isinstance(model.kwargs["async_client"], FakeAsyncAnthropicBedrock)
+    assert model.kwargs["client"].kwargs == {
+        "api_key": "bedrock-bearer-token",
+        "timeout": 60,
+        "aws_region": "us-east-1",
+    }
+    assert model.kwargs["async_client"].kwargs == {
+        "api_key": "bedrock-bearer-token",
+        "timeout": 60,
+        "aws_region": "us-east-1",
+    }
+    assert model.kwargs["aws_region"] == "us-east-1"
+
+
+def test_native_bedrock_transport_classifies_missing_credentials_for_fallback(
+    tmp_path: Path,
+) -> None:
     runtime = _make_runtime(tmp_path, pro_mode_transport="aws_bedrock_claude")
 
     assert (
@@ -326,7 +556,12 @@ def test_published_api_transport_extracts_text_blocks() -> None:
         "conversationId": "conv-1",
         "message": {
             "content": [
-                {"contentType": "reasoning", "text": "hidden", "signature": "sig", "redactedContent": ""},
+                {
+                    "contentType": "reasoning",
+                    "text": "hidden",
+                    "signature": "sig",
+                    "redactedContent": "",
+                },
                 {"contentType": "text", "body": "First paragraph."},
                 {"contentType": "text", "body": "Second paragraph."},
             ]
@@ -589,11 +824,70 @@ def test_megaseg_request_requires_megaseg_in_strict_tool_workflow(tmp_path: Path
         user_text="Run MegaSeg on this image and quantify the result.",
         uploaded_files=["/tmp/test-image.ome.tiff"],
         selection_context=None,
-        selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks", "segment_image_sam2"],
+        selected_tool_names=[
+            "segment_image_megaseg",
+            "quantify_segmentation_masks",
+            "segment_image_sam2",
+        ],
     )
 
     assert strict is True
     assert required == ["segment_image_megaseg", "quantify_segmentation_masks"]
+
+
+def test_megaseg_prompt_with_explicit_local_path_builds_strict_plan_without_upload(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+
+    prompt = (
+        "Run MegaSeg on /private/tmp/megaseg_test_crop.ome.tiff, "
+        "then quantify the mask and write a short report."
+    )
+
+    plan = runtime._build_pro_mode_tool_plan(
+        user_text=prompt,
+        uploaded_files=[],
+        selected_tool_names=[],
+        selection_context=None,
+        inferred_tool_names=["segment_image_megaseg"],
+        prior_pro_mode_state=None,
+    )
+
+    assert plan is not None
+    assert plan.category == "segmentation"
+    assert plan.selected_tool_names == ["segment_image_megaseg", "quantify_segmentation_masks"]
+    assert plan.strict_validation is True
+
+
+def test_megaseg_prompt_with_explicit_s3_ome_zarr_stabilizes_to_tool_workflow(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    prompt = (
+        "Use MegaSeg on "
+        "s3://allencell/aics/emt_timelapse_dataset/data/1500004526_10_raw_converted.ome.zarr/ "
+        "then quantify the result."
+    )
+    messages = [{"role": "user", "content": prompt}]
+
+    intake = runtime._stabilize_pro_mode_intake_decision(
+        decision=runtime.pro_mode._fallback_intake_decision(
+            messages=messages, latest_user_text=prompt
+        ),
+        messages=messages,
+        latest_user_text=prompt,
+        uploaded_files=[],
+        selected_tool_names=None,
+        selection_context=None,
+        prior_pro_mode_state=None,
+    )
+
+    assert intake.route == "tool_workflow"
+    assert intake.execution_regime == "validated_tool"
+    assert intake.selected_tool_names == ["segment_image_megaseg", "quantify_segmentation_masks"]
+    assert intake.tool_plan_category == "segmentation"
+    assert intake.strict_tool_validation is True
 
 
 def test_megaseg_strict_workflow_requires_quantification_completion(tmp_path: Path) -> None:
@@ -786,7 +1080,9 @@ def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them
 
     result = asyncio.run(
         runtime._run_pro_mode_tool_workflow(
-            messages=[{"role": "user", "content": "Write Python to analyze this image and run it."}],
+            messages=[
+                {"role": "user", "content": "Write Python to analyze this image and run it."}
+            ],
             latest_user_text="Write Python to analyze this image and run it.",
             uploaded_files=["/tmp/test-image.png"],
             max_tool_calls=8,
@@ -825,7 +1121,7 @@ def test_tool_program_phase_records_native_bedrock_model_route_in_compression_st
         pro_mode_transport="aws_bedrock_claude",
         pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
         pro_mode_aws_region="us-east-1",
-        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_profile="sandbox-profile",
         pro_mode_aws_sso_auth=True,
     )
     session_state: dict[str, object] = {}
@@ -955,7 +1251,9 @@ def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Pat
     assert metadata["pro_mode"]["model_route"]["transport"] == "bedrock_published_api"
 
 
-def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(tmp_path: Path) -> None:
+def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(
+    tmp_path: Path,
+) -> None:
     runtime = _make_runtime(
         tmp_path,
         llm_provider="openai",
@@ -1045,7 +1343,7 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
         pro_mode_transport="aws_bedrock_claude",
         pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
         pro_mode_aws_region="us-east-1",
-        pro_mode_aws_profile="ucsb-sandbox",
+        pro_mode_aws_profile="sandbox-profile",
         pro_mode_aws_sso_auth=True,
     )
 
@@ -1061,7 +1359,11 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
         return {
             "response_text": "Measured output is ready.",
             "tool_invocations": [
-                {"tool": "execute_python_job", "status": "completed", "output_summary": {"success": True}}
+                {
+                    "tool": "execute_python_job",
+                    "status": "completed",
+                    "output_summary": {"success": True},
+                }
             ],
             "metadata": {
                 "research_program": {

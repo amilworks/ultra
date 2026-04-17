@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _ACTION_VERBS = {
     "run",
     "compare",
@@ -148,14 +147,15 @@ def _heuristic_response_quality(response_payload: dict[str, Any]) -> dict[str, A
 
     limitations = [item for item in _as_list(contract.get("limitations")) if _string(item)]
     next_steps = _next_step_actions(contract)
-    measurements = [item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)]
+    measurements = [
+        item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)
+    ]
 
     checks = {
         "direct_answer": bool(normalized) and word_count >= 32 and meta_rate < 0.5,
         "structured_detail": sentence_count >= 3 or "\n-" in normalized or "\n1." in normalized,
-        "limitations_covered": bool(limitations) or any(
-            token in normalized.lower() for token in ("limitation", "caveat", "uncertain")
-        ),
+        "limitations_covered": bool(limitations)
+        or any(token in normalized.lower() for token in ("limitation", "caveat", "uncertain")),
         "next_steps_present": bool(next_steps) or "next step" in normalized.lower(),
         "numeric_detail_present": bool(measurements) or numeric_density >= 0.45,
     }
@@ -221,7 +221,9 @@ def audit_contract_payload(response_payload: dict[str, Any]) -> dict[str, Any]:
     confidence_why = [item for item in _as_list(confidence.get("why")) if _string(item)]
 
     evidence = _evidence_entries(contract)
-    measurements = [item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)]
+    measurements = [
+        item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)
+    ]
     limitations = [item for item in _as_list(contract.get("limitations")) if _string(item)]
     next_steps = _next_step_actions(contract)
 
@@ -272,7 +274,9 @@ def score_research_value(response_payload: dict[str, Any]) -> dict[str, Any]:
     combined_text_lower = combined_text.lower()
 
     evidence = _evidence_entries(contract)
-    measurements = [item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)]
+    measurements = [
+        item for item in _as_list(contract.get("measurements")) if isinstance(item, dict)
+    ]
     limitations = [item for item in _as_list(contract.get("limitations")) if _string(item)]
     next_steps = _next_step_actions(contract)
     confidence = _as_dict(contract.get("confidence"))
@@ -281,13 +285,19 @@ def score_research_value(response_payload: dict[str, Any]) -> dict[str, Any]:
     reproducibility = 0
     if evidence:
         reproducibility += 1
-    if any(token in combined_text_lower for token in ("repro", "run id", "artifact", "hash", "version")):
+    if any(
+        token in combined_text_lower for token in ("repro", "run id", "artifact", "hash", "version")
+    ):
         reproducibility += 1
 
     actionability = 0
     if next_steps:
         actionability += 1
-    if any(_string(step).split(" ", 1)[0].lower() in _ACTION_VERBS for step in next_steps if _string(step)):
+    if any(
+        _string(step).split(" ", 1)[0].lower() in _ACTION_VERBS
+        for step in next_steps
+        if _string(step)
+    ):
         actionability += 1
 
     traceability = 0
@@ -312,20 +322,32 @@ def score_research_value(response_payload: dict[str, Any]) -> dict[str, Any]:
     max_total = 10
     recommendations: list[str] = []
     if reproducibility < 2:
-        recommendations.append("Add reproducibility anchors (run IDs, artifacts, or version/hash notes).")
+        recommendations.append(
+            "Add reproducibility anchors (run IDs, artifacts, or version/hash notes)."
+        )
     if actionability < 2:
-        recommendations.append("Return concrete next-step actions with clear verbs and follow-up intent.")
+        recommendations.append(
+            "Return concrete next-step actions with clear verbs and follow-up intent."
+        )
     if traceability < 2:
-        recommendations.append("Include stronger evidence-to-measurement traceability in the final contract.")
+        recommendations.append(
+            "Include stronger evidence-to-measurement traceability in the final contract."
+        )
     if uncertainty < 2:
-        recommendations.append("State uncertainty with explicit confidence rationale and study limitations.")
+        recommendations.append(
+            "State uncertainty with explicit confidence rationale and study limitations."
+        )
     if scientific_specificity < 2:
-        recommendations.append("Increase scientific specificity with quantitative metrics and numeric context.")
+        recommendations.append(
+            "Increase scientific specificity with quantitative metrics and numeric context."
+        )
 
     if total >= 8:
         summary = "High research value: actionable, traceable, and quantitatively grounded."
     elif total >= 6:
-        summary = "Moderate research value: useful output with room to improve reproducibility details."
+        summary = (
+            "Moderate research value: useful output with room to improve reproducibility details."
+        )
     else:
         summary = "Low research value: response needs stronger evidence, actionability, and uncertainty framing."
 

@@ -59,6 +59,9 @@ fi
 
 uv pip install "linesman==0.3.2"
 
+# Install the path-based CLI used for zero-copy registration.
+uv pip install -e "${ROOT_DIR}/source/contrib/bisque_paths" --no-deps
+
 # Install local BisQue packages without resolver side-effects.
 uv pip install -e "${ROOT_DIR}/source/bqcore" --no-deps
 uv pip install -e "${ROOT_DIR}/source/bqapi" --no-deps
@@ -66,9 +69,11 @@ uv pip install -e "${ROOT_DIR}/source/bqengine" --no-deps
 uv pip install -e "${ROOT_DIR}/source/bqfeature" --no-deps
 uv pip install -e "${ROOT_DIR}/source/bqserver" --no-deps
 uv pip install -e "${ROOT_DIR}/source/pytest-bisque" --no-deps
+uv pip install -e "${ROOT_DIR}/source/contrib/bisque_paths" --no-deps
 
 echo "Running bootstrap sanity checks..."
 python -c "import pkg_resources, tg, bqapi; print('import-ok')"
 bq-admin --help >/dev/null
+bq-path --help >/dev/null
 
 echo "Bootstrap complete."

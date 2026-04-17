@@ -21,9 +21,7 @@ NUMPY_CALCULATOR_TOOL = {
                 },
                 "variables": {
                     "type": "object",
-                    "description": (
-                        "Optional scalar or array variables used by the expression."
-                    ),
+                    "description": ("Optional scalar or array variables used by the expression."),
                     "additionalProperties": True,
                 },
             },

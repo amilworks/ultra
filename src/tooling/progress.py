@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 

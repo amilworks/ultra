@@ -10,9 +10,10 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from xml.etree import ElementTree as ET
 
 import numpy as np
@@ -488,9 +489,7 @@ class DynUNETAdapter(BaseTrainingAdapter):
             return "simulated"
         if requested == "monai":
             if not monai_available:
-                raise ValueError(
-                    "execution_backend=monai requested, but MONAI is not installed."
-                )
+                raise ValueError("execution_backend=monai requested, but MONAI is not installed.")
             return "monai"
         return "monai" if monai_available else "simulated"
 
@@ -584,7 +583,7 @@ class DynUNETAdapter(BaseTrainingAdapter):
         final_loss = 1.0
         for epoch in range(start_epoch, epochs + 1):
             control_callback()
-            final_loss = max(0.015, (0.92 ** epoch) + rng.uniform(-0.01, 0.01))
+            final_loss = max(0.015, (0.92**epoch) + rng.uniform(-0.01, 0.01))
             val_dice = min(0.985, 0.42 + (0.055 * epoch) + rng.uniform(-0.015, 0.015))
             best_val_dice = max(best_val_dice, val_dice)
             row = {
@@ -961,9 +960,7 @@ class DynUNETAdapter(BaseTrainingAdapter):
             "model_artifact_path": str(model_artifact),
             "model_summary_path": str(model_summary_path),
             "metrics_path": str(metrics_path),
-            "checkpoint_paths": [
-                str(path) for path in sorted(checkpoints_dir.glob("epoch-*.pt"))
-            ],
+            "checkpoint_paths": [str(path) for path in sorted(checkpoints_dir.glob("epoch-*.pt"))],
             "metrics": {
                 "best_val_dice": round(best_val_dice, 6),
                 "final_loss": round(final_loss, 6),
@@ -1247,7 +1244,9 @@ class MedSAMAdapter(BaseTrainingAdapter):
         edge_weight = _safe_float(config.get("edge_weight"), 0.25)
         medsam_model_id = str(config.get("model_id") or "").strip() or None
         medsam_device = str(config.get("device") or "").strip() or None
-        medsam_max_slices = _safe_int(config.get("max_slices"), default=160, minimum=1, maximum=2048)
+        medsam_max_slices = _safe_int(
+            config.get("max_slices"), default=160, minimum=1, maximum=2048
+        )
         medsam_multimask = _safe_bool(config.get("multimask_output"), True)
 
         for index, raw_path in enumerate(input_paths):
@@ -1270,9 +1269,13 @@ class MedSAMAdapter(BaseTrainingAdapter):
                     device=medsam_device,
                     max_slices=medsam_max_slices,
                 )
-                if bool(medsam_result.get("success")) and isinstance(medsam_result.get("_mask"), np.ndarray):
+                if bool(medsam_result.get("success")) and isinstance(
+                    medsam_result.get("_mask"), np.ndarray
+                ):
                     medsam_backend = str(medsam_result.get("backend") or "medsam2")
-                    mask = (np.asarray(medsam_result["_mask"]).astype(np.uint8) > 0).astype(np.uint8) * 255
+                    mask = (np.asarray(medsam_result["_mask"]).astype(np.uint8) > 0).astype(
+                        np.uint8
+                    ) * 255
                     score_map = array.astype(np.float32)
                 else:
                     medsam_warning = str(medsam_result.get("error") or "MedSAM2 inference failed.")
@@ -1313,14 +1316,16 @@ class MedSAMAdapter(BaseTrainingAdapter):
                 }
             )
 
-        framework = "medsam2" if any(str(item.get("backend", "")).startswith("medsam2") for item in predictions) else "medsam-fallback"
+        framework = (
+            "medsam2"
+            if any(str(item.get("backend", "")).startswith("medsam2") for item in predictions)
+            else "medsam-fallback"
+        )
         return {
             "predictions": predictions,
             "prediction_count": len(predictions),
             "framework": framework,
-            "execution_backend": "medsam2"
-            if framework == "medsam2"
-            else "simulated",
+            "execution_backend": "medsam2" if framework == "medsam2" else "simulated",
             "drift_score_mean": round(
                 (sum(drift_scores) / float(len(drift_scores))) if drift_scores else 0.0,
                 6,
@@ -1356,7 +1361,9 @@ def _resolve_yolov5_repo_path() -> Path:
 
 
 def _resolve_rarespot_weights_path() -> Path:
-    return _resolve_package_relative_path(os.getenv("YOLOV5_RARESPOT_WEIGHTS"), "RareSpotWeights.pt")
+    return _resolve_package_relative_path(
+        os.getenv("YOLOV5_RARESPOT_WEIGHTS"), "RareSpotWeights.pt"
+    )
 
 
 def _ensure_yolov5_font_asset(config_dir: Path) -> None:
@@ -1400,9 +1407,7 @@ def _yolo_train_pairs(manifest: dict[str, Any], split: str) -> list[dict[str, An
         if not isinstance(row, dict):
             continue
         image = row.get("image") if isinstance(row.get("image"), dict) else {}
-        annotation = (
-            row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
-        )
+        annotation = row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
         image_path = str(image.get("path") or "").strip()
         annotation_path = str(annotation.get("path") or "").strip()
         if not image_path or not annotation_path:
@@ -1417,7 +1422,9 @@ def _yolo_train_pairs(manifest: dict[str, Any], split: str) -> list[dict[str, An
     return output
 
 
-def _parse_bisque_rectangles(xml_path: Path, *, layer_name: str = "gt2") -> tuple[list[dict[str, Any]], dict[str, int]]:
+def _parse_bisque_rectangles(
+    xml_path: Path, *, layer_name: str = "gt2"
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     tree = ET.parse(str(xml_path))
     root = tree.getroot()
     top_layers = list(root.findall("./gobject"))
@@ -1541,7 +1548,9 @@ def _clip_box_to_tile(
     clipped_y1 = max(tile_y0, y1)
     clipped_x2 = min(tile_x1, x2)
     clipped_y2 = min(tile_y1, y2)
-    if (clipped_x2 - clipped_x1) < float(min_pixels) or (clipped_y2 - clipped_y1) < float(min_pixels):
+    if (clipped_x2 - clipped_x1) < float(min_pixels) or (clipped_y2 - clipped_y1) < float(
+        min_pixels
+    ):
         return None
     return [
         float(clipped_x1 - tile_x0),
@@ -1556,8 +1565,7 @@ def _box_center_in_tile(*, xyxy: list[float], tile: dict[str, int]) -> bool:
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
     return bool(
-        float(tile["x0"]) <= cx < float(tile["x1"])
-        and float(tile["y0"]) <= cy < float(tile["y1"])
+        float(tile["x0"]) <= cx < float(tile["x1"]) and float(tile["y0"]) <= cy < float(tile["y1"])
     )
 
 
@@ -1626,9 +1634,7 @@ def _build_training_tile_assignments(
         clipped_area_sum += best_visible_area
 
     clipped_fraction = (
-        max(0.0, min(1.0, clipped_area_sum / original_area_sum))
-        if original_area_sum > 0.0
-        else 0.0
+        max(0.0, min(1.0, clipped_area_sum / original_area_sum)) if original_area_sum > 0.0 else 0.0
     )
     return assignments, {
         "objects_total": float(len(boxes)),
@@ -1657,7 +1663,7 @@ def _deterministic_sample_rows(
     decorated: list[tuple[str, dict[str, Any]]] = []
     for row in rows:
         row_token = str(row.get("token") or row.get("sample_id") or "").strip() or "tile"
-        digest = hashlib.sha256(f"{seed_token}|{row_token}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{seed_token}|{row_token}".encode()).hexdigest()
         decorated.append((digest, row))
     decorated.sort(key=lambda item: item[0])
     return [row for _, row in decorated[:target]]
@@ -1805,10 +1811,13 @@ def _classwise_nms(rows: list[dict[str, Any]], *, iou_threshold: float) -> list[
                 row_xyxy = row.get("xyxy")
                 if not isinstance(row_xyxy, list) or len(row_xyxy) != 4:
                     continue
-                if _xyxy_iou(
-                    [float(v) for v in candidate_xyxy],
-                    [float(v) for v in row_xyxy],
-                ) <= threshold:
+                if (
+                    _xyxy_iou(
+                        [float(v) for v in candidate_xyxy],
+                        [float(v) for v in row_xyxy],
+                    )
+                    <= threshold
+                ):
                     survivors.append(row)
             ordered = survivors
         merged.extend(kept)
@@ -1874,7 +1883,9 @@ def _write_prediction_xml(
             ET.SubElement(rect, "vertex", index="0", x=f"{x1:.3f}", y=f"{y1:.3f}", z="0.0", t="0.0")
             ET.SubElement(rect, "vertex", index="1", x=f"{x2:.3f}", y=f"{y2:.3f}", z="0.0", t="0.0")
             if isinstance(row.get("confidence"), (float, int)):
-                ET.SubElement(rect, "tag", name="confidence", value=f"{float(row['confidence']):.6f}")
+                ET.SubElement(
+                    rect, "tag", name="confidence", value=f"{float(row['confidence']):.6f}"
+                )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
     return output_path
@@ -2163,11 +2174,14 @@ def _run_subprocess_with_heartbeat(
     stdout_log_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
     returncode = -1
-    with stdout_log_path.open("w", encoding="utf-8", errors="ignore") as stdout_handle, stderr_log_path.open(
-        "w",
-        encoding="utf-8",
-        errors="ignore",
-    ) as stderr_handle:
+    with (
+        stdout_log_path.open("w", encoding="utf-8", errors="ignore") as stdout_handle,
+        stderr_log_path.open(
+            "w",
+            encoding="utf-8",
+            errors="ignore",
+        ) as stderr_handle,
+    ):
         process = subprocess.Popen(
             command,
             cwd=str(cwd),
@@ -2244,8 +2258,7 @@ class YOLOv5Adapter(BaseTrainingAdapter):
         spec_path = Path(spec_path_raw).expanduser().resolve()
         if not spec_path.exists() or not spec_path.is_file():
             raise ValueError(
-                "failed_pre_eval: canonical benchmark spec file was not found at "
-                f"{spec_path}."
+                f"failed_pre_eval: canonical benchmark spec file was not found at {spec_path}."
             )
         spec = _load_simple_yaml_mapping(spec_path)
         dataset_yaml_raw = str(spec.get("dataset_yaml") or "").strip()
@@ -2257,7 +2270,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 "failed_pre_eval: canonical benchmark dataset yaml was not found at "
                 f"{dataset_yaml}."
             )
-        rewrite = spec.get("yaml_path_rewrite") if isinstance(spec.get("yaml_path_rewrite"), dict) else {}
+        rewrite = (
+            spec.get("yaml_path_rewrite") if isinstance(spec.get("yaml_path_rewrite"), dict) else {}
+        )
         return {
             "spec_path": str(spec_path),
             "dataset_yaml": str(dataset_yaml),
@@ -2584,15 +2599,11 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 else None,
             },
             "thresholds": {
-                "canonical_map50_drop_max": float(
-                    thresholds.get("canonical_map50_drop_max", 0.02)
-                ),
+                "canonical_map50_drop_max": float(thresholds.get("canonical_map50_drop_max", 0.02)),
                 "prairie_dog_map50_drop_max": float(
                     thresholds.get("prairie_dog_map50_drop_max", 0.03)
                 ),
-                "active_map50_drop_max": float(
-                    thresholds.get("active_map50_drop_max", 0.02)
-                ),
+                "active_map50_drop_max": float(thresholds.get("active_map50_drop_max", 0.02)),
                 "canonical_fp_increase_max": float(
                     thresholds.get("canonical_fp_increase_max", 0.25)
                 ),
@@ -2703,7 +2714,6 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                     continue
                 with Image.open(image_path) as image:
                     width, height = image.size
-                    rgb_image = image.convert("RGB")
                 boxes, unsupported = _parse_bisque_rectangles(ann_path, layer_name="gt2")
                 hist = _build_detection_size_histogram(boxes)
                 for key, value in hist.items():
@@ -2713,7 +2723,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 for cls, count in unsupported.items():
                     unsupported_counts[cls] = unsupported_counts.get(cls, 0) + int(count)
                 for box in boxes:
-                    class_counts[str(box["class_name"])] = class_counts.get(str(box["class_name"]), 0) + 1
+                    class_counts[str(box["class_name"])] = (
+                        class_counts.get(str(box["class_name"]), 0) + 1
+                    )
                 tiles = _build_sliding_tiles(
                     width=width,
                     height=height,
@@ -2726,38 +2738,46 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                     min_pixels=min_box_pixels,
                 )
                 clipping_stats["objects_total"] += float(assign_stats.get("objects_total") or 0.0)
-                clipping_stats["objects_assigned"] += float(assign_stats.get("objects_assigned") or 0.0)
-                clipping_stats["objects_dropped"] += float(assign_stats.get("objects_dropped") or 0.0)
+                clipping_stats["objects_assigned"] += float(
+                    assign_stats.get("objects_assigned") or 0.0
+                )
+                clipping_stats["objects_dropped"] += float(
+                    assign_stats.get("objects_dropped") or 0.0
+                )
                 clipping_stats["original_area_pixels_sum"] += float(
                     assign_stats.get("original_area_pixels_sum") or 0.0
                 )
                 clipping_stats["clipped_area_pixels_sum"] += float(
                     assign_stats.get("clipped_area_pixels_sum") or 0.0
                 )
-                tile_counts[split]["objects_assigned"] = int(tile_counts[split]["objects_assigned"]) + int(
-                    assign_stats.get("objects_assigned") or 0
-                )
-                tile_counts[split]["objects_dropped"] = int(tile_counts[split]["objects_dropped"]) + int(
-                    assign_stats.get("objects_dropped") or 0
-                )
+                tile_counts[split]["objects_assigned"] = int(
+                    tile_counts[split]["objects_assigned"]
+                ) + int(assign_stats.get("objects_assigned") or 0)
+                tile_counts[split]["objects_dropped"] = int(
+                    tile_counts[split]["objects_dropped"]
+                ) + int(assign_stats.get("objects_dropped") or 0)
                 tile_counts[split]["box_tile_assignments"] = int(
                     tile_counts[split]["box_tile_assignments"]
                 ) + int(assign_stats.get("assignment_count") or 0)
-                tile_counts[split]["tiles_generated"] = int(tile_counts[split]["tiles_generated"]) + len(tiles)
+                tile_counts[split]["tiles_generated"] = int(
+                    tile_counts[split]["tiles_generated"]
+                ) + len(tiles)
                 for tile_index, tile in enumerate(tiles):
                     tile_box_rows = tile_assignments.get(tile_index, [])
                     has_objects = bool(tile_box_rows)
                     if not has_objects and not include_empty_tiles:
                         continue
                     if has_objects:
-                        tile_counts[split]["annotated_tiles"] = int(tile_counts[split]["annotated_tiles"]) + 1
-                    else:
-                        tile_counts[split]["empty_tiles"] = int(tile_counts[split]["empty_tiles"]) + 1
-                    token = _slug_token(
-                        (
-                            f"{pair['sample_id']}-{idx:04d}-"
-                            f"x{int(tile['x0']):05d}-y{int(tile['y0']):05d}"
+                        tile_counts[split]["annotated_tiles"] = (
+                            int(tile_counts[split]["annotated_tiles"]) + 1
                         )
+                    else:
+                        tile_counts[split]["empty_tiles"] = (
+                            int(tile_counts[split]["empty_tiles"]) + 1
+                        )
+                    token = _slug_token(
+                        f"{pair['sample_id']}-{idx:04d}-"
+                        f"x{int(tile['x0']):05d}-y{int(tile['y0']):05d}"
                     )
                     row_payload = {
                         "token": token,
@@ -2773,9 +2793,13 @@ class YOLOv5Adapter(BaseTrainingAdapter):
             tile_counts[split]["positive_tiles_all_intersections"] = len(tile_rows_with_objects)
             selected_rows = list(tile_rows_with_objects)
             if include_empty_tiles and tile_rows_empty:
-                empty_target = int(round(float(len(tile_rows_with_objects)) * float(empty_tile_ratio)))
+                empty_target = int(
+                    round(float(len(tile_rows_with_objects)) * float(empty_tile_ratio))
+                )
                 if len(tile_rows_with_objects) <= 0:
-                    empty_target = min(len(tile_rows_empty), max(1, int(len(tile_rows_empty) * 0.25)))
+                    empty_target = min(
+                        len(tile_rows_empty), max(1, int(len(tile_rows_empty) * 0.25))
+                    )
                 sampled_empty = _deterministic_sample_rows(
                     rows=tile_rows_empty,
                     limit=min(len(tile_rows_empty), max(0, empty_target)),
@@ -2786,12 +2810,14 @@ class YOLOv5Adapter(BaseTrainingAdapter):
             positive_tiles_selected = sum(
                 1
                 for row in selected_rows
-                if isinstance(row.get("tile_box_rows"), list) and len(row.get("tile_box_rows") or []) > 0
+                if isinstance(row.get("tile_box_rows"), list)
+                and len(row.get("tile_box_rows") or []) > 0
             )
             tile_counts[split]["positive_tiles_selected"] = int(positive_tiles_selected)
             tile_counts[split]["hidden_positive_tiles"] = max(
                 0,
-                int(tile_counts[split]["positive_tiles_all_intersections"]) - int(positive_tiles_selected),
+                int(tile_counts[split]["positive_tiles_all_intersections"])
+                - int(positive_tiles_selected),
             )
 
             if split == "train" and selected_rows:
@@ -2810,7 +2836,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                                 "token": _slug_token(f"replay-{row['sample_id']}-{index:06d}"),
                                 "image_path": str(row["image_path"]),
                                 "label_path": str(row["label_path"]),
-                                "class_tags": row.get("class_tags") if isinstance(row.get("class_tags"), list) else [],
+                                "class_tags": row.get("class_tags")
+                                if isinstance(row.get("class_tags"), list)
+                                else [],
                                 "small_object_count": int(row.get("small_object_count") or 0),
                             }
                             for index, row in enumerate(replay_pool)
@@ -2848,7 +2876,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                                     "image_path": str(image_path),
                                     "label_path": str(label_path),
                                     "class_tags": list(replay_row.get("class_tags") or []),
-                                    "small_object_count": int(replay_row.get("small_object_count") or 0),
+                                    "small_object_count": int(
+                                        replay_row.get("small_object_count") or 0
+                                    ),
                                 }
                             )
 
@@ -2857,7 +2887,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 control_callback()
                 tile = row["tile"]
                 token = str(row["token"])
-                tile_box_rows = row.get("tile_box_rows") if isinstance(row.get("tile_box_rows"), list) else []
+                tile_box_rows = (
+                    row.get("tile_box_rows") if isinstance(row.get("tile_box_rows"), list) else []
+                )
                 image_path_raw = str(row.get("image_path") or "").strip()
                 if not image_path_raw:
                     continue
@@ -2917,7 +2949,10 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 f"nc: {len(_YOLO_SUPPORTED_CLASSES)}\n"
                 "names:\n"
                 + "\n".join(
-                    [f"  {index}: {json.dumps(name)}" for index, name in enumerate(_YOLO_SUPPORTED_CLASSES)]
+                    [
+                        f"  {index}: {json.dumps(name)}"
+                        for index, name in enumerate(_YOLO_SUPPORTED_CLASSES)
+                    ]
                 )
                 + "\n"
             ),
@@ -2950,7 +2985,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
         runtime_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         hyp_path = str(config.get("hyp_path") or "").strip()
         if not hyp_path:
-            hyp_path = str((Path(__file__).resolve().parent / "hyp.prairie_finetune.yaml").resolve())
+            hyp_path = str(
+                (Path(__file__).resolve().parent / "hyp.prairie_finetune.yaml").resolve()
+            )
         hyp_file = Path(hyp_path).expanduser().resolve()
         if not hyp_file.exists() or not hyp_file.is_file():
             raise ValueError(f"YOLOv5 finetune hyp profile not found at {hyp_file}")
@@ -3147,7 +3184,9 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 and _benchmark_metrics_complete(candidate_active_eval)
                 and bool(comparison.get("required_packet_complete"))
             ),
-            "canonical_benchmark_ready": bool(_benchmark_metrics_complete(candidate_canonical_eval)),
+            "canonical_benchmark_ready": bool(
+                _benchmark_metrics_complete(candidate_canonical_eval)
+            ),
             "promotion_benchmark_ready": bool(
                 _benchmark_metrics_complete(candidate_canonical_eval)
                 and _benchmark_metrics_complete(candidate_active_eval)
@@ -3189,15 +3228,14 @@ class YOLOv5Adapter(BaseTrainingAdapter):
             "replay_tiles_injected": int(replay_tiles_injected),
             "replay_tile_fraction": round(
                 float(replay_tiles_injected)
-                / float(max(1, int(tile_counts["train"]["tiles_selected"]) + int(replay_tiles_injected))),
+                / float(
+                    max(1, int(tile_counts["train"]["tiles_selected"]) + int(replay_tiles_injected))
+                ),
                 6,
             ),
             "splits": tile_counts,
             "clipping": {
-                **{
-                    key: round(float(value), 6)
-                    for key, value in clipping_stats.items()
-                },
+                **{key: round(float(value), 6) for key, value in clipping_stats.items()},
                 "clipped_area_fraction": round(float(max(0.0, min(1.0, clipped_fraction))), 6),
             },
         }
@@ -3659,10 +3697,8 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 for tile in tiles:
                     control_callback()
                     stem = _slug_token(
-                        (
-                            f"{path.stem}-{source_index:04d}-"
-                            f"x{int(tile['x0']):05d}-y{int(tile['y0']):05d}"
-                        )
+                        f"{path.stem}-{source_index:04d}-"
+                        f"x{int(tile['x0']):05d}-y{int(tile['y0']):05d}"
                     )
                     tile_path = source_dir / f"{stem}.jpg"
                     rgb_image.crop(

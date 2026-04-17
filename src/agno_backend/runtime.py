@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 import hashlib
 import json
 import os
 import re
 import time
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -37,13 +37,12 @@ from agno.workflow.types import StepInput, StepOutput
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
 
-from src.auth import get_request_bisque_auth, reset_request_bisque_auth, set_request_bisque_auth
-from src.agentic.policies import APPROVAL_REQUIRED_TOOL_NAMES, route_scientist_turn
 from src.agentic.db import AgenticDb
+from src.agentic.policies import APPROVAL_REQUIRED_TOOL_NAMES, route_scientist_turn
 from src.agentic.repositories import ScientificNoteRepository, SessionRepository
+from src.auth import get_request_bisque_auth, reset_request_bisque_auth, set_request_bisque_auth
 from src.config import Settings
 from src.science.viewer import build_hdf5_viewer_manifest
-from src.tools import AVAILABLE_TOOLS, execute_tool_call
 from src.tooling.calculator import numpy_calculator
 from src.tooling.domains import (
     ANALYSIS_TOOL_SCHEMAS,
@@ -53,10 +52,16 @@ from src.tooling.domains import (
     VISION_TOOL_SCHEMAS,
 )
 from src.tooling.engine import _progress_summary_from_result
+from src.tools import AVAILABLE_TOOLS, execute_tool_call, extract_scientific_image_paths_from_text
 
 from .knowledge import ScientificKnowledgeContext, ScientificKnowledgeHub, ScientificKnowledgeScope
 from .learning import ScientificLearningJournal
-from .memory import ScientificMemoryContext, ScientificMemoryPolicy, ScientificMemoryService, ScientificMemoryUpdate
+from .memory import (
+    ScientificMemoryContext,
+    ScientificMemoryPolicy,
+    ScientificMemoryService,
+    ScientificMemoryUpdate,
+)
 from .pro_mode import (
     ProModeIntakeDecision,
     ProModeSynthesis,
@@ -64,7 +69,6 @@ from .pro_mode import (
     ProModeWorkflowResult,
     ProModeWorkflowRunner,
 )
-
 
 ALL_TOOL_SCHEMAS = [
     *BISQUE_TOOL_SCHEMAS,
@@ -158,9 +162,7 @@ RESEARCH_PROGRAM_TOOL_BUNDLES: dict[str, tuple[str, ...]] = {
         "segment_image_sam2",
         "estimate_depth_pro",
     ),
-    "acquisition": (
-        "analyze_prediction_stability",
-    ),
+    "acquisition": ("analyze_prediction_stability",),
     "analysis": (
         "quantify_objects",
         "quantify_segmentation_masks",
@@ -175,7 +177,9 @@ RESEARCH_PROGRAM_TOOL_BUNDLES: dict[str, tuple[str, ...]] = {
 }
 
 RESEARCH_PROGRAM_SAFE_TOOL_NAMES: tuple[str, ...] = tuple(
-    dict.fromkeys(tool_name for bundle in RESEARCH_PROGRAM_TOOL_BUNDLES.values() for tool_name in bundle)
+    dict.fromkeys(
+        tool_name for bundle in RESEARCH_PROGRAM_TOOL_BUNDLES.values() for tool_name in bundle
+    )
 )
 
 PROOF_METHOD_GUIDANCE = (
@@ -328,6 +332,7 @@ PROSE_STYLE_GUIDELINES: tuple[str, ...] = (
     "Move from intuition to mechanism to implication rather than dropping technical facts in isolation.",
     "Use concrete examples, analogies, or miniature thought experiments only when they genuinely clarify an abstraction.",
     "Sharpen distinctions with contrastive framing: explain not just what something is, but what it is not and why the difference matters.",
+    "When figures, tables, or artifacts are available, orient the reader to what to inspect first and why it matters.",
     "Prefer clean, direct sentences with occasional longer sentences for synthesis; vary rhythm without becoming ornate.",
     "Use confident, precise claims, but qualify them where the evidence or scope requires restraint.",
     "Favor strong verbs, concrete nouns, and explicit transitions over vague meta-language.",
@@ -376,6 +381,47 @@ class ToolProgramReportPacket(BaseModel):
     interpretation: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     recommended_next_steps: list[str] = Field(default_factory=list)
+
+
+class ResearchPresentationEvidence(BaseModel):
+    source: str = ""
+    summary: str = ""
+    artifact: str | None = None
+    run_id: str | None = None
+
+
+class ResearchPresentationMeasurement(BaseModel):
+    name: str = ""
+    value: Any = None
+    unit: str | None = None
+    summary: str | None = None
+
+
+class ResearchPresentationStatistic(BaseModel):
+    label: str = ""
+    summary: str = ""
+
+
+class ResearchPresentationConfidence(BaseModel):
+    level: Literal["low", "medium", "high"] = "medium"
+    why: list[str] = Field(default_factory=list)
+
+
+class ResearchPresentationNextStep(BaseModel):
+    action: str = ""
+
+
+class ResearchPresentationContract(BaseModel):
+    result: str = ""
+    evidence: list[ResearchPresentationEvidence] = Field(default_factory=list)
+    measurements: list[ResearchPresentationMeasurement] = Field(default_factory=list)
+    statistical_analysis: list[ResearchPresentationStatistic] = Field(default_factory=list)
+    confidence: ResearchPresentationConfidence = Field(
+        default_factory=ResearchPresentationConfidence
+    )
+    qc_warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    next_steps: list[ResearchPresentationNextStep] = Field(default_factory=list)
 
 
 AutonomousCycleAction = Literal[
@@ -578,6 +624,7 @@ class _AutonomousSharedContextKnowledge:
                 )
             )
         return documents
+
     metadata_richness: str = "minimal"
 
 
@@ -679,6 +726,8 @@ class AgnoChatRuntime:
         ".nd2",
         ".czi",
         ".svs",
+        ".zarr",
+        ".ome.zarr",
         ".ome.tif",
         ".ome.tiff",
     )
@@ -691,7 +740,9 @@ class AgnoChatRuntime:
     @staticmethod
     def _normalize_proof_sanity_text(value: Any) -> str:
         text = str(value or "")
-        text = text.replace("\\le", "<=").replace("\\ge", ">=").replace("≤", "<=").replace("≥", ">=")
+        text = (
+            text.replace("\\le", "<=").replace("\\ge", ">=").replace("≤", "<=").replace("≥", ">=")
+        )
         text = text.replace("‑", "-").replace("–", "-").replace("—", "-")
         text = re.sub(r"\s+", " ", text).strip().lower()
         return text
@@ -710,7 +761,10 @@ class AgnoChatRuntime:
             r"\bbecause\b[^.]{0,180}<=[^.]{0,180}\b[a-z]_[a-z0-9]+\b[^.]{0,40}<=[^.]{0,40}\b[a-z]_[a-z0-9]+\b",
             corpus,
         )
-        digit_context = any(token in corpus for token in ("digit", "base-p", "base p", "carry", "coefficient", "residue"))
+        digit_context = any(
+            token in corpus
+            for token in ("digit", "base-p", "base p", "carry", "coefficient", "residue")
+        )
         if componentwise_pattern and digit_context:
             findings.append(
                 "A global inequality is being treated as componentwise digit, coefficient, or residue monotonicity without a separate proof."
@@ -727,7 +781,10 @@ class AgnoChatRuntime:
         if (
             digit_context
             and any(token in corpus for token in ("for every digit", "each digit", "every digit"))
-            and any(token in corpus for token in ("because a<=", "because x<=", "because m<=", "because n<="))
+            and any(
+                token in corpus
+                for token in ("because a<=", "because x<=", "because m<=", "because n<=")
+            )
         ):
             findings.append(
                 "The proof appears to infer per-digit bounds directly from an integer inequality, which is not automatically valid."
@@ -741,10 +798,25 @@ class AgnoChatRuntime:
                 "A weighted logarithmic sum is being used to force coefficientwise nonpositivity without a valid separation argument."
             )
         if (
-            any(token in corpus for token in ("for every prime", "for all primes", "for all p", "for every p"))
+            any(
+                token in corpus
+                for token in ("for every prime", "for all primes", "for all p", "for every p")
+            )
             and "log n" in corpus
-            and any(token in corpus for token in ("slack dominates", "forces", "forcing", "possible deficit", "uniform control"))
-            and any(token in corpus for token in ("valuation inequality", "digit-sum inequality", "divisibility"))
+            and any(
+                token in corpus
+                for token in (
+                    "slack dominates",
+                    "forces",
+                    "forcing",
+                    "possible deficit",
+                    "uniform control",
+                )
+            )
+            and any(
+                token in corpus
+                for token in ("valuation inequality", "digit-sum inequality", "divisibility")
+            )
         ):
             findings.append(
                 "A coarse logarithmic slack is being used to conclude a universal primewise valuation or divisibility claim without a verified per-prime bridge."
@@ -791,9 +863,13 @@ class AgnoChatRuntime:
             if raw_api_key is not None and str(raw_api_key).strip()
             else ("EMPTY" if self.llm_provider in {"vllm", "ollama"} else None)
         )
-        self.response_verbosity = str(self._setting(settings, "llm_response_verbosity", "balanced") or "balanced")
+        self.response_verbosity = str(
+            self._setting(settings, "llm_response_verbosity", "balanced") or "balanced"
+        )
         self.agno_db = self._build_agno_db()
-        db_target = str(self._setting(settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
+        db_target = str(
+            self._setting(settings, "run_store_path", "data/runs.db") or "data/runs.db"
+        ).strip()
         self.persistence_db = AgenticDb(db_target)
         self.session_repository = SessionRepository(self.persistence_db)
         self.note_repository = ScientificNoteRepository(self.persistence_db)
@@ -819,11 +895,15 @@ class AgnoChatRuntime:
         return bool(self._setting(self.settings, "pro_mode_autonomous_cycle_shadow_enabled", False))
 
     def _pro_mode_autonomous_cycle_agno_controller_enabled(self) -> bool:
-        return bool(self._setting(self.settings, "pro_mode_autonomous_cycle_agno_controller_enabled", True))
+        return bool(
+            self._setting(self.settings, "pro_mode_autonomous_cycle_agno_controller_enabled", True)
+        )
 
     def _pro_mode_autonomous_cycle_max_cycles(self) -> int:
         try:
-            value = int(self._setting(self.settings, "pro_mode_autonomous_cycle_max_cycles", 12) or 12)
+            value = int(
+                self._setting(self.settings, "pro_mode_autonomous_cycle_max_cycles", 12) or 12
+            )
         except Exception:
             value = 12
         return max(1, min(32, value))
@@ -926,16 +1006,22 @@ class AgnoChatRuntime:
 
     def _resolved_pro_mode_timeout_seconds(self) -> float:
         try:
-            value = float(self._setting(self.settings, "resolved_pro_mode_timeout_seconds", 60) or 60)
+            value = float(
+                self._setting(self.settings, "resolved_pro_mode_timeout_seconds", 60) or 60
+            )
         except Exception:
             value = 60.0
         return max(1.0, value)
 
     def _pro_mode_transport(self) -> str:
-        transport = str(
-            self._setting(self.settings, "pro_mode_transport", "openai_compatible")
-            or "openai_compatible"
-        ).strip().lower()
+        transport = (
+            str(
+                self._setting(self.settings, "pro_mode_transport", "openai_compatible")
+                or "openai_compatible"
+            )
+            .strip()
+            .lower()
+        )
         if transport not in {"openai_compatible", "bedrock_published_api", "aws_bedrock_claude"}:
             return "openai_compatible"
         return transport
@@ -974,20 +1060,19 @@ class AgnoChatRuntime:
         *,
         api_key: str | None,
     ) -> tuple[str, dict[str, str] | None, dict[str, str] | None, str | None]:
-        header_name = str(
-            self._setting(self.settings, "pro_mode_api_key_header", "") or ""
-        ).strip()
+        header_name = str(self._setting(self.settings, "pro_mode_api_key_header", "") or "").strip()
         header_prefix_raw = self._setting(self.settings, "pro_mode_api_key_prefix", None)
-        headers = self._string_dict(
-            self._setting(self.settings, "pro_mode_default_headers", {})
-        )
-        query = self._string_dict(
-            self._setting(self.settings, "pro_mode_default_query", {})
-        )
+        headers = self._string_dict(self._setting(self.settings, "pro_mode_default_headers", {}))
+        query = self._string_dict(self._setting(self.settings, "pro_mode_default_query", {}))
         effective_api_key = str(api_key or "").strip() or "EMPTY"
 
         if header_name:
-            if header_name.lower() == "authorization" and header_prefix_raw in (None, "", "Bearer", "bearer"):
+            if header_name.lower() == "authorization" and header_prefix_raw in (
+                None,
+                "",
+                "Bearer",
+                "bearer",
+            ):
                 return effective_api_key, headers or None, query or None, "Authorization"
             prefix = ""
             if header_prefix_raw is None:
@@ -1012,6 +1097,66 @@ class AgnoChatRuntime:
         normalized_mode = str(reasoning_mode or "").strip().lower()
         normalized_effort = str(reasoning_effort_override or "").strip().lower()
         return normalized_mode == "deep" or normalized_effort == "high"
+
+    def _native_claude_sampling_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        max_tokens = self._setting(self.settings, "pro_mode_max_tokens", None)
+        if max_tokens is not None:
+            try:
+                kwargs["max_tokens"] = max(256, int(max_tokens))
+            except Exception:
+                pass
+        temperature = self._setting(self.settings, "pro_mode_temperature", None)
+        if temperature is not None:
+            try:
+                kwargs["temperature"] = max(0.0, min(1.0, float(temperature)))
+            except Exception:
+                pass
+        top_p = self._setting(self.settings, "pro_mode_top_p", None)
+        if top_p is not None:
+            try:
+                kwargs["top_p"] = max(1e-6, min(1.0, float(top_p)))
+            except Exception:
+                pass
+        top_k = self._setting(self.settings, "pro_mode_top_k", None)
+        if top_k is not None:
+            try:
+                kwargs["top_k"] = max(1, int(top_k))
+            except Exception:
+                pass
+        return kwargs
+
+    def _native_claude_thinking_config(
+        self,
+        *,
+        reasoning_mode: str | None,
+        reasoning_effort_override: str | None,
+    ) -> dict[str, Any] | None:
+        if not bool(self._setting(self.settings, "pro_mode_claude_thinking_enabled", True)):
+            return None
+        if not self._published_api_reasoning_enabled(
+            reasoning_mode=reasoning_mode,
+            reasoning_effort_override=reasoning_effort_override,
+        ):
+            return None
+        thinking: dict[str, Any] = {"type": "enabled"}
+        budget_tokens = self._setting(
+            self.settings,
+            "pro_mode_claude_thinking_budget_tokens",
+            4096,
+        )
+        try:
+            thinking["budget_tokens"] = max(1024, int(budget_tokens))
+        except Exception:
+            thinking["budget_tokens"] = 4096
+        display = (
+            str(self._setting(self.settings, "pro_mode_claude_thinking_display", "") or "")
+            .strip()
+            .lower()
+        )
+        if display in {"summarized", "omitted"}:
+            thinking["display"] = display
+        return thinking
 
     @staticmethod
     def _published_api_extract_text(payload: dict[str, Any] | None) -> str:
@@ -1047,12 +1192,20 @@ class AgnoChatRuntime:
         _effective_api_key, default_headers, default_query, auth_header_name = (
             self._resolved_pro_mode_client_overrides(api_key=api_key)
         )
-        base_url = str(
-            self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url) or self.base_url
-        ).strip().rstrip("/")
-        resolved_model = str(
-            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
-        ).strip() or self.model
+        base_url = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url)
+                or self.base_url
+            )
+            .strip()
+            .rstrip("/")
+        )
+        resolved_model = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ).strip()
+            or self.model
+        )
         request_timeout = max(
             self._resolved_pro_mode_timeout_seconds(),
             float(max_runtime_seconds) + 15.0,
@@ -1083,7 +1236,9 @@ class AgnoChatRuntime:
             conversation_id = str(create_payload.get("conversationId") or "").strip()
             message_id = str(create_payload.get("messageId") or "").strip()
             if not conversation_id or not message_id:
-                raise RuntimeError("Published Pro Mode API did not return conversationId/messageId.")
+                raise RuntimeError(
+                    "Published Pro Mode API did not return conversationId/messageId."
+                )
             deadline = time.monotonic() + max(5.0, float(max_runtime_seconds))
             last_payload: dict[str, Any] | None = None
             while True:
@@ -1109,7 +1264,8 @@ class AgnoChatRuntime:
                         return response_text, {
                             "conversation_id": conversation_id,
                             "message_id": message_id,
-                            "auth_header_name": str(auth_header_name or "").strip() or "Authorization",
+                            "auth_header_name": str(auth_header_name or "").strip()
+                            or "Authorization",
                         }
                 if time.monotonic() >= deadline:
                     break
@@ -1142,9 +1298,12 @@ class AgnoChatRuntime:
                 user_id=user_id,
                 debug=debug,
             )
-        configured_model = str(
-            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
-        ).strip() or self.model
+        configured_model = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ).strip()
+            or self.model
+        )
         try:
             response_text, published_meta = await self._run_published_pro_mode_prompt(
                 phase_name=phase_name,
@@ -1221,12 +1380,16 @@ class AgnoChatRuntime:
         failure_code: str | None = None,
         active_model: str | None = None,
     ) -> dict[str, Any]:
-        configured_model = str(
-            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
-        ).strip() or self.model
-        auth_header_name = str(
-            self._setting(self.settings, "pro_mode_api_key_header", "") or ""
-        ).strip() or "Authorization"
+        configured_model = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ).strip()
+            or self.model
+        )
+        auth_header_name = (
+            str(self._setting(self.settings, "pro_mode_api_key_header", "") or "").strip()
+            or "Authorization"
+        )
         if self._uses_native_bedrock_claude():
             auth_header_name = "AWS SigV4 / IAM"
         return {
@@ -1295,7 +1458,8 @@ class AgnoChatRuntime:
             return result, self._pro_mode_model_route_metadata(
                 fallback_used=False,
                 active_model=str(
-                    self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+                    self._setting(self.settings, "resolved_pro_mode_model", self.model)
+                    or self.model
                 ),
             )
         except Exception as exc:
@@ -1314,7 +1478,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::{phase_name}:fallback" if run_id else f"{phase_name}:fallback",
+                    run_id=f"{str(run_id or '').strip()}::{phase_name}:fallback"
+                    if run_id
+                    else f"{phase_name}:fallback",
                 ),
                 debug_mode=bool(debug),
             )
@@ -1347,21 +1513,32 @@ class AgnoChatRuntime:
     ) -> RTDProblemFrame:
         lowered = str(latest_user_text or "").strip().lower()
         target_quantity = ""
-        if re.search(r"\b(energy|mass|probability|count|rate|area|volume|distance|time)\b", lowered):
-            match = re.search(r"\b(energy|mass|probability|count|rate|area|volume|distance|time)\b", lowered)
+        if re.search(
+            r"\b(energy|mass|probability|count|rate|area|volume|distance|time)\b", lowered
+        ):
+            match = re.search(
+                r"\b(energy|mass|probability|count|rate|area|volume|distance|time)\b", lowered
+            )
             target_quantity = str(match.group(1) if match else "").strip()
         assumptions: list[str] = []
         if "energy" in lowered and "kinetic" not in lowered and "relativistic" in lowered:
-            assumptions.append("Interpret bare `energy` as total relativistic energy unless the prompt says kinetic.")
+            assumptions.append(
+                "Interpret bare `energy` as total relativistic energy unless the prompt says kinetic."
+            )
         if "defined as" in lowered or "knowing that" in lowered:
-            assumptions.append("Infer quantities from the composition explicitly given in the prompt before using external conventions.")
+            assumptions.append(
+                "Infer quantities from the composition explicitly given in the prompt before using external conventions."
+            )
         constraints: list[str] = []
         precision_match = re.search(r"precision[^0-9]*([0-9]+e[-+]?[0-9]+|1e[-+]?[0-9]+)", lowered)
         if precision_match:
-            constraints.append(f"Respect the requested numeric precision: {precision_match.group(1)}.")
+            constraints.append(
+                f"Respect the requested numeric precision: {precision_match.group(1)}."
+            )
         return RTDProblemFrame(
             objective=str(latest_user_text or "").strip(),
-            task_type=str(task_regime or "conceptual_high_uncertainty").strip() or "conceptual_high_uncertainty",
+            task_type=str(task_regime or "conceptual_high_uncertainty").strip()
+            or "conceptual_high_uncertainty",
             target_quantity=target_quantity,
             assumptions=assumptions[:6],
             constraints=constraints[:6],
@@ -1382,14 +1559,30 @@ class AgnoChatRuntime:
             or dict(selection_context or {}).get("dataset_uris")
         )
         if task_regime == "rigorous_proof" or bool(
-            re.search(r"\b(prove|proof|derive rigorously|show that|theorem|lemma|corollary)\b", lowered)
+            re.search(
+                r"\b(prove|proof|derive rigorously|show that|theorem|lemma|corollary)\b", lowered
+            )
         ):
             return "proof_derivation_workflow"
-        if bool(re.search(r"\b(simulat|enumerat|sweep|search over|optimi[sz]e|table|program|write code)\b", lowered)):
+        if bool(
+            re.search(
+                r"\b(simulat|enumerat|sweep|search over|optimi[sz]e|table|program|write code)\b",
+                lowered,
+            )
+        ):
             return "programmatic_experiment_workflow"
-        if has_artifacts or task_regime in {"artifact_interpretation", "dataset_or_catalog_research", "iterative_multimodal_research"}:
+        if has_artifacts or task_regime in {
+            "artifact_interpretation",
+            "dataset_or_catalog_research",
+            "iterative_multimodal_research",
+        }:
             return "evidence_review_workflow"
-        if bool(re.search(r"\b(report|concise report|write a report|survey|compare approaches|landscape|synthesis)\b", lowered)):
+        if bool(
+            re.search(
+                r"\b(report|concise report|write a report|survey|compare approaches|landscape|synthesis)\b",
+                lowered,
+            )
+        ):
             return "focused_synthesis_team_workflow"
         if bool(
             re.search(
@@ -1404,7 +1597,11 @@ class AgnoChatRuntime:
     def _rtd_skill_to_action(skill: RTDSkill) -> AutonomousCycleAction:
         if skill == "focused_synthesis_team_workflow":
             return "focused_team"
-        if skill in {"deterministic_numeric_workflow", "evidence_review_workflow", "programmatic_experiment_workflow"}:
+        if skill in {
+            "deterministic_numeric_workflow",
+            "evidence_review_workflow",
+            "programmatic_experiment_workflow",
+        }:
             return "tool_workflow"
         return "reasoning_solver"
 
@@ -1452,7 +1649,9 @@ class AgnoChatRuntime:
             confidence=0.8 if candidate_answer else 0.0,
         )
         challenger = RTDCandidate()
-        requires_challenger = self._rtd_requires_challenger(latest_user_text, task_regime=task_regime)
+        requires_challenger = self._rtd_requires_challenger(
+            latest_user_text, task_regime=task_regime
+        )
         if requires_challenger and not challenger.answer_text:
             challenger = RTDCandidate(
                 answer_text="",
@@ -1501,7 +1700,9 @@ class AgnoChatRuntime:
         return "reasoning_solver"
 
     def _build_agno_db(self) -> SqliteDb | PostgresDb:
-        db_target = str(self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
+        db_target = str(
+            self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db"
+        ).strip()
         table_kwargs = {
             "session_table": "agno_agent_sessions",
             "memory_table": "agno_agent_memories",
@@ -1511,9 +1712,13 @@ class AgnoChatRuntime:
         if db_target.lower().startswith(("postgres://", "postgresql://")):
             normalized_target = db_target
             if normalized_target.startswith("postgres://"):
-                normalized_target = "postgresql+psycopg://" + normalized_target[len("postgres://") :]
+                normalized_target = (
+                    "postgresql+psycopg://" + normalized_target[len("postgres://") :]
+                )
             elif normalized_target.startswith("postgresql://"):
-                normalized_target = "postgresql+psycopg://" + normalized_target[len("postgresql://") :]
+                normalized_target = (
+                    "postgresql+psycopg://" + normalized_target[len("postgresql://") :]
+                )
             return PostgresDb(db_engine=create_engine(normalized_target), **table_kwargs)
         return SqliteDb(db_file=db_target, **table_kwargs)
 
@@ -1543,6 +1748,27 @@ class AgnoChatRuntime:
             for path in list(paths or [])
             if str(path or "").strip() and cls._is_image_like_path(str(path or ""))
         ]
+
+    @staticmethod
+    def _prompt_image_paths(user_text: str) -> list[str]:
+        return extract_scientific_image_paths_from_text(user_text)
+
+    @classmethod
+    def _has_direct_image_target(
+        cls,
+        *,
+        user_text: str,
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+    ) -> bool:
+        return bool(
+            cls._image_like_files(uploaded_files)
+            or cls._prompt_image_paths(user_text)
+            or cls._selection_context_supports_direct_image_analysis(
+                user_text=user_text,
+                selection_context=selection_context,
+            )
+        )
 
     @staticmethod
     def _latest_user_text(messages: list[dict[str, Any]] | list[Message]) -> str:
@@ -1592,13 +1818,19 @@ class AgnoChatRuntime:
             float(self._setting(self.settings, "openai_timeout", 60) or 60),
             float(max_runtime_seconds) + 15.0,
         )
-        reasoning_effort = str(
-            reasoning_effort_override or self._reasoning_effort_for_mode(reasoning_mode)
-        ).strip().lower()
+        reasoning_effort = (
+            str(reasoning_effort_override or self._reasoning_effort_for_mode(reasoning_mode))
+            .strip()
+            .lower()
+        )
         if reasoning_effort not in {"low", "medium", "high"}:
             reasoning_effort = self._reasoning_effort_for_mode(reasoning_mode)
         return OpenAILike(
-            id=str(model_id or self.model or self._setting(self.settings, "openai_model", "gpt-oss-120b")),
+            id=str(
+                model_id
+                or self.model
+                or self._setting(self.settings, "openai_model", "gpt-oss-120b")
+            ),
             api_key=self.api_key or "EMPTY",
             base_url=self.base_url,
             timeout=timeout_seconds,
@@ -1613,6 +1845,8 @@ class AgnoChatRuntime:
         self,
         *,
         model_id: str | None = None,
+        reasoning_mode: str | None = None,
+        reasoning_effort_override: str | None = None,
         max_runtime_seconds: int = 900,
     ) -> AgnoModel:
         try:
@@ -1623,29 +1857,49 @@ class AgnoChatRuntime:
                 "Run `uv sync` after pulling the updated production repo."
             ) from exc
 
-        profile = str(
-            self._setting(self.settings, "resolved_pro_mode_aws_profile", "") or ""
-        ).strip() or None
-        region = str(
-            self._setting(self.settings, "resolved_pro_mode_aws_region", "") or ""
-        ).strip() or None
-        access_key = str(
-            self._setting(self.settings, "resolved_pro_mode_aws_access_key_id", "") or ""
-        ).strip() or None
-        secret_key = str(
-            self._setting(self.settings, "resolved_pro_mode_aws_secret_access_key", "") or ""
-        ).strip() or None
-        session_token = str(
-            self._setting(self.settings, "resolved_pro_mode_aws_session_token", "") or ""
-        ).strip() or None
+        profile = (
+            str(self._setting(self.settings, "resolved_pro_mode_aws_profile", "") or "").strip()
+            or None
+        )
+        region = (
+            str(self._setting(self.settings, "resolved_pro_mode_aws_region", "") or "").strip()
+            or None
+        )
+        access_key = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_aws_access_key_id", "") or ""
+            ).strip()
+            or None
+        )
+        secret_key = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_aws_secret_access_key", "") or ""
+            ).strip()
+            or None
+        )
+        session_token = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_aws_session_token", "") or ""
+            ).strip()
+            or None
+        )
+        bearer_token = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_aws_bearer_token", "") or ""
+            ).strip()
+            or None
+        )
         use_sso = bool(self._setting(self.settings, "pro_mode_aws_sso_auth", False))
         timeout_seconds = max(
             self._resolved_pro_mode_timeout_seconds(),
             float(max_runtime_seconds) + 15.0,
         )
-        resolved_model = str(
-            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
-        ).strip() or self.model
+        resolved_model = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ).strip()
+            or self.model
+        )
 
         session = None
         if profile or use_sso:
@@ -1662,13 +1916,45 @@ class AgnoChatRuntime:
             if region:
                 session_kwargs["region_name"] = region
             session = Session(**session_kwargs)
+        use_bearer_token = bool(
+            bearer_token
+            and session is None
+            and not access_key
+            and not secret_key
+            and not session_token
+        )
 
         kwargs: dict[str, Any] = {
             "id": str(model_id or resolved_model),
             "timeout": timeout_seconds,
         }
+        kwargs.update(self._native_claude_sampling_kwargs())
+        thinking = self._native_claude_thinking_config(
+            reasoning_mode=reasoning_mode,
+            reasoning_effort_override=reasoning_effort_override,
+        )
+        if thinking is not None:
+            kwargs["thinking"] = thinking
         if session is not None:
             kwargs["session"] = session
+            if region:
+                kwargs["aws_region"] = region
+        elif use_bearer_token:
+            try:
+                from anthropic.lib.bedrock import AnthropicBedrock, AsyncAnthropicBedrock
+            except ImportError as exc:  # pragma: no cover - exercised in smoke/local env
+                raise RuntimeError(
+                    "Native AWS Bedrock bearer-token auth requires anthropic[bedrock]. "
+                    "Run `uv sync` after pulling the updated production repo."
+                ) from exc
+            client_kwargs: dict[str, Any] = {
+                "api_key": bearer_token,
+                "timeout": timeout_seconds,
+            }
+            if region:
+                client_kwargs["aws_region"] = region
+            kwargs["client"] = AnthropicBedrock(**client_kwargs)
+            kwargs["async_client"] = AsyncAnthropicBedrock(**client_kwargs)
             if region:
                 kwargs["aws_region"] = region
         else:
@@ -1693,31 +1979,44 @@ class AgnoChatRuntime:
         if self._uses_native_bedrock_claude():
             return self._build_native_bedrock_claude_model(
                 model_id=model_id,
+                reasoning_mode=reasoning_mode,
+                reasoning_effort_override=reasoning_effort_override,
                 max_runtime_seconds=max_runtime_seconds,
             )
         timeout_seconds = max(
             self._resolved_pro_mode_timeout_seconds(),
             float(max_runtime_seconds) + 15.0,
         )
-        reasoning_effort = str(
-            reasoning_effort_override or self._reasoning_effort_for_mode(reasoning_mode)
-        ).strip().lower()
+        reasoning_effort = (
+            str(reasoning_effort_override or self._reasoning_effort_for_mode(reasoning_mode))
+            .strip()
+            .lower()
+        )
         if reasoning_effort not in {"low", "medium", "high"}:
             reasoning_effort = self._reasoning_effort_for_mode(reasoning_mode)
         raw_api_key = self._setting(self.settings, "resolved_pro_mode_api_key")
         if raw_api_key is not None and str(raw_api_key).strip():
             api_key = str(raw_api_key).strip()
         else:
-            api_key = "EMPTY" if self.llm_provider in {"vllm", "ollama"} else (self.api_key or "EMPTY")
+            api_key = (
+                "EMPTY" if self.llm_provider in {"vllm", "ollama"} else (self.api_key or "EMPTY")
+            )
         effective_api_key, default_headers, default_query, _auth_header_name = (
             self._resolved_pro_mode_client_overrides(api_key=api_key)
         )
-        base_url = str(
-            self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url) or self.base_url
-        ).strip() or self.base_url
-        resolved_model = str(
-            self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
-        ).strip() or self.model
+        base_url = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_base_url", self.base_url)
+                or self.base_url
+            ).strip()
+            or self.base_url
+        )
+        resolved_model = (
+            str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ).strip()
+            or self.model
+        )
         return OpenAILike(
             id=str(model_id or resolved_model),
             api_key=effective_api_key,
@@ -1743,7 +2042,10 @@ class AgnoChatRuntime:
             "identify the target quantity, the governing formula, the constants/conventions implied by the prompt, "
             "and whether the user asked for total energy, kinetic energy, a difference, or a rate."
         )
-        if re.search(r"\b(relativistic|collider|beam|rhic|lhc|synchrotron|beta|gamma|0\.\d+\s*c|speed .*c)\b", lowered):
+        if re.search(
+            r"\b(relativistic|collider|beam|rhic|lhc|synchrotron|beta|gamma|0\.\d+\s*c|speed .*c)\b",
+            lowered,
+        ):
             guidance.append(
                 "For relativistic beam or collider questions, treat plain `energy` as total relativistic energy "
                 "`E = gamma m c^2` unless the user explicitly asks for kinetic energy."
@@ -1754,9 +2056,9 @@ class AgnoChatRuntime:
                 "prefer the composition-based mass convention supported directly by the prompt instead of importing a tabulated isotope mass. "
                 "For beam-energy back-of-the-envelope questions where no isotope mass is supplied, it is usually better to use the mass-number / nucleon approximation directly implied by the prompt, i.e. `m ≈ A * m_n`, and say that approximation explicitly rather than substituting `A * u`."
             )
-        if re.search(r"\b(relativistic|collider|beam|rhic|lhc|synchrotron)\b", lowered) and re.search(
-            r"\b(nucleus|ion|isotope|neutron|proton)\b", lowered
-        ):
+        if re.search(
+            r"\b(relativistic|collider|beam|rhic|lhc|synchrotron)\b", lowered
+        ) and re.search(r"\b(nucleus|ion|isotope|neutron|proton)\b", lowered):
             guidance.append(
                 "For textbook relativistic beam questions that specify a nucleus by composition but do not provide an exact isotope mass, "
                 "default to the rounded nucleon rest-energy constant `m_n c^2 ≈ 939.5 MeV` per nucleon unless the user explicitly asks for higher-fidelity mass modeling."
@@ -1773,15 +2075,25 @@ class AgnoChatRuntime:
         if not lowered:
             return False
         has_relativistic_beam_context = bool(
-            re.search(r"\b(relativistic|collider|beam|rhic|lhc|synchrotron|beta|gamma|speed .*c|0\.\d+\s*c)\b", lowered)
+            re.search(
+                r"\b(relativistic|collider|beam|rhic|lhc|synchrotron|beta|gamma|speed .*c|0\.\d+\s*c)\b",
+                lowered,
+            )
         )
         has_nuclear_composition = bool(
             re.search(r"\b(nucleus|ion|isotope|neutron|proton)\b", lowered)
         )
         asks_for_exact_mass_model = bool(
-            re.search(r"\b(exact mass|precise mass|tabulated mass|atomic mass|nuclear mass|mass defect|binding energy|amu|u\b)\b", lowered)
+            re.search(
+                r"\b(exact mass|precise mass|tabulated mass|atomic mass|nuclear mass|mass defect|binding energy|amu|u\b)\b",
+                lowered,
+            )
         )
-        return has_relativistic_beam_context and has_nuclear_composition and not asks_for_exact_mass_model
+        return (
+            has_relativistic_beam_context
+            and has_nuclear_composition
+            and not asks_for_exact_mass_model
+        )
 
     @classmethod
     def _normalize_validated_numeric_expression(cls, expression: str, *, user_text: str) -> str:
@@ -1797,7 +2109,9 @@ class AgnoChatRuntime:
         guidance = cls._numeric_tool_guidance(user_text)
         if not guidance:
             return ""
-        return "Closed-form numeric workflow guidance:\n" + "\n".join(f"- {item}" for item in guidance)
+        return "Closed-form numeric workflow guidance:\n" + "\n".join(
+            f"- {item}" for item in guidance
+        )
 
     def _tool_instructions(self, tool_names: list[str], *, user_text: str = "") -> list[str]:
         if not tool_names:
@@ -1841,7 +2155,12 @@ class AgnoChatRuntime:
         lowered = str(user_text or "").strip().lower()
         return bool(
             re.search(
-                r"\b(report|write up|write a report|scientist-facing|ecological analysis|research summary|survey|overview|backgrounder|deep dive|primer)\b",
+                r"\b("
+                r"report|write up|write a report|scientist-facing|ecological analysis|"
+                r"research summary|survey|overview|backgrounder|deep dive|primer|"
+                r"technical analysis|methods discussion|methods section|discussion section|"
+                r"technical note|graduate-level analysis"
+                r")\b",
                 lowered,
             )
         )
@@ -1941,7 +2260,9 @@ class AgnoChatRuntime:
         return f"pro-mode::{owner}::{root}"
 
     def _pro_mode_state_cache_path(self, *, session_id: str) -> Path:
-        db_target = str(self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
+        db_target = str(
+            self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db"
+        ).strip()
         if db_target.lower().startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
             base_dir = (Path.cwd() / "data").resolve()
         else:
@@ -1953,7 +2274,9 @@ class AgnoChatRuntime:
 
     def _load_pro_mode_state_cache(self, *, session_id: str) -> dict[str, Any]:
         try:
-            payload = json.loads(self._pro_mode_state_cache_path(session_id=session_id).read_text(encoding="utf-8"))
+            payload = json.loads(
+                self._pro_mode_state_cache_path(session_id=session_id).read_text(encoding="utf-8")
+            )
         except Exception:
             return {}
         if not isinstance(payload, dict):
@@ -1996,7 +2319,9 @@ class AgnoChatRuntime:
     ) -> AgnoTurnIntent:
         return AgnoTurnIntent(
             user_text=str(user_text or "").strip(),
-            uploaded_files=[str(item or "").strip() for item in uploaded_files if str(item or "").strip()],
+            uploaded_files=[
+                str(item or "").strip() for item in uploaded_files if str(item or "").strip()
+            ],
             selected_tool_names=self._normalize_selected_tool_names(selected_tool_names),
             workflow_hint=dict(workflow_hint or {}),
             selection_context=dict(selection_context or {}),
@@ -2091,7 +2416,9 @@ class AgnoChatRuntime:
         raw_handles = payload.get("artifact_handles")
         if not isinstance(raw_handles, dict):
             return False
-        return any(bool(list(value or [])) for value in raw_handles.values() if isinstance(value, list))
+        return any(
+            bool(list(value or [])) for value in raw_handles.values() if isinstance(value, list)
+        )
 
     @classmethod
     def _selection_context_image_handle_paths(
@@ -2379,7 +2706,9 @@ class AgnoChatRuntime:
                 reason="Prompt asks for raw BisQue XML or metadata export.",
             )
 
-        if _has_any((r"\bgobject\b", r"\bgobjects\b", r"\bpolygon annotation\b", r"\badd annotations\b")):
+        if _has_any(
+            (r"\bgobject\b", r"\bgobjects\b", r"\bpolygon annotation\b", r"\badd annotations\b")
+        ):
             return ProModeToolPlan(
                 category="bisque_management",
                 selected_tool_names=["bisque_add_gobjects"],
@@ -2395,7 +2724,9 @@ class AgnoChatRuntime:
                 reason="Prompt asks to delete a BisQue resource.",
             )
 
-        if _has_any((r"\badd tag\b", r"\btag resource\b", r"\bmetadata tag\b", r"\bannotate metadata\b")):
+        if _has_any(
+            (r"\badd tag\b", r"\btag resource\b", r"\bmetadata tag\b", r"\bannotate metadata\b")
+        ):
             return ProModeToolPlan(
                 category="bisque_management",
                 selected_tool_names=["add_tags_to_resource"],
@@ -2570,7 +2901,9 @@ class AgnoChatRuntime:
     @staticmethod
     def _is_segmentation_request(user_text: str) -> bool:
         lowered = str(user_text or "").strip().lower()
-        return bool(re.search(r"\b(segment|segmentation|sam2|sam3|megaseg|dynunet|mask)\b", lowered))
+        return bool(
+            re.search(r"\b(segment|segmentation|sam2|sam3|megaseg|dynunet|mask)\b", lowered)
+        )
 
     @staticmethod
     def _prefers_megaseg_segmentation(user_text: str) -> bool:
@@ -2595,7 +2928,9 @@ class AgnoChatRuntime:
     @staticmethod
     def _is_hdf5_like_path(path: str | os.PathLike[str] | None) -> bool:
         lowered = str(path or "").strip().lower()
-        return bool(lowered and lowered.endswith((".h5", ".hdf5", ".hdf", ".he5", ".dream3d", ".h5ebsd")))
+        return bool(
+            lowered and lowered.endswith((".h5", ".hdf5", ".hdf", ".he5", ".dream3d", ".h5ebsd"))
+        )
 
     @staticmethod
     def _is_structured_artifact_introspection_request(user_text: str) -> bool:
@@ -2611,7 +2946,9 @@ class AgnoChatRuntime:
         )
 
     @classmethod
-    def _inspect_hdf5_artifact_summary(cls, file_path: str | os.PathLike[str] | None) -> dict[str, Any] | None:
+    def _inspect_hdf5_artifact_summary(
+        cls, file_path: str | os.PathLike[str] | None
+    ) -> dict[str, Any] | None:
         source = Path(str(file_path or "")).expanduser()
         if not source.exists() or not cls._is_hdf5_like_path(source):
             return None
@@ -2637,7 +2974,9 @@ class AgnoChatRuntime:
             "kind": "hdf5_structure",
             "file_path": str(source),
             "file_name": str(source.name),
-            "root_keys": [str(item) for item in list(hdf_payload.get("root_keys") or []) if str(item).strip()],
+            "root_keys": [
+                str(item) for item in list(hdf_payload.get("root_keys") or []) if str(item).strip()
+            ],
             "default_dataset_path": (
                 str(hdf_payload.get("default_dataset_path")).strip()
                 if str(hdf_payload.get("default_dataset_path") or "").strip()
@@ -2702,12 +3041,10 @@ class AgnoChatRuntime:
             if tool_name in TOOL_SCHEMA_MAP
         ]
         lowered = str(user_text or "").strip().lower()
-        has_direct_image_target = bool(
-            uploaded_files
-            or AgnoChatRuntime._selection_context_supports_direct_image_analysis(
-                user_text=user_text,
-                selection_context=selection_context,
-            )
+        has_direct_image_target = AgnoChatRuntime._has_direct_image_target(
+            user_text=user_text,
+            uploaded_files=uploaded_files,
+            selection_context=selection_context,
         )
         if AgnoChatRuntime._requires_rigorous_proof_workflow(
             user_text=user_text,
@@ -2717,7 +3054,9 @@ class AgnoChatRuntime:
         ):
             return None
         early_bisque_plan: ProModeToolPlan | None = None
-        if AgnoChatRuntime._is_bisque_management_request(user_text, selection_context=selection_context):
+        if AgnoChatRuntime._is_bisque_management_request(
+            user_text, selection_context=selection_context
+        ):
             early_bisque_plan = AgnoChatRuntime._bisque_management_tool_plan(
                 user_text=user_text,
                 uploaded_files=uploaded_files,
@@ -2725,7 +3064,8 @@ class AgnoChatRuntime:
                 inferred_tool_names=inferred_tool_names,
             )
             if any(
-                tool_name not in {"search_bisque_resources", "bisque_find_assets", "load_bisque_resource"}
+                tool_name
+                not in {"search_bisque_resources", "bisque_find_assets", "load_bisque_resource"}
                 for tool_name in list(early_bisque_plan.selected_tool_names or [])
             ):
                 return early_bisque_plan
@@ -2871,23 +3211,38 @@ class AgnoChatRuntime:
             for item in list((shared_context or {}).get("knowledge_messages") or [])
             if str(item or "").strip()
         ]
+        analysis_brief_lines = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("analysis_brief_lines") or [])
+            if str(item or "").strip()
+        ]
         if memory_messages:
             context_sections.append(
                 "Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:4])
             )
         if knowledge_messages:
             context_sections.append(
-                "Relevant knowledge context:\n" + "\n".join(f"- {item}" for item in knowledge_messages[:4])
+                "Relevant knowledge context:\n"
+                + "\n".join(f"- {item}" for item in knowledge_messages[:4])
+            )
+        if analysis_brief_lines:
+            context_sections.append(
+                "Relevant running summary:\n"
+                + "\n".join(f"- {item}" for item in analysis_brief_lines[:4])
             )
 
         prompt_sections = [
             "Answer the following scientist-facing request directly.",
             "Keep the answer concise, accurate, and natural to read.",
+            "Start with a 1-2 sentence bottom line before any structure or elaboration.",
+            "Prefer short paragraphs over heading-heavy frameworks unless the user explicitly asked for a checklist or protocol.",
             "Do not mention internal workflows, routes, tools, or hidden reasoning.",
             "If the user asked for a direct comparison or explanation, prioritize clarity over exhaustiveness.",
         ]
         if str(task_regime or "").strip().lower() == "closed_form_grounded":
-            prompt_sections.append("Prefer the standard interpretation and state the answer near the beginning.")
+            prompt_sections.append(
+                "Prefer the standard interpretation and state the answer near the beginning."
+            )
         draft = str(intake_direct_response or "").strip()
         if draft:
             prompt_sections.extend(
@@ -2911,7 +3266,9 @@ class AgnoChatRuntime:
                 instructions=[
                     "You answer directly and clearly.",
                     "Be concise without sounding terse.",
+                    "Lead with the answer, then add short explanatory paragraphs.",
                     "Avoid unnecessary formatting unless it improves clarity.",
+                    "Prefer paragraphs to long heading stacks or nested bullet hierarchies.",
                     "Do not fabricate missing details.",
                 ],
                 markdown=True,
@@ -2923,6 +3280,7 @@ class AgnoChatRuntime:
                     "pro_mode_context": {
                         "memory_messages": memory_messages[:4],
                         "knowledge_messages": knowledge_messages[:4],
+                        "analysis_brief_lines": analysis_brief_lines[:4],
                     }
                 },
                 add_session_state_to_context=True,
@@ -2931,7 +3289,9 @@ class AgnoChatRuntime:
 
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
-            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
         )
         try:
             result, model_route = await self._arun_text_phase_with_optional_pro_mode_transport(
@@ -3163,7 +3523,13 @@ class AgnoChatRuntime:
         ):
             return selection_context
         sanitized = dict(current)
-        for key in ("resource_uris", "dataset_uris", "artifact_handles", "focused_file_ids", "context_id"):
+        for key in (
+            "resource_uris",
+            "dataset_uris",
+            "artifact_handles",
+            "focused_file_ids",
+            "context_id",
+        ):
             sanitized.pop(key, None)
         return sanitized or None
 
@@ -3188,10 +3554,9 @@ class AgnoChatRuntime:
             "dataset_uris",
             "resource_uris",
         )
-        return any(
-            bool(list(handles.get(key) or []))
-            for key in meaningful_keys
-        ) or bool(list(state.get("evidence_summaries") or []))
+        return any(bool(list(handles.get(key) or [])) for key in meaningful_keys) or bool(
+            list(state.get("evidence_summaries") or [])
+        )
 
     @classmethod
     def _is_prior_analysis_follow_up_request(
@@ -3230,7 +3595,9 @@ class AgnoChatRuntime:
                 "iterations": int(proof_workflow.get("iterations") or 0),
                 "compression_stats": dict(proof_workflow.get("compression_stats") or {}),
                 "stagnant_iterations": int(proof_workflow.get("stagnant_iterations") or 0),
-                "last_blocker_signature": str(proof_workflow.get("last_blocker_signature") or "").strip(),
+                "last_blocker_signature": str(
+                    proof_workflow.get("last_blocker_signature") or ""
+                ).strip(),
                 "progress_score": float(proof_state.get("progress_score") or 0.0),
                 "quality_flags": list(proof_state.get("quality_flags") or []),
                 "proof_frame": dict(proof_workflow.get("proof_frame") or {}),
@@ -3262,7 +3629,8 @@ class AgnoChatRuntime:
             ][-20:],
             "candidate_answer": str(autonomy_state.get("candidate_answer") or "").strip(),
             "stop_reason": str(autonomy_state.get("stop_reason") or "").strip(),
-            "resume_readiness": str(autonomy_state.get("resume_readiness") or "").strip() or "ready",
+            "resume_readiness": str(autonomy_state.get("resume_readiness") or "").strip()
+            or "ready",
             "next_best_actions": [
                 str(item or "").strip()
                 for item in list(autonomy_state.get("next_best_actions") or [])
@@ -3283,7 +3651,9 @@ class AgnoChatRuntime:
         return bool(cls._saved_autonomy_state(pro_mode_state))
 
     @classmethod
-    def _is_autonomy_follow_up_turn(cls, user_text: str, pro_mode_state: dict[str, Any] | None) -> bool:
+    def _is_autonomy_follow_up_turn(
+        cls, user_text: str, pro_mode_state: dict[str, Any] | None
+    ) -> bool:
         if not cls._has_saved_autonomy_state(pro_mode_state):
             return False
         if cls._is_phatic_turn(user_text):
@@ -3305,7 +3675,9 @@ class AgnoChatRuntime:
         )
 
     @classmethod
-    def _is_autonomy_resume_synthesis_turn(cls, user_text: str, pro_mode_state: dict[str, Any] | None) -> bool:
+    def _is_autonomy_resume_synthesis_turn(
+        cls, user_text: str, pro_mode_state: dict[str, Any] | None
+    ) -> bool:
         saved_state = cls._saved_autonomy_state(pro_mode_state)
         if not saved_state:
             return False
@@ -3337,7 +3709,9 @@ class AgnoChatRuntime:
         return bool(cls._saved_proof_workflow_state(state))
 
     @classmethod
-    def _is_proof_follow_up_turn(cls, user_text: str, pro_mode_state: dict[str, Any] | None) -> bool:
+    def _is_proof_follow_up_turn(
+        cls, user_text: str, pro_mode_state: dict[str, Any] | None
+    ) -> bool:
         if not cls._has_saved_proof_state(pro_mode_state):
             return False
         if cls._is_phatic_turn(user_text):
@@ -3368,8 +3742,12 @@ class AgnoChatRuntime:
     ) -> str:
         lowered = str(user_text or "").strip().lower()
         selection_context = dict(selection_context or {})
-        has_catalog_handles = bool(selection_context.get("resource_uris") or selection_context.get("dataset_uris"))
-        has_artifact_handles = AgnoChatRuntime._selection_context_has_artifact_handles(selection_context)
+        has_catalog_handles = bool(
+            selection_context.get("resource_uris") or selection_context.get("dataset_uris")
+        )
+        has_artifact_handles = AgnoChatRuntime._selection_context_has_artifact_handles(
+            selection_context
+        )
         if AgnoChatRuntime._is_phatic_turn(user_text):
             return "phatic_or_small_talk"
         if AgnoChatRuntime._requires_rigorous_proof_workflow(
@@ -3388,14 +3766,25 @@ class AgnoChatRuntime:
             return "self_contained_reasoning"
         if tool_plan is not None:
             if tool_plan.category == "research_program":
-                if uploaded_files and (has_catalog_handles or re.search(r"\b(dataset|bisque|report|compare|given everything)\b", lowered)):
+                if uploaded_files and (
+                    has_catalog_handles
+                    or re.search(r"\b(dataset|bisque|report|compare|given everything)\b", lowered)
+                ):
                     return "iterative_multimodal_research"
-                if has_catalog_handles or re.search(r"\b(dataset|bisque|catalog|resource)\b", lowered):
+                if has_catalog_handles or re.search(
+                    r"\b(dataset|bisque|catalog|resource)\b", lowered
+                ):
                     return "dataset_or_catalog_research"
                 return "artifact_interpretation"
             if tool_plan.category in {"validated_numeric", "code_execution"}:
                 return "closed_form_grounded"
-            if tool_plan.category in {"image_metadata", "uploaded_file_analysis", "depth_analysis", "detection", "segmentation"}:
+            if tool_plan.category in {
+                "image_metadata",
+                "uploaded_file_analysis",
+                "depth_analysis",
+                "detection",
+                "segmentation",
+            }:
                 return "artifact_interpretation"
             if tool_plan.category == "bisque_management":
                 return "dataset_or_catalog_research"
@@ -3421,7 +3810,9 @@ class AgnoChatRuntime:
 
     @staticmethod
     def _normalize_forced_execution_regime(benchmark: dict[str, Any] | None) -> str | None:
-        regime = str(dict(benchmark or {}).get("force_pro_mode_execution_regime") or "").strip().lower()
+        regime = (
+            str(dict(benchmark or {}).get("force_pro_mode_execution_regime") or "").strip().lower()
+        )
         if regime in {
             "fast_dialogue",
             "validated_tool",
@@ -3492,8 +3883,7 @@ class AgnoChatRuntime:
             has_saved_autonomy = AgnoChatRuntime._has_saved_autonomy_state(prior_pro_mode_state)
             return {
                 "load_memory": bool(
-                    AgnoChatRuntime._has_follow_up_reference(latest_user_text)
-                    or has_saved_autonomy
+                    AgnoChatRuntime._has_follow_up_reference(latest_user_text) or has_saved_autonomy
                 ),
                 "load_knowledge": knowledge_signal,
                 "history_window": 3 if has_saved_autonomy else 2,
@@ -3523,7 +3913,9 @@ class AgnoChatRuntime:
                     or AgnoChatRuntime._has_saved_proof_state(prior_pro_mode_state)
                 ),
                 "load_knowledge": False,
-                "history_window": 2 if AgnoChatRuntime._has_saved_proof_state(prior_pro_mode_state) else 1,
+                "history_window": 2
+                if AgnoChatRuntime._has_saved_proof_state(prior_pro_mode_state)
+                else 1,
                 "artifact_handles_to_expose": [],
                 "compression_required": True,
             }
@@ -3563,7 +3955,9 @@ class AgnoChatRuntime:
             return overridden
         if regime == "fast_dialogue":
             overridden.route = "direct_response"
-            overridden.direct_response = overridden.direct_response or str(latest_user_text or "").strip()
+            overridden.direct_response = (
+                overridden.direct_response or str(latest_user_text or "").strip()
+            )
             task_regime = "phatic_or_small_talk"
         elif regime in {"validated_tool", "iterative_research"}:
             overridden.route = "tool_workflow"
@@ -3622,13 +4016,13 @@ class AgnoChatRuntime:
             selection_context=selection_context,
         ):
             return False
-        has_artifact_handles = AgnoChatRuntime._selection_context_has_artifact_handles(selection_context)
-        has_direct_image_target = bool(
-            uploaded_files
-            or AgnoChatRuntime._selection_context_supports_direct_image_analysis(
-                user_text=user_text,
-                selection_context=selection_context,
-            )
+        has_artifact_handles = AgnoChatRuntime._selection_context_has_artifact_handles(
+            selection_context
+        )
+        has_direct_image_target = AgnoChatRuntime._has_direct_image_target(
+            user_text=user_text,
+            uploaded_files=uploaded_files,
+            selection_context=selection_context,
         )
         simple_single_image_segmentation = bool(
             has_direct_image_target
@@ -3648,7 +4042,9 @@ class AgnoChatRuntime:
             user_text,
             prior_state=prior_pro_mode_state,
         )
-        has_bisque_context = bool(selection_context.get("resource_uris") or selection_context.get("dataset_uris"))
+        has_bisque_context = bool(
+            selection_context.get("resource_uris") or selection_context.get("dataset_uris")
+        )
         multi_stage_signal = bool(
             re.search(
                 r"\b("
@@ -3663,21 +4059,30 @@ class AgnoChatRuntime:
             uploaded_files
             or has_bisque_context
             or has_artifact_handles
+            or has_direct_image_target
             or prior_analysis_follow_up
-            or re.search(r"\b(dataset|bisque|resource|resources|image|images|file|files|table|ct scan|scan)\b", lowered)
+            or re.search(r"\b(dataset|bisque|resource|resources|catalog|ct scan|scan)\b", lowered)
         )
         introspection_signal = bool(
             AgnoChatRuntime._is_structured_artifact_introspection_request(user_text)
             and (
                 has_bisque_context
-                or any(AgnoChatRuntime._is_hdf5_like_path(path) for path in list(uploaded_files or []))
+                or any(
+                    AgnoChatRuntime._is_hdf5_like_path(path) for path in list(uploaded_files or [])
+                )
             )
         )
         report_signal = bool(
-            re.search(r"\b(report|write up|write a report|ecological analysis|research summary)\b", lowered)
+            re.search(
+                r"\b(report|write up|write a report|ecological analysis|research summary)\b",
+                lowered,
+            )
         )
         numeric_signal = bool(
-            re.search(r"\b(count|average|mean|median|statistics|distribution|size|box|burrow|population|density)\b", lowered)
+            re.search(
+                r"\b(count|average|mean|median|statistics|distribution|size|box|burrow|population|density)\b",
+                lowered,
+            )
         )
         return bool(
             data_signal
@@ -3724,7 +4129,10 @@ class AgnoChatRuntime:
             )
         )
         open_ended_signal = bool(
-            re.search(r"\b(explain|summari[sz]e|report|research|survey|literature|compare carefully)\b", lowered)
+            re.search(
+                r"\b(explain|summari[sz]e|report|research|survey|literature|compare carefully)\b",
+                lowered,
+            )
         )
         return (proof_signal or proof_task_signal) and not open_ended_signal
 
@@ -3855,7 +4263,9 @@ class AgnoChatRuntime:
             return True
         has_option_language = bool(re.search(r"\b(option|choice|statement|answer)\b", lowered))
         discriminative_language = bool(
-            re.search(r"\b(correct|incorrect|except|best|most likely|least likely|false|true)\b", lowered)
+            re.search(
+                r"\b(correct|incorrect|except|best|most likely|least likely|false|true)\b", lowered
+            )
         )
         return has_option_language and discriminative_language
 
@@ -3892,9 +4302,12 @@ class AgnoChatRuntime:
                 if tool_name in TOOL_SCHEMA_MAP and tool_name not in chosen:
                     chosen.append(tool_name)
 
-        image_like_uploaded_files = AgnoChatRuntime._image_like_files(uploaded_files)
         direct_image_analysis = bool(
-            image_like_uploaded_files
+            AgnoChatRuntime._has_direct_image_target(
+                user_text=user_text,
+                uploaded_files=uploaded_files,
+                selection_context=selection_context,
+            )
             or re.search(
                 r"\b(attached|uploaded|new image|new aerial image|this image|analy[sz]e it|analy[sz]e this|look at this|local image)\b",
                 lowered,
@@ -3946,7 +4359,10 @@ class AgnoChatRuntime:
             _extend(RESEARCH_PROGRAM_TOOL_BUNDLES["acquisition"])
         if quantitative_request or report_like_request or direct_image_analysis:
             _extend(RESEARCH_PROGRAM_TOOL_BUNDLES["analysis"])
-        if plot_request or re.search(r"\b(code|python|script|parse|optimi[sz]e|benchmark|custom analysis|xml|csv|json)\b", lowered):
+        if plot_request or re.search(
+            r"\b(code|python|script|parse|optimi[sz]e|benchmark|custom analysis|xml|csv|json)\b",
+            lowered,
+        ):
             _extend(RESEARCH_PROGRAM_TOOL_BUNDLES["code"])
         if not chosen:
             _extend(RESEARCH_PROGRAM_TOOL_BUNDLES["analysis"])
@@ -4012,7 +4428,9 @@ class AgnoChatRuntime:
     @staticmethod
     def _requires_deep_reasoning(user_text: str) -> bool:
         lowered = str(user_text or "").strip().lower()
-        if re.search(r"\b(previous|earlier|above|that|this|those|these|continue|follow[- ]up)\b", lowered):
+        if re.search(
+            r"\b(previous|earlier|above|that|this|those|these|continue|follow[- ]up)\b", lowered
+        ):
             return True
         if re.search(
             r"\b("
@@ -4023,7 +4441,9 @@ class AgnoChatRuntime:
             lowered,
         ):
             return True
-        if re.search(r"\d", lowered) and re.search(r"[=<>]|10\^|e[-+]?\d+|mev|ev|hz|nm|cm|kg|mol|s\b", lowered):
+        if re.search(r"\d", lowered) and re.search(
+            r"[=<>]|10\^|e[-+]?\d+|mev|ev|hz|nm|cm|kg|mol|s\b", lowered
+        ):
             return True
         sentence_count = len(re.findall(r"[.!?]+", lowered))
         return len(lowered) > 280 or sentence_count >= 3
@@ -4041,7 +4461,9 @@ class AgnoChatRuntime:
         if selection_context.get("resource_uris") or selection_context.get("dataset_uris"):
             return False
         lowered = str(user_text or "").strip().lower()
-        if re.search(r"\b(why|explain|mechanism|pathway|cause|interpret|research|paper)\b", lowered):
+        if re.search(
+            r"\b(why|explain|mechanism|pathway|cause|interpret|research|paper)\b", lowered
+        ):
             return False
         if re.search(r"\b(prove|proof|theorem|lemma|corollary|rigorous|self-contained)\b", lowered):
             return False
@@ -4058,7 +4480,10 @@ class AgnoChatRuntime:
             )
         )
         open_ended_research = bool(
-            re.search(r"\b(research question|open problem|hypothesis|proposal|design an experiment)\b", lowered)
+            re.search(
+                r"\b(research question|open problem|hypothesis|proposal|design an experiment)\b",
+                lowered,
+            )
         )
         return asks_for_numeric_answer and formal_signal and not open_ended_research
 
@@ -4111,12 +4536,15 @@ class AgnoChatRuntime:
                 "bisque_advanced_search",
                 "run_bisque_module",
             }
-            inferred = [tool_name for tool_name in inferred if tool_name not in bisque_management_tools]
+            inferred = [
+                tool_name for tool_name in inferred if tool_name not in bisque_management_tools
+            ]
         if self._prefers_megaseg_segmentation(latest_user_text):
             inferred = [
                 tool_name
                 for tool_name in inferred
-                if tool_name not in {"segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
+                if tool_name
+                not in {"segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
             ]
             if "segment_image_megaseg" not in inferred:
                 inferred.insert(0, "segment_image_megaseg")
@@ -4134,12 +4562,10 @@ class AgnoChatRuntime:
         if not normalized_selected:
             return [], False
         lowered = str(user_text or "").strip().lower()
-        has_direct_image_target = bool(
-            uploaded_files
-            or AgnoChatRuntime._selection_context_supports_direct_image_analysis(
-                user_text=user_text,
-                selection_context=selection_context,
-            )
+        has_direct_image_target = AgnoChatRuntime._has_direct_image_target(
+            user_text=user_text,
+            uploaded_files=uploaded_files,
+            selection_context=selection_context,
         )
         if AgnoChatRuntime._is_code_execution_request(user_text):
             return ["codegen_python_plan", "execute_python_job"], True
@@ -4208,7 +4634,8 @@ class AgnoChatRuntime:
             collective_council_requested
             and not uploaded_files
             and not bool(
-                selection_context_payload.get("resource_uris") or selection_context_payload.get("dataset_uris")
+                selection_context_payload.get("resource_uris")
+                or selection_context_payload.get("dataset_uris")
             )
             and not self._selection_context_has_artifact_handles(selection_context_payload)
             and not self._normalize_selected_tool_names(selected_tool_names)
@@ -4268,12 +4695,17 @@ class AgnoChatRuntime:
             stabilized.strict_tool_validation = False
             if not str(stabilized.direct_response or "").strip():
                 if "thank" in str(latest_user_text or "").strip().lower():
-                    stabilized.direct_response = "You're welcome. What would you like to work on next?"
+                    stabilized.direct_response = (
+                        "You're welcome. What would you like to work on next?"
+                    )
                 else:
                     stabilized.direct_response = "Hello! How can I assist you today?"
             _apply_policy(route="direct_response", tool_plan_override=None)
             return stabilized
-        if self._is_proof_follow_up_turn(latest_user_text, prior_pro_mode_state) and tool_plan is None:
+        if (
+            self._is_proof_follow_up_turn(latest_user_text, prior_pro_mode_state)
+            and tool_plan is None
+        ):
             stabilized.route = "deep_reasoning"
             stabilized.direct_response = None
             stabilized.selected_tool_names = []
@@ -4295,9 +4727,7 @@ class AgnoChatRuntime:
             stabilized.selected_tool_names = []
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
-            stabilized.reason = (
-                "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
-            )
+            stabilized.reason = "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
             collective_task_regime = (
                 "self_contained_reasoning"
                 if (
@@ -4346,9 +4776,7 @@ class AgnoChatRuntime:
             stabilized.selected_tool_names = []
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
-            stabilized.reason = (
-                "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
-            )
+            stabilized.reason = "Explicit collective-reasoning cues were routed into the single frontier reasoning solver for production stability."
             collective_task_regime = (
                 "self_contained_reasoning"
                 if (
@@ -4382,9 +4810,7 @@ class AgnoChatRuntime:
             stabilized.selected_tool_names = []
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
-            stabilized.reason = (
-                "The turn looks like an open-ended, long-cycle reasoning problem that benefits from checkpointed Think -> Act -> Analyze loops."
-            )
+            stabilized.reason = "The turn looks like an open-ended, long-cycle reasoning problem that benefits from checkpointed Think -> Act -> Analyze loops."
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
@@ -4413,7 +4839,10 @@ class AgnoChatRuntime:
         if (
             tool_plan is None
             and not uploaded_files
-            and not bool(dict(selection_context or {}).get("resource_uris") or dict(selection_context or {}).get("dataset_uris"))
+            and not bool(
+                dict(selection_context or {}).get("resource_uris")
+                or dict(selection_context or {}).get("dataset_uris")
+            )
             and not self._selection_context_has_artifact_handles(selection_context)
             and self._is_report_like_request(latest_user_text)
         ):
@@ -4422,9 +4851,7 @@ class AgnoChatRuntime:
             stabilized.selected_tool_names = []
             stabilized.tool_plan_category = None
             stabilized.strict_tool_validation = False
-            stabilized.reason = (
-                "Open-ended report requests stay on the frontier reasoning solver in production; the focused team is benchmark-only."
-            )
+            stabilized.reason = "Open-ended report requests stay on the frontier reasoning solver in production; the focused team is benchmark-only."
             _apply_policy(
                 route="deep_reasoning",
                 tool_plan_override=None,
@@ -4529,12 +4956,15 @@ class AgnoChatRuntime:
         lowered = str(user_text or "").strip().lower()
         if not lowered or "bisque" not in lowered:
             return False
-        if not re.search(r"\b(dataset|datasets|resource|resources|image|images|file|files|table|tables|hdf5|h5|dream3d)\b", lowered):
+        if not re.search(
+            r"\b(dataset|datasets|resource|resources|image|images|file|files|table|tables|hdf5|h5|dream3d)\b",
+            lowered,
+        ):
             return False
         return bool(
             re.search(
                 r"\b(search|find|list|browse|show me|look up|which|what|any|recent|latest|most recent)\b",
-                lowered
+                lowered,
             )
             or "are there any" in lowered
             or "do i have any" in lowered
@@ -4556,9 +4986,8 @@ class AgnoChatRuntime:
         if not route.available_tool_names:
             return []
         available = set(route.available_tool_names or [])
-        if (
-            "search_bisque_resources" in available
-            and self._looks_like_bisque_catalog_question(turn_intent.user_text)
+        if "search_bisque_resources" in available and self._looks_like_bisque_catalog_question(
+            turn_intent.user_text
         ):
             return ["search_bisque_resources"]
         return []
@@ -4611,7 +5040,11 @@ class AgnoChatRuntime:
     def _summarize_tool_output(self, tool_name: str, parsed: Any, raw_text: str) -> dict[str, Any]:
         if isinstance(parsed, dict):
             if tool_name == "bisque_download_dataset":
-                download_rows = parsed.get("download_rows") if isinstance(parsed.get("download_rows"), list) else []
+                download_rows = (
+                    parsed.get("download_rows")
+                    if isinstance(parsed.get("download_rows"), list)
+                    else []
+                )
                 if not download_rows and isinstance(parsed.get("results"), list):
                     download_rows = [
                         {
@@ -4639,9 +5072,15 @@ class AgnoChatRuntime:
                     ],
                 }
             if tool_name == "load_bisque_resource":
-                resource = parsed.get("resource") if isinstance(parsed.get("resource"), dict) else {}
+                resource = (
+                    parsed.get("resource") if isinstance(parsed.get("resource"), dict) else {}
+                )
                 tags = resource.get("tags") if isinstance(resource.get("tags"), list) else []
-                dimensions = resource.get("dimensions") if isinstance(resource.get("dimensions"), dict) else {}
+                dimensions = (
+                    resource.get("dimensions")
+                    if isinstance(resource.get("dimensions"), dict)
+                    else {}
+                )
                 return {
                     "success": bool(parsed.get("success")),
                     "kind": "bisque_resource",
@@ -4661,26 +5100,35 @@ class AgnoChatRuntime:
                     "dimensions": dimensions,
                 }
             if tool_name == "bioio_load_image":
-                dimensions = parsed.get("dimensions") if isinstance(parsed.get("dimensions"), dict) else {}
+                dimensions = (
+                    parsed.get("dimensions") if isinstance(parsed.get("dimensions"), dict) else {}
+                )
                 if not dimensions and isinstance(parsed.get("axis_sizes"), dict):
                     dimensions = {
                         str(axis): int(value)
                         for axis, value in parsed.get("axis_sizes", {}).items()
                         if str(axis).strip() and isinstance(value, (int, float))
                     }
-                metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+                metadata = (
+                    parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+                )
                 header = metadata.get("header") if isinstance(metadata.get("header"), dict) else {}
                 exif = metadata.get("exif") if isinstance(metadata.get("exif"), dict) else {}
                 geo = metadata.get("geo") if isinstance(metadata.get("geo"), dict) else {}
                 filename_hints = (
-                    metadata.get("filename_hints") if isinstance(metadata.get("filename_hints"), dict) else {}
+                    metadata.get("filename_hints")
+                    if isinstance(metadata.get("filename_hints"), dict)
+                    else {}
                 )
-                captured_at = str(
-                    parsed.get("captured_at")
-                    or exif.get("DateTimeOriginal")
-                    or exif.get("DateTime")
-                    or ""
-                ).strip() or None
+                captured_at = (
+                    str(
+                        parsed.get("captured_at")
+                        or exif.get("DateTimeOriginal")
+                        or exif.get("DateTime")
+                        or ""
+                    ).strip()
+                    or None
+                )
                 return {
                     "success": bool(parsed.get("success")),
                     "kind": "bioio_image",
@@ -4728,9 +5176,21 @@ class AgnoChatRuntime:
                     "captured_at": captured_at,
                 }
             if tool_name == "yolo_detect":
-                scientific_summary = parsed.get("scientific_summary") if isinstance(parsed.get("scientific_summary"), dict) else {}
-                overall = scientific_summary.get("overall") if isinstance(scientific_summary.get("overall"), dict) else {}
-                prediction_records = parsed.get("prediction_image_records") if isinstance(parsed.get("prediction_image_records"), list) else []
+                scientific_summary = (
+                    parsed.get("scientific_summary")
+                    if isinstance(parsed.get("scientific_summary"), dict)
+                    else {}
+                )
+                overall = (
+                    scientific_summary.get("overall")
+                    if isinstance(scientific_summary.get("overall"), dict)
+                    else {}
+                )
+                prediction_records = (
+                    parsed.get("prediction_image_records")
+                    if isinstance(parsed.get("prediction_image_records"), list)
+                    else []
+                )
                 stability_audit = (
                     parsed.get("prediction_stability_audit")
                     if isinstance(parsed.get("prediction_stability_audit"), dict)
@@ -4755,12 +5215,15 @@ class AgnoChatRuntime:
                     "model_name": parsed.get("model_name"),
                     "predictions_json": parsed.get("predictions_json"),
                     "counts_by_class": parsed.get("counts_by_class"),
-                    "total_boxes": overall.get("total_boxes") or parsed.get("metrics", {}).get("total_boxes"),
+                    "total_boxes": overall.get("total_boxes")
+                    or parsed.get("metrics", {}).get("total_boxes"),
                     "scientific_summary": {"overall": overall} if overall else {},
                     "per_image": compact_records,
                     "prediction_stability": {
                         "summary": stability_audit.get("summary"),
-                        "review_candidates": list(stability_audit.get("review_candidates") or [])[:5],
+                        "review_candidates": list(stability_audit.get("review_candidates") or [])[
+                            :5
+                        ],
                         "backend_method": stability_audit.get("backend_method"),
                     }
                     if stability_audit
@@ -4768,7 +5231,9 @@ class AgnoChatRuntime:
                 }
             if tool_name in {"score_spectral_instability", "analyze_prediction_stability"}:
                 summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
-                top_ranked = summary.get("top_ranked") if isinstance(summary.get("top_ranked"), list) else []
+                top_ranked = (
+                    summary.get("top_ranked") if isinstance(summary.get("top_ranked"), list) else []
+                )
                 compact_ranked: list[dict[str, Any]] = []
                 for item in top_ranked[:5]:
                     if not isinstance(item, dict):
@@ -4799,7 +5264,11 @@ class AgnoChatRuntime:
                     "active_learning_note": parsed.get("active_learning_note"),
                 }
             if tool_name == "quantify_objects":
-                distribution_summary = parsed.get("distribution_summary") if isinstance(parsed.get("distribution_summary"), dict) else {}
+                distribution_summary = (
+                    parsed.get("distribution_summary")
+                    if isinstance(parsed.get("distribution_summary"), dict)
+                    else {}
+                )
                 return {
                     "success": bool(parsed.get("success")),
                     "kind": "quantify_objects",
@@ -4809,7 +5278,8 @@ class AgnoChatRuntime:
                     "distribution_summary": {
                         key: value
                         for key, value in distribution_summary.items()
-                        if key in {"bbox_area_px", "width_px", "height_px", "equivalent_diameter_px"}
+                        if key
+                        in {"bbox_area_px", "width_px", "height_px", "equivalent_diameter_px"}
                     },
                     "object_row_count": parsed.get("object_row_count"),
                 }
@@ -4822,8 +5292,16 @@ class AgnoChatRuntime:
                     "message": parsed.get("message"),
                 }
             if tool_name == "execute_python_job":
-                key_measurements = parsed.get("key_measurements") if isinstance(parsed.get("key_measurements"), list) else []
-                analysis_outputs = parsed.get("analysis_outputs") if isinstance(parsed.get("analysis_outputs"), list) else []
+                key_measurements = (
+                    parsed.get("key_measurements")
+                    if isinstance(parsed.get("key_measurements"), list)
+                    else []
+                )
+                analysis_outputs = (
+                    parsed.get("analysis_outputs")
+                    if isinstance(parsed.get("analysis_outputs"), list)
+                    else []
+                )
                 return {
                     "success": bool(parsed.get("success")),
                     "kind": "execute_python_job",
@@ -5138,15 +5616,57 @@ class AgnoChatRuntime:
             project_id=str(scope.project_id or "").strip() or None,
         )
 
-    @staticmethod
+    def _pro_mode_analysis_brief_lines(
+        self,
+        *,
+        analysis_state: dict[str, Any] | None,
+        selection_context: dict[str, Any] | None,
+        uploaded_files: list[str] | None,
+    ) -> list[str]:
+        payload = self._analysis_session_state_payload(
+            analysis_state=analysis_state,
+            selection_context=selection_context,
+            uploaded_files=list(uploaded_files or []),
+        )
+        state = dict(payload.get("analysis_state") or {})
+        lines: list[str] = []
+        last_objective = str(state.get("last_objective") or "").strip()
+        last_answer_summary = str(state.get("last_answer_summary") or "").strip()
+        if last_objective:
+            lines.append(
+                f"Last objective: {self._presentation_text(last_objective, max_chars=180)}"
+            )
+        if last_answer_summary:
+            lines.append(
+                f"Last answer: {self._presentation_text(last_answer_summary, max_chars=220)}"
+            )
+        for item in list(state.get("key_measurements") or [])[:3]:
+            rendered = self._presentation_text(item, max_chars=160)
+            if rendered:
+                lines.append(f"Key measurement: {rendered}")
+        for item in list(state.get("recommended_next_steps") or [])[:2]:
+            rendered = self._presentation_text(item, max_chars=180)
+            if rendered:
+                lines.append(f"Open next step: {rendered}")
+        return lines[:6]
+
     def _pro_mode_shared_context_payload(
+        self,
         *,
         memory_context: ScientificMemoryContext,
         knowledge_result: ScientificKnowledgeContext,
+        analysis_state: dict[str, Any] | None,
+        selection_context: dict[str, Any] | None,
+        uploaded_files: list[str] | None,
     ) -> dict[str, Any]:
         return {
             "memory_messages": list(memory_context.system_messages or []),
             "knowledge_messages": list(knowledge_result.system_messages or []),
+            "analysis_brief_lines": self._pro_mode_analysis_brief_lines(
+                analysis_state=analysis_state,
+                selection_context=selection_context,
+                uploaded_files=uploaded_files,
+            ),
             "memory_metadata": memory_context.metadata(),
             "knowledge_metadata": knowledge_result.metadata(),
         }
@@ -5174,17 +5694,31 @@ class AgnoChatRuntime:
             for item in list((shared_context or {}).get("knowledge_messages") or [])
             if str(item or "").strip()
         ]
+        analysis_brief_lines = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("analysis_brief_lines") or [])
+            if str(item or "").strip()
+        ]
         if memory_messages:
-            context_sections.append("Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6]))
+            context_sections.append(
+                "Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6])
+            )
         if knowledge_messages:
             context_sections.append(
-                "Relevant knowledge context:\n" + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+                "Relevant knowledge context:\n"
+                + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+            )
+        if analysis_brief_lines:
+            context_sections.append(
+                "Relevant running summary:\n"
+                + "\n".join(f"- {item}" for item in analysis_brief_lines[:4])
             )
 
         team_session_state = {
             "pro_mode_context": {
                 "memory_messages": memory_messages[:6],
                 "knowledge_messages": knowledge_messages[:6],
+                "analysis_brief_lines": analysis_brief_lines[:4],
             }
         }
 
@@ -5304,7 +5838,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::focused_team" if run_id else "focused_team",
+                    run_id=f"{str(run_id or '').strip()}::focused_team"
+                    if run_id
+                    else "focused_team",
                 ),
                 debug_mode=bool(debug),
             )
@@ -5378,7 +5914,11 @@ class AgnoChatRuntime:
                 leader_summary or "No team leader summary.",
                 "",
                 "Structured member notes:",
-                json.dumps([note.model_dump(mode='json') for note in member_notes], ensure_ascii=False, indent=2),
+                json.dumps(
+                    [note.model_dump(mode="json") for note in member_notes],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
             ]
         )
         focused_review = await self._run_tool_program_phase(
@@ -5397,7 +5937,8 @@ class AgnoChatRuntime:
         )
 
         synthesis_fallback = ProModeSynthesis(
-            response_text=leader_summary or (
+            response_text=leader_summary
+            or (
                 "I could not yet produce a stable focused-team synthesis for this report-style request."
             ),
             settlement_summary="Focused team fallback synthesis used.",
@@ -5443,7 +5984,11 @@ class AgnoChatRuntime:
                 leader_summary or "No team leader summary.",
                 "",
                 "Structured member notes:",
-                json.dumps([note.model_dump(mode='json') for note in member_notes], ensure_ascii=False, indent=2),
+                json.dumps(
+                    [note.model_dump(mode="json") for note in member_notes],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 "",
                 "Focused critique round:",
                 focused_review.model_dump_json(indent=2),
@@ -5482,7 +6027,11 @@ class AgnoChatRuntime:
                 synthesis.model_dump_json(indent=2),
                 "",
                 "Member notes JSON:",
-                json.dumps([note.model_dump(mode='json') for note in member_notes], ensure_ascii=False, indent=2),
+                json.dumps(
+                    [note.model_dump(mode="json") for note in member_notes],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 "",
                 "Critique JSON:",
                 focused_review.model_dump_json(indent=2),
@@ -5579,11 +6128,24 @@ class AgnoChatRuntime:
             for item in list((shared_context or {}).get("knowledge_messages") or [])
             if str(item or "").strip()
         ]
+        analysis_brief_lines = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("analysis_brief_lines") or [])
+            if str(item or "").strip()
+        ]
         if memory_messages:
-            context_sections.append("Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6]))
+            context_sections.append(
+                "Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6])
+            )
         if knowledge_messages:
             context_sections.append(
-                "Relevant knowledge context:\n" + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+                "Relevant knowledge context:\n"
+                + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+            )
+        if analysis_brief_lines:
+            context_sections.append(
+                "Relevant running summary:\n"
+                + "\n".join(f"- {item}" for item in analysis_brief_lines[:4])
             )
 
         prompt = "\n\n".join(
@@ -5622,6 +6184,7 @@ class AgnoChatRuntime:
                 f"Question: {latest_user_text}",
             ]
         )
+
         def _build_reasoning_solver_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             return Agent(
                 name="pro-mode-reasoning-solver",
@@ -5673,6 +6236,7 @@ class AgnoChatRuntime:
                     "pro_mode_context": {
                         "memory_messages": memory_messages[:6],
                         "knowledge_messages": knowledge_messages[:6],
+                        "analysis_brief_lines": analysis_brief_lines[:4],
                     }
                 },
                 add_session_state_to_context=True,
@@ -5681,9 +6245,12 @@ class AgnoChatRuntime:
                 reasoning_max_steps=12,
                 debug_mode=bool(debug),
             )
+
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
-            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
         )
         try:
             result, model_route = await self._arun_text_phase_with_optional_pro_mode_transport(
@@ -5828,8 +6395,18 @@ class AgnoChatRuntime:
             for item in [
                 *list((shared_context or {}).get("memory_messages") or []),
                 *list((shared_context or {}).get("knowledge_messages") or []),
-                *list(dict((autonomy_state_seed or {}).get("autonomy_state") or {}).get("evidence_ledger") or []),
-                *list(dict((autonomy_state_seed or {}).get("autonomy_state") or {}).get("open_obligations") or []),
+                *list(
+                    dict((autonomy_state_seed or {}).get("autonomy_state") or {}).get(
+                        "evidence_ledger"
+                    )
+                    or []
+                ),
+                *list(
+                    dict((autonomy_state_seed or {}).get("autonomy_state") or {}).get(
+                        "open_obligations"
+                    )
+                    or []
+                ),
             ]
             if str(item or "").strip()
         ]
@@ -5914,8 +6491,12 @@ class AgnoChatRuntime:
                 "Shared context JSON:",
                 json.dumps(
                     {
-                        "memory_messages": list((shared_context or {}).get("memory_messages") or [])[:6],
-                        "knowledge_messages": list((shared_context or {}).get("knowledge_messages") or [])[:6],
+                        "memory_messages": list(
+                            (shared_context or {}).get("memory_messages") or []
+                        )[:6],
+                        "knowledge_messages": list(
+                            (shared_context or {}).get("knowledge_messages") or []
+                        )[:6],
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -5963,8 +6544,12 @@ class AgnoChatRuntime:
             tools=controller_tools,
             session_state={
                 "pro_mode_context": {
-                    "memory_messages": list((shared_context or {}).get("memory_messages") or [])[:6],
-                    "knowledge_messages": list((shared_context or {}).get("knowledge_messages") or [])[:6],
+                    "memory_messages": list((shared_context or {}).get("memory_messages") or [])[
+                        :6
+                    ],
+                    "knowledge_messages": list(
+                        (shared_context or {}).get("knowledge_messages") or []
+                    )[:6],
                 }
             },
             add_session_state_to_context=True,
@@ -5979,7 +6564,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::autonomous_cycle_controller" if run_id else "autonomous_cycle_controller",
+                    run_id=f"{str(run_id or '').strip()}::autonomous_cycle_controller"
+                    if run_id
+                    else "autonomous_cycle_controller",
                 ),
                 debug_mode=bool(debug),
             )
@@ -6023,10 +6610,14 @@ class AgnoChatRuntime:
             )
         envelope = AutonomousCycleWorkflowEnvelope.model_validate(
             {
-                "response_text": workflow_content.get("response_text") or controller_output.response_text or "",
+                "response_text": workflow_content.get("response_text")
+                or controller_output.response_text
+                or "",
                 "metadata": workflow_content.get("metadata") or {},
                 "tool_invocations": workflow_content.get("tool_invocations") or [],
-                "runtime_status": workflow_content.get("runtime_status") or controller_output.workflow_status or "completed",
+                "runtime_status": workflow_content.get("runtime_status")
+                or controller_output.workflow_status
+                or "completed",
                 "runtime_error": workflow_content.get("runtime_error"),
             }
         )
@@ -6048,7 +6639,9 @@ class AgnoChatRuntime:
             )
         pro_mode_meta["controller_mode"] = "rtd_v1"
         pro_mode_meta["controller_toolkits"] = list(toolkit_names)
-        pro_mode_meta["controller_summary"] = str(controller_output.controller_summary or "").strip()
+        pro_mode_meta["controller_summary"] = str(
+            controller_output.controller_summary or ""
+        ).strip()
         return ProModeWorkflowResult(
             response_text=str(envelope.response_text or "").strip(),
             metadata={"pro_mode": pro_mode_meta},
@@ -6205,7 +6798,9 @@ class AgnoChatRuntime:
     ) -> ProModeWorkflowResult:
         benchmark = dict(benchmark or {})
         disable_memory_knowledge = bool(benchmark.get("disable_autonomy_memory_knowledge"))
-        disable_focused_team_delegate = bool(benchmark.get("disable_autonomy_focused_team_delegate"))
+        disable_focused_team_delegate = bool(
+            benchmark.get("disable_autonomy_focused_team_delegate")
+        )
         disable_resume = bool(benchmark.get("disable_autonomy_resume"))
         disable_falsifier = bool(benchmark.get("disable_autonomy_falsifier"))
         raw_max_cycles = benchmark.get("autonomy_max_cycles")
@@ -6239,7 +6834,9 @@ class AgnoChatRuntime:
             )
             and not self._selection_context_has_artifact_handles(selection_context)
         )
-        prior_autonomy_state = {} if disable_resume else self._saved_autonomy_state(autonomy_state_seed)
+        prior_autonomy_state = (
+            {} if disable_resume else self._saved_autonomy_state(autonomy_state_seed)
+        )
         resumed = bool(prior_autonomy_state)
         prior_cycles_completed = int(prior_autonomy_state.get("cycles_completed") or 0)
         phase_timings: dict[str, float] = {}
@@ -6316,6 +6913,7 @@ class AgnoChatRuntime:
                 ),
                 title=(latest_user_text[:120].strip() or "Pro Mode conversation state"),
             )
+
         memory_messages = [
             str(item or "").strip()
             for item in list((shared_context or {}).get("memory_messages") or [])
@@ -6339,13 +6937,19 @@ class AgnoChatRuntime:
         session_state["autonomy_state"] = _legacy_autonomy_state_from_rtd(
             rtd_state,
             counterfactual_required=bool(
-                (prior_autonomy_state.get("counterfactual_verification_required")
-                if "counterfactual_verification_required" in prior_autonomy_state
-                else counterfactual_verification_required)
+                (
+                    prior_autonomy_state.get("counterfactual_verification_required")
+                    if "counterfactual_verification_required" in prior_autonomy_state
+                    else counterfactual_verification_required
+                )
                 and not disable_falsifier
             ),
-            counterfactual_pending=bool(prior_autonomy_state.get("counterfactual_verification_pending")),
-            counterfactual_completed=bool(prior_autonomy_state.get("counterfactual_verification_completed")),
+            counterfactual_pending=bool(
+                prior_autonomy_state.get("counterfactual_verification_pending")
+            ),
+            counterfactual_completed=bool(
+                prior_autonomy_state.get("counterfactual_verification_completed")
+            ),
         )
         if resumed:
             self._emit_event(
@@ -6404,7 +7008,9 @@ class AgnoChatRuntime:
             cycle_index: int,
             autonomy_state: dict[str, Any],
         ) -> str:
-            rtd_state = RTDEpistemicState.model_validate(dict(session_state.get("autonomy_state_v2") or {}) or {})
+            rtd_state = RTDEpistemicState.model_validate(
+                dict(session_state.get("autonomy_state_v2") or {}) or {}
+            )
             candidate_answer = (
                 str(plan.candidate_set.leader.answer_text or "").strip()
                 or str(plan.candidate_answer or "").strip()
@@ -6421,15 +7027,24 @@ class AgnoChatRuntime:
                     *[str(item or "").strip() for item in list(plan.obligation_ledger or [])],
                     *[str(item or "").strip() for item in list(plan.open_obligations or [])],
                     *[str(item or "").strip() for item in list(rtd_state.obligation_ledger or [])],
-                    *[str(item or "").strip() for item in list(autonomy_state.get("open_obligations") or [])],
+                    *[
+                        str(item or "").strip()
+                        for item in list(autonomy_state.get("open_obligations") or [])
+                    ],
                 ],
                 limit=6,
             )
             next_best_actions = _dedupe_preserve(
                 [
-                    *[str(item or "").strip() for item in list(rtd_state.checkpoint.next_best_actions or [])],
+                    *[
+                        str(item or "").strip()
+                        for item in list(rtd_state.checkpoint.next_best_actions or [])
+                    ],
                     *[str(item or "").strip() for item in list(plan.next_best_actions or [])],
-                    *[str(item or "").strip() for item in list(autonomy_state.get("next_best_actions") or [])],
+                    *[
+                        str(item or "").strip()
+                        for item in list(autonomy_state.get("next_best_actions") or [])
+                    ],
                 ],
                 limit=4,
             )
@@ -6506,7 +7121,9 @@ class AgnoChatRuntime:
             selected_tool_names: list[str],
             action_request: str,
         ) -> tuple[str, dict[str, Any], list[dict[str, Any]], str, RTDSkill]:
-            workflow_messages = list(messages[-4:]) or [{"role": "user", "content": latest_user_text}]
+            workflow_messages = list(messages[-4:]) or [
+                {"role": "user", "content": latest_user_text}
+            ]
             if workflow_messages and workflow_messages[-1].get("role") == "user":
                 workflow_messages = [
                     *workflow_messages[:-1],
@@ -6585,16 +7202,23 @@ class AgnoChatRuntime:
                     if numeric_result:
                         return StepOutput(
                             content={
-                                "response_text": str(numeric_result.get("response_text") or "").strip(),
+                                "response_text": str(
+                                    numeric_result.get("response_text") or ""
+                                ).strip(),
                                 "metadata": dict(numeric_result.get("metadata") or {}),
-                                "tool_invocations": list(numeric_result.get("tool_invocations") or []),
+                                "tool_invocations": list(
+                                    numeric_result.get("tool_invocations") or []
+                                ),
                                 "selected_action": "tool_workflow",
                             }
                         )
-                if selected_action_hint == "reasoning_solver" or skill_name == "counterfactual_verification_workflow":
+                if (
+                    selected_action_hint == "reasoning_solver"
+                    or skill_name == "counterfactual_verification_workflow"
+                ):
                     result = await self._run_pro_mode_reasoning_solver(
                         latest_user_text=action_request,
-                        task_regime=task_regime,
+                        task_regime=inferred_task_regime,
                         shared_context={
                             "memory_messages": memory_messages,
                             "knowledge_messages": knowledge_messages,
@@ -6616,7 +7240,11 @@ class AgnoChatRuntime:
                             "selected_action": "reasoning_solver",
                         }
                     )
-                if skill_name in {"evidence_review_workflow", "programmatic_experiment_workflow", "deterministic_numeric_workflow"}:
+                if skill_name in {
+                    "evidence_review_workflow",
+                    "programmatic_experiment_workflow",
+                    "deterministic_numeric_workflow",
+                }:
                     effective_tools = list(selected_tool_names or [])
                     if skill_name == "programmatic_experiment_workflow" and not effective_tools:
                         effective_tools = ["codegen_python_plan", "execute_python_job"]
@@ -6666,7 +7294,7 @@ class AgnoChatRuntime:
                     )
                 result = await self._run_pro_mode_reasoning_solver(
                     latest_user_text=action_request,
-                    task_regime=task_regime,
+                    task_regime=inferred_task_regime,
                     shared_context={
                         "memory_messages": memory_messages,
                         "knowledge_messages": knowledge_messages,
@@ -6705,7 +7333,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::{skill_name}" if run_id else str(skill_name),
+                    run_id=f"{str(run_id or '').strip()}::{skill_name}"
+                    if run_id
+                    else str(skill_name),
                 ),
             )
             content = dict(getattr(output, "content", {}) or {})
@@ -6713,7 +7343,8 @@ class AgnoChatRuntime:
                 str(content.get("response_text") or "").strip(),
                 dict(content.get("metadata") or {}),
                 list(content.get("tool_invocations") or []),
-                str(content.get("selected_action") or self._rtd_skill_to_action(skill_name)).strip() or self._rtd_skill_to_action(skill_name),
+                str(content.get("selected_action") or self._rtd_skill_to_action(skill_name)).strip()
+                or self._rtd_skill_to_action(skill_name),
                 skill_name,
             )
 
@@ -6746,10 +7377,13 @@ class AgnoChatRuntime:
         # treat follow-up reframing requests as answer-shaping turns rather than
         # sending them back through the full planner loop.
         if self._is_autonomy_resume_synthesis_turn(latest_user_text, autonomy_state_seed):
-            next_cycle_index = max(
-                int(prior_autonomy_state.get("checkpoint_index") or 0),
-                prior_cycles_completed,
-            ) + 1
+            next_cycle_index = (
+                max(
+                    int(prior_autonomy_state.get("checkpoint_index") or 0),
+                    prior_cycles_completed,
+                )
+                + 1
+            )
             prior_rtd_payload = dict(session_state.get("autonomy_state_v2") or {})
             prior_rtd_state = RTDEpistemicState.model_validate(prior_rtd_payload or {})
             prior_rtd_state.checkpoint = RTDCheckpoint(
@@ -6809,13 +7443,17 @@ class AgnoChatRuntime:
                 max_runtime_seconds=min(max_runtime_seconds, 60),
                 debug=debug,
             )
-            final_response_text = str(rewritten_response or prior_autonomy_state.get("candidate_answer") or "").strip()
+            final_response_text = str(
+                rewritten_response or prior_autonomy_state.get("candidate_answer") or ""
+            ).strip()
             cycle_metrics = {
                 "cycles_completed": int(next_cycle_index),
                 "tool_families_used": list(tool_families_used),
                 "self_correction_count": 0,
                 "stop_reason": "resume_synthesis",
-                "checkpoint_coverage": round(float(next_cycle_index) / float(max(watchdog_max_cycles, 1)), 3),
+                "checkpoint_coverage": round(
+                    float(next_cycle_index) / float(max(watchdog_max_cycles, 1)), 3
+                ),
                 "evidence_sufficiency_score": 1.0,
                 "continuation_fidelity": 1.0,
                 "counterfactual_verification_completed": bool(
@@ -6868,11 +7506,15 @@ class AgnoChatRuntime:
                     "autonomy_state_v2": prior_rtd_state.model_dump(mode="json"),
                     "candidate_set": prior_rtd_state.candidate_set.model_dump(mode="json"),
                     "obligation_ledger": [],
-                    "verification_ledger": [item.model_dump(mode="json") for item in prior_rtd_state.verification_ledger],
+                    "verification_ledger": [
+                        item.model_dump(mode="json") for item in prior_rtd_state.verification_ledger
+                    ],
                     "cycle_metrics": cycle_metrics,
                     "cycle_metrics_v2": {
                         **cycle_metrics,
-                        "verification_count": int(prior_rtd_state.budget_state.verification_count or 0),
+                        "verification_count": int(
+                            prior_rtd_state.budget_state.verification_count or 0
+                        ),
                     },
                     "stop_decision": {
                         "reason": "resume_synthesis",
@@ -6905,7 +7547,9 @@ class AgnoChatRuntime:
         async def think_plan(step_input: StepInput) -> StepOutput:
             del step_input
             local_state["iteration_count"] = int(local_state.get("iteration_count") or 0) + 1
-            cycle_index = int(local_state.get("cycle_offset") or 0) + int(local_state.get("iteration_count") or 0)
+            cycle_index = int(local_state.get("cycle_offset") or 0) + int(
+                local_state.get("iteration_count") or 0
+            )
             local_state["current_cycle_index"] = cycle_index
             state = dict(session_state.get("autonomy_state") or {})
             rtd_state_payload = dict(session_state.get("autonomy_state_v2") or {})
@@ -6946,14 +7590,24 @@ class AgnoChatRuntime:
                     selection_context=selection_context,
                 ),
                 action_rationale="Fallback action selected because the controller plan was unavailable.",
-                candidate_answer=str(rtd_state.candidate_set.leader.answer_text or state.get("candidate_answer") or "").strip(),
+                candidate_answer=str(
+                    rtd_state.candidate_set.leader.answer_text
+                    or state.get("candidate_answer")
+                    or ""
+                ).strip(),
                 candidate_set=rtd_state.candidate_set,
                 problem_frame=rtd_state.problem_frame,
-                open_obligations=list(rtd_state.obligation_ledger or state.get("open_obligations") or []),
+                open_obligations=list(
+                    rtd_state.obligation_ledger or state.get("open_obligations") or []
+                ),
                 obligation_ledger=list(rtd_state.obligation_ledger or []),
-                evidence_ledger=list(rtd_state.evidence_ledger or state.get("evidence_ledger") or [])[-12:],
+                evidence_ledger=list(
+                    rtd_state.evidence_ledger or state.get("evidence_ledger") or []
+                )[-12:],
                 verification_ledger=list(rtd_state.verification_ledger or [])[-4:],
-                next_best_actions=list(rtd_state.checkpoint.next_best_actions or state.get("next_best_actions") or [])[:4],
+                next_best_actions=list(
+                    rtd_state.checkpoint.next_best_actions or state.get("next_best_actions") or []
+                )[:4],
                 selected_tool_names=[],
                 request_checkpoint=False,
             )
@@ -6977,7 +7631,9 @@ class AgnoChatRuntime:
                     rtd_state.model_dump_json(indent=2),
                     "",
                     "Shared context JSON:",
-                    json.dumps(session_state.get("pro_mode_context") or {}, ensure_ascii=False, indent=2),
+                    json.dumps(
+                        session_state.get("pro_mode_context") or {}, ensure_ascii=False, indent=2
+                    ),
                 ]
             )
             plan_started = time.monotonic()
@@ -7000,15 +7656,24 @@ class AgnoChatRuntime:
                 ),
                 debug=debug,
             )
-            phase_timings[f"autonomous_cycle_think_{cycle_index}"] = round(time.monotonic() - plan_started, 3)
+            phase_timings[f"autonomous_cycle_think_{cycle_index}"] = round(
+                time.monotonic() - plan_started, 3
+            )
             local_state["current_plan"] = plan.model_dump(mode="json")
             return StepOutput(content=plan.model_dump(mode="json"))
 
         async def run_action(step_input: StepInput) -> StepOutput:
-            plan_payload = dict(step_input.get_step_content("autonomous_cycle_think_plan") or local_state.get("current_plan") or {})
+            plan_payload = dict(
+                step_input.get_step_content("autonomous_cycle_think_plan")
+                or local_state.get("current_plan")
+                or {}
+            )
             plan = AutonomousCyclePlan.model_validate(plan_payload or {})
             cycle_index = int(local_state.get("current_cycle_index") or 0)
-            selected_action = str(plan.selected_action or "reasoning_solver").strip().lower() or "reasoning_solver"
+            selected_action = (
+                str(plan.selected_action or "reasoning_solver").strip().lower()
+                or "reasoning_solver"
+            )
             selected_skill = str(plan.selected_skill or "").strip()
             if not selected_skill:
                 if selected_action == "focused_team":
@@ -7017,7 +7682,9 @@ class AgnoChatRuntime:
                     if bool(local_state.get("counterfactual_verification_pending")) or bool(
                         re.search(
                             r"counterfactual verification|strongest alternative|falsif",
-                            (str(plan.think_plan or "") + " " + str(plan.action_rationale or "")).lower(),
+                            (
+                                str(plan.think_plan or "") + " " + str(plan.action_rationale or "")
+                            ).lower(),
                         )
                     ):
                         selected_skill = "counterfactual_verification_workflow"
@@ -7046,10 +7713,22 @@ class AgnoChatRuntime:
                 selected_action = "reasoning_solver"
                 if selected_skill == "focused_synthesis_team_workflow":
                     selected_skill = "counterfactual_verification_workflow"
-            if selected_action not in {"reasoning_solver", "focused_team", "tool_workflow", "finalize", "checkpoint"}:
-                selected_action = self._rtd_skill_to_action(selected_skill) if selected_action not in {"finalize", "checkpoint"} else "reasoning_solver"
+            if selected_action not in {
+                "reasoning_solver",
+                "focused_team",
+                "tool_workflow",
+                "finalize",
+                "checkpoint",
+            }:
+                selected_action = (
+                    self._rtd_skill_to_action(selected_skill)
+                    if selected_action not in {"finalize", "checkpoint"}
+                    else "reasoning_solver"
+                )
             state = dict(session_state.get("autonomy_state") or {})
-            response_text_for_cycle = str(plan.candidate_answer or state.get("candidate_answer") or "").strip()
+            response_text_for_cycle = str(
+                plan.candidate_answer or state.get("candidate_answer") or ""
+            ).strip()
             action_metadata: dict[str, Any] = {}
             action_tool_invocations: list[dict[str, Any]] = []
             if selected_action not in {"finalize", "checkpoint"}:
@@ -7103,14 +7782,19 @@ class AgnoChatRuntime:
                     selected_tool_names=selected_tools,
                     action_request=action_request,
                 )
-                phase_timings[f"autonomous_cycle_run_{cycle_index}"] = round(time.monotonic() - action_started, 3)
+                phase_timings[f"autonomous_cycle_run_{cycle_index}"] = round(
+                    time.monotonic() - action_started, 3
+                )
                 tool_invocations.extend(action_tool_invocations)
                 for invocation in action_tool_invocations:
-                    family = self._research_program_tool_family(str(invocation.get("tool") or "").strip())
+                    family = self._research_program_tool_family(
+                        str(invocation.get("tool") or "").strip()
+                    )
                     if family and family not in tool_families_used:
                         tool_families_used.append(family)
             local_state["last_response_text"] = (
-                _response_excerpt(response_text_for_cycle) or str(local_state.get("last_response_text") or "").strip()
+                _response_excerpt(response_text_for_cycle)
+                or str(local_state.get("last_response_text") or "").strip()
             )
             local_state["current_action"] = {
                 "selected_action": selected_action,
@@ -7123,11 +7807,27 @@ class AgnoChatRuntime:
             return StepOutput(content=dict(local_state.get("current_action") or {}))
 
         async def analyze_result(step_input: StepInput) -> StepOutput:
-            plan_payload = dict(step_input.get_step_content("autonomous_cycle_think_plan") or local_state.get("current_plan") or {})
+            plan_payload = dict(
+                step_input.get_step_content("autonomous_cycle_think_plan")
+                or local_state.get("current_plan")
+                or {}
+            )
             plan = AutonomousCyclePlan.model_validate(plan_payload or {})
-            action_payload = dict(step_input.get_step_content("autonomous_cycle_run_action") or local_state.get("current_action") or {})
-            selected_action = str(action_payload.get("selected_action") or "reasoning_solver").strip().lower() or "reasoning_solver"
-            selected_skill = str(action_payload.get("selected_skill") or local_state.get("current_skill") or plan.selected_skill or "").strip() or self._rtd_skill_from_context(
+            action_payload = dict(
+                step_input.get_step_content("autonomous_cycle_run_action")
+                or local_state.get("current_action")
+                or {}
+            )
+            selected_action = (
+                str(action_payload.get("selected_action") or "reasoning_solver").strip().lower()
+                or "reasoning_solver"
+            )
+            selected_skill = str(
+                action_payload.get("selected_skill")
+                or local_state.get("current_skill")
+                or plan.selected_skill
+                or ""
+            ).strip() or self._rtd_skill_from_context(
                 latest_user_text=latest_user_text,
                 task_regime=inferred_task_regime,
                 uploaded_files=uploaded_files,
@@ -7135,11 +7835,18 @@ class AgnoChatRuntime:
             )
             response_text_for_cycle = str(action_payload.get("response_text") or "").strip()
             state = dict(session_state.get("autonomy_state") or {})
-            rtd_state = RTDEpistemicState.model_validate(dict(session_state.get("autonomy_state_v2") or {}) or {})
+            rtd_state = RTDEpistemicState.model_validate(
+                dict(session_state.get("autonomy_state_v2") or {}) or {}
+            )
             cycle_index = int(local_state.get("current_cycle_index") or 0)
             combined_ledger = _dedupe_preserve(
                 [
-                    *[str(item or "").strip() for item in list(rtd_state.evidence_ledger or state.get("evidence_ledger") or [])],
+                    *[
+                        str(item or "").strip()
+                        for item in list(
+                            rtd_state.evidence_ledger or state.get("evidence_ledger") or []
+                        )
+                    ],
                     *[str(item or "").strip() for item in list(plan.evidence_ledger or [])],
                     *(
                         [_response_excerpt(response_text_for_cycle)]
@@ -7155,7 +7862,9 @@ class AgnoChatRuntime:
                 evidence_sufficiency_score=(
                     0.8
                     if selected_action in {"finalize", "checkpoint"}
-                    else 0.65 if str(response_text_for_cycle or "").strip() else 0.35
+                    else 0.65
+                    if str(response_text_for_cycle or "").strip()
+                    else 0.35
                 ),
                 self_correction_needed=False,
                 stop_reason=(
@@ -7168,11 +7877,26 @@ class AgnoChatRuntime:
                     else "continue"
                 ),
                 resume_readiness=("ready" if selected_action == "checkpoint" else "not_needed"),
-                open_obligations=list(plan.obligation_ledger or plan.open_obligations or rtd_state.obligation_ledger or []),
-                obligation_ledger=list(plan.obligation_ledger or plan.open_obligations or rtd_state.obligation_ledger or []),
+                open_obligations=list(
+                    plan.obligation_ledger
+                    or plan.open_obligations
+                    or rtd_state.obligation_ledger
+                    or []
+                ),
+                obligation_ledger=list(
+                    plan.obligation_ledger
+                    or plan.open_obligations
+                    or rtd_state.obligation_ledger
+                    or []
+                ),
                 next_best_actions=list(plan.next_best_actions or []),
                 candidate_answer=str(response_text_for_cycle or "").strip(),
-                candidate_set=plan.candidate_set if (plan.candidate_set.leader.answer_text or plan.candidate_set.challenger.answer_text) else rtd_state.candidate_set,
+                candidate_set=plan.candidate_set
+                if (
+                    plan.candidate_set.leader.answer_text
+                    or plan.candidate_set.challenger.answer_text
+                )
+                else rtd_state.candidate_set,
                 verification_ledger=list(rtd_state.verification_ledger or [])[-4:],
                 critique="Fallback analyzer result.",
             )
@@ -7233,9 +7957,13 @@ class AgnoChatRuntime:
                 ),
                 debug=debug,
             )
-            phase_timings[f"autonomous_cycle_analyze_{cycle_index}"] = round(time.monotonic() - analysis_started, 3)
+            phase_timings[f"autonomous_cycle_analyze_{cycle_index}"] = round(
+                time.monotonic() - analysis_started, 3
+            )
             if analysis.self_correction_needed:
-                local_state["self_correction_count"] = int(local_state.get("self_correction_count") or 0) + 1
+                local_state["self_correction_count"] = (
+                    int(local_state.get("self_correction_count") or 0) + 1
+                )
             should_finalize = bool(analysis.should_finalize or selected_action == "finalize")
             should_checkpoint = bool(selected_action == "checkpoint" or plan.request_checkpoint)
             if should_finalize and not list(analysis.open_obligations or []):
@@ -7243,11 +7971,20 @@ class AgnoChatRuntime:
             else:
                 open_obligations = _dedupe_preserve(
                     [
-                        *[str(item or "").strip() for item in list(analysis.obligation_ledger or [])],
-                        *[str(item or "").strip() for item in list(analysis.open_obligations or [])],
+                        *[
+                            str(item or "").strip()
+                            for item in list(analysis.obligation_ledger or [])
+                        ],
+                        *[
+                            str(item or "").strip()
+                            for item in list(analysis.open_obligations or [])
+                        ],
                         *[str(item or "").strip() for item in list(plan.obligation_ledger or [])],
                         *[str(item or "").strip() for item in list(plan.open_obligations or [])],
-                        *[str(item or "").strip() for item in list(rtd_state.obligation_ledger or [])],
+                        *[
+                            str(item or "").strip()
+                            for item in list(rtd_state.obligation_ledger or [])
+                        ],
                     ],
                     limit=12,
                 )
@@ -7256,7 +7993,10 @@ class AgnoChatRuntime:
             else:
                 next_best_actions = _dedupe_preserve(
                     [
-                        *[str(item or "").strip() for item in list(analysis.next_best_actions or [])],
+                        *[
+                            str(item or "").strip()
+                            for item in list(analysis.next_best_actions or [])
+                        ],
                         *[str(item or "").strip() for item in list(plan.next_best_actions or [])],
                     ],
                     limit=8,
@@ -7264,34 +8004,60 @@ class AgnoChatRuntime:
             candidate_answer = (
                 str(analysis.candidate_answer or "").strip()
                 or str(response_text_for_cycle or "").strip()
-                or str(rtd_state.candidate_set.leader.answer_text or state.get("candidate_answer") or "").strip()
+                or str(
+                    rtd_state.candidate_set.leader.answer_text
+                    or state.get("candidate_answer")
+                    or ""
+                ).strip()
             )
             prior_candidate_set = rtd_state.candidate_set.model_copy(deep=True)
             candidate_set = (
                 analysis.candidate_set.model_copy(deep=True)
-                if (analysis.candidate_set.leader.answer_text or analysis.candidate_set.challenger.answer_text)
+                if (
+                    analysis.candidate_set.leader.answer_text
+                    or analysis.candidate_set.challenger.answer_text
+                )
                 else plan.candidate_set.model_copy(deep=True)
-                if (plan.candidate_set.leader.answer_text or plan.candidate_set.challenger.answer_text)
+                if (
+                    plan.candidate_set.leader.answer_text
+                    or plan.candidate_set.challenger.answer_text
+                )
                 else rtd_state.candidate_set.model_copy(deep=True)
             )
             if candidate_answer and not str(candidate_set.leader.answer_text or "").strip():
                 candidate_set.leader = RTDCandidate(
                     answer_text=candidate_answer,
                     rationale=str(analysis.critique or response_text_for_cycle or "").strip(),
-                    confidence=max(0.05, min(1.0, float(analysis.evidence_sufficiency_score or 0.5))),
+                    confidence=max(
+                        0.05, min(1.0, float(analysis.evidence_sufficiency_score or 0.5))
+                    ),
                 )
-            elif candidate_answer and str(candidate_set.leader.answer_text or "").strip() != candidate_answer:
+            elif (
+                candidate_answer
+                and str(candidate_set.leader.answer_text or "").strip() != candidate_answer
+            ):
                 previous_leader = candidate_set.leader.model_copy(deep=True)
                 candidate_set.leader = RTDCandidate(
                     answer_text=candidate_answer,
                     rationale=str(analysis.critique or response_text_for_cycle or "").strip(),
-                    confidence=max(0.05, min(1.0, float(analysis.evidence_sufficiency_score or 0.5))),
+                    confidence=max(
+                        0.05, min(1.0, float(analysis.evidence_sufficiency_score or 0.5))
+                    ),
                 )
-                if not str(candidate_set.challenger.answer_text or "").strip() and str(previous_leader.answer_text or "").strip():
+                if (
+                    not str(candidate_set.challenger.answer_text or "").strip()
+                    and str(previous_leader.answer_text or "").strip()
+                ):
                     candidate_set.challenger = previous_leader
-            if requires_dual_candidates and not str(candidate_set.challenger.answer_text or "").strip():
+            if (
+                requires_dual_candidates
+                and not str(candidate_set.challenger.answer_text or "").strip()
+            ):
                 seed_answer = str(prior_candidate_set.leader.answer_text or "").strip()
-                if seed_answer and seed_answer != str(candidate_set.leader.answer_text or "").strip():
+                if (
+                    seed_answer
+                    and seed_answer != str(candidate_set.leader.answer_text or "").strip()
+                ):
                     candidate_set.challenger = RTDCandidate(
                         answer_text=seed_answer,
                         rationale="Preserved as the strongest previously leading alternative.",
@@ -7303,7 +8069,9 @@ class AgnoChatRuntime:
                         rationale="Reserved for a challenger or alternative-convention pass.",
                         confidence=0.0,
                     )
-            evidence_sufficiency_score = max(0.0, min(1.0, float(analysis.evidence_sufficiency_score or 0.0)))
+            evidence_sufficiency_score = max(
+                0.0, min(1.0, float(analysis.evidence_sufficiency_score or 0.0))
+            )
             continuation_overlap = 0
             if initial_open_obligations and open_obligations:
                 prior_terms = {item.lower() for item in initial_open_obligations}
@@ -7334,15 +8102,24 @@ class AgnoChatRuntime:
                 counterfactual_completed = True
                 local_state["counterfactual_verification_pending"] = False
                 local_state["counterfactual_verification_completed"] = True
-            verification_ledger = [item.model_copy(deep=True) for item in list(rtd_state.verification_ledger or [])]
+            verification_ledger = [
+                item.model_copy(deep=True) for item in list(rtd_state.verification_ledger or [])
+            ]
             if list(analysis.verification_ledger or []):
-                verification_ledger.extend([item.model_copy(deep=True) for item in list(analysis.verification_ledger or [])][-4:])
+                verification_ledger.extend(
+                    [
+                        item.model_copy(deep=True)
+                        for item in list(analysis.verification_ledger or [])
+                    ][-4:]
+                )
             if selected_skill == "counterfactual_verification_workflow":
                 verification_ledger.append(
                     RTDVerificationRecord(
                         cycle_index=cycle_index,
                         workflow=selected_skill,
-                        outcome="leader_replaced" if bool(analysis.self_correction_needed) else "leader_survived",
+                        outcome="leader_replaced"
+                        if bool(analysis.self_correction_needed)
+                        else "leader_survived",
                         corrected_error=bool(analysis.self_correction_needed),
                         leader_survived=not bool(analysis.self_correction_needed),
                         notes=str(analysis.critique or response_text_for_cycle or "").strip(),
@@ -7375,7 +8152,9 @@ class AgnoChatRuntime:
                 and not bool(_watchdog_reasons())
             )
             analysis_stop_reason = str(analysis.stop_reason or "").strip()
-            if should_finalize and (open_obligations or evidence_sufficiency_score < 0.8 or not latest_verification_ok):
+            if should_finalize and (
+                open_obligations or evidence_sufficiency_score < 0.8 or not latest_verification_ok
+            ):
                 should_finalize = False
                 if open_obligations:
                     analysis_stop_reason = "obligations_remaining"
@@ -7432,7 +8211,9 @@ class AgnoChatRuntime:
                 )
             updated_rtd_state = RTDEpistemicState(
                 controller_mode="rtd_v1",
-                problem_frame=plan.problem_frame if str(plan.problem_frame.objective or "").strip() else rtd_state.problem_frame,
+                problem_frame=plan.problem_frame
+                if str(plan.problem_frame.objective or "").strip()
+                else rtd_state.problem_frame,
                 candidate_set=candidate_set,
                 obligation_ledger=list(open_obligations),
                 evidence_ledger=list(combined_ledger),
@@ -7448,7 +8229,10 @@ class AgnoChatRuntime:
                     tool_families_used=list(tool_families_used),
                     model_calls=max(0, (cycle_index * 2) + len(tool_invocations)),
                     verification_count=sum(
-                        1 for item in verification_ledger[-12:] if str(item.workflow or "").strip() == "counterfactual_verification_workflow"
+                        1
+                        for item in verification_ledger[-12:]
+                        if str(item.workflow or "").strip()
+                        == "counterfactual_verification_workflow"
                     ),
                     watchdog_triggered=bool(watchdog_triggered),
                     watchdog_reasons=list(watchdog_reasons),
@@ -7464,8 +8248,10 @@ class AgnoChatRuntime:
                 counterfactual_completed=counterfactual_completed,
             )
             if (
-                str(prior_candidate_set.leader.answer_text or "").strip() != str(candidate_set.leader.answer_text or "").strip()
-                or str(prior_candidate_set.challenger.answer_text or "").strip() != str(candidate_set.challenger.answer_text or "").strip()
+                str(prior_candidate_set.leader.answer_text or "").strip()
+                != str(candidate_set.leader.answer_text or "").strip()
+                or str(prior_candidate_set.challenger.answer_text or "").strip()
+                != str(candidate_set.challenger.answer_text or "").strip()
             ):
                 self._emit_event(
                     event_callback,
@@ -7526,7 +8312,9 @@ class AgnoChatRuntime:
             if needs_counterfactual_verification:
                 should_continue = True
             if should_finalize:
-                local_state["stop_reason"] = str(local_state.get("stop_reason") or "").strip() or "converged"
+                local_state["stop_reason"] = (
+                    str(local_state.get("stop_reason") or "").strip() or "converged"
+                )
                 self._emit_event(
                     event_callback,
                     {
@@ -7575,14 +8363,18 @@ class AgnoChatRuntime:
                         "status": "completed",
                         "message": (
                             "Autonomous cycle stopped at a safety-watchdog checkpoint."
-                            if str(local_state.get("stop_reason") or "").strip() == "safety_watchdog_triggered"
+                            if str(local_state.get("stop_reason") or "").strip()
+                            == "safety_watchdog_triggered"
                             else "Autonomous cycle stopped at a bounded checkpoint."
                         ),
                         "payload": {
                             "cycle_index": cycle_index,
                             "stop_reason": str(local_state.get("stop_reason") or "").strip(),
                             "resume_readiness": str(
-                                dict(session_state.get("autonomy_state") or {}).get("resume_readiness") or "ready"
+                                dict(session_state.get("autonomy_state") or {}).get(
+                                    "resume_readiness"
+                                )
+                                or "ready"
                             ),
                         },
                     },
@@ -7603,7 +8395,9 @@ class AgnoChatRuntime:
         async def final_synthesis(step_input: StepInput) -> StepOutput:
             del step_input
             final_autonomy_state = dict(session_state.get("autonomy_state") or {})
-            final_rtd_state = RTDEpistemicState.model_validate(dict(session_state.get("autonomy_state_v2") or {}) or {})
+            final_rtd_state = RTDEpistemicState.model_validate(
+                dict(session_state.get("autonomy_state_v2") or {}) or {}
+            )
             last_response_text = str(local_state.get("last_response_text") or "").strip()
             stop_reason = str(local_state.get("stop_reason") or "").strip()
             cycles_completed = int(local_state.get("cycles_completed") or prior_cycles_completed)
@@ -7611,27 +8405,42 @@ class AgnoChatRuntime:
             if not str(last_response_text or "").strip():
                 open_obligations = list(final_autonomy_state.get("open_obligations") or [])
                 next_best_actions = list(final_autonomy_state.get("next_best_actions") or [])
-                last_response_text = (
-                    "I made bounded progress but stopped at a checkpoint rather than pretending to have fully converged."
-                )
+                last_response_text = "I made bounded progress but stopped at a checkpoint rather than pretending to have fully converged."
                 if open_obligations:
-                    last_response_text += " The main remaining obligations are: " + "; ".join(open_obligations[:4]) + "."
+                    last_response_text += (
+                        " The main remaining obligations are: "
+                        + "; ".join(open_obligations[:4])
+                        + "."
+                    )
                 if next_best_actions:
-                    last_response_text += " The best next actions are: " + "; ".join(next_best_actions[:3]) + "."
+                    last_response_text += (
+                        " The best next actions are: " + "; ".join(next_best_actions[:3]) + "."
+                    )
             elif str(stop_reason or "").strip() == "safety_watchdog_triggered":
                 open_obligations = list(final_autonomy_state.get("open_obligations") or [])
                 next_best_actions = list(final_autonomy_state.get("next_best_actions") or [])
                 last_response_text = str(last_response_text).rstrip()
-                last_response_text += " I saved a checkpoint instead of forcing a low-confidence stop."
+                last_response_text += (
+                    " I saved a checkpoint instead of forcing a low-confidence stop."
+                )
                 if open_obligations:
-                    last_response_text += " Remaining obligations: " + "; ".join(open_obligations[:4]) + "."
+                    last_response_text += (
+                        " Remaining obligations: " + "; ".join(open_obligations[:4]) + "."
+                    )
                 if next_best_actions:
-                    last_response_text += " Best next actions: " + "; ".join(next_best_actions[:3]) + "."
+                    last_response_text += (
+                        " Best next actions: " + "; ".join(next_best_actions[:3]) + "."
+                    )
             convergence_ready = bool(
                 not list(final_autonomy_state.get("open_obligations") or [])
-                and str(stop_reason or "").strip() in {"converged", "controller_requested_finalize", "finalize", "finalized"}
+                and str(stop_reason or "").strip()
+                in {"converged", "controller_requested_finalize", "finalize", "finalized"}
             )
-            checkpoint_coverage = round(float(int(local_state.get("iteration_count") or 0)) / float(max(watchdog_max_cycles, 1)), 3)
+            checkpoint_coverage = round(
+                float(int(local_state.get("iteration_count") or 0))
+                / float(max(watchdog_max_cycles, 1)),
+                3,
+            )
             cycle_metrics = {
                 "cycles_completed": int(cycles_completed),
                 "tool_families_used": list(tool_families_used),
@@ -7639,18 +8448,26 @@ class AgnoChatRuntime:
                 "stop_reason": str(stop_reason or "").strip() or "analyzer_requested_stop",
                 "checkpoint_coverage": checkpoint_coverage,
                 "evidence_sufficiency_score": round(float(evidence_sufficiency_score), 3),
-                "continuation_fidelity": round(float(final_autonomy_state.get("continuation_fidelity") or 0.0), 3),
+                "continuation_fidelity": round(
+                    float(final_autonomy_state.get("continuation_fidelity") or 0.0), 3
+                ),
                 "counterfactual_verification_completed": bool(
                     final_autonomy_state.get("counterfactual_verification_completed")
                 ),
                 "converged": bool(convergence_ready),
-                "stop_policy": "semantic" if not bool(final_rtd_state.budget_state.watchdog_triggered) else "watchdog",
+                "stop_policy": "semantic"
+                if not bool(final_rtd_state.budget_state.watchdog_triggered)
+                else "watchdog",
             }
             cycle_metrics_v2 = {
                 **cycle_metrics,
                 "verification_count": int(final_rtd_state.budget_state.verification_count or 0),
-                "leader_confidence": round(float(final_rtd_state.candidate_set.leader.confidence or 0.0), 3),
-                "has_challenger": bool(str(final_rtd_state.candidate_set.challenger.answer_text or "").strip()),
+                "leader_confidence": round(
+                    float(final_rtd_state.candidate_set.leader.confidence or 0.0), 3
+                ),
+                "has_challenger": bool(
+                    str(final_rtd_state.candidate_set.challenger.answer_text or "").strip()
+                ),
                 "watchdog_triggered": bool(final_rtd_state.budget_state.watchdog_triggered),
                 "watchdog_reasons": list(final_rtd_state.budget_state.watchdog_reasons or []),
             }
@@ -7660,16 +8477,25 @@ class AgnoChatRuntime:
                 "controller_mode": "rtd_v1",
                 "autonomous_cycle": {
                     "cycle_id": str(final_autonomy_state.get("cycle_id") or "").strip(),
-                    "checkpoint_index": int(final_autonomy_state.get("checkpoint_index") or cycles_completed),
+                    "checkpoint_index": int(
+                        final_autonomy_state.get("checkpoint_index") or cycles_completed
+                    ),
                     "open_obligations": list(final_autonomy_state.get("open_obligations") or []),
                     "evidence_ledger": list(final_autonomy_state.get("evidence_ledger") or []),
-                    "candidate_answer": str(final_autonomy_state.get("candidate_answer") or "").strip(),
+                    "candidate_answer": str(
+                        final_autonomy_state.get("candidate_answer") or ""
+                    ).strip(),
                     "stop_reason": str(stop_reason or "").strip() or "analyzer_requested_stop",
-                    "resume_readiness": str(final_autonomy_state.get("resume_readiness") or "").strip() or "ready",
+                    "resume_readiness": str(
+                        final_autonomy_state.get("resume_readiness") or ""
+                    ).strip()
+                    or "ready",
                     "next_best_actions": list(final_autonomy_state.get("next_best_actions") or []),
                     "cycles_completed": int(cycles_completed),
                     "tool_families_used": list(tool_families_used),
-                    "continuation_fidelity": round(float(final_autonomy_state.get("continuation_fidelity") or 0.0), 3),
+                    "continuation_fidelity": round(
+                        float(final_autonomy_state.get("continuation_fidelity") or 0.0), 3
+                    ),
                     "counterfactual_verification_required": bool(
                         final_autonomy_state.get("counterfactual_verification_required")
                     ),
@@ -7685,7 +8511,10 @@ class AgnoChatRuntime:
                 "autonomy_state_v2": final_rtd_state.model_dump(mode="json"),
                 "candidate_set": final_rtd_state.candidate_set.model_dump(mode="json"),
                 "obligation_ledger": list(final_rtd_state.obligation_ledger or []),
-                "verification_ledger": [item.model_dump(mode="json") for item in list(final_rtd_state.verification_ledger or [])],
+                "verification_ledger": [
+                    item.model_dump(mode="json")
+                    for item in list(final_rtd_state.verification_ledger or [])
+                ],
                 "cycle_metrics": cycle_metrics,
                 "cycle_metrics_v2": cycle_metrics_v2,
                 "safety_watchdog": {
@@ -7698,11 +8527,16 @@ class AgnoChatRuntime:
                 },
                 "stop_decision": {
                     "reason": str(stop_reason or "").strip() or "analyzer_requested_stop",
-                    "checkpoint_index": int(final_autonomy_state.get("checkpoint_index") or cycles_completed),
-                    "policy": "semantic" if not bool(final_rtd_state.budget_state.watchdog_triggered) else "watchdog",
+                    "checkpoint_index": int(
+                        final_autonomy_state.get("checkpoint_index") or cycles_completed
+                    ),
+                    "policy": "semantic"
+                    if not bool(final_rtd_state.budget_state.watchdog_triggered)
+                    else "watchdog",
                 },
                 "resume_decision": {
-                    "readiness": str(final_autonomy_state.get("resume_readiness") or "").strip() or "ready",
+                    "readiness": str(final_autonomy_state.get("resume_readiness") or "").strip()
+                    or "ready",
                     "next_best_actions": list(final_autonomy_state.get("next_best_actions") or []),
                 },
                 "reasoning_trace_summary": reasoning_trace_summary,
@@ -7752,7 +8586,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::autonomous_cycle_engine" if run_id else "autonomous_cycle_engine",
+                    run_id=f"{str(run_id or '').strip()}::autonomous_cycle_engine"
+                    if run_id
+                    else "autonomous_cycle_engine",
                 ),
             )
         except Exception as exc:
@@ -7814,7 +8650,9 @@ class AgnoChatRuntime:
                 case_splits=[],
                 endgame_strategy="",
                 verified_steps=[],
-                blocker_gaps=["Classify the theorem target and find the simplest viable reduction."],
+                blocker_gaps=[
+                    "Classify the theorem target and find the simplest viable reduction."
+                ],
                 attack_points=[],
                 next_iteration_focus="Identify the simplest valid reduction or substitution.",
                 ready_to_finalize=False,
@@ -7828,7 +8666,9 @@ class AgnoChatRuntime:
             initial_quality_flags = [
                 "goal type not fixed",
                 "canonical reduction missing",
-                "proof obligations missing" if not list(initial_proof_state.obligations or []) else "",
+                "proof obligations missing"
+                if not list(initial_proof_state.obligations or [])
+                else "",
                 "no verified steps yet",
                 "endgame strategy not explicit",
                 "blocker gaps remain",
@@ -7838,7 +8678,9 @@ class AgnoChatRuntime:
             "iteration": int(saved_seed.get("iterations") or 0),
             "proof_state": initial_proof_state.model_copy(
                 update={
-                    "progress_score": float(saved_seed.get("progress_score") or initial_progress_score),
+                    "progress_score": float(
+                        saved_seed.get("progress_score") or initial_progress_score
+                    ),
                     "quality_flags": list(saved_seed.get("quality_flags") or initial_quality_flags),
                 }
             ).model_dump(mode="json"),
@@ -7861,7 +8703,15 @@ class AgnoChatRuntime:
             max_iterations = 4
         else:
             max_iterations = 3
-        stagnation_limit = 5 if int(max_runtime_seconds) >= 7200 else 4 if int(max_runtime_seconds) >= 3600 else 3 if int(max_runtime_seconds) >= 1200 else 2
+        stagnation_limit = (
+            5
+            if int(max_runtime_seconds) >= 7200
+            else 4
+            if int(max_runtime_seconds) >= 3600
+            else 3
+            if int(max_runtime_seconds) >= 1200
+            else 2
+        )
         sequential_phase_count = (max_iterations * 5) + 2
         step_cap = max(20, min(120, int(max_runtime_seconds / max(sequential_phase_count, 1))))
         workflow_deadline = time.monotonic() + max(1.0, float(max_runtime_seconds))
@@ -7879,8 +8729,12 @@ class AgnoChatRuntime:
         def _current_proof_state() -> ProofWorkflowState:
             return ProofWorkflowState.model_validate(dict(local_state.get("proof_state") or {}))
 
-        def _remaining_proof_budget(preferred: int | None = None, *, reserve_seconds: int = 0) -> int:
-            remaining = max(1.0, workflow_deadline - time.monotonic() - float(max(0, reserve_seconds)))
+        def _remaining_proof_budget(
+            preferred: int | None = None, *, reserve_seconds: int = 0
+        ) -> int:
+            remaining = max(
+                1.0, workflow_deadline - time.monotonic() - float(max(0, reserve_seconds))
+            )
             candidate = int(preferred if preferred is not None else step_cap)
             return max(1, min(candidate, int(remaining)))
 
@@ -7921,10 +8775,14 @@ class AgnoChatRuntime:
                 "iteration_summaries": list(local_state.get("iteration_summaries") or [])[-10:],
                 "compression_stats": dict(local_state.get("compression_stats") or {}),
                 "stagnant_iterations": int(local_state.get("stagnant_iterations") or 0),
-                "last_blocker_signature": str(local_state.get("last_blocker_signature") or "").strip(),
+                "last_blocker_signature": str(
+                    local_state.get("last_blocker_signature") or ""
+                ).strip(),
                 "proof_status": (
                     "proved"
-                    if not list(dict(local_state.get("proof_state") or {}).get("blocker_gaps") or [])
+                    if not list(
+                        dict(local_state.get("proof_state") or {}).get("blocker_gaps") or []
+                    )
                     and bool(dict(local_state.get("proof_state") or {}).get("ready_to_finalize"))
                     else "partial"
                 ),
@@ -7959,7 +8817,9 @@ class AgnoChatRuntime:
                     break
             return merged
 
-        def _merge_obligations(obligations: list[ProofObligation], limit: int = 8) -> list[ProofObligation]:
+        def _merge_obligations(
+            obligations: list[ProofObligation], limit: int = 8
+        ) -> list[ProofObligation]:
             merged: list[ProofObligation] = []
             seen: dict[str, ProofObligation] = {}
             status_rank = {"verified": 3, "resolved": 3, "in_progress": 2, "blocked": 1, "open": 0}
@@ -7975,7 +8835,9 @@ class AgnoChatRuntime:
                     status=str(obligation.status or "").strip() or "open",
                 )
                 existing = seen.get(key)
-                if existing is None or status_rank.get(normalized.status, 0) > status_rank.get(existing.status, 0):
+                if existing is None or status_rank.get(normalized.status, 0) > status_rank.get(
+                    existing.status, 0
+                ):
                     seen[key] = normalized
             for obligation in seen.values():
                 merged.append(obligation)
@@ -7990,7 +8852,9 @@ class AgnoChatRuntime:
         ) -> ProofWorkflowState:
             findings = self._proof_sanity_findings_for_texts(source_texts)
             if not findings:
-                return state.model_copy(update={"sanity_findings": list(state.sanity_findings or [])[:6]})
+                return state.model_copy(
+                    update={"sanity_findings": list(state.sanity_findings or [])[:6]}
+                )
             blocked_sanity_obligations = [
                 ProofObligation(
                     label=f"sanity_check_{index + 1}",
@@ -8006,10 +8870,18 @@ class AgnoChatRuntime:
                         [*list(state.obligations or []), *blocked_sanity_obligations],
                         limit=10,
                     ),
-                    "blocker_gaps": _merge_unique([*list(state.blocker_gaps or []), *findings], limit=8),
-                    "attack_points": _merge_unique([*list(state.attack_points or []), *findings], limit=8),
-                    "unresolved_points": _merge_unique([*list(state.unresolved_points or []), *findings], limit=8),
-                    "sanity_findings": _merge_unique([*list(state.sanity_findings or []), *findings], limit=6),
+                    "blocker_gaps": _merge_unique(
+                        [*list(state.blocker_gaps or []), *findings], limit=8
+                    ),
+                    "attack_points": _merge_unique(
+                        [*list(state.attack_points or []), *findings], limit=8
+                    ),
+                    "unresolved_points": _merge_unique(
+                        [*list(state.unresolved_points or []), *findings], limit=8
+                    ),
+                    "sanity_findings": _merge_unique(
+                        [*list(state.sanity_findings or []), *findings], limit=6
+                    ),
                     "ready_to_finalize": False,
                     "confidence": "low",
                 }
@@ -8043,7 +8915,8 @@ class AgnoChatRuntime:
             if list(state.resolved_obligations or []):
                 score += 0.10
             unresolved_obligations = [
-                item for item in list(state.obligations or [])
+                item
+                for item in list(state.obligations or [])
                 if str(item.status or "").strip().lower() not in {"verified", "resolved"}
             ]
             if not unresolved_obligations:
@@ -8066,7 +8939,11 @@ class AgnoChatRuntime:
         def _proof_state_fallback(memos: list[ProofRoleMemo]) -> ProofWorkflowState:
             current = _current_proof_state()
             goal_type = next(
-                (str(item.goal_type or "").strip() for item in memos if str(item.goal_type or "").strip()),
+                (
+                    str(item.goal_type or "").strip()
+                    for item in memos
+                    if str(item.goal_type or "").strip()
+                ),
                 current.goal_type,
             )
             candidate_directions = [
@@ -8074,13 +8951,23 @@ class AgnoChatRuntime:
                 for item in memos
                 if str(item.candidate_direction or "").strip()
             ]
-            current_direction = candidate_directions[0] if candidate_directions else current.current_direction
+            current_direction = (
+                candidate_directions[0] if candidate_directions else current.current_direction
+            )
             simplest_anchor = next(
-                (str(item.simplest_anchor or "").strip() for item in memos if str(item.simplest_anchor or "").strip()),
+                (
+                    str(item.simplest_anchor or "").strip()
+                    for item in memos
+                    if str(item.simplest_anchor or "").strip()
+                ),
                 current.simplest_anchor,
             )
             canonical_reduction = next(
-                (str(item.canonical_reduction or "").strip() for item in memos if str(item.canonical_reduction or "").strip()),
+                (
+                    str(item.canonical_reduction or "").strip()
+                    for item in memos
+                    if str(item.canonical_reduction or "").strip()
+                ),
                 current.canonical_reduction,
             )
             proof_outline = _merge_unique(
@@ -8112,7 +8999,11 @@ class AgnoChatRuntime:
                 limit=8,
             )
             endgame_strategy = next(
-                (str(item.endgame_strategy or "").strip() for item in memos if str(item.endgame_strategy or "").strip()),
+                (
+                    str(item.endgame_strategy or "").strip()
+                    for item in memos
+                    if str(item.endgame_strategy or "").strip()
+                ),
                 current.endgame_strategy,
             )
             verified_steps = _merge_unique(
@@ -8139,14 +9030,16 @@ class AgnoChatRuntime:
                     *[
                         obligation.statement
                         for obligation in list(obligations or [])
-                        if str(obligation.status or "").strip().lower() not in {"verified", "resolved"}
+                        if str(obligation.status or "").strip().lower()
+                        not in {"verified", "resolved"}
                     ],
                     *[item for memo in memos for item in list(memo.next_actions or [])],
                 ],
                 limit=8,
             )
             all_obligations_closed = bool(obligations) and all(
-                str(item.status or "").strip().lower() in {"verified", "resolved"} for item in obligations
+                str(item.status or "").strip().lower() in {"verified", "resolved"}
+                for item in obligations
             )
             next_iteration_focus = (
                 blocker_gaps[0]
@@ -8160,8 +9053,11 @@ class AgnoChatRuntime:
                     current.next_iteration_focus,
                 )
             )
-            ready_to_finalize = bool(verified_steps) and all_obligations_closed and not blocker_gaps and any(
-                bool(item.ready_to_finalize) for item in memos
+            ready_to_finalize = (
+                bool(verified_steps)
+                and all_obligations_closed
+                and not blocker_gaps
+                and any(bool(item.ready_to_finalize) for item in memos)
             )
             confidence = "high" if ready_to_finalize else ("medium" if verified_steps else "low")
             candidate_state = ProofWorkflowState(
@@ -8199,7 +9095,9 @@ class AgnoChatRuntime:
                     understanding_status="imperfectly_understood",
                     goal_type=str(current.goal_type or "").strip() or "undetermined",
                     known_conditions=[],
-                    unknown_targets=["Classify the theorem target and identify the decisive reduction."],
+                    unknown_targets=[
+                        "Classify the theorem target and identify the decisive reduction."
+                    ],
                     missing_conditions=list(current.blocker_gaps or [])[:4]
                     or ["Need a canonical reduction, explicit obligations, and an endgame."],
                     simplest_first_object=str(current.simplest_anchor or "").strip(),
@@ -8249,16 +9147,27 @@ class AgnoChatRuntime:
                             and str(frame.goal_type or "").strip()
                             else current.goal_type
                         ),
-                        "simplest_anchor": current.simplest_anchor or str(frame.simplest_first_object or "").strip(),
+                        "simplest_anchor": current.simplest_anchor
+                        or str(frame.simplest_first_object or "").strip(),
                         "canonical_reduction": current.canonical_reduction
                         or str(frame.canonical_representation or "").strip(),
-                        "proof_outline": list(current.proof_outline or []) or list(frame.dependency_order or [])[:8],
+                        "proof_outline": list(current.proof_outline or [])
+                        or list(frame.dependency_order or [])[:8],
                         "case_splits": list(current.case_splits or [])
-                        or ([str(frame.candidate_regime_split or "").strip()] if str(frame.candidate_regime_split or "").strip() else []),
-                        "endgame_strategy": current.endgame_strategy or str(frame.candidate_endgame or "").strip(),
+                        or (
+                            [str(frame.candidate_regime_split or "").strip()]
+                            if str(frame.candidate_regime_split or "").strip()
+                            else []
+                        ),
+                        "endgame_strategy": current.endgame_strategy
+                        or str(frame.candidate_endgame or "").strip(),
                         "next_iteration_focus": current.next_iteration_focus
                         or next(
-                            (str(item or "").strip() for item in list(frame.dependency_order or []) if str(item or "").strip()),
+                            (
+                                str(item or "").strip()
+                                for item in list(frame.dependency_order or [])
+                                if str(item or "").strip()
+                            ),
                             current.next_iteration_focus,
                         ),
                         "unresolved_points": _merge_unique(
@@ -8292,7 +9201,11 @@ class AgnoChatRuntime:
                         latest_user_text,
                         "",
                         "Proof problem frame:",
-                        json.dumps(_current_proof_frame().model_dump(mode="json"), ensure_ascii=False, indent=2),
+                        json.dumps(
+                            _current_proof_frame().model_dump(mode="json"),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         "",
                         "Current proof state:",
                         json.dumps(current.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -8357,10 +9270,14 @@ class AgnoChatRuntime:
                     latest_user_text,
                     "",
                     "Previous proof state:",
-                    json.dumps(current.model_dump(mode='json'), ensure_ascii=False, indent=2),
+                    json.dumps(current.model_dump(mode="json"), ensure_ascii=False, indent=2),
                     "",
                     "Role outputs:",
-                    json.dumps([memo.model_dump(mode='json') for memo in memos], ensure_ascii=False, indent=2),
+                    json.dumps(
+                        [memo.model_dump(mode="json") for memo in memos],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 ]
             )
             new_state = await self._run_tool_program_phase(
@@ -8409,15 +9326,23 @@ class AgnoChatRuntime:
                     "quality_flags": quality_flags,
                 }
             )
-            phase_timings[f"proof_integrate_round_{int(local_state.get('iteration') or 0) + 1}"] = round(
-                time.monotonic() - started, 3
+            phase_timings[f"proof_integrate_round_{int(local_state.get('iteration') or 0) + 1}"] = (
+                round(time.monotonic() - started, 3)
             )
             blocker_signature = " || ".join(list(new_state.blocker_gaps or [])[:6])
             previous_signature = str(local_state.get("last_blocker_signature") or "")
-            previous_verified = set(str(item or "").strip() for item in list(current.verified_steps or []))
-            current_verified = set(str(item or "").strip() for item in list(new_state.verified_steps or []))
-            previous_resolved = set(str(item or "").strip() for item in list(current.resolved_obligations or []))
-            current_resolved = set(str(item or "").strip() for item in list(new_state.resolved_obligations or []))
+            previous_verified = set(
+                str(item or "").strip() for item in list(current.verified_steps or [])
+            )
+            current_verified = set(
+                str(item or "").strip() for item in list(new_state.verified_steps or [])
+            )
+            previous_resolved = set(
+                str(item or "").strip() for item in list(current.resolved_obligations or [])
+            )
+            current_resolved = set(
+                str(item or "").strip() for item in list(new_state.resolved_obligations or [])
+            )
             previous_progress = float(current.progress_score or 0.0)
             current_progress = float(new_state.progress_score or 0.0)
             no_structural_progress = (
@@ -8425,8 +9350,14 @@ class AgnoChatRuntime:
                 and current_resolved.issubset(previous_resolved)
                 and current_progress <= previous_progress + 0.02
             )
-            if blocker_signature and blocker_signature == previous_signature and no_structural_progress:
-                local_state["stagnant_iterations"] = int(local_state.get("stagnant_iterations") or 0) + 1
+            if (
+                blocker_signature
+                and blocker_signature == previous_signature
+                and no_structural_progress
+            ):
+                local_state["stagnant_iterations"] = (
+                    int(local_state.get("stagnant_iterations") or 0) + 1
+                )
             else:
                 local_state["stagnant_iterations"] = 0
             local_state["last_blocker_signature"] = blocker_signature
@@ -8474,13 +9405,21 @@ class AgnoChatRuntime:
                         latest_user_text,
                         "",
                         "Proof problem frame:",
-                        json.dumps(_current_proof_frame().model_dump(mode="json"), ensure_ascii=False, indent=2),
+                        json.dumps(
+                            _current_proof_frame().model_dump(mode="json"),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         "",
                         "Current proof state:",
                         json.dumps(current.model_dump(mode="json"), ensure_ascii=False, indent=2),
                         "",
                         "Recent iteration summaries:",
-                        json.dumps(list(local_state.get("iteration_summaries") or [])[-6:], ensure_ascii=False, indent=2),
+                        json.dumps(
+                            list(local_state.get("iteration_summaries") or [])[-6:],
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                     ]
                 )
                 started = time.monotonic()
@@ -8498,8 +9437,8 @@ class AgnoChatRuntime:
                     max_runtime_seconds=_remaining_proof_budget(step_cap, reserve_seconds=30),
                     debug=debug,
                 )
-                phase_timings[f"{role}_repair_round_{int(local_state.get('iteration') or 0)}"] = round(
-                    time.monotonic() - started, 3
+                phase_timings[f"{role}_repair_round_{int(local_state.get('iteration') or 0)}"] = (
+                    round(time.monotonic() - started, 3)
                 )
                 return memo
 
@@ -8521,10 +9460,14 @@ class AgnoChatRuntime:
                     latest_user_text,
                     "",
                     "Current proof state:",
-                    json.dumps(current.model_dump(mode='json'), ensure_ascii=False, indent=2),
+                    json.dumps(current.model_dump(mode="json"), ensure_ascii=False, indent=2),
                     "",
                     "Repair memos:",
-                    json.dumps([memo.model_dump(mode='json') for memo in repair_memos], ensure_ascii=False, indent=2),
+                    json.dumps(
+                        [memo.model_dump(mode="json") for memo in repair_memos],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 ]
             )
             started = time.monotonic()
@@ -8566,7 +9509,9 @@ class AgnoChatRuntime:
                     if str(piece or "").strip()
                 ],
             ]
-            repaired_state = _apply_sanity_findings(repaired_state, source_texts=repair_source_texts)
+            repaired_state = _apply_sanity_findings(
+                repaired_state, source_texts=repair_source_texts
+            )
             validation_roles = ("proof_checker", "proof_skeptic", "proof_obligation_closer")
 
             async def _run_repair_validation_role(role: str) -> ProofRoleMemo:
@@ -8580,10 +9525,16 @@ class AgnoChatRuntime:
                         latest_user_text,
                         "",
                         "Repaired proof state to audit:",
-                        json.dumps(repaired_state.model_dump(mode='json'), ensure_ascii=False, indent=2),
+                        json.dumps(
+                            repaired_state.model_dump(mode="json"), ensure_ascii=False, indent=2
+                        ),
                         "",
                         "Recent repair memos:",
-                        json.dumps([memo.model_dump(mode='json') for memo in repair_memos], ensure_ascii=False, indent=2),
+                        json.dumps(
+                            [memo.model_dump(mode="json") for memo in repair_memos],
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                     ]
                 )
                 return await self._run_tool_program_phase(
@@ -8608,9 +9559,9 @@ class AgnoChatRuntime:
                     return_exceptions=False,
                 )
             )
-            phase_timings[f"proof_repair_validate_round_{int(local_state.get('iteration') or 0)}"] = round(
-                time.monotonic() - validation_started, 3
-            )
+            phase_timings[
+                f"proof_repair_validate_round_{int(local_state.get('iteration') or 0)}"
+            ] = round(time.monotonic() - validation_started, 3)
             validation_obligations = [
                 obligation
                 for memo in validation_memos
@@ -8650,14 +9601,17 @@ class AgnoChatRuntime:
                         limit=8,
                     ),
                     "unresolved_points": _merge_unique(
-                        [*list(repaired_state.unresolved_points or []), *validation_blockers, *validation_next_actions],
+                        [
+                            *list(repaired_state.unresolved_points or []),
+                            *validation_blockers,
+                            *validation_next_actions,
+                        ],
                         limit=8,
                     ),
-                    "ready_to_finalize": bool(repaired_state.ready_to_finalize) and not validation_blockers,
+                    "ready_to_finalize": bool(repaired_state.ready_to_finalize)
+                    and not validation_blockers,
                     "confidence": (
-                        "low"
-                        if validation_blockers
-                        else str(repaired_state.confidence or "medium")
+                        "low" if validation_blockers else str(repaired_state.confidence or "medium")
                     ),
                 }
             )
@@ -8680,7 +9634,9 @@ class AgnoChatRuntime:
                     if str(piece or "").strip()
                 ],
             ]
-            repaired_state = _apply_sanity_findings(repaired_state, source_texts=validation_source_texts)
+            repaired_state = _apply_sanity_findings(
+                repaired_state, source_texts=validation_source_texts
+            )
             progress_score, quality_flags = _proof_progress_snapshot(repaired_state)
             repaired_state = repaired_state.model_copy(
                 update={
@@ -8688,20 +9644,29 @@ class AgnoChatRuntime:
                     "quality_flags": quality_flags,
                 }
             )
-            phase_timings[f"proof_repair_integrate_round_{int(local_state.get('iteration') or 0)}"] = round(
-                time.monotonic() - started, 3
-            )
+            phase_timings[
+                f"proof_repair_integrate_round_{int(local_state.get('iteration') or 0)}"
+            ] = round(time.monotonic() - started, 3)
             previous_signature = str(local_state.get("last_blocker_signature") or "")
             repaired_signature = " || ".join(list(repaired_state.blocker_gaps or [])[:6])
-            previous_verified = set(str(item or "").strip() for item in list(current.verified_steps or []))
-            repaired_verified = set(str(item or "").strip() for item in list(repaired_state.verified_steps or []))
-            previous_resolved = set(str(item or "").strip() for item in list(current.resolved_obligations or []))
-            repaired_resolved = set(str(item or "").strip() for item in list(repaired_state.resolved_obligations or []))
+            previous_verified = set(
+                str(item or "").strip() for item in list(current.verified_steps or [])
+            )
+            repaired_verified = set(
+                str(item or "").strip() for item in list(repaired_state.verified_steps or [])
+            )
+            previous_resolved = set(
+                str(item or "").strip() for item in list(current.resolved_obligations or [])
+            )
+            repaired_resolved = set(
+                str(item or "").strip() for item in list(repaired_state.resolved_obligations or [])
+            )
             if (
                 repaired_signature != previous_signature
                 or repaired_verified != previous_verified
                 or repaired_resolved != previous_resolved
-                or float(repaired_state.progress_score or 0.0) > float(current.progress_score or 0.0) + 0.02
+                or float(repaired_state.progress_score or 0.0)
+                > float(current.progress_score or 0.0) + 0.02
             ):
                 local_state["stagnant_iterations"] = 0
             local_state["last_blocker_signature"] = repaired_signature
@@ -8747,10 +9712,18 @@ class AgnoChatRuntime:
                         if str(current.canonical_reduction or "").strip()
                         else ""
                     )
-                    + "\n".join(f"- {item}" for item in list(current.verified_steps or current.proof_outline or [])[:8])
+                    + "\n".join(
+                        f"- {item}"
+                        for item in list(current.verified_steps or current.proof_outline or [])[:8]
+                    )
                     + (
                         "\n\nRemaining gaps:\n"
-                        + "\n".join(f"- {item}" for item in list(current.blocker_gaps or current.unresolved_points or [])[:6])
+                        + "\n".join(
+                            f"- {item}"
+                            for item in list(
+                                current.blocker_gaps or current.unresolved_points or []
+                            )[:6]
+                        )
                         if list(current.blocker_gaps or current.unresolved_points or [])
                         else ""
                     )
@@ -8774,13 +9747,19 @@ class AgnoChatRuntime:
                     latest_user_text,
                     "",
                     "Proof problem frame:",
-                    json.dumps(_current_proof_frame().model_dump(mode='json'), ensure_ascii=False, indent=2),
+                    json.dumps(
+                        _current_proof_frame().model_dump(mode="json"), ensure_ascii=False, indent=2
+                    ),
                     "",
                     "Proof workflow state:",
-                    json.dumps(current.model_dump(mode='json'), ensure_ascii=False, indent=2),
+                    json.dumps(current.model_dump(mode="json"), ensure_ascii=False, indent=2),
                     "",
                     "Iteration summaries:",
-                    json.dumps(list(local_state.get('iteration_summaries') or []), ensure_ascii=False, indent=2),
+                    json.dumps(
+                        list(local_state.get("iteration_summaries") or []),
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 ]
             )
             started = time.monotonic()
@@ -8839,7 +9818,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::proof_workflow" if run_id else "proof_workflow",
+                    run_id=f"{str(run_id or '').strip()}::proof_workflow"
+                    if run_id
+                    else "proof_workflow",
                 ),
             )
             content = dict(getattr(output, "content", {}) or {})
@@ -8855,11 +9836,15 @@ class AgnoChatRuntime:
                             "reasoning_effort": "high",
                             "proof_frame": dict(local_state.get("proof_frame") or {}),
                             "proof_state": dict(local_state.get("proof_state") or {}),
-                            "iteration_summaries": list(local_state.get("iteration_summaries") or []),
+                            "iteration_summaries": list(
+                                local_state.get("iteration_summaries") or []
+                            ),
                             "compression_stats": dict(local_state.get("compression_stats") or {}),
                             "phase_timings": phase_timings,
                             "stagnant_iterations": int(local_state.get("stagnant_iterations") or 0),
-                            "last_blocker_signature": str(local_state.get("last_blocker_signature") or ""),
+                            "last_blocker_signature": str(
+                                local_state.get("last_blocker_signature") or ""
+                            ),
                             "proof_status": synthesis.proof_status,
                         },
                     }
@@ -8879,11 +9864,15 @@ class AgnoChatRuntime:
                             "reasoning_effort": "high",
                             "proof_frame": dict(local_state.get("proof_frame") or {}),
                             "proof_state": current.model_dump(mode="json"),
-                            "iteration_summaries": list(local_state.get("iteration_summaries") or []),
+                            "iteration_summaries": list(
+                                local_state.get("iteration_summaries") or []
+                            ),
                             "compression_stats": dict(local_state.get("compression_stats") or {}),
                             "phase_timings": phase_timings,
                             "stagnant_iterations": int(local_state.get("stagnant_iterations") or 0),
-                            "last_blocker_signature": str(local_state.get("last_blocker_signature") or ""),
+                            "last_blocker_signature": str(
+                                local_state.get("last_blocker_signature") or ""
+                            ),
                         },
                     }
                 },
@@ -8944,7 +9933,9 @@ class AgnoChatRuntime:
             debug=debug,
         )
         calculations = [
-            item for item in list(plan.calculation_expressions or []) if str(item.expression or "").strip()
+            item
+            for item in list(plan.calculation_expressions or [])
+            if str(item.expression or "").strip()
         ][:4]
         if not calculations:
             return None
@@ -8986,7 +9977,9 @@ class AgnoChatRuntime:
             return None
 
         primary_label = str(plan.final_expression_label or calculations[0].label or "").strip()
-        fallback_primary = next((item for item in rendered_results if bool(item.get("success"))), rendered_results[0])
+        fallback_primary = next(
+            (item for item in rendered_results if bool(item.get("success"))), rendered_results[0]
+        )
         fallback_units = str(plan.target_units or "").strip()
         fallback_text = (
             f"{str(plan.target_quantity or 'Computed result').strip()}: "
@@ -9045,7 +10038,9 @@ class AgnoChatRuntime:
                     "plan": plan.model_dump(mode="json"),
                     "results": rendered_results,
                     "used_textbook_rounding": used_textbook_rounding,
-                    "primary_result_label": str(synthesis.primary_result_label or primary_label).strip(),
+                    "primary_result_label": str(
+                        synthesis.primary_result_label or primary_label
+                    ).strip(),
                     "alternative_result_labels": list(synthesis.alternative_result_labels or []),
                 },
             },
@@ -9108,7 +10103,11 @@ class AgnoChatRuntime:
                 inferred_tool_names=inferred_tool_names,
                 prior_pro_mode_state=conversation_state_seed,
             )
-        if allow_research_program and tool_plan is not None and tool_plan.category == "research_program":
+        if (
+            allow_research_program
+            and tool_plan is not None
+            and tool_plan.category == "research_program"
+        ):
             return await self._run_pro_mode_research_program_workflow(
                 messages=prepared_messages,
                 latest_user_text=latest_user_text,
@@ -9127,7 +10126,8 @@ class AgnoChatRuntime:
         if (
             tool_plan is not None
             and tool_plan.category == "validated_numeric"
-            and self._normalize_selected_tool_names(tool_plan.selected_tool_names) == ["numpy_calculator"]
+            and self._normalize_selected_tool_names(tool_plan.selected_tool_names)
+            == ["numpy_calculator"]
         ):
             validated_numeric_result = await self._run_validated_numeric_workflow(
                 latest_user_text=latest_user_text,
@@ -9178,7 +10178,9 @@ class AgnoChatRuntime:
                 if str(run_id or "").strip()
                 else None
             )
-            context_token = set_request_bisque_auth(request_bisque_auth) if request_bisque_auth else None
+            context_token = (
+                set_request_bisque_auth(request_bisque_auth) if request_bisque_auth else None
+            )
             try:
                 async for event in self.stream(
                     messages=tool_prepared_messages,
@@ -9302,7 +10304,9 @@ class AgnoChatRuntime:
                         "message": "Running the required tool directly because the earlier answer skipped it.",
                         "payload": {
                             "required_tool_names": list(required_tool_names),
-                            "tool_plan_category": str(tool_plan.category if tool_plan is not None else ""),
+                            "tool_plan_category": str(
+                                tool_plan.category if tool_plan is not None else ""
+                            ),
                         },
                     },
                 )
@@ -9334,7 +10338,9 @@ class AgnoChatRuntime:
                     )
                     deterministic_metadata = dict(last_result.get("metadata") or {})
                     deterministic_metadata["tool_invocations"] = merged_tool_invocations
-                    deterministic_tool_workflow_meta = dict(deterministic_metadata.get("tool_workflow") or {})
+                    deterministic_tool_workflow_meta = dict(
+                        deterministic_metadata.get("tool_workflow") or {}
+                    )
                     deterministic_tool_workflow_meta["deterministic_required_tool_fallback"] = {
                         "required_tool_names": list(required_tool_names),
                         "tool_invocation_count": len(deterministic_invocations),
@@ -9346,15 +10352,17 @@ class AgnoChatRuntime:
                         "tool_invocations": merged_tool_invocations,
                         "metadata": deterministic_metadata,
                         "runtime_status": "completed" if deterministic_satisfied else "error",
-                        "runtime_error": None if deterministic_satisfied else "required_tool_execution_failed",
+                        "runtime_error": None
+                        if deterministic_satisfied
+                        else "required_tool_execution_failed",
                     }
         if (
             allow_research_program
             and strict_validation
             and not self._tool_workflow_satisfied(
-            tool_invocations=list(last_result.get("tool_invocations") or []),
-            required_tool_names=required_tool_names,
-            strict_validation=True,
+                tool_invocations=list(last_result.get("tool_invocations") or []),
+                required_tool_names=required_tool_names,
+                strict_validation=True,
             )
         ):
             self._emit_event(
@@ -9370,7 +10378,9 @@ class AgnoChatRuntime:
                     ),
                     "payload": {
                         "required_tool_names": list(required_tool_names),
-                        "tool_plan_category": str(tool_plan.category if tool_plan is not None else ""),
+                        "tool_plan_category": str(
+                            tool_plan.category if tool_plan is not None else ""
+                        ),
                     },
                 },
             )
@@ -9410,7 +10420,9 @@ class AgnoChatRuntime:
                     "message": "Escalating from a narrow validated-tool pass to an iterative research workflow.",
                     "payload": {
                         "prior_tool_names": list(last_result.get("selected_tool_names") or []),
-                        "tool_plan_category": str(tool_plan.category if tool_plan is not None else ""),
+                        "tool_plan_category": str(
+                            tool_plan.category if tool_plan is not None else ""
+                        ),
                     },
                 },
             )
@@ -9461,9 +10473,12 @@ class AgnoChatRuntime:
             if family not in required_families:
                 required_families.append(family)
 
-        image_like_uploaded_files = AgnoChatRuntime._image_like_files(uploaded_files)
         direct_image_analysis = bool(
-            image_like_uploaded_files
+            AgnoChatRuntime._has_direct_image_target(
+                user_text=latest_user_text,
+                uploaded_files=uploaded_files,
+                selection_context=selection_context,
+            )
             or re.search(
                 r"\b(attached|uploaded|new image|new aerial image|this image|analy[sz]e it|analy[sz]e this|look at this|local image)\b",
                 lowered,
@@ -9500,7 +10515,9 @@ class AgnoChatRuntime:
             re.search(r"\b(report|ecological|summary|analysis|summarize|compare)\b", lowered)
         )
         plot_request = AgnoChatRuntime._is_plot_or_visual_analysis_request(latest_user_text)
-        introspection_request = AgnoChatRuntime._is_structured_artifact_introspection_request(latest_user_text)
+        introspection_request = AgnoChatRuntime._is_structured_artifact_introspection_request(
+            latest_user_text
+        )
         if direct_image_analysis:
             _require("vision")
         if data_context:
@@ -9509,9 +10526,16 @@ class AgnoChatRuntime:
             _require("vision")
         if acquisition_request and (direct_image_analysis or data_context):
             _require("acquisition")
-        if quantitative_request or report_like_request or direct_image_analysis or introspection_request:
+        if (
+            quantitative_request
+            or report_like_request
+            or direct_image_analysis
+            or introspection_request
+        ):
             _require("analysis")
-        if plot_request or re.search(r"\b(code|python|script|parse|optimi[sz]e|benchmark|csv|json|xml)\b", lowered):
+        if plot_request or re.search(
+            r"\b(code|python|script|parse|optimi[sz]e|benchmark|csv|json|xml)\b", lowered
+        ):
             _require("code")
         if quantitative_request:
             required_measurements.append("quantitative_summary")
@@ -9532,7 +10556,11 @@ class AgnoChatRuntime:
         requirements: dict[str, Any],
     ) -> bool:
         evidence_blob = " ".join(str(item or "") for item in list(evidence_summaries or [])).lower()
-        needed_families = {str(item) for item in list(requirements.get("required_families") or []) if str(item).strip()}
+        needed_families = {
+            str(item)
+            for item in list(requirements.get("required_families") or [])
+            if str(item).strip()
+        }
         seen_families = {str(item) for item in list(executed_families or []) if str(item).strip()}
         if needed_families and not needed_families.issubset(seen_families):
             return False
@@ -9585,7 +10613,14 @@ class AgnoChatRuntime:
         }
         if not completed_tools:
             return True
-        if completed_tools.issubset({"bioio_load_image", "load_bisque_resource", "search_bisque_resources", "bisque_find_assets"}):
+        if completed_tools.issubset(
+            {
+                "bioio_load_image",
+                "load_bisque_resource",
+                "search_bisque_resources",
+                "bisque_find_assets",
+            }
+        ):
             return True
         if not str(response_text or "").strip():
             return True
@@ -9624,12 +10659,22 @@ class AgnoChatRuntime:
         uploaded_files: list[str],
         selection_context: dict[str, Any] | None,
     ) -> dict[str, list[str]]:
-        normalized_uploaded = [str(path) for path in list(uploaded_files or []) if str(path).strip()]
+        normalized_uploaded = [
+            str(path) for path in list(uploaded_files or []) if str(path).strip()
+        ]
         handles: dict[str, list[str]] = {
             "uploaded_files": normalized_uploaded,
             "image_files": AgnoChatRuntime._image_like_files(normalized_uploaded),
-            "resource_uris": [str(uri) for uri in list((selection_context or {}).get("resource_uris") or []) if str(uri).strip()],
-            "dataset_uris": [str(uri) for uri in list((selection_context or {}).get("dataset_uris") or []) if str(uri).strip()],
+            "resource_uris": [
+                str(uri)
+                for uri in list((selection_context or {}).get("resource_uris") or [])
+                if str(uri).strip()
+            ],
+            "dataset_uris": [
+                str(uri)
+                for uri in list((selection_context or {}).get("dataset_uris") or [])
+                if str(uri).strip()
+            ],
             "download_dirs": [],
             "downloaded_files": [],
             "mask_paths": [],
@@ -9642,7 +10687,9 @@ class AgnoChatRuntime:
             "job_ids": [],
         }
 
-        for key, raw_values in dict((selection_context or {}).get("artifact_handles") or {}).items():
+        for key, raw_values in dict(
+            (selection_context or {}).get("artifact_handles") or {}
+        ).items():
             handle_key = str(key or "").strip()
             if handle_key not in handles:
                 continue
@@ -9742,7 +10789,9 @@ class AgnoChatRuntime:
                     _append("image_files", item)
                 for item in list(envelope.get("prediction_image_records") or []):
                     if isinstance(item, dict):
-                        _append("image_files", item.get("raw_source_path") or item.get("source_path"))
+                        _append(
+                            "image_files", item.get("raw_source_path") or item.get("source_path")
+                        )
                 for item in list(envelope.get("prediction_images") or []):
                     _append("preview_paths", item)
             elif tool_name == "codegen_python_plan":
@@ -9798,7 +10847,9 @@ class AgnoChatRuntime:
                 default=str,
             )
             digest = hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:16]
-            db_target = str(self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db").strip()
+            db_target = str(
+                self._setting(self.settings, "run_store_path", "data/runs.db") or "data/runs.db"
+            ).strip()
             base_dir = Path(db_target).resolve().parent if db_target else (Path.cwd() / "data")
             target_dir = base_dir / "pro_mode_state"
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -9846,7 +10897,9 @@ class AgnoChatRuntime:
             dict.fromkeys(
                 [
                     *(
-                        self._research_program_tool_family(str(invocation.get("tool") or "").strip())
+                        self._research_program_tool_family(
+                            str(invocation.get("tool") or "").strip()
+                        )
                         for invocation in list(tool_invocations or [])
                         if str(invocation.get("tool") or "").strip()
                     ),
@@ -9950,13 +11003,20 @@ class AgnoChatRuntime:
                 "iterations": int(proof_workflow_meta.get("iterations") or 0),
                 "proof_frame": dict(proof_workflow_meta.get("proof_frame") or {}),
                 "proof_state": proof_state,
-                "iteration_summaries": list(proof_workflow_meta.get("iteration_summaries") or [])[-10:],
+                "iteration_summaries": list(proof_workflow_meta.get("iteration_summaries") or [])[
+                    -10:
+                ],
                 "compression_stats": dict(proof_workflow_meta.get("compression_stats") or {}),
                 "stagnant_iterations": int(proof_workflow_meta.get("stagnant_iterations") or 0),
-                "last_blocker_signature": str(proof_workflow_meta.get("last_blocker_signature") or "").strip(),
-                "proof_status": str(proof_workflow_meta.get("proof_status") or "").strip() or "partial",
+                "last_blocker_signature": str(
+                    proof_workflow_meta.get("last_blocker_signature") or ""
+                ).strip(),
+                "proof_status": str(proof_workflow_meta.get("proof_status") or "").strip()
+                or "partial",
             }
-        autonomy_state = dict(autonomy_meta.get("autonomy_state") or autonomy_meta.get("autonomous_cycle") or {})
+        autonomy_state = dict(
+            autonomy_meta.get("autonomy_state") or autonomy_meta.get("autonomous_cycle") or {}
+        )
         autonomy_state_v2 = dict(autonomy_meta.get("autonomy_state_v2") or {})
         if autonomy_state:
             state["autonomy_state"] = {
@@ -9974,7 +11034,8 @@ class AgnoChatRuntime:
                 ][-20:],
                 "candidate_answer": str(autonomy_state.get("candidate_answer") or "").strip(),
                 "stop_reason": str(autonomy_state.get("stop_reason") or "").strip(),
-                "resume_readiness": str(autonomy_state.get("resume_readiness") or "").strip() or "ready",
+                "resume_readiness": str(autonomy_state.get("resume_readiness") or "").strip()
+                or "ready",
                 "next_best_actions": [
                     str(item or "").strip()
                     for item in list(autonomy_state.get("next_best_actions") or [])
@@ -10007,12 +11068,18 @@ class AgnoChatRuntime:
             ][:10]
         if autonomy_state_v2:
             state["autonomy_state_v2"] = autonomy_state_v2
-            state["candidate_set"] = dict(autonomy_meta.get("candidate_set") or autonomy_state_v2.get("candidate_set") or {})
+            state["candidate_set"] = dict(
+                autonomy_meta.get("candidate_set") or autonomy_state_v2.get("candidate_set") or {}
+            )
             state["obligation_ledger"] = list(
-                autonomy_meta.get("obligation_ledger") or autonomy_state_v2.get("obligation_ledger") or []
+                autonomy_meta.get("obligation_ledger")
+                or autonomy_state_v2.get("obligation_ledger")
+                or []
             )[:12]
             state["verification_ledger"] = list(
-                autonomy_meta.get("verification_ledger") or autonomy_state_v2.get("verification_ledger") or []
+                autonomy_meta.get("verification_ledger")
+                or autonomy_state_v2.get("verification_ledger")
+                or []
             )[-10:]
         return state
 
@@ -10165,6 +11232,31 @@ class AgnoChatRuntime:
             tool_invocations=tool_invocations,
             research_program_meta=research_program_meta,
         )
+        answer_summary = self._analysis_state_answer_summary(
+            str(normalized_metadata.get("answer_summary") or "")
+        )
+        if answer_summary:
+            state["last_answer_summary"] = answer_summary
+            evidence_summaries = [
+                str(item or "").strip()
+                for item in list(state.get("evidence_summaries") or [])
+                if str(item or "").strip()
+            ]
+            evidence_summaries.append(f"answer_summary: {answer_summary}")
+            state["evidence_summaries"] = evidence_summaries[-30:]
+        contract = self._coerce_research_presentation_contract_payload(
+            normalized_metadata.get("contract")
+            if isinstance(normalized_metadata.get("contract"), dict)
+            else None,
+            fallback_result=answer_summary,
+        )
+        contract_brief = self._analysis_state_contract_brief(contract)
+        if contract_brief["measurements"]:
+            state["last_measurements"] = contract_brief["measurements"][-6:]
+        if contract_brief["next_steps"]:
+            state["last_next_steps"] = contract_brief["next_steps"][-4:]
+        if contract_brief["limitations"]:
+            state["last_limitations"] = contract_brief["limitations"][-4:]
         self._save_analysis_conversation_state(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -10199,7 +11291,9 @@ class AgnoChatRuntime:
         }
         current_focus: dict[str, Any] = {}
         if uploaded_files:
-            current_focus["uploaded_files"] = [Path(path).name for path in list(uploaded_files or [])[:5]]
+            current_focus["uploaded_files"] = [
+                Path(path).name for path in list(uploaded_files or [])[:5]
+            ]
         if selection.get("dataset_uris"):
             current_focus["dataset_uris"] = [
                 str(item or "").strip()
@@ -10226,6 +11320,22 @@ class AgnoChatRuntime:
                     for item in list(state.get("evidence_summaries") or [])[-6:]
                     if str(item or "").strip()
                 ],
+                "last_answer_summary": str(state.get("last_answer_summary") or "").strip() or None,
+                "key_measurements": [
+                    str(item or "").strip()
+                    for item in list(state.get("last_measurements") or [])[:4]
+                    if str(item or "").strip()
+                ],
+                "recommended_next_steps": [
+                    str(item or "").strip()
+                    for item in list(state.get("last_next_steps") or [])[:3]
+                    if str(item or "").strip()
+                ],
+                "open_limits": [
+                    str(item or "").strip()
+                    for item in list(state.get("last_limitations") or [])[:3]
+                    if str(item or "").strip()
+                ],
                 "handle_counts": handle_counts,
                 "current_focus": current_focus,
             }
@@ -10236,6 +11346,544 @@ class AgnoChatRuntime:
             if value not in (None, "", [], {})
         }
         return payload if payload["analysis_state"] else {}
+
+    @staticmethod
+    def _analysis_state_answer_summary(response_text: str) -> str:
+        text = re.sub(r"```.*?```", " ", str(response_text or ""), flags=re.DOTALL)
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return ""
+        sentences = [
+            segment.strip() for segment in re.split(r"(?<=[.!?])\s+", text) if segment.strip()
+        ]
+        summary = " ".join(sentences[:2]).strip() or text
+        if len(summary) > 420:
+            summary = summary[:417].rstrip() + "..."
+        return summary
+
+    @staticmethod
+    def _presentation_text(value: Any, *, max_chars: int = 220) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) > max_chars:
+            return text[: max_chars - 3].rstrip() + "..."
+        return text
+
+    @classmethod
+    def _presentation_result_summary(cls, response_text: str) -> str:
+        text = re.sub(r"```.*?```", " ", str(response_text or ""), flags=re.DOTALL)
+        bottom_line_match = re.search(
+            r"(?:bottom line|takeaway|direct answer|key point|main conclusion|primary suspect|most likely failure mode|answer)\s*:\s*(.+?)(?:\n|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if bottom_line_match:
+            return cls._presentation_text(bottom_line_match.group(1), max_chars=320)
+        candidates: list[str] = []
+        for raw_line in text.splitlines():
+            line = re.sub(r"^\s*#{1,6}\s*", "", raw_line)
+            line = re.sub(r"^\s*(?:[-*+]|\d+\.)\s*", "", line)
+            line = re.sub(r"\s+", " ", line).strip()
+            if not line:
+                continue
+            if len(line.split()) <= 6 and not re.search(r"[.!?]", line):
+                continue
+            candidates.append(line)
+        joined = " ".join(candidates[:6]).strip()
+        if not joined:
+            joined = cls._analysis_state_answer_summary(text)
+        sentences = [
+            segment.strip() for segment in re.split(r"(?<=[.!?])\s+", joined) if segment.strip()
+        ]
+        summary = " ".join(sentences[:2]).strip() or joined
+        return cls._presentation_text(summary, max_chars=320)
+
+    @staticmethod
+    def _presentation_label(value: str) -> str:
+        normalized = re.sub(r"[_\-]+", " ", str(value or "")).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized or "measurement"
+
+    @classmethod
+    def _presentation_unit_for_key(cls, key: str) -> str | None:
+        lowered = str(key or "").strip().lower()
+        if not lowered:
+            return None
+        if (
+            lowered.endswith("percent")
+            or lowered.endswith("_percent")
+            or lowered.endswith("percentage")
+        ):
+            return "%"
+        if lowered.endswith("_count") or lowered.endswith("count") or lowered.startswith("num_"):
+            return "count"
+        if lowered.endswith("_seconds") or lowered.endswith("seconds") or lowered.endswith("_secs"):
+            return "s"
+        if lowered.endswith("_minutes") or lowered.endswith("minutes"):
+            return "min"
+        if lowered.endswith("_hours") or lowered.endswith("hours"):
+            return "h"
+        if lowered.endswith("_voxels") or lowered.endswith("voxels"):
+            return "voxels"
+        if lowered.endswith("_slices") or lowered.endswith("slices"):
+            return "slices"
+        return None
+
+    @classmethod
+    def _presentation_scalar_measurements(
+        cls,
+        record: dict[str, Any] | None,
+        *,
+        tool_name: str = "",
+        max_items: int = 8,
+    ) -> list[dict[str, Any]]:
+        payload = dict(record or {})
+        if not payload:
+            return []
+        ignored_keys = {
+            "success",
+            "status",
+            "error",
+            "message",
+            "details",
+            "run_id",
+            "tool",
+            "model",
+            "artifact",
+            "artifacts",
+        }
+        ignored_fragments = (
+            "path",
+            "paths",
+            "file",
+            "files",
+            "url",
+            "uri",
+            "directory",
+            "artifact",
+            "preview",
+            "report",
+            "mask",
+            "overlay",
+            "summary",
+            "warning",
+            "error",
+        )
+        measurements: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _maybe_add(name: str, value: Any) -> None:
+            if len(measurements) >= max_items:
+                return
+            key = str(name or "").strip()
+            if not key:
+                return
+            lowered = key.lower()
+            if lowered in ignored_keys or any(
+                fragment in lowered for fragment in ignored_fragments
+            ):
+                return
+            if isinstance(value, bool) or value is None:
+                return
+            if isinstance(value, (int, float)):
+                label = cls._presentation_label(key)
+                identity = f"{label.lower()}::{cls._presentation_unit_for_key(key) or ''}"
+                if identity in seen:
+                    return
+                seen.add(identity)
+                measurements.append(
+                    {
+                        "name": label,
+                        "value": value,
+                        "unit": cls._presentation_unit_for_key(key),
+                        "summary": (
+                            f"Derived from {cls._presentation_label(tool_name)}."
+                            if str(tool_name or "").strip()
+                            else None
+                        ),
+                    }
+                )
+                return
+            if isinstance(value, dict):
+                for nested_key, nested_value in value.items():
+                    _maybe_add(f"{key} {nested_key}", nested_value)
+                return
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped or len(stripped) > 40:
+                    return
+                if not re.fullmatch(r"-?\d+(?:\.\d+)?", stripped):
+                    return
+                parsed_value: int | float
+                parsed_value = float(stripped) if "." in stripped else int(stripped)
+                _maybe_add(key, parsed_value)
+
+        for item_key, item_value in payload.items():
+            _maybe_add(str(item_key or ""), item_value)
+            if len(measurements) >= max_items:
+                break
+        return measurements
+
+    @classmethod
+    def _coerce_research_presentation_contract_payload(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        fallback_result: str,
+    ) -> dict[str, Any]:
+        source = dict(payload or {})
+        confidence_payload = dict(source.get("confidence") or {})
+        level = str(confidence_payload.get("level") or "").strip().lower()
+        if level not in {"low", "medium", "high"}:
+            level = "medium"
+        contract = ResearchPresentationContract(
+            result=cls._presentation_text(source.get("result") or fallback_result, max_chars=600),
+            evidence=[
+                ResearchPresentationEvidence(
+                    source=cls._presentation_text(item.get("source"), max_chars=80),
+                    summary=cls._presentation_text(item.get("summary"), max_chars=220),
+                    artifact=cls._presentation_text(item.get("artifact"), max_chars=180) or None,
+                    run_id=cls._presentation_text(item.get("run_id"), max_chars=80) or None,
+                )
+                for item in list(source.get("evidence") or [])
+                if isinstance(item, dict)
+                and (
+                    cls._presentation_text(item.get("source"), max_chars=80)
+                    or cls._presentation_text(item.get("summary"), max_chars=220)
+                )
+            ][:4],
+            measurements=[
+                ResearchPresentationMeasurement(
+                    name=cls._presentation_label(item.get("name")),
+                    value=item.get("value"),
+                    unit=cls._presentation_text(item.get("unit"), max_chars=24) or None,
+                    summary=cls._presentation_text(item.get("summary"), max_chars=180) or None,
+                )
+                for item in list(source.get("measurements") or [])
+                if isinstance(item, dict)
+                and cls._presentation_label(item.get("name"))
+                and item.get("value") not in (None, "")
+            ][:6],
+            statistical_analysis=[
+                ResearchPresentationStatistic(
+                    label=cls._presentation_label(item.get("label")),
+                    summary=cls._presentation_text(item.get("summary"), max_chars=220),
+                )
+                for item in list(source.get("statistical_analysis") or [])
+                if isinstance(item, dict)
+                and cls._presentation_label(item.get("label"))
+                and cls._presentation_text(item.get("summary"), max_chars=220)
+            ][:4],
+            confidence=ResearchPresentationConfidence(
+                level=level,
+                why=[
+                    cls._presentation_text(item, max_chars=180)
+                    for item in list(confidence_payload.get("why") or [])
+                    if cls._presentation_text(item, max_chars=180)
+                ][:3],
+            ),
+            qc_warnings=[
+                cls._presentation_text(item, max_chars=200)
+                for item in list(source.get("qc_warnings") or [])
+                if cls._presentation_text(item, max_chars=200)
+            ][:4],
+            limitations=[
+                cls._presentation_text(item, max_chars=220)
+                for item in list(source.get("limitations") or [])
+                if cls._presentation_text(item, max_chars=220)
+            ][:4],
+            next_steps=[
+                ResearchPresentationNextStep(
+                    action=cls._presentation_text(
+                        item.get("action") if isinstance(item, dict) else item,
+                        max_chars=220,
+                    )
+                )
+                for item in list(source.get("next_steps") or [])
+                if cls._presentation_text(
+                    item.get("action") if isinstance(item, dict) else item,
+                    max_chars=220,
+                )
+            ][:4],
+        )
+        if not str(contract.result or "").strip():
+            contract.result = cls._presentation_text(fallback_result, max_chars=600)
+        if not list(contract.next_steps or []):
+            contract.next_steps = [
+                ResearchPresentationNextStep(
+                    action="Continue with the next highest-impact validation or comparison step."
+                )
+            ]
+        return contract.model_dump(mode="json")
+
+    @classmethod
+    def _fallback_research_presentation_contract(
+        cls,
+        *,
+        user_text: str,
+        response_text: str,
+        metadata: dict[str, Any] | None,
+        tool_invocations: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        normalized_response = cls._presentation_result_summary(response_text)
+        normalized_metadata = dict(metadata or {})
+        normalized_invocations = [
+            dict(item or {}) for item in list(tool_invocations or []) if isinstance(item, dict)
+        ]
+        evidence: list[dict[str, Any]] = []
+        measurements: list[dict[str, Any]] = []
+        qc_warnings: list[str] = []
+        limitations: list[str] = []
+        seen_evidence: set[str] = set()
+        seen_measurements: set[str] = set()
+
+        def _append_evidence(
+            source: str, summary: str, artifact: str | None = None, run_id: str | None = None
+        ) -> None:
+            rendered_source = cls._presentation_text(source, max_chars=80)
+            rendered_summary = cls._presentation_text(summary, max_chars=220)
+            if not rendered_source and not rendered_summary:
+                return
+            identity = f"{rendered_source.lower()}::{rendered_summary.lower()}"
+            if identity in seen_evidence:
+                return
+            seen_evidence.add(identity)
+            evidence.append(
+                {
+                    "source": rendered_source or "Evidence",
+                    "summary": rendered_summary,
+                    "artifact": cls._presentation_text(artifact, max_chars=180) or None,
+                    "run_id": cls._presentation_text(run_id, max_chars=80) or None,
+                }
+            )
+
+        def _append_measurement(item: dict[str, Any]) -> None:
+            name = cls._presentation_label(item.get("name"))
+            value = item.get("value")
+            if not name or value in (None, ""):
+                return
+            identity = (
+                f"{name.lower()}::{cls._presentation_text(item.get('unit'), max_chars=24).lower()}"
+            )
+            if identity in seen_measurements:
+                return
+            seen_measurements.add(identity)
+            measurements.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "unit": cls._presentation_text(item.get("unit"), max_chars=24) or None,
+                    "summary": cls._presentation_text(item.get("summary"), max_chars=180) or None,
+                }
+            )
+
+        for invocation in normalized_invocations[:8]:
+            tool_name = cls._presentation_label(str(invocation.get("tool") or "analysis"))
+            status = str(invocation.get("status") or "").strip().lower()
+            summary_payload = invocation.get("output_summary")
+            rendered_summary = ""
+            if isinstance(summary_payload, str):
+                rendered_summary = cls._presentation_text(summary_payload, max_chars=220)
+            elif isinstance(summary_payload, dict):
+                rendered_summary = cls._presentation_text(
+                    ", ".join(
+                        f"{cls._presentation_label(key)}={value}"
+                        for key, value in list(summary_payload.items())[:4]
+                        if value not in (None, "", [], {})
+                    ),
+                    max_chars=220,
+                )
+                for item in cls._presentation_scalar_measurements(
+                    summary_payload,
+                    tool_name=tool_name,
+                ):
+                    _append_measurement(item)
+            output_envelope = invocation.get("output_envelope")
+            if isinstance(output_envelope, dict):
+                for summary_key in ("summary", "metrics", "measurements"):
+                    nested_payload = output_envelope.get(summary_key)
+                    if isinstance(nested_payload, dict):
+                        for item in cls._presentation_scalar_measurements(
+                            nested_payload,
+                            tool_name=tool_name,
+                        ):
+                            _append_measurement(item)
+                if not rendered_summary:
+                    rendered_summary = cls._presentation_text(
+                        output_envelope.get("summary"),
+                        max_chars=220,
+                    )
+            artifact = next(
+                (
+                    cls._presentation_text(item, max_chars=180)
+                    for item in list(invocation.get("preferred_upload_paths") or [])
+                    if cls._presentation_text(item, max_chars=180)
+                ),
+                None,
+            )
+            run_id = cls._presentation_text(invocation.get("run_id"), max_chars=80) or None
+            if rendered_summary:
+                _append_evidence(tool_name, rendered_summary, artifact=artifact, run_id=run_id)
+            if status in {"error", "failed"}:
+                warning_text = cls._presentation_text(
+                    invocation.get("output_summary")
+                    or invocation.get("error")
+                    or f"{tool_name} failed.",
+                    max_chars=220,
+                )
+                if warning_text and warning_text not in qc_warnings:
+                    qc_warnings.append(warning_text)
+
+        pro_mode_metadata = dict(normalized_metadata.get("pro_mode") or {})
+        research_program_meta = dict(pro_mode_metadata.get("research_program") or {})
+        for item in list(research_program_meta.get("evidence_summaries") or [])[:4]:
+            summary_text = cls._presentation_text(item, max_chars=220)
+            if summary_text:
+                _append_evidence("Research program", summary_text)
+
+        metadata_specialist = dict(pro_mode_metadata.get("metadata_specialist") or {})
+        for item in list(metadata_specialist.get("verified_findings") or [])[:3]:
+            summary_text = cls._presentation_text(item, max_chars=220)
+            if summary_text:
+                _append_evidence("Metadata review", summary_text)
+        for item in [
+            *list(metadata_specialist.get("missing_metadata") or []),
+            *list(metadata_specialist.get("caveats") or []),
+        ]:
+            rendered = cls._presentation_text(item, max_chars=220)
+            if rendered and rendered not in limitations:
+                limitations.append(rendered)
+
+        verifier = dict(pro_mode_metadata.get("verifier") or {})
+        for item in list(verifier.get("issues") or [])[:3]:
+            rendered = cls._presentation_text(item, max_chars=220)
+            if rendered and rendered not in limitations:
+                limitations.append(rendered)
+
+        missing_families = list(
+            research_program_meta.get("requirements", {}).get("missing_families") or []
+        )
+        if missing_families:
+            limitations.append(
+                "Missing evidence families: "
+                + ", ".join(
+                    cls._presentation_label(str(item or ""))
+                    for item in missing_families[:4]
+                    if cls._presentation_label(str(item or ""))
+                )
+            )
+
+        if not limitations and not evidence and not measurements:
+            limitations.append(
+                "This response is primarily interpretive and does not include newly measured artifacts from this turn."
+            )
+
+        confidence_level = "medium"
+        confidence_why: list[str] = []
+        if qc_warnings:
+            confidence_level = "low"
+            confidence_why.append(
+                "One or more workflow steps reported warnings or incomplete outputs."
+            )
+        elif measurements or len(evidence) >= 2:
+            confidence_level = "high" if len(measurements) >= 2 else "medium"
+            confidence_why.append(
+                "The answer is anchored by measured outputs or explicit evidence summaries from this turn."
+            )
+        else:
+            confidence_why.append(
+                "The answer is grounded in the current response text but has limited structured evidence."
+            )
+
+        next_steps: list[dict[str, str]] = []
+        if measurements:
+            next_steps.append(
+                {
+                    "action": "Compare the key measurements against a control, replicate, or alternative condition."
+                }
+            )
+        if evidence:
+            next_steps.append(
+                {
+                    "action": "Review the leading figures or artifacts to confirm that the interpretation matches the visual evidence."
+                }
+            )
+        if not next_steps:
+            next_steps.append(
+                {
+                    "action": "Apply this interpretation to a representative example and check whether the main criteria hold in practice."
+                }
+            )
+        if "follow" not in str(user_text or "").strip().lower():
+            next_steps.append(
+                {
+                    "action": "Ask a focused follow-up question if you want a deeper comparison, validation plan, or implementation detail."
+                }
+            )
+
+        return cls._coerce_research_presentation_contract_payload(
+            {
+                "result": normalized_response
+                or cls._presentation_text(response_text, max_chars=600),
+                "evidence": evidence[:4],
+                "measurements": measurements[:6],
+                "statistical_analysis": [],
+                "confidence": {
+                    "level": confidence_level,
+                    "why": confidence_why[:3],
+                },
+                "qc_warnings": qc_warnings[:4],
+                "limitations": limitations[:4],
+                "next_steps": next_steps[:4],
+            },
+            fallback_result=response_text,
+        )
+
+    @classmethod
+    def _analysis_state_contract_brief(
+        cls,
+        contract: dict[str, Any] | None,
+    ) -> dict[str, list[str]]:
+        normalized = cls._coerce_research_presentation_contract_payload(
+            contract,
+            fallback_result=str((contract or {}).get("result") or ""),
+        )
+        measurement_lines = [
+            cls._presentation_text(
+                f"{cls._presentation_label(item.get('name'))}: {item.get('value')}"
+                + (
+                    f" {cls._presentation_text(item.get('unit'), max_chars=24)}"
+                    if cls._presentation_text(item.get("unit"), max_chars=24)
+                    else ""
+                ),
+                max_chars=140,
+            )
+            for item in list(normalized.get("measurements") or [])[:4]
+            if isinstance(item, dict)
+            and cls._presentation_label(item.get("name"))
+            and item.get("value") not in (None, "")
+        ]
+        next_step_lines = [
+            cls._presentation_text(
+                item.get("action") if isinstance(item, dict) else item,
+                max_chars=180,
+            )
+            for item in list(normalized.get("next_steps") or [])[:3]
+            if cls._presentation_text(
+                item.get("action") if isinstance(item, dict) else item,
+                max_chars=180,
+            )
+        ]
+        limitation_lines = [
+            cls._presentation_text(item, max_chars=180)
+            for item in list(normalized.get("limitations") or [])[:3]
+            if cls._presentation_text(item, max_chars=180)
+        ]
+        return {
+            "measurements": measurement_lines,
+            "next_steps": next_step_lines,
+            "limitations": limitation_lines,
+        }
 
     @classmethod
     def _merge_selection_context_with_analysis_state(
@@ -10257,7 +11905,9 @@ class AgnoChatRuntime:
             selection_context=selection_context,
             prior_state=analysis_state,
         )
-        prompt_requests_cross_turn_comparison = cls._prompt_requests_cross_turn_comparison(user_text)
+        prompt_requests_cross_turn_comparison = cls._prompt_requests_cross_turn_comparison(
+            user_text
+        )
         if not cls._should_reuse_analysis_state(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -10348,17 +11998,36 @@ class AgnoChatRuntime:
         if not has_prior_handles:
             return False
         current = dict(selection_context or {})
-        current_dataset_uris = {str(item or "").strip() for item in list(current.get("dataset_uris") or []) if str(item or "").strip()}
-        prior_dataset_uris = {str(item or "").strip() for item in list(handles.get("dataset_uris") or []) if str(item or "").strip()}
-        current_resource_uris = {str(item or "").strip() for item in list(current.get("resource_uris") or []) if str(item or "").strip()}
-        prior_resource_uris = {str(item or "").strip() for item in list(handles.get("resource_uris") or []) if str(item or "").strip()}
+        current_dataset_uris = {
+            str(item or "").strip()
+            for item in list(current.get("dataset_uris") or [])
+            if str(item or "").strip()
+        }
+        prior_dataset_uris = {
+            str(item or "").strip()
+            for item in list(handles.get("dataset_uris") or [])
+            if str(item or "").strip()
+        }
+        current_resource_uris = {
+            str(item or "").strip()
+            for item in list(current.get("resource_uris") or [])
+            if str(item or "").strip()
+        }
+        prior_resource_uris = {
+            str(item or "").strip()
+            for item in list(handles.get("resource_uris") or [])
+            if str(item or "").strip()
+        }
         current_turn_replaces_saved_image_target = cls._current_turn_replaces_saved_image_target(
             user_text=user_text,
             uploaded_files=uploaded_files,
             selection_context=selection_context,
             prior_state=prior_state,
         )
-        if current_turn_replaces_saved_image_target and not cls._prompt_requests_cross_turn_comparison(user_text):
+        if (
+            current_turn_replaces_saved_image_target
+            and not cls._prompt_requests_cross_turn_comparison(user_text)
+        ):
             return False
         if current_dataset_uris and current_dataset_uris & prior_dataset_uris:
             return True
@@ -10577,7 +12246,12 @@ class AgnoChatRuntime:
             ),
             "",
         )
-        if introspection_request and selected_resource_uri and not (downloaded_hdf5_files or uploaded_hdf5_files) and "bisque_download_resource" in available:
+        if (
+            introspection_request
+            and selected_resource_uri
+            and not (downloaded_hdf5_files or uploaded_hdf5_files)
+            and "bisque_download_resource" in available
+        ):
             actions.append(
                 ToolProgramAction(
                     tool_name="bisque_download_resource",
@@ -10585,7 +12259,11 @@ class AgnoChatRuntime:
                     args={"resource_uri": selected_resource_uri},
                 )
             )
-        if handles.get("dataset_uris") and not handles.get("download_dirs") and "load_bisque_resource" in available:
+        if (
+            handles.get("dataset_uris")
+            and not handles.get("download_dirs")
+            and "load_bisque_resource" in available
+        ):
             actions.append(
                 ToolProgramAction(
                     tool_name="load_bisque_resource",
@@ -10606,7 +12284,10 @@ class AgnoChatRuntime:
                     args={"dataset_uri": handles["dataset_uris"][0], "limit": 200},
                 )
             )
-        elif re.search(r"\b(dataset|bisque|resource)\b", lowered) and "search_bisque_resources" in available:
+        elif (
+            re.search(r"\b(dataset|bisque|resource)\b", lowered)
+            and "search_bisque_resources" in available
+        ):
             actions.append(
                 ToolProgramAction(
                     tool_name="search_bisque_resources",
@@ -10614,8 +12295,10 @@ class AgnoChatRuntime:
                     args={"resource_type": "dataset", "limit": 10},
                 )
             )
-        if handles.get("prediction_json_paths") and "quantify_objects" in available and (
-            quantitative_request or report_like_request or object_pattern_request
+        if (
+            handles.get("prediction_json_paths")
+            and "quantify_objects" in available
+            and (quantitative_request or report_like_request or object_pattern_request)
         ):
             actions.append(
                 ToolProgramAction(
@@ -10631,14 +12314,18 @@ class AgnoChatRuntime:
             if "segment_image_sam3" in available
             else ""
         )
-        if depth_map_paths and segmentation_tool_name and (
-            self._is_segmentation_request(latest_user_text)
-            or (
-                self._is_depth_request(latest_user_text)
-                and (
-                    quantitative_request
-                    or report_like_request
-                    or self._has_follow_up_reference(latest_user_text)
+        if (
+            depth_map_paths
+            and segmentation_tool_name
+            and (
+                self._is_segmentation_request(latest_user_text)
+                or (
+                    self._is_depth_request(latest_user_text)
+                    and (
+                        quantitative_request
+                        or report_like_request
+                        or self._has_follow_up_reference(latest_user_text)
+                    )
                 )
             )
         ):
@@ -10646,11 +12333,15 @@ class AgnoChatRuntime:
                 ToolProgramAction(
                     tool_name=segmentation_tool_name,
                     purpose="Segment object-like structures on the derived depth map so the depth output can be measured quantitatively.",
-                    args={"depth_map_paths": depth_map_paths[: self.RESEARCH_PROGRAM_IMAGE_BATCH_SIZE]},
+                    args={
+                        "depth_map_paths": depth_map_paths[: self.RESEARCH_PROGRAM_IMAGE_BATCH_SIZE]
+                    },
                 )
             )
-        if mask_paths and "quantify_segmentation_masks" in available and (
-            quantitative_request or report_like_request
+        if (
+            mask_paths
+            and "quantify_segmentation_masks" in available
+            and (quantitative_request or report_like_request)
         ):
             actions.append(
                 ToolProgramAction(
@@ -10659,12 +12350,16 @@ class AgnoChatRuntime:
                     args={"mask_paths": mask_paths[:8]},
                 )
             )
-        if image_files and "yolo_detect" in available and (
-            object_pattern_request
-            or (
-                report_like_request
-                and quantitative_request
-                and (not plot_request or plot_prefers_detection_artifacts)
+        if (
+            image_files
+            and "yolo_detect" in available
+            and (
+                object_pattern_request
+                or (
+                    report_like_request
+                    and quantitative_request
+                    and (not plot_request or plot_prefers_detection_artifacts)
+                )
             )
         ):
             actions.append(
@@ -10731,8 +12426,16 @@ class AgnoChatRuntime:
             and plot_request
             and plot_prefers_detection_artifacts
         ):
-            prediction_json_path = str(handles.get("prediction_json_paths", [])[-1] or "").strip() if handles.get("prediction_json_paths") else ""
-            analysis_table_path = str(handles.get("analysis_table_paths", [])[-1] or "").strip() if handles.get("analysis_table_paths") else ""
+            prediction_json_path = (
+                str(handles.get("prediction_json_paths", [])[-1] or "").strip()
+                if handles.get("prediction_json_paths")
+                else ""
+            )
+            analysis_table_path = (
+                str(handles.get("analysis_table_paths", [])[-1] or "").strip()
+                if handles.get("analysis_table_paths")
+                else ""
+            )
             inputs: list[dict[str, Any]] = []
             if prediction_json_path:
                 inputs.append(
@@ -10813,7 +12516,13 @@ class AgnoChatRuntime:
                                 "plots/intensity_distribution.png",
                                 "plots/image_comparison.png",
                             ],
-                            "preferred_libraries": ["matplotlib", "seaborn", "numpy", "pillow", "scikit-image"],
+                            "preferred_libraries": [
+                                "matplotlib",
+                                "seaborn",
+                                "numpy",
+                                "pillow",
+                                "scikit-image",
+                            ],
                         },
                     },
                 )
@@ -10844,12 +12553,15 @@ class AgnoChatRuntime:
                 )
             )
         return ToolProgramIterationPlan(
-            objective=str(latest_user_text or "").strip() or "Carry out the requested scientific analysis.",
+            objective=str(latest_user_text or "").strip()
+            or "Carry out the requested scientific analysis.",
             reasoning_summary="Fallback planning path selected because structured planning was unavailable.",
             actions=actions[:3],
             ready_to_answer=False if actions else True,
             answer_outline=[],
-            remaining_questions=[] if actions else ["No safe next action could be planned from the available evidence."],
+            remaining_questions=[]
+            if actions
+            else ["No safe next action could be planned from the available evidence."],
         )
 
     def _next_research_program_image_batch(
@@ -10966,7 +12678,9 @@ class AgnoChatRuntime:
             if isinstance(raw_paths, (str, os.PathLike)):
                 file_paths = [str(raw_paths).strip()]
             elif isinstance(raw_paths, (list, tuple, set)):
-                file_paths = [str(item or "").strip() for item in raw_paths if str(item or "").strip()]
+                file_paths = [
+                    str(item or "").strip() for item in raw_paths if str(item or "").strip()
+                ]
             else:
                 file_paths = []
             prioritized_uploaded = [
@@ -10993,9 +12707,8 @@ class AgnoChatRuntime:
             if not file_paths:
                 return None
             args["file_paths"] = file_paths[: self.RESEARCH_PROGRAM_IMAGE_BATCH_SIZE]
-            if (
-                not str(args.get("model_name") or "").strip()
-                and re.search(r"\b(prairie dog|burrow)\b", str(latest_user_text or "").lower())
+            if not str(args.get("model_name") or "").strip() and re.search(
+                r"\b(prairie dog|burrow)\b", str(latest_user_text or "").lower()
             ):
                 args["model_name"] = "yolov5_rarespot"
         elif tool_name == "quantify_objects":
@@ -11051,7 +12764,9 @@ class AgnoChatRuntime:
                 if image_context_path:
                     args["source_image_path"] = image_context_path
             if "confidence_threshold" not in args:
-                args["confidence_threshold"] = self._requested_confidence_threshold(latest_user_text)
+                args["confidence_threshold"] = self._requested_confidence_threshold(
+                    latest_user_text
+                )
         elif tool_name == "execute_python_job":
             job_id = str(args.get("job_id") or "").strip()
             if not job_id:
@@ -11129,7 +12844,9 @@ class AgnoChatRuntime:
                         analysis_table_path = next(
                             (
                                 str(item or "").strip()
-                                for item in reversed(list(handles.get("analysis_table_paths") or []))
+                                for item in reversed(
+                                    list(handles.get("analysis_table_paths") or [])
+                                )
                                 if str(item or "").strip()
                             ),
                             "",
@@ -11171,7 +12888,9 @@ class AgnoChatRuntime:
                             args["inputs"] = prepared_inputs
                         else:
                             return None
-        return ToolProgramAction(tool_name=tool_name, purpose=str(action.purpose or "").strip(), args=args)
+        return ToolProgramAction(
+            tool_name=tool_name, purpose=str(action.purpose or "").strip(), args=args
+        )
 
     def _stabilize_research_program_iteration_actions(
         self,
@@ -11181,7 +12900,9 @@ class AgnoChatRuntime:
         handles: dict[str, list[str]] | None,
         latest_user_text: str,
     ) -> list[ToolProgramAction]:
-        normalized_actions = [action for action in list(actions or []) if isinstance(action, ToolProgramAction)]
+        normalized_actions = [
+            action for action in list(actions or []) if isinstance(action, ToolProgramAction)
+        ]
         if not normalized_actions:
             return []
         tool_names = [str(action.tool_name or "").strip() for action in normalized_actions]
@@ -11190,7 +12911,11 @@ class AgnoChatRuntime:
             for path in list((session_state or {}).get("current_uploaded_files") or [])
             if str(path or "").strip()
         )
-        if current_uploaded_present and "yolo_detect" in tool_names and "quantify_objects" in tool_names:
+        if (
+            current_uploaded_present
+            and "yolo_detect" in tool_names
+            and "quantify_objects" in tool_names
+        ):
             return [
                 action
                 for action in normalized_actions
@@ -11233,6 +12958,7 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> Any:
         compression_stats: dict[str, Any] = {}
+
         def _build_tool_program_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
@@ -11275,9 +13001,12 @@ class AgnoChatRuntime:
                 reasoning_max_steps=8 if use_reasoning_agent else None,
                 debug_mode=bool(debug),
             )
+
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
-            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
         )
         try:
             if self._uses_published_pro_mode_api():
@@ -11350,11 +13079,26 @@ class AgnoChatRuntime:
         return [
             {"field": "Make", "meaning": "manufacturer label recorded by the file"},
             {"field": "Model", "meaning": "device or camera model label recorded by the file"},
-            {"field": "Software", "meaning": "software or firmware label that last wrote the metadata"},
-            {"field": "DateTimeOriginal", "meaning": "original capture timestamp when the file provides it"},
-            {"field": "DateTime", "meaning": "file timestamp written by the device or software; it may differ from capture time"},
-            {"field": "latitude/longitude", "meaning": "embedded GPS coordinates if the file contains geotags"},
-            {"field": "altitude_m", "meaning": "embedded altitude value from the file metadata when available"},
+            {
+                "field": "Software",
+                "meaning": "software or firmware label that last wrote the metadata",
+            },
+            {
+                "field": "DateTimeOriginal",
+                "meaning": "original capture timestamp when the file provides it",
+            },
+            {
+                "field": "DateTime",
+                "meaning": "file timestamp written by the device or software; it may differ from capture time",
+            },
+            {
+                "field": "latitude/longitude",
+                "meaning": "embedded GPS coordinates if the file contains geotags",
+            },
+            {
+                "field": "altitude_m",
+                "meaning": "embedded altitude value from the file metadata when available",
+            },
         ]
 
     @staticmethod
@@ -11402,8 +13146,12 @@ class AgnoChatRuntime:
         enrichment: dict[str, Any] = {
             "decimal_coordinates": f"{float(latitude):.8f}, {float(longitude):.8f}",
             "dms_coordinates": {
-                "latitude": self._decimal_to_dms(float(latitude), positive_label="N", negative_label="S"),
-                "longitude": self._decimal_to_dms(float(longitude), positive_label="E", negative_label="W"),
+                "latitude": self._decimal_to_dms(
+                    float(latitude), positive_label="N", negative_label="S"
+                ),
+                "longitude": self._decimal_to_dms(
+                    float(longitude), positive_label="E", negative_label="W"
+                ),
             },
         }
         altitude = geo.get("altitude_m")
@@ -11437,7 +13185,9 @@ class AgnoChatRuntime:
                 image_summary = summary
             elif tool_name == "load_bisque_resource":
                 resource_summary = summary
-        if not self._metadata_summary_has_content(image_summary) and not self._metadata_summary_has_content(resource_summary):
+        if not self._metadata_summary_has_content(
+            image_summary
+        ) and not self._metadata_summary_has_content(resource_summary):
             return None
         image_file_path = str((image_summary or {}).get("file_path") or "").strip()
         display_name = self._display_artifact_name(image_file_path) if image_file_path else ""
@@ -11463,7 +13213,8 @@ class AgnoChatRuntime:
             return True
         if self._is_report_like_request(latest_user_text):
             return any(
-                str(invocation.get("tool") or "").strip() in {"bioio_load_image", "load_bisque_resource"}
+                str(invocation.get("tool") or "").strip()
+                in {"bioio_load_image", "load_bisque_resource"}
                 for invocation in list(tool_invocations or [])
             )
         return False
@@ -11485,7 +13236,9 @@ class AgnoChatRuntime:
         if evidence_packet is None:
             return fallback
         image_metadata = (
-            evidence_packet.get("image_metadata") if isinstance(evidence_packet.get("image_metadata"), dict) else {}
+            evidence_packet.get("image_metadata")
+            if isinstance(evidence_packet.get("image_metadata"), dict)
+            else {}
         )
         geo = image_metadata.get("geo") if isinstance(image_metadata.get("geo"), dict) else {}
         if isinstance(geo, dict) and geo:
@@ -11532,17 +13285,15 @@ class AgnoChatRuntime:
         evidence_summaries: list[str],
     ) -> ToolProgramReportPacket:
         response_text = str(synthesis.response_text or "").strip()
-        paragraphs = [part.strip() for part in response_text.split("\n\n") if str(part or "").strip()]
+        paragraphs = [
+            part.strip() for part in response_text.split("\n\n") if str(part or "").strip()
+        ]
         lead = paragraphs[0] if paragraphs else response_text
         measured_findings = [
-            item
-            for item in list(synthesis.evidence_basis or [])
-            if str(item or "").strip()
+            item for item in list(synthesis.evidence_basis or []) if str(item or "").strip()
         ]
         limitations = [
-            item
-            for item in list(synthesis.unresolved_points or [])
-            if str(item or "").strip()
+            item for item in list(synthesis.unresolved_points or []) if str(item or "").strip()
         ]
         if not measured_findings:
             measured_findings = [
@@ -11575,6 +13326,7 @@ class AgnoChatRuntime:
         debug: bool | None,
     ) -> str:
         compression_stats: dict[str, Any] = {}
+
         def _build_report_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
@@ -11625,6 +13377,7 @@ class AgnoChatRuntime:
                 reasoning_max_steps=10,
                 debug_mode=bool(debug),
             )
+
         prompt = "\n".join(
             [
                 "Write the final scientist-facing report from the structured evidence below.",
@@ -11636,7 +13389,7 @@ class AgnoChatRuntime:
                 f"User request: {latest_user_text}",
                 "",
                 "Structured report packet:",
-                json.dumps(report_packet.model_dump(mode='json'), ensure_ascii=False, indent=2),
+                json.dumps(report_packet.model_dump(mode="json"), ensure_ascii=False, indent=2),
                 "",
                 "Compressed evidence summaries:",
                 json.dumps(list(evidence_summaries or [])[-12:], ensure_ascii=False, indent=2),
@@ -11647,7 +13400,9 @@ class AgnoChatRuntime:
         )
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
-            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
         )
         try:
             result, model_route = await asyncio.wait_for(
@@ -11700,7 +13455,10 @@ class AgnoChatRuntime:
         proof_writer_instructions: list[str] = []
         report_writer_instructions: list[str] = []
         math_writer_instructions: list[str] = []
-        if execution_regime == "proof_workflow" or str(task_regime or "").strip().lower() == "rigorous_proof":
+        if (
+            execution_regime == "proof_workflow"
+            or str(task_regime or "").strip().lower() == "rigorous_proof"
+        ):
             proof_writer_instructions = [
                 "For proofs, organize the answer pedagogically: verdict or current status first, then the main reduction, then the load-bearing steps, then the endgame or remaining gap.",
                 "Make dependency order explicit, and do not skip from a local lemma to the final theorem without naming the bridge.",
@@ -11723,6 +13481,7 @@ class AgnoChatRuntime:
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
         compression_stats: dict[str, Any] = {}
+
         def _build_final_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
             compression_manager = CompressionManager(
                 model=model_builder(
@@ -11790,6 +13549,7 @@ class AgnoChatRuntime:
                 reasoning_max_steps=8,
                 debug_mode=bool(debug),
             )
+
         prompt = "\n".join(
             [
                 "Rewrite the grounded draft below into the final user-facing Pro Mode answer.",
@@ -11799,7 +13559,8 @@ class AgnoChatRuntime:
                     [
                         "For proof answers, make the structure teachable: identify the main reduction, the crucial intermediate obligations, and the closing bridge."
                     ]
-                    if execution_regime == "proof_workflow" or str(task_regime or "").strip().lower() == "rigorous_proof"
+                    if execution_regime == "proof_workflow"
+                    or str(task_regime or "").strip().lower() == "rigorous_proof"
                     else []
                 ),
                 *(
@@ -11858,7 +13619,9 @@ class AgnoChatRuntime:
         )
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
-            active_model=str(self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model),
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
         )
         try:
             result, model_route = await asyncio.wait_for(
@@ -11925,9 +13688,7 @@ class AgnoChatRuntime:
         request_bisque_auth: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         normalized_actions = [
-            action
-            for action in list(actions or [])
-            if str(action.tool_name or "").strip()
+            action for action in list(actions or []) if str(action.tool_name or "").strip()
         ]
         if not normalized_actions:
             return []
@@ -11947,7 +13708,9 @@ class AgnoChatRuntime:
                     "payload": {"tool": tool_name, "args": args},
                 },
             )
-            context_token = set_request_bisque_auth(request_bisque_auth) if request_bisque_auth else None
+            context_token = (
+                set_request_bisque_auth(request_bisque_auth) if request_bisque_auth else None
+            )
             try:
                 raw_output = await asyncio.to_thread(
                     execute_tool_call,
@@ -11964,12 +13727,17 @@ class AgnoChatRuntime:
                     "args": args,
                     "purpose": action.purpose,
                     "output_envelope": parsed_output if isinstance(parsed_output, dict) else {},
-                    "output_summary": self._summarize_tool_output(tool_name, parsed_output, raw_text),
+                    "output_summary": self._summarize_tool_output(
+                        tool_name, parsed_output, raw_text
+                    ),
                     "output_preview": raw_text[:4000],
                 }
                 event_status = "completed"
                 event_message = f"{tool_name} completed for the {phase_label}."
-                event_payload: dict[str, Any] = {"tool": tool_name, "summary": invocation["output_summary"]}
+                event_payload: dict[str, Any] = {
+                    "tool": tool_name,
+                    "summary": invocation["output_summary"],
+                }
             except Exception as exc:
                 invocation = {
                     "tool": tool_name,
@@ -11977,7 +13745,10 @@ class AgnoChatRuntime:
                     "args": args,
                     "purpose": action.purpose,
                     "output_envelope": {},
-                    "output_summary": {"success": False, "error": str(exc or exc.__class__.__name__)},
+                    "output_summary": {
+                        "success": False,
+                        "error": str(exc or exc.__class__.__name__),
+                    },
                     "output_preview": str(exc or exc.__class__.__name__),
                 }
                 event_status = "failed"
@@ -12011,7 +13782,8 @@ class AgnoChatRuntime:
         event_callback: Callable[[dict[str, Any]], None] | None,
     ) -> list[dict[str, Any]]:
         family_actions = [
-            action for action in list(actions or [])
+            action
+            for action in list(actions or [])
             if self._research_program_tool_family(action.tool_name) == family
         ]
         return await self._execute_tool_program_actions(
@@ -12125,7 +13897,8 @@ class AgnoChatRuntime:
             needs_new_uploaded_artifact_measurement = bool(
                 int(state.get("iteration") or 0) == 1
                 and list(handles.get("image_files") or [])
-                and "vision" in {
+                and "vision"
+                in {
                     str(item or "").strip()
                     for item in list(requirements.get("required_families") or [])
                     if str(item or "").strip()
@@ -12137,7 +13910,10 @@ class AgnoChatRuntime:
                     needs_new_uploaded_artifact_measurement
                     or not list(state.get("evidence_summaries") or [])
                 )
-                and any(bool(list(handles.get(key) or [])) for key in ("dataset_uris", "resource_uris", "image_files", "downloaded_files"))
+                and any(
+                    bool(list(handles.get(key) or []))
+                    for key in ("dataset_uris", "resource_uris", "image_files", "downloaded_files")
+                )
                 and not self._research_program_has_enough_evidence(
                     evidence_summaries=(
                         list(state.get("evidence_summaries") or [])
@@ -12162,11 +13938,15 @@ class AgnoChatRuntime:
                     conversation_id=conversation_id,
                     run_id=run_id,
                     user_id=user_id,
-                    reasoning_mode="deep" if str(reasoning_mode or "deep").strip().lower() != "fast" else "auto",
+                    reasoning_mode="deep"
+                    if str(reasoning_mode or "deep").strip().lower() != "fast"
+                    else "auto",
                     max_runtime_seconds=step_cap,
                     debug=debug,
                 )
-                phase_timings[f"research_program_plan_{state['iteration']}"] = round(time.monotonic() - started, 3)
+                phase_timings[f"research_program_plan_{state['iteration']}"] = round(
+                    time.monotonic() - started, 3
+                )
             sanitized_actions: list[ToolProgramAction] = []
             for action in list(plan.actions or []):
                 normalized_action = self._normalize_research_program_action(
@@ -12214,7 +13994,9 @@ class AgnoChatRuntime:
         def _family_step(family: str) -> Step:
             async def _executor(step_input: StepInput) -> StepOutput:
                 state = state_from_input(step_input)
-                plan = ToolProgramIterationPlan.model_validate(dict(state.get("current_plan") or {}))
+                plan = ToolProgramIterationPlan.model_validate(
+                    dict(state.get("current_plan") or {})
+                )
                 started = time.monotonic()
                 results = await self._execute_research_program_actions(
                     family=family,
@@ -12248,7 +14030,9 @@ class AgnoChatRuntime:
                 output_summary = invocation.get("output_summary")
                 if not isinstance(output_summary, dict) or not output_summary.get("success", True):
                     continue
-                family = self._research_program_tool_family(str(invocation.get("tool") or "").strip())
+                family = self._research_program_tool_family(
+                    str(invocation.get("tool") or "").strip()
+                )
                 if family not in executed_families:
                     executed_families.append(family)
                 tool_name = str(invocation.get("tool") or "").strip()
@@ -12320,7 +14104,11 @@ class AgnoChatRuntime:
             done = bool(enough_evidence and int(state.get("iteration") or 0) >= 1)
             if not done:
                 done = bool(plan.ready_to_answer and (enough_evidence or new_result_count > 0))
-            if not done and new_result_count == 0 and (enough_evidence or int(state.get("iteration") or 0) >= 2):
+            if (
+                not done
+                and new_result_count == 0
+                and (enough_evidence or int(state.get("iteration") or 0) >= 2)
+            ):
                 done = True
             state["program_done"] = done
             return StepOutput(
@@ -12357,26 +14145,49 @@ class AgnoChatRuntime:
             detection_summary = (summaries_by_tool.get("yolo_detect") or [None])[-1]
             quant_summary = (summaries_by_tool.get("quantify_objects") or [None])[-1]
             code_summary = (summaries_by_tool.get("execute_python_job") or [None])[-1]
-            if not any((dataset_summary, hdf5_summary, metadata_summary, image_summary, detection_summary, quant_summary, code_summary)):
+            if not any(
+                (
+                    dataset_summary,
+                    hdf5_summary,
+                    metadata_summary,
+                    image_summary,
+                    detection_summary,
+                    quant_summary,
+                    code_summary,
+                )
+            ):
                 return None
 
             lowered = str(latest_user_text or "").strip().lower()
             report_like = self._is_report_like_request(latest_user_text) or bool(
                 re.search(r"\b(summary|analysis|ecological|summarize|compare)\b", lowered)
             )
-            introspection_request = self._is_structured_artifact_introspection_request(latest_user_text)
+            introspection_request = self._is_structured_artifact_introspection_request(
+                latest_user_text
+            )
             uploaded_names = self._image_like_uploaded_names(uploaded_files)
             response_parts: list[str] = []
             evidence_basis: list[str] = []
             unresolved_points: list[str] = []
 
             if isinstance(hdf5_summary, dict) and hdf5_summary.get("success", True):
-                root_keys = [str(item) for item in list(hdf5_summary.get("root_keys") or []) if str(item).strip()]
-                file_label = str(hdf5_summary.get("file_name") or Path(str(hdf5_summary.get("file_path") or "")).name).strip()
+                root_keys = [
+                    str(item)
+                    for item in list(hdf5_summary.get("root_keys") or [])
+                    if str(item).strip()
+                ]
+                file_label = str(
+                    hdf5_summary.get("file_name")
+                    or Path(str(hdf5_summary.get("file_path") or "")).name
+                ).strip()
                 group_count = hdf5_summary.get("group_count")
                 dataset_count = hdf5_summary.get("dataset_count")
                 default_dataset_path = str(hdf5_summary.get("default_dataset_path") or "").strip()
-                key_line = ", ".join(f"`{key}`" for key in root_keys) if root_keys else "no top-level keys were exposed"
+                key_line = (
+                    ", ".join(f"`{key}`" for key in root_keys)
+                    if root_keys
+                    else "no top-level keys were exposed"
+                )
                 response_parts.append(
                     f"The HDF5 file{f' `{file_label}`' if file_label else ''} has the following top-level keys: {key_line}."
                 )
@@ -12388,7 +14199,11 @@ class AgnoChatRuntime:
                 if default_dataset_path:
                     detail_bits.append(f"default dataset `{default_dataset_path}`")
                 if detail_bits:
-                    response_parts.append("The deterministic HDF5 inspection also found " + ", ".join(detail_bits) + ".")
+                    response_parts.append(
+                        "The deterministic HDF5 inspection also found "
+                        + ", ".join(detail_bits)
+                        + "."
+                    )
                 evidence_basis.append("deterministic HDF5 structure inspection")
                 if introspection_request and not report_like:
                     return ToolProgramSynthesis(
@@ -12414,7 +14229,9 @@ class AgnoChatRuntime:
                 if total_members is not None:
                     dataset_bits.append(f"the dataset contains {int(total_members)} members")
                 if downloaded is not None:
-                    dataset_bits.append(f"{int(downloaded)} files were downloaded for deterministic analysis")
+                    dataset_bits.append(
+                        f"{int(downloaded)} files were downloaded for deterministic analysis"
+                    )
                 evidence_basis.append("dataset download metadata")
             if isinstance(metadata_summary, dict):
                 tag_count = metadata_summary.get("tag_count")
@@ -12450,7 +14267,9 @@ class AgnoChatRuntime:
                                 text += f" (median {float(median_area):.1f} px^2)"
                             quant_bits.append(text)
                 if quant_bits:
-                    response_parts.append("Object-level measurements show that " + ", and ".join(quant_bits) + ".")
+                    response_parts.append(
+                        "Object-level measurements show that " + ", and ".join(quant_bits) + "."
+                    )
                     evidence_basis.append("object quantification")
             elif isinstance(detection_summary, dict):
                 detect_bits: list[str] = []
@@ -12467,7 +14286,9 @@ class AgnoChatRuntime:
                     if rendered_counts:
                         detect_bits.append(f"class counts were {rendered_counts}")
                 if detect_bits:
-                    response_parts.append("The detector reported that " + ", and ".join(detect_bits) + ".")
+                    response_parts.append(
+                        "The detector reported that " + ", and ".join(detect_bits) + "."
+                    )
                     evidence_basis.append("object detection")
 
             image_bits: list[str] = []
@@ -12500,7 +14321,9 @@ class AgnoChatRuntime:
                     in uploaded_names
                 ]
                 if current_records:
-                    current_box_total = sum(int(record.get("box_count") or 0) for record in current_records)
+                    current_box_total = sum(
+                        int(record.get("box_count") or 0) for record in current_records
+                    )
                     aggregate_counts: dict[str, int] = {}
                     for record in current_records:
                         class_counts = record.get("class_counts")
@@ -12510,7 +14333,9 @@ class AgnoChatRuntime:
                             label = str(key or "").strip()
                             if not label:
                                 continue
-                            aggregate_counts[label] = aggregate_counts.get(label, 0) + int(value or 0)
+                            aggregate_counts[label] = aggregate_counts.get(label, 0) + int(
+                                value or 0
+                            )
                     width = next(
                         (
                             int(record.get("image_width"))
@@ -12532,8 +14357,7 @@ class AgnoChatRuntime:
                     )
                     if aggregate_counts:
                         rendered_counts = ", ".join(
-                            f"{key}: {value}"
-                            for key, value in list(aggregate_counts.items())[:6]
+                            f"{key}: {value}" for key, value in list(aggregate_counts.items())[:6]
                         )
                         current_image_bits.append(f"with class counts {rendered_counts}")
                     if width is not None and height is not None:
@@ -12543,7 +14367,9 @@ class AgnoChatRuntime:
                 response_parts.append("For the new image, " + ", and ".join(image_bits) + ".")
             if current_image_bits:
                 response_parts.append(
-                    "For the attached image specifically, " + ", and ".join(current_image_bits) + "."
+                    "For the attached image specifically, "
+                    + ", and ".join(current_image_bits)
+                    + "."
                 )
 
             if report_like:
@@ -12560,7 +14386,9 @@ class AgnoChatRuntime:
                                 prairie_count = overall.get("prairie_dog_count")
                                 burrow_count = overall.get("burrow_count")
                                 spacing = overall.get("nearest_burrow_distance_px_mean")
-                                if isinstance(prairie_count, (int, float)) and isinstance(burrow_count, (int, float)):
+                                if isinstance(prairie_count, (int, float)) and isinstance(
+                                    burrow_count, (int, float)
+                                ):
                                     ecology_bits.append(
                                         f"the measured baseline includes {int(prairie_count)} prairie-dog detections and {int(burrow_count)} burrow detections"
                                     )
@@ -12577,7 +14405,9 @@ class AgnoChatRuntime:
                         "the dataset context provides a measured baseline for comparing the newly acquired aerial frame"
                     )
                 if ecology_bits:
-                    response_parts.append("Ecological interpretation: " + ", and ".join(ecology_bits) + ".")
+                    response_parts.append(
+                        "Ecological interpretation: " + ", and ".join(ecology_bits) + "."
+                    )
                 limitation_bits: list[str] = []
                 if not isinstance(quant_summary, dict):
                     limitation_bits.append(
@@ -12622,12 +14452,17 @@ class AgnoChatRuntime:
             evidence_summaries = list(state.get("evidence_summaries") or [])
             handles = dict(state.get("handles") or {})
             report_like = self._is_report_like_request(latest_user_text) or bool(
-                re.search(r"\b(summary|analysis|ecological|summarize|compare)\b", str(latest_user_text or "").strip().lower())
+                re.search(
+                    r"\b(summary|analysis|ecological|summarize|compare)\b",
+                    str(latest_user_text or "").strip().lower(),
+                )
             )
             prompt = "\n".join(
                 [
                     "Write the final user-facing scientific answer from the measured evidence only.",
                     "Lead with the answer, then explain the strongest evidence succinctly.",
+                    "Write like a frontier research assistant: open with a crisp bottom line, then use short paragraphs for interpretation, comparison, and implications.",
+                    "Do not turn the answer into a repetitive checklist of measurements or caveats; synthesize what matters most.",
                     "Do not invent coordinates, acquisition metadata, species presence, or counts that were not measured.",
                     "If the evidence is partial, say exactly what was and was not established.",
                     "Use polished, scientist-facing prose.",
@@ -12646,7 +14481,9 @@ class AgnoChatRuntime:
                     "I gathered some evidence, but not enough grounded measurements to write a reliable final answer."
                 ),
                 evidence_basis=evidence_summaries[-5:],
-                unresolved_points=["More deterministic evidence is needed before a stronger conclusion is justified."],
+                unresolved_points=[
+                    "More deterministic evidence is needed before a stronger conclusion is justified."
+                ],
                 confidence="low",
             )
             started = time.monotonic()
@@ -12687,6 +14524,7 @@ class AgnoChatRuntime:
                     [
                         "Convert the measured evidence into a structured scientific report packet.",
                         "Keep the packet domain-general: focus on measured findings, comparisons, interpretation, limitations, and next steps.",
+                        "Prioritize the strongest distinctions and decision-relevant findings so the final response can stay concise but informative.",
                         "Do not invent counts, coordinates, metadata, or unsupported claims.",
                         "If multiple uploaded images or artifacts were analyzed, comparisons should name the most important differences.",
                         "",
@@ -12696,10 +14534,14 @@ class AgnoChatRuntime:
                         str(synthesis.response_text or "").strip(),
                         "",
                         "Evidence basis:",
-                        json.dumps(list(synthesis.evidence_basis or []), ensure_ascii=False, indent=2),
+                        json.dumps(
+                            list(synthesis.evidence_basis or []), ensure_ascii=False, indent=2
+                        ),
                         "",
                         "Unresolved points:",
-                        json.dumps(list(synthesis.unresolved_points or []), ensure_ascii=False, indent=2),
+                        json.dumps(
+                            list(synthesis.unresolved_points or []), ensure_ascii=False, indent=2
+                        ),
                         "",
                         "Compressed evidence summaries:",
                         json.dumps(evidence_summaries[-20:], ensure_ascii=False, indent=2),
@@ -12754,7 +14596,10 @@ class AgnoChatRuntime:
                     "phase": "research_program",
                     "status": "completed",
                     "message": "Iterative scientific evidence program completed.",
-                    "payload": {"iterations": int(state.get("iteration") or 0), "tool_invocation_count": len(tool_invocations)},
+                    "payload": {
+                        "iterations": int(state.get("iteration") or 0),
+                        "tool_invocation_count": len(tool_invocations),
+                    },
                 },
             )
             return StepOutput(content=synthesis.model_dump(mode="json"))
@@ -12798,7 +14643,9 @@ class AgnoChatRuntime:
                 session_id=self._scope_session_id(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    run_id=f"{str(run_id or '').strip()}::research_program" if run_id else "research_program",
+                    run_id=f"{str(run_id or '').strip()}::research_program"
+                    if run_id
+                    else "research_program",
                 ),
             )
             content = dict(getattr(output, "content", {}) or {})
@@ -12940,7 +14787,9 @@ class AgnoChatRuntime:
             ],
         }
 
-    def _tool_invocations_from_run_output(self, run_output: RunOutput | None) -> list[dict[str, Any]]:
+    def _tool_invocations_from_run_output(
+        self, run_output: RunOutput | None
+    ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         if run_output is None:
             return records
@@ -13102,7 +14951,9 @@ class AgnoChatRuntime:
         if not visual_count and str(payload.get("visualization_path") or "").strip():
             visual_count = 1
         if not visual_count and isinstance(files_rows, list):
-            visual_count = sum(1 for row in files_rows if isinstance(row, dict) and row.get("visualization_saved"))
+            visual_count = sum(
+                1 for row in files_rows if isinstance(row, dict) and row.get("visualization_saved")
+            )
         if not visual_count and isinstance(payload.get("ui_artifacts"), list):
             visual_count = sum(
                 1
@@ -13133,7 +14984,9 @@ class AgnoChatRuntime:
                         f"Mean image coverage was about {float(coverage_value):.1f}%."
                     )
             if visual_count > 0:
-                response_parts.append("Overlay and mask preview artifacts are available for inspection.")
+                response_parts.append(
+                    "Overlay and mask preview artifacts are available for inspection."
+                )
             if compact_request:
                 response_parts.append(
                     "If you want, I can also extract a bounding box, measure the region, or upload the mask to BisQue."
@@ -13165,7 +15018,12 @@ class AgnoChatRuntime:
     ) -> str:
         for invocation in reversed(list(tool_invocations or [])):
             tool_name = str(invocation.get("tool") or "").strip()
-            if tool_name not in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}:
+            if tool_name not in {
+                "segment_image_megaseg",
+                "segment_image_sam2",
+                "segment_image_sam3",
+                "sam2_prompt_image",
+            }:
                 continue
             status = str(invocation.get("status") or "").strip().lower()
             if status and status not in {"completed", "success"}:
@@ -13212,7 +15070,9 @@ class AgnoChatRuntime:
             return False
         return cls._segmentation_response_looks_unpolished(normalized)
 
-    def _emit_event(self, callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
+    def _emit_event(
+        self, callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
+    ) -> None:
         if callable(callback):
             callback(payload)
 
@@ -13259,10 +15119,13 @@ class AgnoChatRuntime:
             latest_user_text=latest_user_text,
             tool_invocations=tool_invocations,
         )
-        if deterministic_segmentation_text and self._should_prefer_deterministic_segmentation_response(
-            latest_user_text=latest_user_text,
-            response_text=response_text,
-            tool_invocations=tool_invocations,
+        if (
+            deterministic_segmentation_text
+            and self._should_prefer_deterministic_segmentation_response(
+                latest_user_text=latest_user_text,
+                response_text=response_text,
+                tool_invocations=tool_invocations,
+            )
         ):
             response_text = deterministic_segmentation_text
             output_source = "segmentation_summary"
@@ -13316,7 +15179,11 @@ class AgnoChatRuntime:
         metadata: dict[str, Any] = {
             "runtime": "agno",
             "debug": self._runtime_debug(
-                path=("approval_resume" if hitl_resume else ("tool_agent" if tool_names else "text_completion")),
+                path=(
+                    "approval_resume"
+                    if hitl_resume
+                    else ("tool_agent" if tool_names else "text_completion")
+                ),
                 route=route,
                 tool_names=tool_names,
                 reasoning_mode=reasoning_mode,
@@ -13326,6 +15193,7 @@ class AgnoChatRuntime:
             "memory": memory_metadata,
             "knowledge": dict(knowledge_result),
             "learning": learning_result.metadata(),
+            "answer_summary": self._analysis_state_answer_summary(response_text),
         }
         if isinstance(debug_override, dict) and debug_override:
             metadata["debug"] = {
@@ -13346,6 +15214,24 @@ class AgnoChatRuntime:
                     )
                 else:
                     metadata[key] = value
+        existing_contract = (
+            metadata.get("contract") if isinstance(metadata.get("contract"), dict) else None
+        )
+        metadata["contract"] = (
+            self._coerce_research_presentation_contract_payload(
+                existing_contract,
+                fallback_result=response_text,
+            )
+            if existing_contract
+            else self._fallback_research_presentation_contract(
+                user_text=latest_user_text,
+                response_text=response_text,
+                metadata=metadata,
+                tool_invocations=metadata.get("tool_invocations")
+                if isinstance(metadata.get("tool_invocations"), list)
+                else [],
+            )
+        )
         metadata["debug"]["runtime_status"] = str(runtime_status or "completed")
         if runtime_error:
             metadata["debug"]["runtime_error"] = runtime_error
@@ -13357,7 +15243,9 @@ class AgnoChatRuntime:
                 workflow_hint=workflow_hint,
             )
         if hitl_resume is not None:
-            metadata["resume_decision"] = str(hitl_resume.get("decision") or "").strip().lower() or None
+            metadata["resume_decision"] = (
+                str(hitl_resume.get("decision") or "").strip().lower() or None
+            )
         return AgnoChatRuntimeResult(
             response_text=response_text,
             selected_domains=list(route.selected_domains or ["core"]),
@@ -13536,9 +15424,12 @@ class AgnoChatRuntime:
         resolved_memory_policy = self.memory_service.normalize_policy(memory_policy)
         resolved_knowledge_scope = self.knowledge_hub.normalize_scope(
             knowledge_scope,
-            default_project_id=str((knowledge_context or {}).get("project_id") or "").strip() or None,
+            default_project_id=str((knowledge_context or {}).get("project_id") or "").strip()
+            or None,
         )
-        pending_hitl = dict(hitl_resume.get("pending_hitl") or {}) if isinstance(hitl_resume, dict) else {}
+        pending_hitl = (
+            dict(hitl_resume.get("pending_hitl") or {}) if isinstance(hitl_resume, dict) else {}
+        )
         explicit_tool_names = self._normalize_selected_tool_names(
             selected_tool_names or pending_hitl.get("selected_tool_names")
         )
@@ -13569,7 +15460,9 @@ class AgnoChatRuntime:
             metadata: dict[str, Any] | None,
             task_regime_override: str | None = None,
         ) -> None:
-            resolved_task_regime = str(task_regime_override or "").strip() or self._task_regime_for_turn(
+            resolved_task_regime = str(
+                task_regime_override or ""
+            ).strip() or self._task_regime_for_turn(
                 user_text=latest_user_text,
                 uploaded_files=uploaded_files,
                 selection_context=effective_selection_context,
@@ -13588,9 +15481,13 @@ class AgnoChatRuntime:
             )
 
         if workflow_id == "pro_mode":
-            pro_mode_debug = bool(debug) and str(
-                self._setting(self.settings, "environment", "development") or "development"
-            ).strip().lower() != "production"
+            pro_mode_debug = (
+                bool(debug)
+                and str(self._setting(self.settings, "environment", "development") or "development")
+                .strip()
+                .lower()
+                != "production"
+            )
             prior_pro_mode_state = self._load_pro_mode_conversation_state(
                 conversation_id=conversation_id,
                 user_id=user_id,
@@ -13637,9 +15534,8 @@ class AgnoChatRuntime:
                     selection_context=effective_selection_context,
                     prior_pro_mode_state=prior_pro_mode_state,
                 )
-            if (
-                intake_decision.execution_regime == "autonomous_cycle"
-                and bool(dict(benchmark or {}).get("disable_autonomy_memory_knowledge"))
+            if intake_decision.execution_regime == "autonomous_cycle" and bool(
+                dict(benchmark or {}).get("disable_autonomy_memory_knowledge")
             ):
                 intake_decision.context_policy = intake_decision.context_policy.model_copy(
                     update={"load_memory": False, "load_knowledge": False}
@@ -13688,7 +15584,9 @@ class AgnoChatRuntime:
                         },
                     },
                 )
-            if intake_decision.route in {"deep_reasoning", "tool_workflow"} and context_policy.get("load_memory"):
+            if intake_decision.route in {"deep_reasoning", "tool_workflow"} and context_policy.get(
+                "load_memory"
+            ):
                 memory_context = self.memory_service.retrieve_context(
                     session_id=app_session_id,
                     user_id=user_id,
@@ -13712,7 +15610,9 @@ class AgnoChatRuntime:
                         **memory_context.metadata(),
                     },
                 )
-            if intake_decision.route in {"deep_reasoning", "tool_workflow"} and context_policy.get("load_knowledge"):
+            if intake_decision.route in {"deep_reasoning", "tool_workflow"} and context_policy.get(
+                "load_knowledge"
+            ):
                 knowledge_result = self.knowledge_hub.retrieve_context(
                     user_id=user_id,
                     session_id=app_session_id,
@@ -13743,6 +15643,9 @@ class AgnoChatRuntime:
             shared_context = self._pro_mode_shared_context_payload(
                 memory_context=memory_context,
                 knowledge_result=knowledge_result,
+                analysis_state=prior_analysis_state,
+                selection_context=effective_selection_context,
+                uploaded_files=uploaded_files,
             )
             if intake_decision.route == "direct_response":
                 self._emit_event(
@@ -13797,7 +15700,13 @@ class AgnoChatRuntime:
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
                         "active_roles": ["Front Door Triage", "Fast Dialogue"],
-                        "phase_order": ["intake", "context_policy", "execution_router", "fast_dialogue", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "fast_dialogue",
+                            "finalize",
+                        ],
                         "phase_timings": {},
                         "round_count": 0,
                         "discussion_round_count": 0,
@@ -13805,16 +15714,22 @@ class AgnoChatRuntime:
                         "convergence": {
                             "per_role_vote": {},
                             "central_blockers": [],
-                            "ready": bool(fast_dialogue_result.response_text) and fast_dialogue_completed,
-                            "consensus_level": "high" if fast_dialogue_completed and fast_dialogue_result.response_text else "low",
+                            "ready": bool(fast_dialogue_result.response_text)
+                            and fast_dialogue_completed,
+                            "consensus_level": "high"
+                            if fast_dialogue_completed and fast_dialogue_result.response_text
+                            else "low",
                         },
                         "role_stats": {},
                         "calculator": {"used": False, "call_count": 0, "results": []},
                         "verifier": {
-                            "passed": bool(fast_dialogue_result.response_text) and fast_dialogue_completed,
+                            "passed": bool(fast_dialogue_result.response_text)
+                            and fast_dialogue_completed,
                             "issues": [],
                             "suggested_changes": [],
-                            "confidence": "medium" if fast_dialogue_completed and fast_dialogue_result.response_text else "low",
+                            "confidence": "medium"
+                            if fast_dialogue_completed and fast_dialogue_result.response_text
+                            else "low",
                         },
                         "summary": (
                             "Answered directly through the dedicated Pro Mode reasoning model."
@@ -13846,14 +15761,59 @@ class AgnoChatRuntime:
                         }
                     )
                 response_text = str(fast_dialogue_result.response_text or "").strip()
+                writer_stats: dict[str, Any] = {}
+                polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
+                    latest_user_text=latest_user_text,
+                    draft_response_text=response_text,
+                    execution_regime="direct_response",
+                    task_regime=intake_decision.task_regime,
+                    supporting_points=[
+                        *[
+                            str(item or "").strip()
+                            for item in list(
+                                (shared_context or {}).get("analysis_brief_lines") or []
+                            )
+                            if str(item or "").strip()
+                        ],
+                        *[
+                            str(item or "").strip()
+                            for item in list((shared_context or {}).get("knowledge_messages") or [])
+                            if str(item or "").strip()
+                        ][:2],
+                    ],
+                    reservations=[],
+                    session_state={"pro_mode_context": dict(shared_context or {})},
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    max_runtime_seconds=min(effective_max_runtime_seconds, 45),
+                    debug=pro_mode_debug,
+                )
+                if polished_response_text:
+                    response_text = polished_response_text
+                pro_mode_metadata["writer"] = {
+                    "applied": bool(polished_response_text),
+                    "kind": "final_writer",
+                    "compression_stats": writer_stats,
+                }
+                pro_mode_metadata["model_call_count"] = 2 if polished_response_text else 1
+                final_metadata["pro_mode"] = pro_mode_metadata
+                if isinstance(final_metadata.get("debug"), dict):
+                    final_metadata["debug"]["model_call_count"] = pro_mode_metadata[
+                        "model_call_count"
+                    ]
+                final_metadata["contract"] = self._fallback_research_presentation_contract(
+                    user_text=latest_user_text,
+                    response_text=response_text,
+                    metadata=final_metadata,
+                    tool_invocations=[],
+                )
                 if response_text:
                     yield {"event": "token", "data": {"delta": response_text}}
                 _persist_turn_analysis_state(
                     metadata=final_metadata,
                     task_regime_override=str(
-                        pro_mode_metadata.get("task_regime")
-                        or intake_decision.task_regime
-                        or ""
+                        pro_mode_metadata.get("task_regime") or intake_decision.task_regime or ""
                     ),
                 )
                 yield {
@@ -13881,11 +15841,25 @@ class AgnoChatRuntime:
                         "phase": "tool_workflow",
                         "status": "started",
                         "message": "Delegating to the tool-enabled workflow.",
-                        "payload": {"selected_tool_names": list(intake_decision.selected_tool_names or [])},
+                        "payload": {
+                            "selected_tool_names": list(intake_decision.selected_tool_names or [])
+                        },
                     },
                 )
                 tool_result = await self._run_pro_mode_tool_workflow(
-                    messages=list(messages[-max(1, int(context_policy.get("history_window") or intake_decision.recent_history_turns or 1) * 2) :]),
+                    messages=list(
+                        messages[
+                            -max(
+                                1,
+                                int(
+                                    context_policy.get("history_window")
+                                    or intake_decision.recent_history_turns
+                                    or 1
+                                )
+                                * 2,
+                            ) :
+                        ]
+                    ),
                     latest_user_text=latest_user_text,
                     uploaded_files=uploaded_files,
                     max_tool_calls=max_tool_calls,
@@ -13919,26 +15893,49 @@ class AgnoChatRuntime:
                         },
                     },
                 )
-                research_program_meta = dict(tool_result.get("metadata", {}).get("research_program") or {})
+                research_program_meta = dict(
+                    tool_result.get("metadata", {}).get("research_program") or {}
+                )
                 used_research_program = bool(research_program_meta)
                 pro_mode_metadata = {
-                    "execution_path": "research_program" if used_research_program else "tool_workflow",
+                    "execution_path": "research_program"
+                    if used_research_program
+                    else "tool_workflow",
                     "route": intake_decision.route,
                     "execution_regime": (
-                        "iterative_research" if used_research_program else intake_decision.execution_regime
+                        "iterative_research"
+                        if used_research_program
+                        else intake_decision.execution_regime
                     ),
                     "task_regime": intake_decision.task_regime,
                     "context_policy": context_policy,
                     "intake": intake_decision.model_dump(mode="json"),
                     "active_roles": (
-                        ["Front Door Triage", "Research Program Planner", "Research Program Synthesizer"]
+                        [
+                            "Front Door Triage",
+                            "Research Program Planner",
+                            "Research Program Synthesizer",
+                        ]
                         if used_research_program
                         else ["Front Door Triage", "Tool Workflow"]
                     ),
                     "phase_order": (
-                        ["intake", "context_policy", "execution_router", "research_program", "tool_workflow", "finalize"]
+                        [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "research_program",
+                            "tool_workflow",
+                            "finalize",
+                        ]
                         if used_research_program
-                        else ["intake", "context_policy", "execution_router", "tool_workflow", "finalize"]
+                        else [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "tool_workflow",
+                            "finalize",
+                        ]
                     ),
                     "phase_timings": dict(research_program_meta.get("phase_timings") or {}),
                     "round_count": 0,
@@ -13973,11 +15970,17 @@ class AgnoChatRuntime:
                 if used_research_program:
                     pro_mode_metadata["research_program"] = {
                         "iterations": int(research_program_meta.get("iterations") or 0),
-                        "evidence_summaries": list(research_program_meta.get("evidence_summaries") or []),
+                        "evidence_summaries": list(
+                            research_program_meta.get("evidence_summaries") or []
+                        ),
                         "handles": dict(research_program_meta.get("handles") or {}),
                         "requirements": dict(research_program_meta.get("requirements") or {}),
-                        "executed_families": list(research_program_meta.get("executed_families") or []),
-                        "compression_stats": dict(research_program_meta.get("compression_stats") or {}),
+                        "executed_families": list(
+                            research_program_meta.get("executed_families") or []
+                        ),
+                        "compression_stats": dict(
+                            research_program_meta.get("compression_stats") or {}
+                        ),
                     }
                 if pro_mode_debug:
                     pro_mode_metadata["dev_conversation"] = {
@@ -13987,10 +15990,14 @@ class AgnoChatRuntime:
                         "tool_selected": list(tool_result.get("selected_tool_names") or []),
                         "attempted_tool_sets": list(tool_result.get("attempted_tool_sets") or []),
                         "tool_invocations": list(tool_result.get("tool_invocations") or []),
-                        "evidence_summaries": list(research_program_meta.get("evidence_summaries") or []),
+                        "evidence_summaries": list(
+                            research_program_meta.get("evidence_summaries") or []
+                        ),
                         "handles": dict(research_program_meta.get("handles") or {}),
                         "requirements": dict(research_program_meta.get("requirements") or {}),
-                        "compression_stats": dict(research_program_meta.get("compression_stats") or {}),
+                        "compression_stats": dict(
+                            research_program_meta.get("compression_stats") or {}
+                        ),
                         "markdown": (
                             "## Pro Mode Internal Conversation\n\n"
                             f"### {'Research Program' if used_research_program else 'Tool Workflow'}\n"
@@ -14022,7 +16029,9 @@ class AgnoChatRuntime:
                         session_state={
                             "pro_mode_context": dict(shared_context or {}),
                             "research_program": {
-                                "requirements": dict(research_program_meta.get("requirements") or {}),
+                                "requirements": dict(
+                                    research_program_meta.get("requirements") or {}
+                                ),
                                 "handles": dict(research_program_meta.get("handles") or {}),
                             },
                         },
@@ -14032,7 +16041,10 @@ class AgnoChatRuntime:
                         max_runtime_seconds=min(effective_max_runtime_seconds, 60),
                         debug=pro_mode_debug,
                     )
-                    if metadata_summary_requested and str(metadata_specialist.direct_answer or "").strip():
+                    if (
+                        metadata_summary_requested
+                        and str(metadata_specialist.direct_answer or "").strip()
+                    ):
                         response_text = str(metadata_specialist.direct_answer or "").strip()
                 if response_text:
                     supporting_points = [
@@ -14061,10 +16073,14 @@ class AgnoChatRuntime:
                         ]
                     )
                     reservations = []
-                    missing_families = list((research_program_meta.get("requirements") or {}).get("missing_families") or [])
+                    missing_families = list(
+                        (research_program_meta.get("requirements") or {}).get("missing_families")
+                        or []
+                    )
                     if missing_families:
                         reservations.append(
-                            "Missing evidence families: " + ", ".join(str(item or "").strip() for item in missing_families)
+                            "Missing evidence families: "
+                            + ", ".join(str(item or "").strip() for item in missing_families)
                         )
                     reservations.extend(
                         [
@@ -14079,14 +16095,18 @@ class AgnoChatRuntime:
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                         latest_user_text=latest_user_text,
                         draft_response_text=response_text,
-                        execution_regime=str(pro_mode_metadata["execution_regime"] or "tool_workflow"),
+                        execution_regime=str(
+                            pro_mode_metadata["execution_regime"] or "tool_workflow"
+                        ),
                         task_regime=intake_decision.task_regime,
                         supporting_points=supporting_points,
                         reservations=reservations,
                         session_state={
                             "pro_mode_context": dict(shared_context or {}),
                             "research_program": {
-                                "requirements": dict(research_program_meta.get("requirements") or {}),
+                                "requirements": dict(
+                                    research_program_meta.get("requirements") or {}
+                                ),
                                 "handles": dict(research_program_meta.get("handles") or {}),
                             },
                         },
@@ -14102,13 +16122,17 @@ class AgnoChatRuntime:
                 structured_phase_routes = self._structured_phase_model_routes(
                     research_program_meta.get("compression_stats")
                 )
-                if isinstance(writer_stats.get("model_route"), dict) and writer_stats.get("model_route"):
+                if isinstance(writer_stats.get("model_route"), dict) and writer_stats.get(
+                    "model_route"
+                ):
                     structured_phase_routes["pro_mode_final_writer"] = dict(
                         writer_stats.get("model_route") or {}
                     )
                 if structured_phase_routes:
                     pro_mode_metadata["model_routes"] = structured_phase_routes
-                pro_mode_metadata["tool_runtime_model"] = str(tool_result.get("model") or self.model)
+                pro_mode_metadata["tool_runtime_model"] = str(
+                    tool_result.get("model") or self.model
+                )
                 pro_mode_metadata["writer"] = {
                     "applied": writer_applied,
                     "kind": "final_writer",
@@ -14125,7 +16149,9 @@ class AgnoChatRuntime:
                         list(metadata_specialist.missing_metadata or []),
                     ]
                 ):
-                    pro_mode_metadata["metadata_specialist"] = metadata_specialist.model_dump(mode="json")
+                    pro_mode_metadata["metadata_specialist"] = metadata_specialist.model_dump(
+                        mode="json"
+                    )
                 self._save_pro_mode_conversation_state(
                     conversation_id=conversation_id,
                     user_id=user_id,
@@ -14150,16 +16176,22 @@ class AgnoChatRuntime:
                             "path": "pro_mode",
                             "agent_mode": "tool_workflow",
                             "prompt_profile": "pro_mode",
-                            "selected_domains": list(tool_result.get("selected_domains") or ["core"]),
+                            "selected_domains": list(
+                                tool_result.get("selected_domains") or ["core"]
+                            ),
                             "tool_names": list(tool_result.get("selected_tool_names") or []),
-                            "attempted_tool_sets": list(tool_result.get("attempted_tool_sets") or []),
+                            "attempted_tool_sets": list(
+                                tool_result.get("attempted_tool_sets") or []
+                            ),
                             "route_reason": (
                                 "pro_mode_research_program"
                                 if used_research_program
                                 else "pro_mode_tool_workflow"
                             ),
                             "reasoning_mode": reasoning_mode,
-                            "response_source": "research_program" if used_research_program else "tool_workflow",
+                            "response_source": "research_program"
+                            if used_research_program
+                            else "tool_workflow",
                             "dev_trace_enabled": pro_mode_debug,
                             "intake_route": "tool_workflow",
                             "execution_regime": pro_mode_metadata["execution_regime"],
@@ -14169,14 +16201,18 @@ class AgnoChatRuntime:
                             "runtime_status": tool_result.get("runtime_status") or "completed",
                         }
                     )
+                final_metadata["contract"] = self._fallback_research_presentation_contract(
+                    user_text=latest_user_text,
+                    response_text=response_text,
+                    metadata=final_metadata,
+                    tool_invocations=list(tool_result.get("tool_invocations") or []),
+                )
                 if response_text:
                     yield {"event": "token", "data": {"delta": response_text}}
                 _persist_turn_analysis_state(
                     metadata=final_metadata,
                     task_regime_override=str(
-                        pro_mode_metadata.get("task_regime")
-                        or intake_decision.task_regime
-                        or ""
+                        pro_mode_metadata.get("task_regime") or intake_decision.task_regime or ""
                     ),
                 )
                 yield {
@@ -14256,14 +16292,23 @@ class AgnoChatRuntime:
                                 "Formal Gap Checker",
                                 "Proof Skeptic",
                             ],
-                            "phase_order": ["intake", "context_policy", "execution_router", "proof_workflow", "finalize"],
+                            "phase_order": [
+                                "intake",
+                                "context_policy",
+                                "execution_router",
+                                "proof_workflow",
+                                "finalize",
+                            ],
                             "round_count": int(proof_meta.get("iterations") or 0),
                             "discussion_round_count": int(proof_meta.get("iterations") or 0),
-                            "model_call_count": max(2, 1 + int(proof_meta.get("iterations") or 0) * 5),
+                            "model_call_count": max(
+                                2, 1 + int(proof_meta.get("iterations") or 0) * 5
+                            ),
                             "convergence": {
                                 "per_role_vote": {},
                                 "central_blockers": list(
-                                    dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
+                                    dict(proof_meta.get("proof_state") or {}).get("blocker_gaps")
+                                    or []
                                 ),
                                 "ready": False,
                                 "consensus_level": "low",
@@ -14272,12 +16317,17 @@ class AgnoChatRuntime:
                             "calculator": {"used": False, "call_count": 0, "results": []},
                             "verifier": {
                                 "passed": False,
-                                "issues": list(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []),
+                                "issues": list(
+                                    dict(proof_meta.get("proof_state") or {}).get("blocker_gaps")
+                                    or []
+                                ),
                                 "suggested_changes": list(
-                                    dict(proof_meta.get("proof_state") or {}).get("attack_points") or []
+                                    dict(proof_meta.get("proof_state") or {}).get("attack_points")
+                                    or []
                                 ),
                                 "confidence": str(
-                                    dict(proof_meta.get("proof_state") or {}).get("confidence") or "medium"
+                                    dict(proof_meta.get("proof_state") or {}).get("confidence")
+                                    or "medium"
                                 ),
                             },
                             "proof_workflow": proof_meta,
@@ -14368,7 +16418,13 @@ class AgnoChatRuntime:
                             "Formal Gap Checker",
                             "Proof Skeptic",
                         ],
-                        "phase_order": ["intake", "context_policy", "execution_router", "proof_workflow", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "proof_workflow",
+                            "finalize",
+                        ],
                         "round_count": int(proof_meta.get("iterations") or 0),
                         "discussion_round_count": int(proof_meta.get("iterations") or 0),
                         "model_call_count": max(2, 1 + int(proof_meta.get("iterations") or 0) * 5),
@@ -14377,20 +16433,34 @@ class AgnoChatRuntime:
                             "central_blockers": list(
                                 dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
                             ),
-                            "ready": not bool(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []),
+                            "ready": not bool(
+                                dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
+                            ),
                             "consensus_level": (
                                 "high"
-                                if not bool(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or [])
+                                if not bool(
+                                    dict(proof_meta.get("proof_state") or {}).get("blocker_gaps")
+                                    or []
+                                )
                                 else "medium"
                             ),
                         },
                         "role_stats": {},
                         "calculator": {"used": False, "call_count": 0, "results": []},
                         "verifier": {
-                            "passed": not bool(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []),
-                            "issues": list(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []),
-                            "suggested_changes": list(dict(proof_meta.get("proof_state") or {}).get("attack_points") or []),
-                            "confidence": str(dict(proof_meta.get("proof_state") or {}).get("confidence") or "medium"),
+                            "passed": not bool(
+                                dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
+                            ),
+                            "issues": list(
+                                dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
+                            ),
+                            "suggested_changes": list(
+                                dict(proof_meta.get("proof_state") or {}).get("attack_points") or []
+                            ),
+                            "confidence": str(
+                                dict(proof_meta.get("proof_state") or {}).get("confidence")
+                                or "medium"
+                            ),
                         },
                         "proof_workflow": proof_meta,
                         "reasoning_effort": "high",
@@ -14413,18 +16483,38 @@ class AgnoChatRuntime:
                         task_regime=intake_decision.task_regime,
                         supporting_points=[
                             *(
-                                [str(dict(proof_meta.get("proof_state") or {}).get("canonical_reduction") or "").strip()]
-                                if str(dict(proof_meta.get("proof_state") or {}).get("canonical_reduction") or "").strip()
+                                [
+                                    str(
+                                        dict(proof_meta.get("proof_state") or {}).get(
+                                            "canonical_reduction"
+                                        )
+                                        or ""
+                                    ).strip()
+                                ]
+                                if str(
+                                    dict(proof_meta.get("proof_state") or {}).get(
+                                        "canonical_reduction"
+                                    )
+                                    or ""
+                                ).strip()
                                 else []
                             ),
                             *[
                                 str(item or "").strip()
-                                for item in list(dict(proof_meta.get("proof_state") or {}).get("verified_steps") or [])
+                                for item in list(
+                                    dict(proof_meta.get("proof_state") or {}).get("verified_steps")
+                                    or []
+                                )
                                 if str(item or "").strip()
                             ],
                             *[
                                 str(item or "").strip()
-                                for item in list(dict(proof_meta.get("proof_state") or {}).get("resolved_obligations") or [])
+                                for item in list(
+                                    dict(proof_meta.get("proof_state") or {}).get(
+                                        "resolved_obligations"
+                                    )
+                                    or []
+                                )
                                 if str(item or "").strip()
                             ],
                             *[
@@ -14434,10 +16524,15 @@ class AgnoChatRuntime:
                         ],
                         reservations=[
                             str(item or "").strip()
-                            for item in list(dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or [])
+                            for item in list(
+                                dict(proof_meta.get("proof_state") or {}).get("blocker_gaps") or []
+                            )
                             if str(item or "").strip()
                         ],
-                        session_state={"pro_mode_context": dict(shared_context or {}), "proof_workflow": proof_meta},
+                        session_state={
+                            "pro_mode_context": dict(shared_context or {}),
+                            "proof_workflow": proof_meta,
+                        },
                         conversation_id=conversation_id,
                         run_id=run_id,
                         user_id=user_id,
@@ -14580,7 +16675,13 @@ class AgnoChatRuntime:
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
                         "active_roles": ["Front Door Triage", "Autonomy Controller"],
-                        "phase_order": ["intake", "context_policy", "execution_router", "autonomous_cycle", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "autonomous_cycle",
+                            "finalize",
+                        ],
                         "round_count": 0,
                         "discussion_round_count": 0,
                         "model_call_count": 1,
@@ -14681,7 +16782,9 @@ class AgnoChatRuntime:
                     ],
                     *[
                         json.dumps(item, ensure_ascii=False)
-                        for item in list(autonomy_metadata.get("reasoning_trace_summary") or [])[-4:]
+                        for item in list(autonomy_metadata.get("reasoning_trace_summary") or [])[
+                            -4:
+                        ]
                     ],
                 ]
                 reservations = [
@@ -14719,33 +16822,54 @@ class AgnoChatRuntime:
                             "Autonomy Controller",
                             *(
                                 ["Focused Team Lead"]
-                                if "focused_team" in {
-                                    str(item.get("action") or item.get("selected_action") or "").strip()
-                                    for item in list(autonomy_metadata.get("reasoning_trace_summary") or [])
+                                if "focused_team"
+                                in {
+                                    str(
+                                        item.get("action") or item.get("selected_action") or ""
+                                    ).strip()
+                                    for item in list(
+                                        autonomy_metadata.get("reasoning_trace_summary") or []
+                                    )
                                     if isinstance(item, dict)
                                 }
                                 else []
                             ),
                             *(
                                 ["Reasoning Solver"]
-                                if "reasoning_solver" in {
-                                    str(item.get("action") or item.get("selected_action") or "").strip()
-                                    for item in list(autonomy_metadata.get("reasoning_trace_summary") or [])
+                                if "reasoning_solver"
+                                in {
+                                    str(
+                                        item.get("action") or item.get("selected_action") or ""
+                                    ).strip()
+                                    for item in list(
+                                        autonomy_metadata.get("reasoning_trace_summary") or []
+                                    )
                                     if isinstance(item, dict)
                                 }
                                 else []
                             ),
                             *(
                                 ["Tool Workflow"]
-                                if "tool_workflow" in {
-                                    str(item.get("action") or item.get("selected_action") or "").strip()
-                                    for item in list(autonomy_metadata.get("reasoning_trace_summary") or [])
+                                if "tool_workflow"
+                                in {
+                                    str(
+                                        item.get("action") or item.get("selected_action") or ""
+                                    ).strip()
+                                    for item in list(
+                                        autonomy_metadata.get("reasoning_trace_summary") or []
+                                    )
                                     if isinstance(item, dict)
                                 }
                                 else []
                             ),
                         ],
-                        "phase_order": ["intake", "context_policy", "execution_router", "autonomous_cycle", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "autonomous_cycle",
+                            "finalize",
+                        ],
                         "round_count": int(cycle_metrics.get("cycles_completed") or 0),
                         "discussion_round_count": int(cycle_metrics.get("cycles_completed") or 0),
                         "model_call_count": max(
@@ -14760,7 +16884,8 @@ class AgnoChatRuntime:
                                 "high"
                                 if bool(cycle_metrics.get("converged"))
                                 else "medium"
-                                if float(cycle_metrics.get("evidence_sufficiency_score") or 0.0) >= 0.6
+                                if float(cycle_metrics.get("evidence_sufficiency_score") or 0.0)
+                                >= 0.6
                                 else "low"
                             ),
                         },
@@ -14769,12 +16894,15 @@ class AgnoChatRuntime:
                         "verifier": {
                             "passed": bool(cycle_metrics.get("converged")),
                             "issues": list(autonomy_state.get("open_obligations") or []),
-                            "suggested_changes": list(autonomy_state.get("next_best_actions") or []),
+                            "suggested_changes": list(
+                                autonomy_state.get("next_best_actions") or []
+                            ),
                             "confidence": (
                                 "high"
                                 if bool(cycle_metrics.get("converged"))
                                 else "medium"
-                                if float(cycle_metrics.get("evidence_sufficiency_score") or 0.0) >= 0.6
+                                if float(cycle_metrics.get("evidence_sufficiency_score") or 0.0)
+                                >= 0.6
                                 else "low"
                             ),
                         },
@@ -14908,7 +17036,13 @@ class AgnoChatRuntime:
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
                         "active_roles": ["Front Door Triage", "Focused Team Lead"],
-                        "phase_order": ["intake", "context_policy", "execution_router", "focused_team", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "focused_team",
+                            "finalize",
+                        ],
                         "round_count": 1,
                         "discussion_round_count": 1,
                         "model_call_count": 1,
@@ -15019,13 +17153,18 @@ class AgnoChatRuntime:
                         ],
                         *[
                             str(item or "").strip()
-                            for item in list(dict(focused_team_details.get("review") or {}).get("must_include") or [])
+                            for item in list(
+                                dict(focused_team_details.get("review") or {}).get("must_include")
+                                or []
+                            )
                             if str(item or "").strip()
                         ],
                     ],
                     reservations=[
                         str(item or "").strip()
-                        for item in list(dict(focused_team_metadata.get("verifier") or {}).get("issues") or [])
+                        for item in list(
+                            dict(focused_team_metadata.get("verifier") or {}).get("issues") or []
+                        )
                         if str(item or "").strip()
                     ],
                     session_state={
@@ -15149,7 +17288,13 @@ class AgnoChatRuntime:
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
                         "active_roles": ["Front Door Triage", "Reasoning Solver"],
-                        "phase_order": ["intake", "context_policy", "execution_router", "reasoning_solver", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "reasoning_solver",
+                            "finalize",
+                        ],
                         "round_count": 0,
                         "discussion_round_count": 0,
                         "model_call_count": 1,
@@ -15255,7 +17400,13 @@ class AgnoChatRuntime:
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
                         "active_roles": ["Front Door Triage", "Reasoning Solver"],
-                        "phase_order": ["intake", "context_policy", "execution_router", "reasoning_solver", "finalize"],
+                        "phase_order": [
+                            "intake",
+                            "context_policy",
+                            "execution_router",
+                            "reasoning_solver",
+                            "finalize",
+                        ],
                         "round_count": 0,
                         "discussion_round_count": 0,
                         "model_call_count": 2 + (1 if verifier_payload else 0),
@@ -15263,7 +17414,9 @@ class AgnoChatRuntime:
                             "per_role_vote": {},
                             "central_blockers": list(verifier_payload.get("issues") or []),
                             "ready": bool(verifier_payload.get("passed", True)),
-                            "consensus_level": "high" if bool(verifier_payload.get("passed", True)) else "medium",
+                            "consensus_level": "high"
+                            if bool(verifier_payload.get("passed", True))
+                            else "medium",
                         },
                         "role_stats": {},
                         "calculator": {"used": False, "call_count": 0, "results": []},
@@ -15280,7 +17433,9 @@ class AgnoChatRuntime:
                         "summary": "Solved with the self-contained reasoning solver instead of the full expert council.",
                     }
                     if dict(solver_runtime_meta.get("model_route") or {}):
-                        solver_metadata["model_route"] = dict(solver_runtime_meta.get("model_route") or {})
+                        solver_metadata["model_route"] = dict(
+                            solver_runtime_meta.get("model_route") or {}
+                        )
                     response_text = str(pro_mode_result.response_text or "").strip()
                     writer_stats: dict[str, Any] = {}
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
@@ -15291,7 +17446,9 @@ class AgnoChatRuntime:
                         supporting_points=[],
                         reservations=[
                             str(item or "").strip()
-                            for item in list(dict(solver_metadata.get("verifier") or {}).get("issues") or [])
+                            for item in list(
+                                dict(solver_metadata.get("verifier") or {}).get("issues") or []
+                            )
                             if str(item or "").strip()
                         ],
                         session_state={"pro_mode_context": dict(shared_context or {})},
@@ -15368,7 +17525,10 @@ class AgnoChatRuntime:
                     }
                     return
             pro_mode_runner = self.pro_mode
-            if intake_decision.execution_regime == "expert_council" and not self._pro_mode_expert_council_enabled():
+            if (
+                intake_decision.execution_regime == "expert_council"
+                and not self._pro_mode_expert_council_enabled()
+            ):
                 pro_mode_runner = ProModeWorkflowRunner(
                     model_builder=self._build_pro_mode_model,
                     fallback_model_builder=self._build_model,
@@ -15393,7 +17553,9 @@ class AgnoChatRuntime:
                 if isinstance(pro_mode_result.metadata, dict)
                 else {}
             )
-            execution_regime = str(pro_mode_metadata.get("execution_regime") or intake_decision.execution_regime or "").strip()
+            execution_regime = str(
+                pro_mode_metadata.get("execution_regime") or intake_decision.execution_regime or ""
+            ).strip()
             writer_stats: dict[str, Any] = {}
             metadata_specialist = MetadataSpecialistSummary()
             metadata_summary_requested = self._is_image_metadata_request(latest_user_text)
@@ -15404,14 +17566,20 @@ class AgnoChatRuntime:
                 metadata_specialist = await self._run_metadata_specialist(
                     latest_user_text=latest_user_text,
                     tool_invocations=list(pro_mode_result.tool_invocations or []),
-                    session_state={"pro_mode_context": dict(shared_context or {}), "pro_mode": pro_mode_metadata},
+                    session_state={
+                        "pro_mode_context": dict(shared_context or {}),
+                        "pro_mode": pro_mode_metadata,
+                    },
                     conversation_id=conversation_id,
                     run_id=run_id,
                     user_id=user_id,
                     max_runtime_seconds=min(effective_max_runtime_seconds, 60),
                     debug=pro_mode_debug,
                 )
-                if metadata_summary_requested and str(metadata_specialist.direct_answer or "").strip():
+                if (
+                    metadata_summary_requested
+                    and str(metadata_specialist.direct_answer or "").strip()
+                ):
                     response_text = str(metadata_specialist.direct_answer or "").strip()
             if response_text and execution_regime and execution_regime != "fast_dialogue":
                 supporting_points = [
@@ -15422,7 +17590,9 @@ class AgnoChatRuntime:
                 supporting_points.extend(
                     [
                         str(item or "").strip()
-                        for item in list((pro_mode_metadata.get("calculator") or {}).get("results") or [])
+                        for item in list(
+                            (pro_mode_metadata.get("calculator") or {}).get("results") or []
+                        )
                         if str(item or "").strip()
                     ]
                 )
@@ -15458,10 +17628,16 @@ class AgnoChatRuntime:
                     latest_user_text=latest_user_text,
                     draft_response_text=response_text,
                     execution_regime=execution_regime,
-                    task_regime=str(pro_mode_metadata.get("task_regime") or intake_decision.task_regime or "").strip() or None,
+                    task_regime=str(
+                        pro_mode_metadata.get("task_regime") or intake_decision.task_regime or ""
+                    ).strip()
+                    or None,
                     supporting_points=supporting_points,
                     reservations=reservations,
-                    session_state={"pro_mode_context": dict(shared_context or {}), "pro_mode": pro_mode_metadata},
+                    session_state={
+                        "pro_mode_context": dict(shared_context or {}),
+                        "pro_mode": pro_mode_metadata,
+                    },
                     conversation_id=conversation_id,
                     run_id=run_id,
                     user_id=user_id,
@@ -15489,7 +17665,9 @@ class AgnoChatRuntime:
                                 list(metadata_specialist.missing_metadata or []),
                             ]
                         ):
-                            pro_mode_result.metadata["pro_mode"]["metadata_specialist"] = metadata_specialist.model_dump(mode="json")
+                            pro_mode_result.metadata["pro_mode"]["metadata_specialist"] = (
+                                metadata_specialist.model_dump(mode="json")
+                            )
             elif isinstance(pro_mode_result.metadata, dict):
                 pro_mode_result.metadata.setdefault("pro_mode", {})
                 if isinstance(pro_mode_result.metadata["pro_mode"], dict):
@@ -15573,20 +17751,27 @@ class AgnoChatRuntime:
                     "status": "updated",
                     "message": (
                         "Updated session memory."
-                        if bool(memory_metadata.get("summary_updated")) or bool(memory_metadata.get("writes"))
+                        if bool(memory_metadata.get("summary_updated"))
+                        or bool(memory_metadata.get("writes"))
                         else "No durable memory update was needed."
                     ),
                     **memory_metadata,
                 },
             )
-            learning_event_type = "learning.promoted" if int(learning_metadata.get("promoted_count") or 0) > 0 else "learning.skipped"
+            learning_event_type = (
+                "learning.promoted"
+                if int(learning_metadata.get("promoted_count") or 0) > 0
+                else "learning.skipped"
+            )
             self._emit_event(
                 event_callback,
                 {
                     "kind": "graph",
                     "event_type": learning_event_type,
                     "phase": "learning",
-                    "status": "completed" if learning_event_type == "learning.promoted" else "skipped",
+                    "status": "completed"
+                    if learning_event_type == "learning.promoted"
+                    else "skipped",
                     "message": (
                         f"Promoted {int(learning_metadata.get('promoted_count') or 0)} reusable note"
                         f"{'' if int(learning_metadata.get('promoted_count') or 0) == 1 else 's'}."
@@ -15734,7 +17919,7 @@ class AgnoChatRuntime:
                     "status": "started",
                     "message": f"Resuming paused run with decision={decision}.",
                 },
-                )
+            )
         else:
             iterator = agent.arun(
                 agno_messages,
@@ -15772,7 +17957,9 @@ class AgnoChatRuntime:
                     else f"Run exceeded runtime budget ({int(effective_max_runtime_seconds)}s)."
                 )
                 break
-            except Exception as exc:  # pragma: no cover - live adapter failures are environment-specific
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - live adapter failures are environment-specific
                 runtime_status = "error"
                 runtime_error = str(exc or exc.__class__.__name__)
                 break
@@ -16040,13 +18227,18 @@ class AgnoChatRuntime:
                 "status": "updated",
                 "message": (
                     "Updated session memory."
-                    if bool(memory_metadata.get("summary_updated")) or bool(memory_metadata.get("writes"))
+                    if bool(memory_metadata.get("summary_updated"))
+                    or bool(memory_metadata.get("writes"))
                     else "No durable memory update was needed."
                 ),
                 **memory_metadata,
             },
         )
-        learning_event_type = "learning.promoted" if int(learning_metadata.get("promoted_count") or 0) > 0 else "learning.skipped"
+        learning_event_type = (
+            "learning.promoted"
+            if int(learning_metadata.get("promoted_count") or 0) > 0
+            else "learning.skipped"
+        )
         self._emit_event(
             event_callback,
             {
@@ -16086,7 +18278,12 @@ class AgnoChatRuntime:
         conversation_id: str | None = None,
     ) -> dict[str, Any]:
         tool_snapshot = json.dumps(tool_result, ensure_ascii=False, default=str)[:12000]
-        segmentation_tool = tool_name in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "sam2_prompt_image"}
+        segmentation_tool = tool_name in {
+            "segment_image_megaseg",
+            "segment_image_sam2",
+            "segment_image_sam3",
+            "sam2_prompt_image",
+        }
         prompt = (
             "Summarize this scientific tool result for the user.\n\n"
             f"Domain: {domain_id}\n"
@@ -16124,10 +18321,12 @@ class AgnoChatRuntime:
         final_text = str(response_text or "").strip() or default_response_text
         deterministic_segmentation_text = ""
         if segmentation_tool:
-            deterministic_segmentation_text = self._deterministic_segmentation_response_from_payload(
-                tool_name=tool_name,
-                payload=dict(tool_result or {}),
-                latest_user_text=user_text,
+            deterministic_segmentation_text = (
+                self._deterministic_segmentation_response_from_payload(
+                    tool_name=tool_name,
+                    payload=dict(tool_result or {}),
+                    latest_user_text=user_text,
+                )
             )
         if deterministic_segmentation_text and (
             self._prefers_compact_segmentation_summary(user_text)
@@ -16140,6 +18339,7 @@ class AgnoChatRuntime:
             "synthesized": final_text != default_response_text,
             "metadata": {"runtime": "agno_tool_endpoint"},
         }
+
     _CORE_TOOL_NAMES = {
         "upload_to_bisque",
         "add_tags_to_resource",

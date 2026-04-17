@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-
 VALID_DATASET_SPLITS = ("train", "val", "test")
 VALID_DATASET_ROLES = ("image", "mask", "annotation")
 VALID_SPATIAL_DIMS = ("2d", "3d")
@@ -240,7 +239,12 @@ def analyze_manifest_spatial_compatibility(
             mask_info = (
                 inspect_image_spatial_dims(str(mask_row.get("path") or ""))
                 if mask_row
-                else {"spatial_dims": None, "spatial_ndim": None, "shape": None, "source": "missing"}
+                else {
+                    "spatial_dims": None,
+                    "spatial_ndim": None,
+                    "shape": None,
+                    "source": "missing",
+                }
             )
 
             for role, info in (("image", image_info), ("mask", mask_info)):
@@ -269,7 +273,11 @@ def analyze_manifest_spatial_compatibility(
 
             image_ndim = image_info.get("spatial_ndim")
             mask_ndim = mask_info.get("spatial_ndim")
-            if isinstance(image_ndim, int) and isinstance(mask_ndim, int) and image_ndim != mask_ndim:
+            if (
+                isinstance(image_ndim, int)
+                and isinstance(mask_ndim, int)
+                and image_ndim != mask_ndim
+            ):
                 if len(pair_mismatches) < 25:
                     pair_mismatches.append(
                         {

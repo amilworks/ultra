@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunStatus = Literal["queued", "running", "waiting_for_input", "succeeded", "failed", "canceled"]
 

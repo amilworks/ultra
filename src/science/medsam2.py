@@ -7,9 +7,9 @@ SAM2 pathway only when a Hugging Face model id is explicitly used.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from typing import Any
 
 import numpy as np
@@ -203,7 +203,9 @@ def _wrap_points(points: list[Any] | None) -> list[list[list[list[float]]]] | No
     return [points_by_object]
 
 
-def _wrap_labels(labels: list[Any] | None, points: list[Any] | None) -> list[list[list[int]]] | None:
+def _wrap_labels(
+    labels: list[Any] | None, points: list[Any] | None
+) -> list[list[list[int]]] | None:
     if labels:
         if isinstance(labels[0], list):
             return [labels]  # Already per-object labels.
@@ -312,7 +314,9 @@ def _sanitize_labels(labels: list[Any] | None, points: list[Any] | None) -> list
     return grouped or None
 
 
-def _sanitize_boxes(boxes: list[list[float]] | None, width: int, height: int) -> list[list[float]] | None:
+def _sanitize_boxes(
+    boxes: list[list[float]] | None, width: int, height: int
+) -> list[list[float]] | None:
     if not boxes:
         return None
     out: list[list[float]] = []
@@ -364,7 +368,13 @@ def _build_prompt_objects(
                 if isinstance(group, (list, tuple))
             ]
     elif points:
-        point_groups = [[ [float(point[0]), float(point[1])] for point in points if isinstance(point, (list, tuple)) and len(point) == 2 ]]
+        point_groups = [
+            [
+                [float(point[0]), float(point[1])]
+                for point in points
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+        ]
         if isinstance(labels, list) and labels:
             try:
                 label_groups = [[1 if int(value) > 0 else 0 for value in labels]]
@@ -393,11 +403,7 @@ def _build_prompt_objects(
 
         shared_box = normalized_boxes[0] if len(normalized_boxes) == 1 else None
         for idx, group in enumerate(point_groups):
-            labels_for_group = (
-                label_groups[idx]
-                if idx < len(label_groups)
-                else [1 for _ in group]
-            )
+            labels_for_group = label_groups[idx] if idx < len(label_groups) else [1 for _ in group]
             object_box = (
                 normalized_boxes[idx]
                 if len(normalized_boxes) == len(point_groups) and idx < len(normalized_boxes)
@@ -905,7 +911,11 @@ def segment_array_with_medsam2(
 
     z_count = int(slices.shape[0])
     if z_count <= 0:
-        return {"success": False, "error": "No slices available for segmentation.", "warnings": warnings}
+        return {
+            "success": False,
+            "error": "No slices available for segmentation.",
+            "warnings": warnings,
+        }
 
     resolved_max_slices: int | None = None
     if max_slices is not None:
@@ -915,7 +925,11 @@ def segment_array_with_medsam2(
             resolved_max_slices = None
 
     stride = 1
-    if resolved_max_slices is not None and resolved_max_slices > 0 and z_count > resolved_max_slices:
+    if (
+        resolved_max_slices is not None
+        and resolved_max_slices > 0
+        and z_count > resolved_max_slices
+    ):
         stride = int(np.ceil(z_count / float(resolved_max_slices)))
     indices = list(range(0, z_count, stride))
     processed_all_slices = stride == 1 and len(indices) == z_count
@@ -1017,19 +1031,13 @@ def segment_array_with_medsam2(
         "instance_voxel_counts": instance_voxel_counts,
         "instance_coverage_percent_values": instance_coverage_values,
         "instance_coverage_percent_mean": (
-            round(float(np.mean(instance_coverage_values)), 6)
-            if instance_coverage_values
-            else None
+            round(float(np.mean(instance_coverage_values)), 6) if instance_coverage_values else None
         ),
         "instance_coverage_percent_min": (
-            round(float(np.min(instance_coverage_values)), 6)
-            if instance_coverage_values
-            else None
+            round(float(np.min(instance_coverage_values)), 6) if instance_coverage_values else None
         ),
         "instance_coverage_percent_max": (
-            round(float(np.max(instance_coverage_values)), 6)
-            if instance_coverage_values
-            else None
+            round(float(np.max(instance_coverage_values)), 6) if instance_coverage_values else None
         ),
         "warnings": warnings,
         "_mask": mask_out.astype(np.uint16),

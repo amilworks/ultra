@@ -12,8 +12,9 @@ import os
 import re
 import shutil
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 
 import numpy as np
 from PIL import ExifTags, Image
@@ -55,6 +56,8 @@ _ORDINARY_DISPLAY_IMAGE_SUFFIXES = (
     ".gif",
     ".webp",
 )
+
+_REMOTE_SOURCE_SCHEMES = {"http", "https", "s3"}
 
 _FILENAME_CHANNEL_TOKENS = {
     "dapi",
@@ -114,7 +117,9 @@ def _extract_filename_hints(source: Path) -> dict[str, Any]:
     z_match = re.search(r"(?:^|[_-])z(\d{1,4})(?:$|[_-])", f"_{stem.lower()}_")
     t_match = re.search(r"(?:^|[_-])t(\d{1,4})(?:$|[_-])", f"_{stem.lower()}_")
     c_match = re.search(r"(?:^|[_-])c(\d{1,4})(?:$|[_-])", f"_{stem.lower()}_")
-    detected_channels = sorted({token for token in lowered_tokens if token in _FILENAME_CHANNEL_TOKENS})
+    detected_channels = sorted(
+        {token for token in lowered_tokens if token in _FILENAME_CHANNEL_TOKENS}
+    )
 
     hints: dict[str, Any] = {"tokens": tokens[:16]}
     if date_match:
@@ -222,10 +227,7 @@ def _extract_geo_metadata(source: Path) -> dict[str, float | str]:
     if not isinstance(gps_raw, dict):
         return {}
     gps_tags = getattr(ExifTags, "GPSTAGS", {})
-    gps_info = {
-        str(gps_tags.get(key) or key): value
-        for key, value in gps_raw.items()
-    }
+    gps_info = {str(gps_tags.get(key) or key): value for key, value in gps_raw.items()}
     latitude = _gps_coordinate_to_decimal(
         gps_info.get("GPSLatitude"),
         str(gps_info.get("GPSLatitudeRef") or "").strip() or None,
@@ -281,20 +283,31 @@ def _extract_image_header_metadata(source: Path) -> dict[str, str]:
         return {}
 
 
-def _attach_source_metadata_hints(result: dict[str, Any], source: Path) -> dict[str, Any]:
+def _attach_source_metadata_hints(result: dict[str, Any], source: str | Path) -> dict[str, Any]:
+    source_str = str(source or "").strip()
     metadata = result.get("metadata")
     metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
-    metadata_payload["filename_hints"] = _extract_filename_hints(source)
-    existing_header = dict(metadata_payload.get("header") or {}) if isinstance(metadata_payload.get("header"), dict) else {}
-    header = _extract_image_header_metadata(source)
+    metadata_payload["filename_hints"] = _extract_filename_hints(
+        Path(_source_name(source_str) or "source")
+    )
+    if _looks_like_remote_source(source_str):
+        result["metadata"] = metadata_payload
+        return result
+    source_path = Path(source_str).expanduser()
+    existing_header = (
+        dict(metadata_payload.get("header") or {})
+        if isinstance(metadata_payload.get("header"), dict)
+        else {}
+    )
+    header = _extract_image_header_metadata(source_path)
     if header:
         metadata_payload["header"] = {**existing_header, **header}
     elif existing_header:
         metadata_payload["header"] = existing_header
-    exif = _extract_exif_metadata(source)
+    exif = _extract_exif_metadata(source_path)
     if exif:
         metadata_payload["exif"] = exif
-    geo = _extract_geo_metadata(source)
+    geo = _extract_geo_metadata(source_path)
     if geo:
         metadata_payload["geo"] = geo
     result["metadata"] = metadata_payload
@@ -338,20 +351,17 @@ def extract_actionable_image_metadata(
     )
     actionable_insights: list[str] = []
     if dimensions.get("X") and dimensions.get("Y"):
-        actionable_insights.append(
-            f"image_size={int(dimensions['X'])}x{int(dimensions['Y'])}"
-        )
+        actionable_insights.append(f"image_size={int(dimensions['X'])}x{int(dimensions['Y'])}")
     captured_at = str(exif.get("DateTimeOriginal") or exif.get("DateTime") or "").strip()
     if captured_at:
         actionable_insights.append(f"captured_at={captured_at}")
     if geo.get("latitude") is not None and geo.get("longitude") is not None:
-        actionable_insights.append(
-            f"gps={geo.get('latitude')},{geo.get('longitude')}"
-        )
+        actionable_insights.append(f"gps={geo.get('latitude')},{geo.get('longitude')}")
     channel_hints = filename_hints.get("channel_hints")
     if isinstance(channel_hints, list) and channel_hints:
         actionable_insights.append(
-            "channel_hints=" + ",".join(str(item) for item in channel_hints[:6] if str(item).strip())
+            "channel_hints="
+            + ",".join(str(item) for item in channel_hints[:6] if str(item).strip())
         )
     summary: dict[str, Any] = {
         "success": True,
@@ -361,7 +371,9 @@ def extract_actionable_image_metadata(
         if isinstance(loaded.get("array_shape"), list)
         else [],
         "dimensions": dimensions,
-        "header": dict(metadata.get("header") or {}) if isinstance(metadata.get("header"), dict) else {},
+        "header": dict(metadata.get("header") or {})
+        if isinstance(metadata.get("header"), dict)
+        else {},
         "exif": exif,
         "geo": geo,
         "filename_hints": filename_hints,
@@ -419,7 +431,11 @@ def _extract_nifti_orientation_metadata(nii: Any) -> dict[str, Any]:
         "frame": "patient",
         "source": "nifti-affine",
         "axis_labels": axis_labels,
-        "axis_codes": [axis_labels["x"]["positive"], axis_labels["y"]["positive"], axis_labels["z"]["positive"]],
+        "axis_codes": [
+            axis_labels["x"]["positive"],
+            axis_labels["y"]["positive"],
+            axis_labels["z"]["positive"],
+        ],
         "affine": affine.tolist(),
         "space_units": {
             "spatial": str(xyz_unit) if xyz_unit else None,
@@ -432,7 +448,9 @@ def _extract_bioio_microscopy_metadata(bio: Any) -> dict[str, Any]:
     output: dict[str, Any] = {}
 
     try:
-        channel_names = [str(name) for name in list(getattr(bio, "channel_names", []) or []) if str(name).strip()]
+        channel_names = [
+            str(name) for name in list(getattr(bio, "channel_names", []) or []) if str(name).strip()
+        ]
     except Exception:
         channel_names = []
     if channel_names:
@@ -454,7 +472,11 @@ def _extract_bioio_microscopy_metadata(bio: Any) -> dict[str, Any]:
             value = getattr(standard, field_name, None)
             if value in (None, "", (), []):
                 continue
-            output[field_name] = str(value) if field_name in {"objective", "imaging_datetime", "binning", "dimensions_present"} else value
+            output[field_name] = (
+                str(value)
+                if field_name in {"objective", "imaging_datetime", "binning", "dimensions_present"}
+                else value
+            )
 
     return output
 
@@ -475,7 +497,9 @@ def _clamp_index(idx: int | None, size: int, default: int = 0) -> int:
     return max(0, min(size - 1, idx))
 
 
-def _dims_axis_size(dims: Any, axis: str, fallback_order: str, fallback_shape: tuple[int, ...]) -> int:
+def _dims_axis_size(
+    dims: Any, axis: str, fallback_order: str, fallback_shape: tuple[int, ...]
+) -> int:
     axis = str(axis).upper()
     value = getattr(dims, axis, None)
     if isinstance(value, (int, np.integer)):
@@ -587,9 +611,36 @@ def _array_order_for_mode(
     return "YX"
 
 
-def _preferred_bioio_reader(source: Path) -> Any | None:
+def _looks_like_remote_source(source: str | Path) -> bool:
+    raw = str(source or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    return bool(parsed.scheme and parsed.netloc and parsed.scheme.lower() in _REMOTE_SOURCE_SCHEMES)
+
+
+def _source_name(source: str | Path) -> str:
+    raw = str(source or "").strip()
+    if not raw:
+        return ""
+    if _looks_like_remote_source(raw):
+        parsed = urlparse(raw)
+        stripped_path = parsed.path.rstrip("/")
+        name = PurePosixPath(stripped_path).name
+        if name:
+            return unquote(name)
+        return unquote(parsed.netloc)
+    return Path(raw).expanduser().name
+
+
+def _is_directory_image_store(source: Path) -> bool:
+    lower = source.name.lower()
+    return source.is_dir() and (lower.endswith(".ome.zarr") or lower.endswith(".zarr"))
+
+
+def _preferred_bioio_reader(source_name: str) -> Any | None:
     """Best-effort reader selection to avoid noisy plugin auto-probing."""
-    name = source.name.lower()
+    name = str(source_name or "").strip().lower()
 
     try:
         if name.endswith(".czi"):
@@ -629,11 +680,16 @@ def _preferred_bioio_reader(source: Path) -> Any | None:
     return None
 
 
-def _fallback_bioio_readers(source: Path) -> list[Any]:
-    name = source.name.lower()
+def _fallback_bioio_readers(source_name: str) -> list[Any]:
+    name = str(source_name or "").strip().lower()
     readers: list[Any] = []
     try:
-        if name.endswith(".ome.tif") or name.endswith(".ome.tiff") or name.endswith(".tif") or name.endswith(".tiff"):
+        if (
+            name.endswith(".ome.tif")
+            or name.endswith(".ome.tiff")
+            or name.endswith(".tif")
+            or name.endswith(".tiff")
+        ):
             import bioio_tifffile  # type: ignore
 
             readers.append(bioio_tifffile.Reader)
@@ -649,12 +705,12 @@ def _fallback_bioio_readers(source: Path) -> list[Any]:
     return readers
 
 
-def _bioio_reader_candidates(source: Path) -> list[Any | None]:
+def _bioio_reader_candidates(source_name: str) -> list[Any | None]:
     candidates: list[Any | None] = []
-    preferred = _preferred_bioio_reader(source)
+    preferred = _preferred_bioio_reader(source_name)
     if preferred is not None:
         candidates.append(preferred)
-    for candidate in _fallback_bioio_readers(source):
+    for candidate in _fallback_bioio_readers(source_name):
         if candidate is not None and candidate not in candidates:
             candidates.append(candidate)
     if not candidates:
@@ -666,7 +722,9 @@ def _bioio_reader_label(reader: Any | None) -> str:
     if reader is None:
         return "auto"
     module_name = str(getattr(reader, "__module__", "") or "").strip()
-    qual_name = str(getattr(reader, "__qualname__", getattr(reader, "__name__", "Reader")) or "Reader").strip()
+    qual_name = str(
+        getattr(reader, "__qualname__", getattr(reader, "__name__", "Reader")) or "Reader"
+    ).strip()
     if module_name:
         return f"{module_name}.{qual_name}"
     return qual_name or "Reader"
@@ -815,7 +873,9 @@ def _load_with_pillow(
         array_cyx = array
 
     stem = _stable_artifact_stem(file_path, scene=None, array_mode=array_mode)
-    preview_path = _save_preview(array, stem=stem, output_root=output_root) if generate_preview else None
+    preview_path = (
+        _save_preview(array, stem=stem, output_root=output_root) if generate_preview else None
+    )
 
     array_path = None
     warning = None
@@ -903,7 +963,11 @@ def _probe_with_pillow(file_path: str) -> dict[str, Any]:
         width, height = opened.size
         mode = str(opened.mode or "")
         bands = tuple(str(band) for band in tuple(opened.getbands() or ()))
-    channel_count = len(bands) if bands else (4 if "A" in mode else 3 if mode in {"RGB", "YCBCR", "LAB", "HSV", "CMYK"} else 1)
+    channel_count = (
+        len(bands)
+        if bands
+        else (4 if "A" in mode else 3 if mode in {"RGB", "YCBCR", "LAB", "HSV", "CMYK"} else 1)
+    )
     multichannel = channel_count > 1
     if multichannel:
         dims_order = "CYX"
@@ -993,8 +1057,7 @@ def _load_with_tifffile(
     if not axes or len(axes) != raw.ndim:
         axes = _infer_tiff_axes(tuple(int(v) for v in raw.shape))
         warnings.append(
-            "TIFF axis metadata missing/ambiguous; inferred axis order "
-            f"as '{axes or 'unknown'}'."
+            f"TIFF axis metadata missing/ambiguous; inferred axis order as '{axes or 'unknown'}'."
         )
 
     arr = np.asarray(raw)
@@ -1003,9 +1066,7 @@ def _load_with_tifffile(
         axis_name = axis_chars[idx]
         if axis_name not in {"T", "C", "Z", "Y", "X", "S"}:
             arr = np.take(arr, 0, axis=idx)
-            warnings.append(
-                f"Ignored unsupported TIFF axis '{axis_name}' by selecting index 0."
-            )
+            warnings.append(f"Ignored unsupported TIFF axis '{axis_name}' by selecting index 0.")
             axis_chars.pop(idx)
 
     if "S" in axis_chars and "C" not in axis_chars:
@@ -1030,15 +1091,15 @@ def _load_with_tifffile(
             axis_chars.pop(sample_axis)
 
     if "Y" not in axis_chars or "X" not in axis_chars:
-        raise ValueError(f"TIFF axes must contain Y and X dimensions (axes='{''.join(axis_chars)}').")
+        raise ValueError(
+            f"TIFF axes must contain Y and X dimensions (axes='{''.join(axis_chars)}')."
+        )
 
     present_indices = [axis_chars.index(ax) for ax in "TCZYX" if ax in axis_chars]
     extra_indices = [i for i in range(len(axis_chars)) if i not in present_indices]
     for idx in sorted(extra_indices, reverse=True):
         arr = np.take(arr, 0, axis=idx)
-        warnings.append(
-            f"Dropped extra TIFF axis '{axis_chars[idx]}' by selecting index 0."
-        )
+        warnings.append(f"Dropped extra TIFF axis '{axis_chars[idx]}' by selecting index 0.")
         axis_chars.pop(idx)
 
     for axis_name in "TCZYX":
@@ -1080,7 +1141,11 @@ def _load_with_tifffile(
             array_order = "YX"
 
     stem = _stable_artifact_stem(file_path, scene=None, array_mode=chosen_mode)
-    preview_path = _save_preview(preview_plane, stem=stem, output_root=output_root) if generate_preview else None
+    preview_path = (
+        _save_preview(preview_plane, stem=stem, output_root=output_root)
+        if generate_preview
+        else None
+    )
 
     array_path = None
     if save_array:
@@ -1211,8 +1276,12 @@ def _load_with_nibabel(
             preview_plane = None
             array_shape_value = [int(y_size), int(x_size)]
             try:
-                raw_min = float(getattr(nii.header, "get", lambda *_args, **_kwargs: 0.0)("cal_min", 0.0) or 0.0)
-                raw_max = float(getattr(nii.header, "get", lambda *_args, **_kwargs: 0.0)("cal_max", 0.0) or 0.0)
+                raw_min = float(
+                    getattr(nii.header, "get", lambda *_args, **_kwargs: 0.0)("cal_min", 0.0) or 0.0
+                )
+                raw_max = float(
+                    getattr(nii.header, "get", lambda *_args, **_kwargs: 0.0)("cal_max", 0.0) or 0.0
+                )
             except Exception:
                 raw_min = 0.0
                 raw_max = 0.0
@@ -1227,9 +1296,7 @@ def _load_with_nibabel(
                 trailing_index = np.unravel_index(t_sel, trailing) if trailing else ()
                 plane = np.asarray(nii.dataobj[(slice(None), slice(None), z_sel, *trailing_index)])
                 if len(source_shape) > 4:
-                    collapsed_warning = (
-                        "NIfTI has >4 dimensions; trailing dimensions were flattened into T for processing."
-                    )
+                    collapsed_warning = "NIfTI has >4 dimensions; trailing dimensions were flattened into T for processing."
             array = np.transpose(plane, (1, 0))
             array_order = "YX"
             preview_plane = np.asarray(array)
@@ -1249,9 +1316,7 @@ def _load_with_nibabel(
                 trailing = raw.shape[3:]
                 t_size = int(np.prod(trailing)) if trailing else 1
                 if raw.ndim > 4:
-                    collapsed_warning = (
-                        "NIfTI has >4 dimensions; trailing dimensions were flattened into T for processing."
-                    )
+                    collapsed_warning = "NIfTI has >4 dimensions; trailing dimensions were flattened into T for processing."
                 reshaped = np.reshape(raw, (x, y, z, t_size))
                 tzyx = np.transpose(reshaped, (3, 2, 1, 0))
 
@@ -1390,26 +1455,44 @@ def _load_with_bioio(
 ) -> dict[str, Any]:
     from bioio import BioImage  # type: ignore
 
-    source = Path(str(file_path)).expanduser()
+    source_token = str(file_path or "").strip()
+    is_remote = _looks_like_remote_source(source_token)
+    source_name = _source_name(source_token)
+    source = source_token if is_remote else str(Path(source_token).expanduser())
     bio: Any | None = None
     reader_used: Any | None = None
     reader_errors: list[str] = []
-    for candidate in _bioio_reader_candidates(source):
-        kwargs: dict[str, Any] = {}
+    open_warning: str | None = None
+    for candidate in _bioio_reader_candidates(source_name):
+        base_kwargs: dict[str, Any] = {}
         if candidate is not None:
-            kwargs["reader"] = candidate
-        if use_aicspylibczi and source.name.lower().endswith(".czi"):
-            kwargs["use_aicspylibczi"] = True
-        try:
-            bio = BioImage(str(source), **kwargs)
-            reader_used = candidate
+            base_kwargs["reader"] = candidate
+        if use_aicspylibczi and source_name.lower().endswith(".czi"):
+            base_kwargs["use_aicspylibczi"] = True
+        attempts: list[tuple[dict[str, Any], str | None]] = [(base_kwargs, None)]
+        if is_remote and source_token.lower().startswith("s3://"):
+            attempts.append(
+                (
+                    {**base_kwargs, "fs_kwargs": {"anon": True}},
+                    "Opened public S3 source with anon=True fallback.",
+                )
+            )
+        for kwargs, warning in attempts:
+            try:
+                bio = BioImage(str(source), **kwargs)
+                reader_used = candidate
+                open_warning = warning
+                break
+            except Exception as exc:
+                reader_errors.append(f"{_bioio_reader_label(candidate)}: {exc}")
+                continue
+        if bio is not None:
             break
-        except Exception as exc:
-            reader_errors.append(f"{_bioio_reader_label(candidate)}: {exc}")
-            continue
 
     if bio is None:
-        raise RuntimeError("bioio open failed via all candidate readers: " + " | ".join(reader_errors))
+        raise RuntimeError(
+            "bioio open failed via all candidate readers: " + " | ".join(reader_errors)
+        )
 
     scenes = [str(s) for s in list(getattr(bio, "scenes", []) or [])]
     if scene is not None:
@@ -1489,7 +1572,9 @@ def _load_with_bioio(
         preview_plane = np.asarray(bio.get_image_data(preview_order, **preview_select))
 
     chosen_mode: ArrayMode = array_mode if array_mode in ("plane", "volume", "tczyx") else "plane"
-    canonical_array_order = _array_order_for_mode(chosen_mode, has_t=has_t, has_c=has_c, has_z=has_z)
+    canonical_array_order = _array_order_for_mode(
+        chosen_mode, has_t=has_t, has_c=has_c, has_z=has_z
+    )
     native_array_order = _native_order_with_channel_axis(canonical_array_order, channel_axis)
     array_select = _selector_for_order(
         native_array_order,
@@ -1503,10 +1588,16 @@ def _load_with_bioio(
     )
     array = np.asarray(bio.get_image_data(native_array_order, **array_select))
 
-    stem = _stable_artifact_stem(str(source), current_scene, chosen_mode)
-    preview_path = _save_preview(preview_plane, stem=stem, output_root=output_root) if generate_preview else None
+    stem = _stable_artifact_stem(source_token or source_name, current_scene, chosen_mode)
+    preview_path = (
+        _save_preview(preview_plane, stem=stem, output_root=output_root)
+        if generate_preview
+        else None
+    )
 
     warnings: list[str] = []
+    if open_warning:
+        warnings.append(open_warning)
     if reader_used is not None and reader_errors:
         warnings.append(
             "Primary bioio reader failed; recovered with fallback reader "
@@ -1518,7 +1609,9 @@ def _load_with_bioio(
                 "Detected sample axis 'S' with RGB-like channels; using it as the display channel axis."
             )
         else:
-            warnings.append("Normalized sample axis 'S' to channel axis 'C' for consistent color handling.")
+            warnings.append(
+                "Normalized sample axis 'S' to channel axis 'C' for consistent color handling."
+            )
 
     array_path = None
     if save_array:
@@ -1549,7 +1642,7 @@ def _load_with_bioio(
     result: dict[str, Any] = {
         "success": True,
         "reader": "bioio",
-        "file_path": str(source.resolve()),
+        "file_path": source_token if is_remote else str(Path(source).resolve()),
         "scene": current_scene,
         "scenes": scenes,
         "dims_order": canonical_dims_order,
@@ -1578,7 +1671,9 @@ def _load_with_bioio(
         "warnings": warnings,
         "metadata": {
             "header": {
-                "Format": source.suffix.lstrip(".").upper() if source.suffix else "Scientific image",
+                "Format": Path(source_name).suffix.lstrip(".").upper()
+                if Path(source_name).suffix
+                else "Scientific image",
                 "Dimensions": canonical_dims_order,
             },
             "orientation": {
@@ -1623,14 +1718,20 @@ def load_scientific_image(
     if not file_path:
         return {"success": False, "error": "file_path is required"}
 
-    source = Path(str(file_path)).expanduser()
-    if not source.exists() or not source.is_file():
+    source_token = str(file_path or "").strip()
+    is_remote = _looks_like_remote_source(source_token)
+    source = source_token if is_remote else Path(source_token).expanduser()
+    source_name = _source_name(source_token)
+    if not is_remote and (
+        not source.exists() or (not source.is_file() and not _is_directory_image_store(source))
+    ):
         return {"success": False, "error": f"File not found: {source}"}
-    if _looks_like_non_image_file(source):
+    display_name = source_name or (source.name if isinstance(source, Path) else "source")
+    if _looks_like_non_image_file(Path(display_name or "source")):
         return {
             "success": False,
             "error": (
-                f"Unsupported file type for scientific image loading: {source.name}. "
+                f"Unsupported file type for scientific image loading: {display_name}. "
                 "Provide an image/volume/video file."
             ),
         }
@@ -1639,7 +1740,7 @@ def load_scientific_image(
     root = Path(output_root or getattr(settings, "science_data_root", "data/science"))
     root.mkdir(parents=True, exist_ok=True)
 
-    if _is_ordinary_display_image_path(source):
+    if not is_remote and _is_ordinary_display_image_path(source):
         try:
             result = _load_with_pillow(
                 str(source),
@@ -1662,7 +1763,7 @@ def load_scientific_image(
             }
 
     nifti_error: Exception | None = None
-    if _is_nifti_path(source):
+    if not is_remote and _is_nifti_path(source):
         try:
             result = _load_with_nibabel(
                 str(source),
@@ -1707,7 +1808,7 @@ def load_scientific_image(
     except Exception as exc:
         bioio_error = exc
 
-    is_tiff = _is_tiff_path(source)
+    is_tiff = bool((not is_remote) and _is_tiff_path(source))
     tiff_error: Exception | None = None
     if is_tiff:
         try:
@@ -1727,12 +1828,20 @@ def load_scientific_image(
             )
             if bioio_error is not None:
                 result.setdefault("warnings", [])
-                result["warnings"].append(f"bioio loader failed, using tifffile fallback: {bioio_error}")
+                result["warnings"].append(
+                    f"bioio loader failed, using tifffile fallback: {bioio_error}"
+                )
             if bool(result.get("success")):
                 return _attach_source_metadata_hints(result, source)
             return result
         except Exception as tifffile_exc:
             tiff_error = tifffile_exc
+
+    if is_remote:
+        return {
+            "success": False,
+            "error": f"Failed to load remote image with bioio: {bioio_error}",
+        }
 
     try:
         fallback = _load_with_pillow(
@@ -1808,6 +1917,7 @@ def _probe_scientific_image_uncached(
 
 def ensure_scientific_derivative(**kwargs: Any) -> dict[str, Any]:
     return load_scientific_image(**kwargs)
+
 
 def probe_scientific_image(
     *,

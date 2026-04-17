@@ -1362,6 +1362,58 @@ body {
     );
 }
 
+.chat-tool-card--scientific {
+  background:
+    radial-gradient(circle at top left, color-mix(in oklab, #d4e8ec 22%, transparent), transparent 38%),
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--bg-panel) 92%, #eef7f9 8%),
+      color-mix(in oklab, var(--bg-panel) 96%, #d7e7eb 4%)
+    );
+}
+
+.chat-research-digest {
+  margin-top: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius-lg) - 0.15rem);
+  background: color-mix(in oklab, var(--bg-panel) 97%, var(--bg-main) 3%);
+  padding: 0.95rem 1rem 1rem;
+}
+
+.chat-research-digest-header {
+  display: grid;
+  gap: 0.18rem;
+  margin-bottom: 0.75rem;
+}
+
+.chat-research-digest-label {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--text-muted) 88%, var(--text-main) 12%);
+}
+
+.chat-research-digest-meta {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.chat-research-digest-note {
+  margin: 0 0 0.8rem;
+  font-size: 0.81rem;
+  line-height: 1.5;
+  color: color-mix(in oklab, var(--text-main) 84%, var(--text-muted) 16%);
+}
+
+.chat-research-digest-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .chat-tool-card-header {
   padding-bottom: 0.75rem;
 }
@@ -1402,6 +1454,64 @@ body {
   min-width: 0;
 }
 
+.chat-research-digest-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.chat-research-digest-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.chat-research-digest-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.chat-research-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.35rem;
+  color: color-mix(in oklab, var(--text-main) 86%, var(--text-muted) 14%);
+  font-size: 0.83rem;
+  line-height: 1.5;
+}
+
+.chat-research-list--ordered {
+  list-style: decimal;
+}
+
+.chat-tool-insight-panel {
+  border: 1px solid color-mix(in oklab, var(--line) 82%, #7ba7b7 18%);
+  border-radius: calc(var(--radius-md) + 2px);
+  background: color-mix(in oklab, var(--bg-panel-strong) 93%, #f3fafb 7%);
+  padding: 0.9rem 1rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.chat-tool-insight-title {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--text-muted) 82%, #2a7287 18%);
+}
+
+.chat-tool-insight-body {
+  margin: 0;
+  max-width: 68ch;
+  font-size: 0.84rem;
+  line-height: 1.58;
+  color: color-mix(in oklab, var(--text-main) 88%, var(--text-muted) 12%);
+}
+
 .chat-tool-metrics {
   margin-top: 0.45rem;
   display: flex;
@@ -1420,6 +1530,29 @@ body {
   border-radius: var(--radius-md);
   overflow: auto;
   background: var(--bg-panel-strong);
+}
+
+.chat-tool-megaseg-shell {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.chat-tool-megaseg-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.85rem 0.95rem 0.1rem;
+}
+
+.chat-tool-megaseg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem 0.55rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
 }
 
 .chat-tool-resource-table {

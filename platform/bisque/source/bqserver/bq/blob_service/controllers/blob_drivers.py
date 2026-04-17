@@ -143,6 +143,15 @@ else:
     def store_compare(store_url, mount_url):
         return store_url.startswith (mount_url)
 
+def _is_within_root(path, root):
+    """Return True when path stays within root after normalization."""
+    try:
+        path = tounicode(os.path.realpath(tounicode(path)))
+        root = tounicode(os.path.realpath(tounicode(root)))
+        return os.path.commonpath([path, root]) == root
+    except (OSError, TypeError, ValueError):
+        return False
+
 
 ##############################################
 #  Load store parameters
@@ -256,7 +265,12 @@ class LocalDriver (StorageDriver):
         #log.debug('valid local ident %s local top %s', url2localpath(ident), url2localpath(self.top))
 
         if store_compare(storeurl, self.mount_url):
-            return storeurl
+            localpath = tounicode(url2localpath(storeurl))
+            if not _is_within_root(localpath, self.mount_path):
+                return None
+            if not os.path.exists(localpath):
+                return None
+            return tounicode(localpath2url(tounicode(os.path.realpath(localpath))))
 
         # It might be a shorted
         storeurl,_ = split_subpath(storeurl)
@@ -268,18 +282,24 @@ class LocalDriver (StorageDriver):
             path = posixpath.normpath(urllib.parse.urlparse(storeurl).path)
             path = force_filesys (path)
             log.debug ("checking unquoted %s", tounicode(path))
-            if os.path.exists (path):
-                return path  # not returning an actual URL ..
+            if os.path.exists(path) and _is_within_root(path, self.mount_path):
+                return tounicode(localpath2url(tounicode(os.path.realpath(path))))
         elif storeurl.startswith('file:///'):
-            #should have matched earlier
-            return None
+            localpath = tounicode(url2localpath(storeurl))
+            if not _is_within_root(localpath, self.mount_path):
+                return None
+            if not os.path.exists(localpath):
+                return None
+            return tounicode(localpath2url(tounicode(os.path.realpath(localpath))))
         elif storeurl.startswith('file://'):
             storeurl = urllib.parse.urljoin(self.top, storeurl[7:])
         else:
             return None
         localpath = tounicode(url2localpath (storeurl))
         log.debug ("checking %s", tounicode(localpath))
-        return os.path.exists(localpath) and tounicode(localpath2url(localpath))
+        if not _is_within_root(localpath, self.mount_path):
+            return None
+        return os.path.exists(localpath) and tounicode(localpath2url(tounicode(os.path.realpath(localpath))))
 
     def relative(self, storeurl):
         path = tounicode(url2localpath (self.valid (storeurl)))

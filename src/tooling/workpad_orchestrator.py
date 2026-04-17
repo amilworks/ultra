@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import re
 from typing import Any, Literal
-
 
 _PHASE_EVENT_NAME = "phase"
 
@@ -51,9 +50,7 @@ def upsert_markdown_section(
     if not current:
         current = "# Prompt Workpad\n\n"
 
-    section_re = re.compile(
-        rf"(?ms)^## {re.escape(section_title)}\n.*?(?=^## |\Z)"
-    )
+    section_re = re.compile(rf"(?ms)^## {re.escape(section_title)}\n.*?(?=^## |\Z)")
     replacement = f"## {section_title}\n{section_body}\n\n"
     if section_re.search(current):
         updated = section_re.sub(replacement, current, count=1)
@@ -100,9 +97,7 @@ def extract_prompt_workpad_phase_trace(
             duration_value = round(float(duration), 3)
             row["duration_seconds"] = duration_value
             if status == "completed":
-                total_durations[phase] = round(
-                    total_durations.get(phase, 0.0) + duration_value, 3
-                )
+                total_durations[phase] = round(total_durations.get(phase, 0.0) + duration_value, 3)
         phase_rows.append(row)
         if len(phase_rows) >= 120:
             break

@@ -280,17 +280,7 @@ function PreviewTile({
   onOpenInViewer: (fileIds: string[]) => void;
 }) {
   const { file, bisqueLink } = item;
-  if (looksLikeHdf5(file)) {
-    return (
-      <Hdf5PreviewTile
-        file={file}
-        bisqueLink={bisqueLink}
-        apiClient={apiClient}
-        onOpenInViewer={onOpenInViewer}
-      />
-    );
-  }
-
+  const isHdf5 = looksLikeHdf5(file);
   const localPreviewUrl = looksLikeImage(file) ? apiClient.uploadPreviewUrl(file.file_id) : null;
   const bisquePreviewUrl = buildBisqueThumbnailUrl(bisqueLink?.imageServiceUrl);
   const previewCandidates = useMemo(
@@ -314,6 +304,17 @@ function PreviewTile({
     previewIndex >= 0 && previewIndex < previewCandidates.length
       ? previewCandidates[previewIndex]
       : null;
+
+  if (isHdf5) {
+    return (
+      <Hdf5PreviewTile
+        file={file}
+        bisqueLink={bisqueLink}
+        apiClient={apiClient}
+        onOpenInViewer={onOpenInViewer}
+      />
+    );
+  }
 
   return (
     <article className="overflow-hidden rounded-xl border border-border/70 bg-background/80 shadow-sm">

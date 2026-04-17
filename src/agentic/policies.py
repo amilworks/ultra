@@ -6,7 +6,6 @@ from src.agents.contracts import KnowledgeContext, ResourceFocus, TurnIntent
 from src.agents.profiles import DOMAIN_PROFILES
 from src.agents.routing import compose_route_decision
 
-
 WRITE_TOOL_NAMES = {
     "upload_to_bisque",
     "add_tags_to_resource",
@@ -86,20 +85,26 @@ def route_scientist_turn(
         suggested_tool_names=suggested_tool_names,
         context_id=str(selection_context.get("context_id") or "").strip() or None,
         source=str(selection_context.get("source") or "").strip() or None,
-        originating_message_id=str(selection_context.get("originating_message_id") or "").strip() or None,
-        originating_user_text=str(selection_context.get("originating_user_text") or "").strip() or None,
+        originating_message_id=str(selection_context.get("originating_message_id") or "").strip()
+        or None,
+        originating_user_text=str(selection_context.get("originating_user_text") or "").strip()
+        or None,
         suggested_domain=str(selection_context.get("suggested_domain") or "").strip() or None,
     )
     turn_intent = TurnIntent(
         original_user_text=str(user_text or "").strip(),
         normalized_user_text=str(user_text or "").strip().lower(),
-        selected_tool_names=[str(name or "").strip() for name in selected_tool_names if str(name or "").strip()],
+        selected_tool_names=[
+            str(name or "").strip() for name in selected_tool_names if str(name or "").strip()
+        ],
         workflow_hint=dict(workflow_hint or {}),
         resource_focus=resource_focus,
         knowledge_context=KnowledgeContext.model_validate(knowledge_context or {}),
     )
     route = compose_route_decision(turn_intent)
-    selected_domains = [str(name or "").strip() for name in route.selected_domains if str(name or "").strip()]
+    selected_domains = [
+        str(name or "").strip() for name in route.selected_domains if str(name or "").strip()
+    ]
     if not selected_domains:
         selected_domains = ["core"]
     primary_domain = selected_domains[0]
@@ -116,10 +121,14 @@ def route_scientist_turn(
             seen.add(normalized)
             available_tool_names.append(normalized)
 
-    explicit_tools = [str(name or "").strip() for name in selected_tool_names if str(name or "").strip()]
+    explicit_tools = [
+        str(name or "").strip() for name in selected_tool_names if str(name or "").strip()
+    ]
     inferred_write_tools = _infer_write_tools(user_text)
     if explicit_tools:
-        available_tool_names = [name for name in available_tool_names if name in set(explicit_tools)] or explicit_tools
+        available_tool_names = [
+            name for name in available_tool_names if name in set(explicit_tools)
+        ] or explicit_tools
     elif inferred_write_tools:
         for tool_name in inferred_write_tools:
             if tool_name not in available_tool_names:
@@ -127,11 +136,17 @@ def route_scientist_turn(
 
     write_intent = bool(set(explicit_tools) & WRITE_TOOL_NAMES) or bool(inferred_write_tools)
     read_tool_names = [name for name in available_tool_names if name in READ_TOOL_NAMES]
-    write_tool_names = [name for name in available_tool_names if name in WRITE_TOOL_NAMES] if write_intent else []
+    write_tool_names = (
+        [name for name in available_tool_names if name in WRITE_TOOL_NAMES] if write_intent else []
+    )
     analysis_tool_names = [
-        name for name in available_tool_names if name not in set(read_tool_names) and name not in set(write_tool_names)
+        name
+        for name in available_tool_names
+        if name not in set(read_tool_names) and name not in set(write_tool_names)
     ]
-    approval_tool_names = [name for name in write_tool_names if name in APPROVAL_REQUIRED_TOOL_NAMES]
+    approval_tool_names = [
+        name for name in write_tool_names if name in APPROVAL_REQUIRED_TOOL_NAMES
+    ]
     requires_approval = bool(approval_tool_names)
     return RoutedScientistTurn(
         turn_intent=turn_intent,

@@ -18,7 +18,12 @@ except Exception:  # pragma: no cover - optional dependency guard
     pd = None  # type: ignore[assignment]
 
 from src.science.reporting import generate_repro_report
-from src.science.stats import compare_two_groups, list_curated_stat_tools, run_stat_tool, summary_statistics
+from src.science.stats import (
+    compare_two_groups,
+    list_curated_stat_tools,
+    run_stat_tool,
+    summary_statistics,
+)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -31,17 +36,17 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _extract_counts(condition: dict[str, Any]) -> dict[str, int]:
     counts = condition.get("counts_by_class")
     if isinstance(counts, dict):
-        out: dict[str, int] = {}
+        counts_by_class: dict[str, int] = {}
         for key, value in counts.items():
             try:
-                out[str(key)] = int(value)
+                counts_by_class[str(key)] = int(value)
             except Exception:
                 continue
-        return out
+        return counts_by_class
 
     summary_rows = condition.get("class_summary")
     if isinstance(summary_rows, list):
-        out: dict[str, int] = {}
+        summary_counts: dict[str, int] = {}
         for row in summary_rows:
             if not isinstance(row, dict):
                 continue
@@ -49,10 +54,10 @@ def _extract_counts(condition: dict[str, Any]) -> dict[str, int]:
             if not cls:
                 continue
             try:
-                out[cls] = int(row.get("count", 0))
+                summary_counts[cls] = int(row.get("count", 0))
             except Exception:
                 continue
-        return out
+        return summary_counts
     return {}
 
 
@@ -89,7 +94,9 @@ def _load_object_table_input(
     max_object_rows: int = 50000,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if isinstance(object_table, list) and object_table:
-        return [row for row in object_table if isinstance(row, dict)], {"source": "inline_object_table"}
+        return [row for row in object_table if isinstance(row, dict)], {
+            "source": "inline_object_table"
+        }
 
     table_path = str(object_table_path or "").strip()
     if table_path:
@@ -99,7 +106,10 @@ def _load_object_table_input(
         parsed = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(parsed, list):
             raise ValueError("object_table_path must contain a JSON array of per-object rows.")
-        return [row for row in parsed if isinstance(row, dict)], {"source": "object_table_path", "path": str(path.resolve())}
+        return [row for row in parsed if isinstance(row, dict)], {
+            "source": "object_table_path",
+            "path": str(path.resolve()),
+        }
 
     quantified = quantify_objects(
         predictions_json_path=predictions_json_path,
@@ -108,7 +118,9 @@ def _load_object_table_input(
         max_object_rows=max_object_rows,
     )
     if not bool(quantified.get("success")):
-        raise ValueError(str(quantified.get("error") or "Failed to quantify detections for plotting."))
+        raise ValueError(
+            str(quantified.get("error") or "Failed to quantify detections for plotting.")
+        )
     rows = _extract_object_rows(quantified)
     return rows, {
         "source": "quantify_objects",
@@ -121,8 +133,11 @@ def _metric_values(rows: list[dict[str, Any]], metric: str) -> list[float]:
     for row in rows:
         if metric not in row:
             continue
+        raw_value = row.get(metric)
+        if raw_value is None:
+            continue
         try:
-            value = float(row.get(metric))
+            value = float(raw_value)
         except Exception:
             continue
         if math.isfinite(value):
@@ -400,7 +415,9 @@ def _read_csv_with_repair(
                     on_bad_lines="error",
                 )
                 if _delimiter_choice_looks_invalid(dataframe, sample_text, delim):
-                    parse_attempts.append("rejected: delimiter likely incorrect based on header structure")
+                    parse_attempts.append(
+                        "rejected: delimiter likely incorrect based on header structure"
+                    )
                     dataframe = None
                     continue
                 selected_encoding = enc
@@ -426,7 +443,9 @@ def _read_csv_with_repair(
                         on_bad_lines="skip",
                     )
                     if _delimiter_choice_looks_invalid(dataframe, sample_text, delim):
-                        parse_attempts.append("rejected: delimiter likely incorrect based on header structure")
+                        parse_attempts.append(
+                            "rejected: delimiter likely incorrect based on header structure"
+                        )
                         dataframe = None
                         continue
                     selected_encoding = enc
@@ -442,8 +461,7 @@ def _read_csv_with_repair(
 
     if dataframe is None:
         raise ValueError(
-            "Failed to parse CSV after strict+tolerant attempts. "
-            + "; ".join(parse_attempts[-6:])
+            "Failed to parse CSV after strict+tolerant attempts. " + "; ".join(parse_attempts[-6:])
         )
 
     row_widths = _sample_row_widths(sample_text, selected_delimiter or ",")
@@ -473,8 +491,12 @@ def _read_csv_with_repair(
         "malformed_rows_estimate": malformed_rows_estimate,
         "decode_notes": decode_notes,
         "row_width_distribution": row_widths.get("distribution", []),
-        "issues_detected": _dedupe_strings([str(item) for item in parse_issues if str(item).strip()]),
-        "fixes_applied": _dedupe_strings([str(item) for item in fixes_applied if str(item).strip()]),
+        "issues_detected": _dedupe_strings(
+            [str(item) for item in parse_issues if str(item).strip()]
+        ),
+        "fixes_applied": _dedupe_strings(
+            [str(item) for item in fixes_applied if str(item).strip()]
+        ),
         "parse_attempts_tail": parse_attempts[-12:],
     }
     return dataframe, metadata
@@ -621,7 +643,9 @@ def _apply_csv_operations(
                 mapping = raw_op.get("mapping")
                 if not isinstance(mapping, dict) or not mapping:
                     raise ValueError("rename_columns requires a non-empty 'mapping' object.")
-                transformed = transformed.rename(columns={str(k): str(v) for k, v in mapping.items()})
+                transformed = transformed.rename(
+                    columns={str(k): str(v) for k, v in mapping.items()}
+                )
                 detail = f"Renamed {len(mapping)} columns."
             elif op_name in {"filter_rows", "filter"}:
                 logic = str(raw_op.get("logic") or "and").strip().lower()
@@ -636,7 +660,9 @@ def _apply_csv_operations(
                     detail = "Filtered rows via query."
                 else:
                     if not isinstance(filters, list) or not filters:
-                        raise ValueError("filter_rows requires non-empty 'filters' or a 'query' string.")
+                        raise ValueError(
+                            "filter_rows requires non-empty 'filters' or a 'query' string."
+                        )
                     mask = _build_filter_mask(transformed, filters, logic=logic)
                     transformed = transformed.loc[mask].copy()
                     detail = f"Filtered rows with {len(filters)} condition(s) ({logic})."
@@ -672,7 +698,9 @@ def _apply_csv_operations(
                 elif method is not None:
                     method_name = str(method).strip().lower()
                     if method_name not in _CSV_ALLOWED_FILL_METHODS:
-                        raise ValueError("fillna method must be one of: ffill, bfill, pad, backfill.")
+                        raise ValueError(
+                            "fillna method must be one of: ffill, bfill, pad, backfill."
+                        )
                     transformed = transformed.fillna(method=method_name)
                     detail = f"Filled NA values with method '{method_name}'."
                 else:
@@ -728,7 +756,9 @@ def _apply_csv_operations(
                 by_cols = [str(item) for item in by]
                 missing = [col for col in by_cols if col not in transformed.columns]
                 if missing:
-                    raise ValueError("groupby_agg missing group columns: " + ", ".join(missing[:10]))
+                    raise ValueError(
+                        "groupby_agg missing group columns: " + ", ".join(missing[:10])
+                    )
                 aggregations = raw_op.get("aggregations")
                 if not isinstance(aggregations, dict) or not aggregations:
                     raise ValueError("groupby_agg requires non-empty 'aggregations'.")
@@ -742,19 +772,25 @@ def _apply_csv_operations(
                     elif isinstance(funcs, list):
                         funcs_list = [str(item) for item in funcs]
                     else:
-                        raise ValueError(f"groupby_agg aggregations for '{column_name}' must be str/list.")
+                        raise ValueError(
+                            f"groupby_agg aggregations for '{column_name}' must be str/list."
+                        )
                     filtered = [f for f in funcs_list if f in _CSV_ALLOWED_AGG_FUNCS]
                     if not filtered:
                         raise ValueError(
                             f"groupby_agg for '{column_name}' has no allowed funcs ({sorted(_CSV_ALLOWED_AGG_FUNCS)})."
                         )
                     safe_aggs[column_name] = filtered if len(filtered) > 1 else filtered[0]
-                transformed = transformed.groupby(by_cols, dropna=False).agg(safe_aggs).reset_index()
+                transformed = (
+                    transformed.groupby(by_cols, dropna=False).agg(safe_aggs).reset_index()
+                )
                 if hasattr(transformed.columns, "to_flat_index"):
                     flattened = []
                     for col in transformed.columns.to_flat_index():
                         if isinstance(col, tuple):
-                            flattened.append("_".join([str(part) for part in col if str(part) and part != ""]))
+                            flattened.append(
+                                "_".join([str(part) for part in col if str(part) and part != ""])
+                            )
                         else:
                             flattened.append(str(col))
                     transformed.columns = flattened
@@ -833,11 +869,9 @@ def _column_profile(frame: Any, *, max_columns: int = 40) -> list[dict[str, Any]
 def _numeric_summary(frame: Any, *, max_columns: int = 20) -> list[dict[str, Any]]:
     if pd is None:
         return []
-    numeric_cols = [
-        str(col)
-        for col in frame.columns
-        if pd.api.types.is_numeric_dtype(frame[col])
-    ][:max_columns]
+    numeric_cols = [str(col) for col in frame.columns if pd.api.types.is_numeric_dtype(frame[col])][
+        :max_columns
+    ]
     if not numeric_cols:
         return []
 
@@ -958,7 +992,9 @@ def analyze_csv(
             )
 
             if duplicate_rows > 0:
-                issues_detected.append(f"Duplicate rows detected after transformations: {duplicate_rows}.")
+                issues_detected.append(
+                    f"Duplicate rows detected after transformations: {duplicate_rows}."
+                )
 
             preview_payload = _preview_rows(transformed_frame, n=preview_rows)
             numeric_summary = _numeric_summary(transformed_frame)
@@ -973,7 +1009,9 @@ def analyze_csv(
                         "rows_after": rows_after,
                         "columns_before": cols_before,
                         "columns_after": cols_after,
-                        "operations_applied": len([row for row in operation_logs if row.get("status") == "applied"]),
+                        "operations_applied": len(
+                            [row for row in operation_logs if row.get("status") == "applied"]
+                        ),
                         "issues_detected": len(issues_detected),
                     },
                 },
@@ -1218,7 +1256,7 @@ def quantify_objects(
     for class_name, count in sorted(counts_by_class.items(), key=lambda item: (-item[1], item[0])):
         cls_conf = confidences_by_class.get(class_name, [])
         conf_mean = round(sum(cls_conf) / len(cls_conf), 6) if cls_conf else 0.0
-        row: dict[str, Any] = {
+        summary_row: dict[str, Any] = {
             "class": class_name,
             "count": int(count),
             "mean_confidence": conf_mean,
@@ -1228,15 +1266,21 @@ def quantify_objects(
         areas = area_px_by_class.get(class_name, [])
         if areas:
             area_mean_px = sum(areas) / len(areas)
-            row["mean_box_area_px"] = round(area_mean_px, 3)
+            summary_row["mean_box_area_px"] = round(area_mean_px, 3)
             if pixel_size is not None and _safe_float(pixel_size, default=0.0) > 0:
                 scale = _safe_float(pixel_size, default=1.0)
                 area_units = area_mean_px * (scale * scale)
-                row[f"mean_box_area_{pixel_unit}2"] = round(area_units, 6)
-        class_summary.append(row)
+                summary_row[f"mean_box_area_{pixel_unit}2"] = round(area_units, 6)
+        class_summary.append(summary_row)
 
     distribution_summary: dict[str, Any] = {}
-    for metric in ("bbox_area_px", "width_px", "height_px", "aspect_ratio", "equivalent_diameter_px"):
+    for metric in (
+        "bbox_area_px",
+        "width_px",
+        "height_px",
+        "aspect_ratio",
+        "equivalent_diameter_px",
+    ):
         vals = _metric_values(object_rows, metric)
         if len(vals) >= 2:
             distribution_summary[metric] = summary_statistics(vals)
@@ -1349,7 +1393,10 @@ def plot_quantified_detections(
     frame["confidence"] = pd.to_numeric(frame["confidence"], errors="coerce")
     frame = frame.dropna(subset=["confidence"]).copy()
     if frame.empty:
-        return {"success": False, "error": "No numeric confidence values were available for plotting."}
+        return {
+            "success": False,
+            "error": "No numeric confidence values were available for plotting.",
+        }
     frame["class"] = frame["class"].astype(str)
     frame["is_low_confidence"] = frame["confidence"] < threshold
 
@@ -1367,7 +1414,9 @@ def plot_quantified_detections(
         plot_dir = Path(str(output_dir)).expanduser()
     else:
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        plot_dir = Path("data") / "quantification_plots" / f"{stamp}-{source_name.replace('.', '_')}"
+        plot_dir = (
+            Path("data") / "quantification_plots" / f"{stamp}-{source_name.replace('.', '_')}"
+        )
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     if sns is not None:
@@ -1380,12 +1429,14 @@ def plot_quantified_detections(
     total_count = int(len(frame))
     low_count = int(frame["is_low_confidence"].sum())
     counts_by_class = {
-        str(key): int(value)
-        for key, value in frame["class"].value_counts().sort_index().items()
+        str(key): int(value) for key, value in frame["class"].value_counts().sort_index().items()
     }
     low_counts_by_class = {
         str(key): int(value)
-        for key, value in frame.loc[frame["is_low_confidence"], "class"].value_counts().sort_index().items()
+        for key, value in frame.loc[frame["is_low_confidence"], "class"]
+        .value_counts()
+        .sort_index()
+        .items()
     }
 
     generated_files: list[dict[str, str]] = []
@@ -1405,7 +1456,9 @@ def plot_quantified_detections(
     ax.hist(frame["confidence"], bins=bins, color=accent_secondary, alpha=0.85, edgecolor="black")
     ax.axvspan(0.0, threshold, color=low_confidence_fill, alpha=0.18)
     ax.axvline(threshold, color=low_confidence_fill, linestyle="--", linewidth=2)
-    ax.set_title(f"Detection confidence distribution\n{image_title}", fontsize=16, fontweight="bold")
+    ax.set_title(
+        f"Detection confidence distribution\n{image_title}", fontsize=16, fontweight="bold"
+    )
     ax.set_xlabel("Confidence score")
     ax.set_ylabel("Detections")
     ax.text(
@@ -1442,8 +1495,7 @@ def plot_quantified_detections(
         )
     else:
         grouped = [
-            frame.loc[frame["class"] == cls, "confidence"].astype(float).tolist()
-            for cls in order
+            frame.loc[frame["class"] == cls, "confidence"].astype(float).tolist() for cls in order
         ]
         box = ax.boxplot(
             grouped,
@@ -1475,7 +1527,11 @@ def plot_quantified_detections(
     if has_centroids:
         fig, ax = plt.subplots(figsize=(10, 6))
         background_drawn = False
-        image_path = Path(str(source_image_path or "")).expanduser() if str(source_image_path or "").strip() else None
+        image_path = (
+            Path(str(source_image_path or "")).expanduser()
+            if str(source_image_path or "").strip()
+            else None
+        )
         if image_path is not None and image_path.exists() and image_path.is_file():
             try:
                 bg = plt.imread(str(image_path))
@@ -1522,9 +1578,15 @@ def plot_quantified_detections(
                 label=f"confidence < {threshold:.2f}",
             )
         if background_drawn:
-            ax.set_title(f"Low-confidence detections on image\n{image_title}", fontsize=16, fontweight="bold")
+            ax.set_title(
+                f"Low-confidence detections on image\n{image_title}", fontsize=16, fontweight="bold"
+            )
         else:
-            ax.set_title(f"Low-confidence detections in image coordinates\n{image_title}", fontsize=16, fontweight="bold")
+            ax.set_title(
+                f"Low-confidence detections in image coordinates\n{image_title}",
+                fontsize=16,
+                fontweight="bold",
+            )
         ax.set_xlabel("X (pixels)")
         ax.set_ylabel("Y (pixels)")
         ax.invert_yaxis()
@@ -1567,7 +1629,9 @@ def plot_quantified_detections(
                 edgecolor="black",
                 linewidth=1.0,
             )
-        ax.set_title(f"Low-confidence detections by class\n{image_title}", fontsize=16, fontweight="bold")
+        ax.set_title(
+            f"Low-confidence detections by class\n{image_title}", fontsize=16, fontweight="bold"
+        )
         ax.set_xlabel("Class")
         ax.set_ylabel(f"Detections below {threshold:.2f}")
         fig.tight_layout()
@@ -1671,7 +1735,9 @@ def compare_conditions(
             row["delta_proportion"] = round(p_b - p_a, 6)
         comparison_rows.append(row)
 
-    comparison_rows.sort(key=lambda r: abs(_safe_float(r.get("log2_fold_change"), 0.0)), reverse=True)
+    comparison_rows.sort(
+        key=lambda r: abs(_safe_float(r.get("log2_fold_change"), 0.0)), reverse=True
+    )
     trimmed = comparison_rows[:max_rows]
 
     metrics_payload = {
@@ -2220,7 +2286,10 @@ REPRO_REPORT_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "run_id": {"type": "string", "description": "Optional run id for artifact scoping."},
+                "run_id": {
+                    "type": "string",
+                    "description": "Optional run id for artifact scoping.",
+                },
                 "title": {"type": "string"},
                 "result_summary": {"type": "string"},
                 "measurements": {"type": "array", "items": {"type": "object"}},

@@ -5,7 +5,6 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 
-
 _BISQUE_SESSIONS: dict[str, dict[str, Any]] = {}
 _BISQUE_SESSIONS_LOCK = Lock()
 

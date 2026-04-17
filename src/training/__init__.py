@@ -13,10 +13,10 @@ from .continuous import (
     version_transition_allowed,
 )
 from .dataset import (
-    DatasetValidationError,
     VALID_DATASET_ROLES,
     VALID_DATASET_SPLITS,
     VALID_SPATIAL_DIMS,
+    DatasetValidationError,
     analyze_manifest_spatial_compatibility,
     build_dataset_manifest,
     inspect_image_spatial_dims,

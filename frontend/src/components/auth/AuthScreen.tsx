@@ -254,7 +254,7 @@ export function AuthScreen({
                   <Input
                     id="guest-affiliation"
                     autoComplete="organization"
-                    placeholder="UCSB VRL"
+                    placeholder="Research lab, company, or university"
                     value={guestAffiliation}
                     onChange={(event) => setGuestAffiliation(event.target.value)}
                     disabled={loading}

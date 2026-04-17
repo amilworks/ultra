@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
-from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -49,7 +48,9 @@ def _detection_annotation_profile(
     reviewed_samples = 0
     total_samples = 0
 
-    splits = dataset_manifest.get("splits") if isinstance(dataset_manifest.get("splits"), dict) else {}
+    splits = (
+        dataset_manifest.get("splits") if isinstance(dataset_manifest.get("splits"), dict) else {}
+    )
     for split in ("train", "val", "test"):
         rows = splits.get(split) if isinstance(splits, dict) else None
         if not isinstance(rows, list):
@@ -58,7 +59,9 @@ def _detection_annotation_profile(
             if not isinstance(row, dict):
                 continue
             total_samples += 1
-            annotation_row = row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
+            annotation_row = (
+                row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
+            )
             annotation_path = Path(str(annotation_row.get("path") or "")).expanduser()
             if not annotation_path.exists():
                 continue
@@ -66,13 +69,13 @@ def _detection_annotation_profile(
             try:
                 root = ET.parse(str(annotation_path)).getroot()
             except Exception as exc:
-                parse_errors.append(
-                    f"{annotation_path.name}: {exc}"
-                )
+                parse_errors.append(f"{annotation_path.name}: {exc}")
                 continue
             top_layers = list(root.findall("./gobject"))
             selected_layers = [
-                layer for layer in top_layers if str(layer.attrib.get("name") or "").strip() == layer_name
+                layer
+                for layer in top_layers
+                if str(layer.attrib.get("name") or "").strip() == layer_name
             ] or top_layers[:1]
             for layer in selected_layers:
                 for class_node in layer.findall("./gobject"):
@@ -83,9 +86,9 @@ def _detection_annotation_profile(
                     if class_name in class_counts:
                         class_counts[class_name] += len(rectangles)
                     else:
-                        unsupported_class_counts[class_name] = (
-                            unsupported_class_counts.get(class_name, 0) + len(rectangles)
-                        )
+                        unsupported_class_counts[class_name] = unsupported_class_counts.get(
+                            class_name, 0
+                        ) + len(rectangles)
 
     return {
         "class_counts": class_counts,
@@ -110,9 +113,7 @@ def build_preflight_report(
     train_samples = int(
         ((dataset_manifest.get("counts") or {}).get("train") or {}).get("samples") or 0
     )
-    val_samples = int(
-        ((dataset_manifest.get("counts") or {}).get("val") or {}).get("samples") or 0
-    )
+    val_samples = int(((dataset_manifest.get("counts") or {}).get("val") or {}).get("samples") or 0)
     disk_usage = shutil.disk_usage(str(artifact_root))
     free_gb = disk_usage.free / float(1024**3)
 
@@ -191,10 +192,7 @@ def build_preflight_report(
 
     estimated_minutes = max(
         1.0,
-        (
-            (epochs * max(1, train_samples))
-            / (8.0 if gpu_summary["available"] else 2.0)
-        ),
+        ((epochs * max(1, train_samples)) / (8.0 if gpu_summary["available"] else 2.0)),
     )
 
     checks = [
@@ -242,7 +240,9 @@ def build_preflight_report(
         )
 
     if model_dimensions:
-        dims = [str(item or "").strip().lower() for item in model_dimensions if str(item or "").strip()]
+        dims = [
+            str(item or "").strip().lower() for item in model_dimensions if str(item or "").strip()
+        ]
         if requested_spatial_dims not in dims:
             checks.append(
                 {
@@ -353,11 +353,25 @@ def build_preflight_report(
             layer_name="gt2",
         )
         reviewed_samples = int(profile.get("reviewed_samples") or 0)
-        class_counts = profile.get("class_counts") if isinstance(profile.get("class_counts"), dict) else {}
-        unsupported = profile.get("unsupported_class_counts") if isinstance(profile.get("unsupported_class_counts"), dict) else {}
-        parse_errors = profile.get("parse_errors") if isinstance(profile.get("parse_errors"), list) else []
-        repo_path = Path(str(config.get("runtime_repo_path") or "third_party/yolov5")).expanduser().resolve()
-        weights_path = Path(str(config.get("weights_path") or "RareSpotWeights.pt")).expanduser().resolve()
+        class_counts = (
+            profile.get("class_counts") if isinstance(profile.get("class_counts"), dict) else {}
+        )
+        unsupported = (
+            profile.get("unsupported_class_counts")
+            if isinstance(profile.get("unsupported_class_counts"), dict)
+            else {}
+        )
+        parse_errors = (
+            profile.get("parse_errors") if isinstance(profile.get("parse_errors"), list) else []
+        )
+        repo_path = (
+            Path(str(config.get("runtime_repo_path") or "third_party/yolov5"))
+            .expanduser()
+            .resolve()
+        )
+        weights_path = (
+            Path(str(config.get("weights_path") or "RareSpotWeights.pt")).expanduser().resolve()
+        )
         checks.append(
             {
                 "name": "yolov5_runtime_available",
@@ -432,7 +446,9 @@ def build_preflight_report(
                 {
                     "name": "unsupported_class_observations",
                     "status": "warn",
-                    "detail": ", ".join([f"{key}={int(value)}" for key, value in sorted(unsupported.items())]),
+                    "detail": ", ".join(
+                        [f"{key}={int(value)}" for key, value in sorted(unsupported.items())]
+                    ),
                 }
             )
         if parse_errors:

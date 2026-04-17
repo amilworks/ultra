@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 CARTESIAN_METHOD_OVERLAY = """
 Cartesian method overlay:
 - Do not accept load-bearing claims prematurely.

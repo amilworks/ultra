@@ -1,37 +1,35 @@
 """Function calling tools for the LLM."""
 
-from src.utils import ensure_local_bqapi
-
-# Ensure local bqapi checkout is used if available.
-ensure_local_bqapi()
-
-import json
-import os
-import re
-import io
 import base64
 import hashlib
-import random
-import shutil
-import time
-import threading
 import inspect
+import io
+import json
+import os
+import random
+import re
+import shutil
 import statistics
 import subprocess
 import sys
+import threading
+import time
 from collections import Counter
+from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
-from uuid import uuid4
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
-from lxml import etree
-import numpy as np
 import httpx
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+import numpy as np
+from lxml import etree
+from PIL import Image, ImageDraw, ImageOps
 
 from src.auth import get_bisque_session, get_request_bisque_auth
+from src.bqapi_bootstrap import LOCAL_BQAPI_READY
 from src.config import get_settings
 from src.logger import logger
 from src.science.chemistry import (
@@ -42,6 +40,16 @@ from src.science.chemistry import (
 )
 from src.science.imaging import load_scientific_image
 from src.science.medsam2 import segment_array_with_medsam2
+from src.science.megaseg_service_client import (
+    MegasegServiceClient,
+    MegasegServiceError,
+    MegasegServiceTimeoutError,
+)
+from src.science.sam3 import (
+    segment_array_with_sam3,
+    segment_array_with_sam3_concept,
+    segment_array_with_sam3_points,
+)
 from src.science.spectral_instability import (
     SPECTRAL_DEFAULT_CONF_THRES,
     SPECTRAL_DEFAULT_IOU_THRES,
@@ -49,70 +57,27 @@ from src.science.spectral_instability import (
     SpectralInstabilityConfig,
     score_spectral_instability,
 )
-from src.science.sam3 import (
-    segment_array_with_sam3,
-    segment_array_with_sam3_concept,
-    segment_array_with_sam3_points,
-)
+from src.tooling.calculator import numpy_calculator
 from src.tooling.code_execution import (
     execute_python_job_once,
     load_python_job_spec,
     prepare_python_job,
 )
-from src.tooling.calculator import numpy_calculator
 from src.tooling.domains import (
-    ANALYZE_CSV_TOOL,
-    BIOIO_LOAD_IMAGE_TOOL,
-    BISQUE_ADD_TO_DATASET_TOOL,
-    CODEGEN_PYTHON_PLAN_TOOL,
-    DEPTH_PRO_ESTIMATE_TOOL,
-    BISQUE_ADD_GOBJECTS_TOOL,
-    BISQUE_ADVANCED_SEARCH_TOOL,
-    BISQUE_CREATE_DATASET_TOOL,
-    BISQUE_DELETE_TOOL,
-    BISQUE_DOWNLOAD_DATASET_TOOL,
-    BISQUE_DOWNLOAD_TOOL,
-    BISQUE_FETCH_XML_TOOL,
-    BISQUE_FIND_ASSETS_TOOL,
-    BISQUE_LOAD_TOOL,
-    BISQUE_PING_TOOL,
-    BISQUE_RUN_MODULE_TOOL,
-    BISQUE_SEARCH_TOOL,
-    BISQUE_TAG_TOOL,
-    BISQUE_UPLOAD_TOOL,
-    COMPARE_CONDITIONS_TOOL,
-    COMPARE_STRUCTURES_TOOL,
-    MEGASEG_SEGMENT_TOOL,
-    PLOT_QUANTIFIED_DETECTIONS_TOOL,
-    QUANTIFY_OBJECTS_TOOL,
-    QUANTIFY_SEGMENTATION_MASKS_TOOL,
-    FORMULA_BALANCE_CHECK_TOOL,
-    REPRO_REPORT_TOOL,
-    EXECUTE_PYTHON_JOB_TOOL,
-    NUMPY_CALCULATOR_TOOL,
-    PREDICTION_STABILITY_TOOL,
-    PROPOSE_REACTIVE_SITES_TOOL,
-    SAM3_SEGMENT_TOOL,
-    SEGMENT_EVALUATE_BATCH_TOOL,
-    SEGMENTATION_EVAL_TOOL,
-    SAM2_PROMPT_TOOL,
-    SAM2_SEGMENT_TOOL,
-    SAM2_VIDEO_TOOL,
-    SPECTRAL_INSTABILITY_TOOL,
-    STATS_LIST_CURATED_TOOLS_TOOL,
-    STATS_RUN_CURATED_TOOL,
-    STRUCTURE_REPORT_TOOL,
-    YOLO_DETECT_TOOL,
-    YOLO_FINETUNE_DETECT_TOOL,
-    YOLO_LIST_MODELS_TOOL,
     analyze_csv,
     compare_conditions,
     plot_quantified_detections,
     quantify_objects,
     repro_report,
+)
+from src.tooling.domains import (
     stats_list_curated_tools as _domain_stats_list_curated_tools,
+)
+from src.tooling.domains import (
     stats_run_curated_tool as _domain_stats_run_curated_tool,
 )
+
+assert LOCAL_BQAPI_READY
 
 _BISQUE_ENV_PLACEHOLDER_RE = re.compile(
     r"^(?:\$\{?(?:BI(?:S)?QUE_(?:USER|PASSWORD|ROOT)|ENV)\}?|BI(?:S)?QUE_(?:USER|PASSWORD|ROOT))$",
@@ -229,8 +194,12 @@ def _resolve_bisque_runtime_auth(
         session_cookie_header,
     ) = _get_bisque_auth_material()
 
-    username = _sanitize_bisque_credential(explicit_user) or _sanitize_bisque_credential(session_user)
-    password = _sanitize_bisque_credential(explicit_password) or _sanitize_bisque_credential(session_password)
+    username = _sanitize_bisque_credential(explicit_user) or _sanitize_bisque_credential(
+        session_user
+    )
+    password = _sanitize_bisque_credential(explicit_password) or _sanitize_bisque_credential(
+        session_password
+    )
     access_token = _sanitize_bisque_credential(session_access_token)
     cookie_header = str(session_cookie_header or "").strip() or None
     root = (
@@ -240,7 +209,9 @@ def _resolve_bisque_runtime_auth(
     )
 
     if request_auth is None:
-        username = username or _sanitize_bisque_credential(str(getattr(settings, "bisque_user", "") or ""))
+        username = username or _sanitize_bisque_credential(
+            str(getattr(settings, "bisque_user", "") or "")
+        )
         password = password or _sanitize_bisque_credential(
             str(getattr(settings, "bisque_password", "") or "")
         )
@@ -332,6 +303,7 @@ def _init_bq_session(
     Returns:
         (token_mode, auth_mode_label)
     """
+
     class _BearerTokenAuth:
         def __init__(self, token: str):
             self._token = token
@@ -384,7 +356,13 @@ def _init_bq_session(
             raise ValueError(f"BisQue cookie authentication failed: {exc}") from exc
         resolved_user = _extract_bisque_user_from_xml(whoami)
         normalized_user = str(resolved_user or "").strip().lower()
-        if not normalized_user or normalized_user in {"anonymous", "guest", "anon", "public", "none"}:
+        if not normalized_user or normalized_user in {
+            "anonymous",
+            "guest",
+            "anon",
+            "public",
+            "none",
+        }:
             raise ValueError("BisQue cookie authentication resolved to anonymous identity.")
         return True
 
@@ -742,7 +720,12 @@ def _build_bisque_resource_links(resource: str | None, bisque_root: str) -> dict
 
 
 def _bisque_user_facing_resource_url(resource: str | None, bisque_root: str) -> str | None:
-    return str(_build_bisque_resource_links(resource, bisque_root).get("client_view_url") or "").strip() or None
+    return (
+        str(
+            _build_bisque_resource_links(resource, bisque_root).get("client_view_url") or ""
+        ).strip()
+        or None
+    )
 
 
 def _bisque_resource_tag_for_path(local_path: str | Path) -> str:
@@ -1031,7 +1014,9 @@ def _rewrite_tag_query_aliases(tag_query: str | None) -> str | None:
             rewritten.append(segment)
         else:
             rewritten.append(
-                alias_pattern.sub(lambda m: _BISQUE_TAG_ALIASES.get(m.group(1), m.group(1)), segment)
+                alias_pattern.sub(
+                    lambda m: _BISQUE_TAG_ALIASES.get(m.group(1), m.group(1)), segment
+                )
             )
     return "".join(rewritten)
 
@@ -1179,10 +1164,10 @@ def _resolve_megaseg_runner_script() -> Path:
 
 
 def _resolve_megaseg_python() -> str | None:
+    settings = get_settings()
     active_venv = str(os.getenv("VIRTUAL_ENV") or "").strip()
     candidates = [
-        str(os.getenv("MEGASEG_PYTHON") or "").strip(),
-        str(os.getenv("CYTODL_PYTHON") or "").strip(),
+        str(getattr(settings, "resolved_megaseg_python", "") or "").strip(),
         str(Path(active_venv).expanduser() / "bin" / "python") if active_venv else "",
         str(Path(sys.executable).expanduser().resolve()),
     ]
@@ -1196,19 +1181,22 @@ def _resolve_megaseg_python() -> str | None:
 
 
 def _resolve_megaseg_checkpoint_path(explicit_path: str | None = None) -> str | None:
+    settings = get_settings()
     candidates: list[Path] = []
     if explicit_path:
         candidates.append(Path(str(explicit_path)).expanduser())
-    env_checkpoint = str(os.getenv("MEGASEG_CHECKPOINT_PATH") or "").strip()
-    if env_checkpoint:
-        candidates.append(Path(env_checkpoint).expanduser())
+    settings_checkpoint = str(
+        getattr(settings, "resolved_megaseg_checkpoint_path", "") or ""
+    ).strip()
+    if settings_checkpoint:
+        candidates.append(Path(settings_checkpoint).expanduser())
     candidates.extend(
         [
             _MEGASEG_DEFAULT_CHECKPOINT,
             _MEGASEG_DEFAULT_ALIAS_CHECKPOINT,
         ]
     )
-    benchmark_root = str(os.getenv("MEGASEG_BENCHMARK_ROOT") or "").strip()
+    benchmark_root = str(getattr(settings, "resolved_megaseg_benchmark_root", "") or "").strip()
     if benchmark_root:
         benchmark_path = Path(benchmark_root).expanduser()
         candidates.extend(
@@ -1236,6 +1224,81 @@ def _resolve_megaseg_checkpoint_path(explicit_path: str | None = None) -> str | 
     return None
 
 
+def _maybe_auto_adjust_megaseg_channels(
+    *,
+    file_paths: list[str],
+    structure_channel: int,
+    nucleus_channel: int | None,
+    channel_index_base: int,
+) -> tuple[int, int | None]:
+    """
+    Normalize Megaseg channel arguments for single-channel microscopy inputs.
+
+    The Megaseg runner already supports ZYX volumes without a C axis by using the
+    index-base channel as the structure input and omitting the nucleus channel.
+    The top-level tool defaults remain tuned for Allen Cell-style multichannel
+    microscopy, so we downshift them here when the inputs are explicitly
+    single-channel.
+    """
+    normalized_paths = [str(path or "").strip() for path in file_paths if str(path or "").strip()]
+    if not normalized_paths:
+        return int(structure_channel), int(nucleus_channel) if nucleus_channel is not None else None
+
+    for raw_path in normalized_paths:
+        try:
+            loaded = load_scientific_image(
+                file_path=raw_path,
+                generate_preview=False,
+                save_array=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Megaseg channel preflight skipped for %s: %s", raw_path, exc)
+            return int(structure_channel), int(
+                nucleus_channel
+            ) if nucleus_channel is not None else None
+
+        if not bool(loaded.get("success")):
+            return int(structure_channel), int(
+                nucleus_channel
+            ) if nucleus_channel is not None else None
+
+        axis_sizes = loaded.get("axis_sizes") or {}
+        channel_count = axis_sizes.get("C")
+        is_multichannel = bool(loaded.get("is_multichannel"))
+        try:
+            resolved_channel_count = int(channel_count)
+        except Exception:  # noqa: BLE001
+            return int(structure_channel), int(
+                nucleus_channel
+            ) if nucleus_channel is not None else None
+
+        if is_multichannel or resolved_channel_count > 1:
+            return int(structure_channel), int(
+                nucleus_channel
+            ) if nucleus_channel is not None else None
+
+    single_channel_number = int(channel_index_base)
+    adjusted_structure = int(structure_channel)
+    adjusted_nucleus = int(nucleus_channel) if nucleus_channel is not None else None
+    changed = False
+
+    if adjusted_structure != single_channel_number:
+        adjusted_structure = single_channel_number
+        changed = True
+    if adjusted_nucleus is not None:
+        adjusted_nucleus = None
+        changed = True
+
+    if changed:
+        logger.info(
+            "Megaseg auto-adjusted single-channel input to structure_channel=%s nucleus_channel=%s",
+            adjusted_structure,
+            adjusted_nucleus,
+        )
+
+    return adjusted_structure, adjusted_nucleus
+
+
 def _models_root() -> str:
     settings = get_settings()
     explicit_root = str(os.getenv("YOLO_MODEL_ROOT") or "").strip()
@@ -1249,9 +1312,7 @@ def _models_root() -> str:
             return _ensure_dir(default_model_path.parent)
         return _ensure_dir(default_model_path)
 
-    configured_rarespot = str(
-        getattr(settings, "prairie_rarespot_weights_path", "") or ""
-    ).strip()
+    configured_rarespot = str(getattr(settings, "prairie_rarespot_weights_path", "") or "").strip()
     if configured_rarespot:
         rarespot_path = Path(configured_rarespot).expanduser()
         if rarespot_path.suffix:
@@ -1270,7 +1331,9 @@ def _finetuned_dir() -> str:
 
 def _require_ultralytics() -> Any:
     try:
-        os.environ.setdefault("YOLO_CONFIG_DIR", _ensure_dir(_science_data_root_path() / ".cache" / "ultralytics"))
+        os.environ.setdefault(
+            "YOLO_CONFIG_DIR", _ensure_dir(_science_data_root_path() / ".cache" / "ultralytics")
+        )
         from ultralytics import YOLO  # type: ignore
 
         return YOLO
@@ -1503,12 +1566,18 @@ def _resolve_prairie_yolo_model_target() -> tuple[str | None, str | None, str]:
             version_row = store.get_training_model_version(version_id=active_version_id)
             if not isinstance(version_row, dict):
                 continue
-            metadata = version_row.get("metadata") if isinstance(version_row.get("metadata"), dict) else {}
+            metadata = (
+                version_row.get("metadata") if isinstance(version_row.get("metadata"), dict) else {}
+            )
             source_job_id = str(version_row.get("source_job_id") or "").strip()
             candidate_paths: list[str] = []
             if source_job_id:
                 job_row = store.get_training_job(job_id=source_job_id)
-                job_result = job_row.get("result") if isinstance(job_row, dict) and isinstance(job_row.get("result"), dict) else {}
+                job_result = (
+                    job_row.get("result")
+                    if isinstance(job_row, dict) and isinstance(job_row.get("result"), dict)
+                    else {}
+                )
                 artifact_path = str(job_result.get("model_artifact_path") or "").strip()
                 if artifact_path:
                     candidate_paths.append(artifact_path)
@@ -1701,9 +1770,13 @@ def _image_metadata_context(file_path: str, *, output_root: str | None = None) -
         "success": True,
         "reader": str(loaded.get("reader") or "").strip() or None,
         "dims_order": str(loaded.get("dims_order") or "").strip() or None,
-        "array_shape": list(loaded.get("array_shape") or []) if isinstance(loaded.get("array_shape"), list) else [],
+        "array_shape": list(loaded.get("array_shape") or [])
+        if isinstance(loaded.get("array_shape"), list)
+        else [],
         "dimensions": dimensions,
-        "header": dict(metadata.get("header") or {}) if isinstance(metadata.get("header"), dict) else {},
+        "header": dict(metadata.get("header") or {})
+        if isinstance(metadata.get("header"), dict)
+        else {},
         "exif": dict(metadata.get("exif") or {}) if isinstance(metadata.get("exif"), dict) else {},
         "geo": dict(metadata.get("geo") or {}) if isinstance(metadata.get("geo"), dict) else {},
         "filename_hints": (
@@ -1713,7 +1786,9 @@ def _image_metadata_context(file_path: str, *, output_root: str | None = None) -
         ),
     }
     captured_at = (
-        str(summary["exif"].get("DateTimeOriginal") or summary["exif"].get("DateTime") or "").strip()
+        str(
+            summary["exif"].get("DateTimeOriginal") or summary["exif"].get("DateTime") or ""
+        ).strip()
         if isinstance(summary.get("exif"), dict)
         else ""
     )
@@ -1932,12 +2007,8 @@ def _build_prairie_ecology_context(
         "survey_altitude_m": 100,
         "ground_sample_distance_cm_per_px": 2,
         "orthomosaic_overlap_percent": 70,
-        "tile_size_px": int(
-            inference_configuration.get("tile_size") or 512
-        ),
-        "tile_overlap_ratio": float(
-            inference_configuration.get("tile_overlap") or 0.25
-        ),
+        "tile_size_px": int(inference_configuration.get("tile_size") or 512),
+        "tile_overlap_ratio": float(inference_configuration.get("tile_overlap") or 0.25),
         "annotation_classes": ["prairie_dog", "burrow"],
         "inference_backend": str(inference_configuration.get("backend") or "").strip() or None,
         "tile_strategy": str(inference_configuration.get("tile_strategy") or "").strip() or None,
@@ -1959,9 +2030,14 @@ def _build_prairie_ecology_context(
     image_width = max(image_size_values) if image_size_values else None
     image_height = max(image_height_values) if image_height_values else None
     border_touching_count = int(overall_context.get("border_touching_box_count") or 0)
-    small_object_risk = bool(overall_context.get("prairie_dog_short_side_px_min") is not None and float(overall_context.get("prairie_dog_short_side_px_min") or 0.0) <= 30.0)
+    small_object_risk = bool(
+        overall_context.get("prairie_dog_short_side_px_min") is not None
+        and float(overall_context.get("prairie_dog_short_side_px_min") or 0.0) <= 30.0
+    )
     burrow_context_missing = bool(prairie_total > 0 and burrow_total == 0)
-    burrow_overlap_present = bool(int(overall_context.get("prairie_dogs_overlapping_burrows") or 0) > 0)
+    burrow_overlap_present = bool(
+        int(overall_context.get("prairie_dogs_overlapping_burrows") or 0) > 0
+    )
     border_effect_risk = bool(border_touching_count > 0)
 
     review_flags = {
@@ -2005,7 +2081,9 @@ def _build_prairie_ecology_context(
             "image_height_px": image_height,
             "prairie_dog_count": prairie_total,
             "burrow_count": burrow_total,
-            "nearest_burrow_distance_px_mean": overall_context.get("nearest_burrow_distance_px_mean"),
+            "nearest_burrow_distance_px_mean": overall_context.get(
+                "nearest_burrow_distance_px_mean"
+            ),
             "nearest_burrow_distance_px_min": overall_context.get("nearest_burrow_distance_px_min"),
         },
     }
@@ -2186,7 +2264,9 @@ def _detection_spatial_analysis(
                             "dog_xyxy": [float(value) for value in dog_box["xyxy"]],
                             "burrow_xyxy": [float(value) for value in burrow_box["xyxy"]],
                         }
-                        if nearest is None or float(candidate["distance_px"]) < float(nearest["distance_px"]):
+                        if nearest is None or float(candidate["distance_px"]) < float(
+                            nearest["distance_px"]
+                        ):
                             nearest = candidate
                     if nearest is not None:
                         if float(nearest["distance_px"]) <= 0.0:
@@ -2218,7 +2298,8 @@ def _detection_spatial_analysis(
                 ),
                 "burrow_short_side_px_mean": (
                     round(
-                        sum(float(box["short_side_px"]) for box in burrow_boxes) / len(burrow_boxes),
+                        sum(float(box["short_side_px"]) for box in burrow_boxes)
+                        / len(burrow_boxes),
                         3,
                     )
                     if burrow_boxes
@@ -2230,12 +2311,18 @@ def _detection_spatial_analysis(
                     else None
                 ),
                 "nearest_burrow_distance_px_mean": (
-                    round(sum(float(row["distance_px"]) for row in nearest_records) / len(nearest_records), 3)
+                    round(
+                        sum(float(row["distance_px"]) for row in nearest_records)
+                        / len(nearest_records),
+                        3,
+                    )
                     if nearest_records
                     else None
                 ),
                 "nearest_burrow_distance_px_median": (
-                    round(statistics.median(float(row["distance_px"]) for row in nearest_records), 3)
+                    round(
+                        statistics.median(float(row["distance_px"]) for row in nearest_records), 3
+                    )
                     if nearest_records
                     else None
                 ),
@@ -2278,9 +2365,7 @@ def _detection_spatial_analysis(
             "prairie_dogs_overlapping_burrows": all_overlap_count,
             "prairie_dogs_without_burrow_overlap": max(0, prairie_total - all_overlap_count),
             "prairie_dog_short_side_px_min": (
-                round(min(all_prairie_short_sides), 3)
-                if all_prairie_short_sides
-                else None
+                round(min(all_prairie_short_sides), 3) if all_prairie_short_sides else None
             ),
             "prairie_dog_short_side_px_mean": (
                 round(sum(all_prairie_short_sides) / len(all_prairie_short_sides), 3)
@@ -2288,9 +2373,7 @@ def _detection_spatial_analysis(
                 else None
             ),
             "burrow_short_side_px_min": (
-                round(min(all_burrow_short_sides), 3)
-                if all_burrow_short_sides
-                else None
+                round(min(all_burrow_short_sides), 3) if all_burrow_short_sides else None
             ),
             "burrow_short_side_px_mean": (
                 round(sum(all_burrow_short_sides) / len(all_burrow_short_sides), 3)
@@ -2349,7 +2432,10 @@ def _detection_spatial_analysis(
         )
         if all_overlap_count:
             summary_parts.append(f"{all_overlap_count} prairie dog(s) overlap a burrow box.")
-    if metadata_summary.get("first_latitude") is not None and metadata_summary.get("first_longitude") is not None:
+    if (
+        metadata_summary.get("first_latitude") is not None
+        and metadata_summary.get("first_longitude") is not None
+    ):
         summary_parts.append(
             "GPS context "
             f"{metadata_summary['first_latitude']}, {metadata_summary['first_longitude']}"
@@ -2409,6 +2495,7 @@ _SEGMENTATION_IMAGE_EXTS = _YOLO_IMAGE_EXTS.union(
         ".r3d",
         ".ome.tif",
         ".ome.tiff",
+        ".zarr",
         ".nii",
         ".nii.gz",
         ".nrrd",
@@ -2423,6 +2510,8 @@ _SEGMENTATION_IMAGE_EXTS = _YOLO_IMAGE_EXTS.union(
         ".mpeg",
     }
 )
+
+_REMOTE_INPUT_SCHEMES = {"http", "https", "s3"}
 
 _DEFAULT_STEM_STRIP_TOKENS = (
     "input",
@@ -2555,9 +2644,7 @@ def _expand_sequence_inputs_for_2d_models(
         else getattr(settings, "sequence_max_frames_per_file", 24)
     )
     stride = int(
-        frame_stride
-        if frame_stride is not None
-        else getattr(settings, "sequence_frame_stride", 4)
+        frame_stride if frame_stride is not None else getattr(settings, "sequence_frame_stride", 4)
     )
     max_frames = max(1, max_frames)
     stride = max(1, stride)
@@ -2618,12 +2705,142 @@ def _is_yolo_label(path: Path) -> bool:
     return path.suffix.lower() in _YOLO_LABEL_EXTS
 
 
+def _looks_like_remote_input_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    raw = value.strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    return bool(parsed.scheme and parsed.netloc and parsed.scheme.lower() in _REMOTE_INPUT_SCHEMES)
+
+
+def _input_path_name(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if _looks_like_remote_input_path(raw):
+        parsed = urlparse(raw)
+        name = Path(unquote(parsed.path.rstrip("/"))).name
+        if name:
+            return name
+        return unquote(parsed.netloc)
+    return Path(raw).expanduser().name
+
+
+def _is_directory_image_store(path: Path) -> bool:
+    lower = path.name.lower()
+    return path.is_dir() and (lower.endswith(".ome.zarr") or lower.endswith(".zarr"))
+
+
+def _looks_like_segmentation_remote_path(value: str) -> bool:
+    lower = _input_path_name(value).lower()
+    if not lower or lower.endswith((".pdf", ".txt")):
+        return False
+    if lower.endswith(".ome.zarr") or lower.endswith(".zarr"):
+        return True
+    if lower.endswith(".ome.tif") or lower.endswith(".ome.tiff") or lower.endswith(".nii.gz"):
+        return True
+    return Path(lower).suffix.lower() in _SEGMENTATION_IMAGE_EXTS
+
+
+_PROMPT_PATHISH_TOKEN_RE = re.compile(
+    r"(?P<token>(?:s3|https?)://[^\s<>'\"`]+|(?:~|/|\./|\.\./)[^\s<>'\"`]+)",
+    re.IGNORECASE,
+)
+_PROMPT_IMAGE_TEXT_SUFFIXES: tuple[str, ...] = (
+    ".ome.zarr",
+    ".ome.tiff",
+    ".ome.tif",
+    ".nii.gz",
+    ".zarr",
+    ".nrrd",
+    ".mhd",
+    ".mha",
+    ".nd2",
+    ".czi",
+    ".svs",
+    ".dicom",
+    ".dcm",
+    ".tiff",
+    ".tif",
+    ".nii",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".gif",
+    ".webp",
+)
+
+
+def _clean_prompt_pathish_token(value: Any) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    token = token.strip("`")
+    while token and token[0] in "\"'([{<":
+        token = token[1:].strip()
+    while token and token[-1] in "\"'`.,;:!?)]}>":
+        token = token[:-1].rstrip()
+    return token
+
+
+def _image_text_suffix_target(value: str) -> str:
+    token = _clean_prompt_pathish_token(value)
+    if not token:
+        return ""
+    if _looks_like_remote_input_path(token):
+        parsed = urlparse(token)
+        return unquote(parsed.path).rstrip("/").lower()
+    return token.rstrip("/").lower()
+
+
+def _looks_like_image_path_text(value: Any) -> bool:
+    target = _image_text_suffix_target(str(value or ""))
+    if not target or target.endswith((".pdf", ".txt")):
+        return False
+    return any(target.endswith(suffix) for suffix in _PROMPT_IMAGE_TEXT_SUFFIXES)
+
+
+def extract_scientific_image_paths_from_text(user_text: str | None) -> list[str]:
+    text = str(user_text or "")
+    if not text:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for match in _PROMPT_PATHISH_TOKEN_RE.finditer(text):
+        token = _clean_prompt_pathish_token(match.group("token"))
+        if not token or token in seen or not _looks_like_image_path_text(token):
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def infer_scientific_image_inputs_from_text(user_text: str | None) -> list[str]:
+    candidates = extract_scientific_image_paths_from_text(user_text)
+    if not candidates:
+        return []
+    remote_candidates = [token for token in candidates if _looks_like_remote_input_path(token)]
+    if remote_candidates:
+        return remote_candidates
+    existing_locals = [token for token in candidates if Path(token).expanduser().exists()]
+    if existing_locals:
+        return existing_locals
+    return candidates
+
+
 def _is_segmentation_image(path: Path) -> bool:
     lower = path.name.lower()
     if lower.endswith(".pdf") or lower.endswith(".txt"):
         return False
     if _is_sequence_media(path):
         return True
+    if _is_directory_image_store(path):
+        return True
+    if lower.endswith(".ome.zarr") or lower.endswith(".zarr"):
+        return path.is_dir()
     if lower.endswith(".nii.gz") or lower.endswith(".ome.tif") or lower.endswith(".ome.tiff"):
         return True
     if path.suffix.lower() in _SEGMENTATION_IMAGE_EXTS:
@@ -2806,7 +3023,9 @@ def _collect_latest_mask_paths_from_refs(latest_result_refs: dict[str, Any] | No
     return [path for path in resolved if _looks_like_explicit_mask_path(path)]
 
 
-def _collect_latest_ground_truth_paths_from_refs(latest_result_refs: dict[str, Any] | None) -> list[str]:
+def _collect_latest_ground_truth_paths_from_refs(
+    latest_result_refs: dict[str, Any] | None,
+) -> list[str]:
     if not isinstance(latest_result_refs, dict):
         return []
     candidates: list[str] = []
@@ -2824,7 +3043,17 @@ def _collect_latest_ground_truth_paths_from_refs(latest_result_refs: dict[str, A
 
 def _strip_known_mask_extension(name: str) -> str:
     lower = (name or "").lower()
-    for ext in (".nii.gz", ".ome.tiff", ".ome.tif", ".tiff", ".tif", ".nrrd", ".mha", ".mhd", ".npy"):
+    for ext in (
+        ".nii.gz",
+        ".ome.tiff",
+        ".ome.tif",
+        ".tiff",
+        ".tif",
+        ".nrrd",
+        ".mha",
+        ".mhd",
+        ".npy",
+    ):
         if lower.endswith(ext):
             return name[: -len(ext)]
     return Path(name).stem
@@ -2938,134 +3167,32 @@ def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]
     return refs
 
 
-def segment_image_megaseg(
-    file_paths: list[str],
-    structure_channel: int = 4,
-    nucleus_channel: int | None = 6,
-    channel_index_base: int = 1,
-    mask_threshold: float = 0.5,
-    save_visualizations: bool = True,
-    generate_report: bool = True,
-    device: str | None = None,
-    checkpoint_path: str | None = None,
-    structure_name: str | None = None,
+def _rewrite_megaseg_payload_paths(value: Any, path_map: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return path_map.get(value, value)
+    if isinstance(value, list):
+        return [_rewrite_megaseg_payload_paths(item, path_map) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_megaseg_payload_paths(item, path_map) for key, item in value.items()}
+    return value
+
+
+def _build_megaseg_tool_response(
+    *,
+    runner_result: dict[str, Any],
+    output_dir: Path,
+    checkpoint_display: str | None,
+    structure_channel: int,
+    nucleus_channel: int | None,
+    channel_index_base: int,
+    mask_threshold: float,
+    requested_device: str | None,
+    non_images: list[str],
+    runner_stderr_text: str | None = None,
 ) -> dict[str, Any]:
-    """Run Megaseg DynUNet inference on multichannel microscopy images."""
-    if not file_paths:
-        return {"success": False, "error": "file_paths is required."}
-
-    runner_script = _resolve_megaseg_runner_script()
-    if not runner_script.exists():
-        return {
-            "success": False,
-            "error": f"Megaseg runner script is missing: {runner_script}",
-        }
-
-    runner_python = _resolve_megaseg_python()
-    if not runner_python:
-        return {
-            "success": False,
-            "error": (
-                "Megaseg requires a Python runtime with cyto-dl/monai installed. "
-                "Set MEGASEG_PYTHON or CYTODL_PYTHON to a valid interpreter."
-            ),
-        }
-
-    resolved_checkpoint = _resolve_megaseg_checkpoint_path(checkpoint_path)
-    if not resolved_checkpoint:
-        return {
-            "success": False,
-            "error": (
-                "No Megaseg checkpoint could be resolved. "
-                "Provide checkpoint_path or set MEGASEG_CHECKPOINT_PATH."
-            ),
-        }
-
-    try:
-        expanded = _expand_file_inputs([str(path) for path in file_paths])
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
-
-    missing = [str(path) for path in expanded if not path.exists()]
-    if missing:
-        return {
-            "success": False,
-            "error": "Some files do not exist.",
-            "missing": missing[:50],
-        }
-
-    images = [path for path in expanded if path.exists() and _is_segmentation_image(path)]
-    non_images = [str(path) for path in expanded if path.exists() and not _is_segmentation_image(path)]
-    if not images:
-        return {"success": False, "error": "No microscopy image files were found in file_paths."}
-
-    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
-    output_dir = Path(_science_output_root("megaseg_results")) / run_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    request_payload = {
-        "file_paths": [str(path.resolve()) for path in images],
-        "output_dir": str(output_dir.resolve()),
-        "structure_channel": int(structure_channel),
-        "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
-        "channel_index_base": int(channel_index_base),
-        "mask_threshold": float(mask_threshold),
-        "save_visualizations": bool(save_visualizations),
-        "generate_report": bool(generate_report),
-        "device": str(device or "").strip() or None,
-        "checkpoint_path": str(Path(resolved_checkpoint).expanduser().resolve()),
-        "structure_name": str(structure_name or "structure"),
-    }
-    request_json_path = output_dir / "megaseg_request.json"
-    request_json_path.write_text(
-        json.dumps(request_payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    runner_files = (
+        runner_result.get("files") if isinstance(runner_result.get("files"), list) else []
     )
-
-    try:
-        completed = subprocess.run(
-            [runner_python, str(runner_script), "--request-json", str(request_json_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=7200,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": "Megaseg inference timed out after 7200 seconds.",
-            "output_directory": str(output_dir),
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": f"Failed to launch Megaseg inference: {exc}",
-            "output_directory": str(output_dir),
-        }
-
-    stdout_text = str(completed.stdout or "").strip()
-    stderr_text = str(completed.stderr or "").strip()
-    if completed.returncode != 0:
-        return {
-            "success": False,
-            "error": "Megaseg inference subprocess failed.",
-            "details": stderr_text[-4000:] or stdout_text[-4000:] or None,
-            "return_code": int(completed.returncode),
-            "output_directory": str(output_dir),
-        }
-
-    try:
-        runner_result = json.loads(stdout_text)
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": f"Failed to parse Megaseg runner output: {exc}",
-            "stdout_tail": stdout_text[-4000:] or None,
-            "stderr_tail": stderr_text[-4000:] or None,
-            "output_directory": str(output_dir),
-        }
-
-    runner_files = runner_result.get("files") if isinstance(runner_result.get("files"), list) else []
     successful = [row for row in runner_files if isinstance(row, dict) and row.get("success")]
     files_processed: list[dict[str, Any]] = []
     preferred_upload_paths: list[str] = []
@@ -3077,7 +3204,9 @@ def segment_image_megaseg(
         if not isinstance(row, dict):
             continue
         if row.get("success"):
-            segmentation = row.get("segmentation") if isinstance(row.get("segmentation"), dict) else {}
+            segmentation = (
+                row.get("segmentation") if isinstance(row.get("segmentation"), dict) else {}
+            )
             intensity_context = (
                 row.get("intensity_context")
                 if isinstance(row.get("intensity_context"), dict)
@@ -3093,7 +3222,9 @@ def segment_image_megaseg(
                         "path": preferred_path,
                     }
                 )
-            row_visualizations = row.get("visualizations") if isinstance(row.get("visualizations"), list) else []
+            row_visualizations = (
+                row.get("visualizations") if isinstance(row.get("visualizations"), list) else []
+            )
             for visualization in row_visualizations:
                 if not isinstance(visualization, dict) or not visualization.get("path"):
                     continue
@@ -3127,8 +3258,12 @@ def segment_image_megaseg(
                     "object_count": segmentation.get("object_count"),
                     "active_slice_count": segmentation.get("active_slice_count"),
                     "largest_component_voxels": segmentation.get("largest_component_voxels"),
-                    "structure_inside_outside_ratio": intensity_context.get("structure_inside_outside_ratio"),
-                    "nucleus_inside_outside_ratio": intensity_context.get("nucleus_inside_outside_ratio"),
+                    "structure_inside_outside_ratio": intensity_context.get(
+                        "structure_inside_outside_ratio"
+                    ),
+                    "nucleus_inside_outside_ratio": intensity_context.get(
+                        "nucleus_inside_outside_ratio"
+                    ),
                     "technical_summary": row.get("technical_summary"),
                 }
             )
@@ -3141,7 +3276,9 @@ def segment_image_megaseg(
                 }
             )
 
-    aggregate = runner_result.get("aggregate") if isinstance(runner_result.get("aggregate"), dict) else {}
+    aggregate = (
+        runner_result.get("aggregate") if isinstance(runner_result.get("aggregate"), dict) else {}
+    )
     summary_payload = {
         "processed_files": len(successful),
         "total_files": len(runner_files),
@@ -3176,8 +3313,8 @@ def segment_image_megaseg(
     warnings: list[Any] = []
     if non_images:
         warnings.append({"ignored_non_images": non_images[:50]})
-    if stderr_text and "Failed to load image Python extension" not in stderr_text:
-        warnings.append({"runner_stderr_tail": stderr_text[-2000:]})
+    if runner_stderr_text and "Failed to load image Python extension" not in runner_stderr_text:
+        warnings.append({"runner_stderr_tail": runner_stderr_text[-2000:]})
     runner_warnings = runner_result.get("warnings")
     if isinstance(runner_warnings, list):
         warnings.extend(runner_warnings[:20])
@@ -3189,8 +3326,8 @@ def segment_image_megaseg(
         "files_processed": files_processed,
         "output_directory": str(output_dir),
         "model": "Megaseg DynUNet",
-        "checkpoint_path": str(Path(resolved_checkpoint).expanduser().resolve()),
-        "device": runner_result.get("device") or device or "auto",
+        "checkpoint_path": checkpoint_display,
+        "device": runner_result.get("device") or requested_device or "auto",
         "structure_channel": int(structure_channel),
         "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
         "channel_index_base": int(channel_index_base),
@@ -3221,16 +3358,384 @@ def segment_image_megaseg(
         latest_refs.update(
             {
                 "segment_image_megaseg.mask_paths": [str(path) for path in preferred_upload_paths],
-                "segment_image_megaseg.preferred_upload_paths": [str(path) for path in preferred_upload_paths],
+                "segment_image_megaseg.preferred_upload_paths": [
+                    str(path) for path in preferred_upload_paths
+                ],
                 "segment_image_megaseg.latest_mask_path": str(preferred_upload_paths[-1]),
             }
         )
     if response.get("report_path"):
         latest_refs["segment_image_megaseg.report_path"] = str(response.get("report_path"))
     if response.get("summary_csv_path"):
-        latest_refs["segment_image_megaseg.summary_csv_path"] = str(response.get("summary_csv_path"))
+        latest_refs["segment_image_megaseg.summary_csv_path"] = str(
+            response.get("summary_csv_path")
+        )
     response["latest_result_refs"] = latest_refs
     return response
+
+
+def _download_megaseg_service_result(
+    *,
+    client: MegasegServiceClient,
+    job_payload: dict[str, Any],
+    output_dir: Path,
+) -> dict[str, Any]:
+    result = deepcopy(
+        job_payload.get("result") if isinstance(job_payload.get("result"), dict) else {}
+    )
+    artifact_manifest = (
+        job_payload.get("artifact_manifest")
+        if isinstance(job_payload.get("artifact_manifest"), list)
+        else []
+    )
+    remote_output_dir = str(result.get("output_directory") or "").strip()
+    path_map: dict[str, str] = {}
+    if remote_output_dir:
+        path_map[remote_output_dir] = str(output_dir)
+
+    for item in artifact_manifest:
+        if not isinstance(item, dict):
+            continue
+        artifact_name = str(item.get("name") or "").strip()
+        if not artifact_name:
+            continue
+        destination = output_dir / artifact_name
+        client.download_artifact(
+            job_id=str(job_payload.get("job_id") or ""),
+            artifact_name=artifact_name,
+            destination=destination,
+        )
+        if remote_output_dir:
+            remote_path = str(Path(remote_output_dir) / artifact_name)
+            path_map[remote_path] = str(destination)
+
+    return _rewrite_megaseg_payload_paths(result, path_map)
+
+
+def _run_megaseg_via_service(
+    *,
+    service_url: str,
+    service_api_key: str | None,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    wait_timeout_seconds: float,
+    download_artifacts: bool,
+    local_image_paths: list[Path],
+    remote_image_paths: list[str],
+    output_dir: Path,
+    structure_channel: int,
+    nucleus_channel: int | None,
+    channel_index_base: int,
+    mask_threshold: float,
+    save_visualizations: bool,
+    generate_report: bool,
+    device: str | None,
+    checkpoint_path: str | None,
+    structure_name: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    client = MegasegServiceClient(
+        base_url=service_url,
+        api_key=service_api_key,
+        timeout_seconds=timeout_seconds,
+    )
+    request_payload: dict[str, Any] = {
+        "sources": [{"uri": raw} for raw in remote_image_paths],
+        "structure_channel": int(structure_channel),
+        "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
+        "channel_index_base": int(channel_index_base),
+        "mask_threshold": float(mask_threshold),
+        "save_visualizations": bool(save_visualizations),
+        "generate_report": bool(generate_report),
+        "device": str(device or "").strip() or None,
+        "structure_name": str(structure_name or "structure"),
+    }
+    if checkpoint_path:
+        request_payload["checkpoint_path"] = str(checkpoint_path)
+
+    job_create = client.submit_job(
+        request_payload=request_payload,
+        local_upload_paths=local_image_paths,
+    )
+    job_id = str(job_create.get("job_id") or "").strip()
+    if not job_id:
+        raise MegasegServiceError("Megaseg service job creation did not return a job id.")
+    job_payload = client.wait_for_job(
+        job_id=job_id,
+        poll_interval_seconds=poll_interval_seconds,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
+    if not isinstance(job_payload.get("result"), dict):
+        raise MegasegServiceError(f"Megaseg service job {job_id} did not return a result payload.")
+
+    runner_result = (
+        _download_megaseg_service_result(
+            client=client,
+            job_payload=job_payload,
+            output_dir=output_dir,
+        )
+        if download_artifacts
+        else deepcopy(job_payload["result"])
+    )
+    if not isinstance(runner_result, dict):
+        raise MegasegServiceError(
+            f"Megaseg service job {job_id} returned an invalid result payload."
+        )
+    return runner_result, job_payload
+
+
+def segment_image_megaseg(
+    file_paths: list[str],
+    structure_channel: int = 4,
+    nucleus_channel: int | None = 6,
+    channel_index_base: int = 1,
+    mask_threshold: float = 0.5,
+    save_visualizations: bool = True,
+    generate_report: bool = True,
+    device: str | None = None,
+    checkpoint_path: str | None = None,
+    structure_name: str | None = None,
+) -> dict[str, Any]:
+    """Run Megaseg DynUNet inference on multichannel microscopy images."""
+    if not file_paths:
+        return {"success": False, "error": "file_paths is required."}
+
+    settings = get_settings()
+    service_url = str(getattr(settings, "resolved_megaseg_service_url", "") or "").strip()
+    remote_inputs = [
+        str(path).strip()
+        for path in file_paths
+        if str(path).strip() and _looks_like_remote_input_path(str(path))
+    ]
+    local_inputs = [
+        str(path).strip()
+        for path in file_paths
+        if str(path).strip() and not _looks_like_remote_input_path(str(path))
+    ]
+
+    try:
+        expanded = _expand_file_inputs(local_inputs)
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+    structure_channel, nucleus_channel = _maybe_auto_adjust_megaseg_channels(
+        file_paths=[*expanded, *remote_inputs],
+        structure_channel=structure_channel,
+        nucleus_channel=nucleus_channel,
+        channel_index_base=channel_index_base,
+    )
+
+    missing = [str(path) for path in expanded if not path.exists()]
+    if missing:
+        return {
+            "success": False,
+            "error": "Some files do not exist.",
+            "missing": missing[:50],
+        }
+
+    local_image_paths: list[Path] = [
+        path.resolve() for path in expanded if path.exists() and _is_segmentation_image(path)
+    ]
+    images: list[str] = [str(path) for path in local_image_paths]
+    non_images = [
+        str(path) for path in expanded if path.exists() and not _is_segmentation_image(path)
+    ]
+    for raw_path in remote_inputs:
+        if _looks_like_segmentation_remote_path(raw_path):
+            images.append(raw_path)
+        else:
+            non_images.append(raw_path)
+    if not images:
+        return {"success": False, "error": "No microscopy image files were found in file_paths."}
+
+    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    output_dir = Path(_science_output_root("megaseg_results")) / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    runner_result: dict[str, Any]
+    runner_stderr_text: str | None = None
+    checkpoint_display: str | None = None
+    explicit_checkpoint = str(checkpoint_path or "").strip() or None
+
+    if service_url:
+        service_api_key = (
+            str(getattr(settings, "resolved_megaseg_service_api_key", "") or "").strip() or None
+        )
+        if not service_api_key:
+            return {
+                "success": False,
+                "error": (
+                    "MEGASEG_SERVICE_URL is configured but MEGASEG_SERVICE_API_KEY is missing. "
+                    "Set the private Megaseg service bearer token before using remote inference."
+                ),
+                "output_directory": str(output_dir),
+            }
+        try:
+            runner_result, job_payload = _run_megaseg_via_service(
+                service_url=service_url,
+                service_api_key=service_api_key,
+                timeout_seconds=float(
+                    getattr(settings, "megaseg_service_timeout_seconds", 60.0) or 60.0
+                ),
+                poll_interval_seconds=float(
+                    getattr(settings, "megaseg_service_poll_interval_seconds", 2.0) or 2.0
+                ),
+                wait_timeout_seconds=float(
+                    getattr(settings, "megaseg_service_wait_timeout_seconds", 7200.0) or 7200.0
+                ),
+                download_artifacts=bool(
+                    getattr(settings, "megaseg_service_download_artifacts", True)
+                ),
+                local_image_paths=local_image_paths,
+                remote_image_paths=[item for item in images if _looks_like_remote_input_path(item)],
+                output_dir=output_dir,
+                structure_channel=structure_channel,
+                nucleus_channel=nucleus_channel,
+                channel_index_base=channel_index_base,
+                mask_threshold=mask_threshold,
+                save_visualizations=save_visualizations,
+                generate_report=generate_report,
+                device=device,
+                checkpoint_path=explicit_checkpoint,
+                structure_name=structure_name,
+            )
+            checkpoint_display = (
+                str(runner_result.get("checkpoint_path") or explicit_checkpoint or "").strip()
+                or None
+            )
+            if isinstance(job_payload, dict):
+                logger.info(
+                    "Megaseg service job %s finished with status=%s",
+                    job_payload.get("job_id"),
+                    job_payload.get("status"),
+                )
+        except MegasegServiceTimeoutError as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+                "output_directory": str(output_dir),
+            }
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[-4000:] if exc.response is not None else str(exc)
+            return {
+                "success": False,
+                "error": "Megaseg service request failed.",
+                "details": detail or str(exc),
+                "output_directory": str(output_dir),
+            }
+        except MegasegServiceError as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+                "output_directory": str(output_dir),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"Failed to execute Megaseg via remote service: {exc}",
+                "output_directory": str(output_dir),
+            }
+    else:
+        runner_script = _resolve_megaseg_runner_script()
+        if not runner_script.exists():
+            return {
+                "success": False,
+                "error": f"Megaseg runner script is missing: {runner_script}",
+            }
+
+        runner_python = _resolve_megaseg_python()
+        if not runner_python:
+            return {
+                "success": False,
+                "error": (
+                    "Megaseg requires a Python runtime with cyto-dl/monai installed. "
+                    "Set MEGASEG_PYTHON or CYTODL_PYTHON to a valid interpreter."
+                ),
+            }
+
+        resolved_checkpoint = _resolve_megaseg_checkpoint_path(explicit_checkpoint)
+        if not resolved_checkpoint:
+            return {
+                "success": False,
+                "error": (
+                    "No Megaseg checkpoint could be resolved. "
+                    "Provide checkpoint_path or set MEGASEG_CHECKPOINT_PATH."
+                ),
+            }
+        checkpoint_display = str(Path(resolved_checkpoint).expanduser().resolve())
+
+        request_payload = {
+            "file_paths": images,
+            "output_dir": str(output_dir.resolve()),
+            "structure_channel": int(structure_channel),
+            "nucleus_channel": (int(nucleus_channel) if nucleus_channel is not None else None),
+            "channel_index_base": int(channel_index_base),
+            "mask_threshold": float(mask_threshold),
+            "save_visualizations": bool(save_visualizations),
+            "generate_report": bool(generate_report),
+            "device": str(device or "").strip() or None,
+            "checkpoint_path": checkpoint_display,
+            "structure_name": str(structure_name or "structure"),
+        }
+        request_json_path = output_dir / "megaseg_request.json"
+        request_json_path.write_text(
+            json.dumps(request_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        try:
+            completed = subprocess.run(
+                [runner_python, str(runner_script), "--request-json", str(request_json_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=7200,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "error": "Megaseg inference timed out after 7200 seconds.",
+                "output_directory": str(output_dir),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"Failed to launch Megaseg inference: {exc}",
+                "output_directory": str(output_dir),
+            }
+
+        stdout_text = str(completed.stdout or "").strip()
+        runner_stderr_text = str(completed.stderr or "").strip()
+        if completed.returncode != 0:
+            return {
+                "success": False,
+                "error": "Megaseg inference subprocess failed.",
+                "details": runner_stderr_text[-4000:] or stdout_text[-4000:] or None,
+                "return_code": int(completed.returncode),
+                "output_directory": str(output_dir),
+            }
+
+        try:
+            runner_result = json.loads(stdout_text)
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"Failed to parse Megaseg runner output: {exc}",
+                "stdout_tail": stdout_text[-4000:] or None,
+                "stderr_tail": runner_stderr_text[-4000:] or None,
+                "output_directory": str(output_dir),
+            }
+
+    return _build_megaseg_tool_response(
+        runner_result=runner_result,
+        output_dir=output_dir,
+        checkpoint_display=checkpoint_display,
+        structure_channel=structure_channel,
+        nucleus_channel=nucleus_channel,
+        channel_index_base=channel_index_base,
+        mask_threshold=mask_threshold,
+        requested_device=device,
+        non_images=non_images,
+        runner_stderr_text=runner_stderr_text,
+    )
 
 
 def _yolo_candidate_stems(path: Path) -> list[str]:
@@ -3254,12 +3759,17 @@ def _expand_file_inputs(paths: list[str], *, max_files: int = 5000) -> list[Path
         if raw is None:
             continue
         p = Path(str(raw)).expanduser()
+        if _is_directory_image_store(p):
+            expanded.append(p)
+            continue
         if p.is_dir():
             for child in p.rglob("*"):
                 if child.is_file():
                     expanded.append(child)
                     if len(expanded) > max_files:
-                        raise ValueError(f"Too many files found (>{max_files}) under directory: {p}")
+                        raise ValueError(
+                            f"Too many files found (>{max_files}) under directory: {p}"
+                        )
         else:
             expanded.append(p)
 
@@ -3339,7 +3849,7 @@ def _depthpro_runtime(
     device: str | None,
 ) -> tuple[Any, Any, str]:
     try:
-        import torch  # type: ignore
+        pass  # type: ignore
     except Exception as e:  # noqa: BLE001
         raise ImportError("torch is required for DepthPro inference.") from e
 
@@ -3348,6 +3858,7 @@ def _depthpro_runtime(
             DepthProForDepthEstimation,
             DepthProImageProcessorFast,
         )
+
         processor_cls = DepthProImageProcessorFast
     except Exception:
         try:
@@ -3355,6 +3866,7 @@ def _depthpro_runtime(
                 DepthProForDepthEstimation,
                 DepthProImageProcessor,
             )
+
             processor_cls = DepthProImageProcessor
         except Exception as e:  # noqa: BLE001
             raise ImportError(
@@ -3419,14 +3931,14 @@ def upload_to_bisque(
     """
     Upload files to BisQue image repository from file paths.
     Files should already be saved to the data folder.
-    
+
     Args:
         file_paths: List of file paths to upload to BisQue
         dataset_uri: Optional existing dataset URI/resource_uniq to append uploads to
         dataset_name: Optional existing dataset name to resolve before appending
         create_dataset_if_missing: Whether to create the named dataset if not found
         dataset_tags: Optional tags to add if a new dataset is created
-        
+
     Returns:
         Dictionary with upload results and metadata
     """
@@ -3435,30 +3947,32 @@ def upload_to_bisque(
     except ImportError:
         return {
             "success": False,
-            "error": "bqapi package not installed. Install with: pip install bqapi"
+            "error": "bqapi package not installed. Install with: pip install bqapi",
         }
-    
+
     try:
         # Initialize BisQue session
         bq = BQSession()
         root, _, _ = _init_bisque_session_with_runtime_auth(bq=bq)
         logger.info("Connecting to BisQue at %s", root)
-        
+
         results = []
         requested_dataset_uri = str(dataset_uri or "").strip() or None
         requested_dataset_name = str(dataset_name or "").strip() or None
-        
+
         for file_path in file_paths:
             try:
                 # Check if file exists
                 if not os.path.exists(file_path):
-                    results.append({
-                        "file": os.path.basename(file_path),
-                        "success": False,
-                        "error": f"File not found: {file_path}"
-                    })
+                    results.append(
+                        {
+                            "file": os.path.basename(file_path),
+                            "success": False,
+                            "error": f"File not found: {file_path}",
+                        }
+                    )
                     continue
-                
+
                 file_name = os.path.basename(file_path)
                 file_size = os.path.getsize(file_path)
                 existing_upload = _lookup_session_visible_canonical_bisque_upload_for_local_path(
@@ -3495,12 +4009,15 @@ def upload_to_bisque(
                 )
                 resolved_uri = str(links.get("resource_uri") or "").strip()
                 if not resolved_uri:
-                    results.append({
-                        "file": file_name,
-                        "local_path": file_path,
-                        "success": False,
-                        "error": upload_error_hint or "Upload did not return a BisQue resource URI.",
-                    })
+                    results.append(
+                        {
+                            "file": file_name,
+                            "local_path": file_path,
+                            "success": False,
+                            "error": upload_error_hint
+                            or "Upload did not return a BisQue resource URI.",
+                        }
+                    )
                     logger.error(
                         "Failed to upload %s: missing resource URI (hint=%s)",
                         file_path,
@@ -3508,35 +4025,39 @@ def upload_to_bisque(
                     )
                     continue
 
-                results.append({
-                    "file": file_name,
-                    "local_path": file_path,
-                    "success": True,
-                    "size_bytes": file_size,
-                    "resource_uniq": links.get("resource_uniq") or resource_uniq,
-                    "resource_uri": resolved_uri,
-                    "client_view_url": links.get("client_view_url"),
-                    "image_service_url": links.get("image_service_url"),
-                    "bisque_url": links.get("client_view_url") or str(response_value),
-                    "reused_existing_upload": reused_existing_upload,
-                    "canonical_upload_file_id": (
-                        str(existing_upload.get("file_id") or "").strip()
-                        if existing_upload is not None
-                        else None
-                    ),
-                })
-                
+                results.append(
+                    {
+                        "file": file_name,
+                        "local_path": file_path,
+                        "success": True,
+                        "size_bytes": file_size,
+                        "resource_uniq": links.get("resource_uniq") or resource_uniq,
+                        "resource_uri": resolved_uri,
+                        "client_view_url": links.get("client_view_url"),
+                        "image_service_url": links.get("image_service_url"),
+                        "bisque_url": links.get("client_view_url") or str(response_value),
+                        "reused_existing_upload": reused_existing_upload,
+                        "canonical_upload_file_id": (
+                            str(existing_upload.get("file_id") or "").strip()
+                            if existing_upload is not None
+                            else None
+                        ),
+                    }
+                )
+
                 logger.info(f"Successfully uploaded {file_name}")
-                
+
             except Exception as file_error:
-                results.append({
-                    "file": os.path.basename(file_path),
-                    "local_path": file_path,
-                    "success": False,
-                    "error": str(file_error)
-                })
+                results.append(
+                    {
+                        "file": os.path.basename(file_path),
+                        "local_path": file_path,
+                        "success": False,
+                        "error": str(file_error),
+                    }
+                )
                 logger.error(f"Failed to upload {file_path}: {str(file_error)}")
-        
+
         # Summary
         successful = sum(1 for r in results if r.get("success"))
         total = len(results)
@@ -3593,21 +4114,27 @@ def upload_to_bisque(
             message = f"Uploaded {successful} of {total} file(s) to BisQue."
         else:
             message = f"Failed to upload files to BisQue ({successful}/{total} succeeded)."
-        
+
         return {
             "success": overall_success,
             "uploaded": successful,
             "total": total,
             "results": results,
             "bisque_root": root,
-            "dataset_action": dataset_result.get("action") if isinstance(dataset_result, dict) else None,
-            "dataset_success": dataset_result.get("success") if isinstance(dataset_result, dict) else None,
-            "dataset_uri": dataset_result.get("dataset_uri") if isinstance(dataset_result, dict) else requested_dataset_uri,
-            "dataset_name": dataset_result.get("dataset_name") if isinstance(dataset_result, dict) else requested_dataset_name,
+            "dataset_action": dataset_result.get("action")
+            if isinstance(dataset_result, dict)
+            else None,
+            "dataset_success": dataset_result.get("success")
+            if isinstance(dataset_result, dict)
+            else None,
+            "dataset_uri": dataset_result.get("dataset_uri")
+            if isinstance(dataset_result, dict)
+            else requested_dataset_uri,
+            "dataset_name": dataset_result.get("dataset_name")
+            if isinstance(dataset_result, dict)
+            else requested_dataset_name,
             "dataset_members_added": (
-                dataset_result.get("added")
-                if isinstance(dataset_result, dict)
-                else None
+                dataset_result.get("added") if isinstance(dataset_result, dict) else None
             ),
             "dataset_client_view_url": (
                 dataset_result.get("dataset_client_view_url")
@@ -3625,17 +4152,13 @@ def upload_to_bisque(
 
     except Exception as e:
         logger.error(f"BisQue upload error: {str(e)}")
-        return {
-            "success": False,
-            "error": f"BisQue connection/upload failed: {str(e)}"
-        }
+        return {"success": False, "error": f"BisQue connection/upload failed: {str(e)}"}
 
 
 def bisque_ping() -> dict[str, Any]:
     """Validate BisQue connectivity and credentials."""
     try:
         from bqapi.comm import BQSession
-        from bqapi.bqclass import BQVertex
     except ImportError:
         return {"success": False, "error": "bqapi package not installed"}
 
@@ -3831,7 +4354,9 @@ def _bisque_search_summary(
         if ext:
             ext_counts[ext] = ext_counts.get(ext, 0) + 1
 
-    media_label = _bisque_media_label(resources[0].get("name"), resource_type) if resources else resource_type
+    media_label = (
+        _bisque_media_label(resources[0].get("name"), resource_type) if resources else resource_type
+    )
     parts = [f"Found {count} {media_label} asset(s)."]
     if scope_text:
         parts.append(f"Search scope: {scope_text}.")
@@ -3839,7 +4364,8 @@ def _bisque_search_summary(
         parts.append(f"Top matches: {', '.join(names)}.")
     if ext_counts:
         ext_summary = ", ".join(
-            f"{ext} ({cnt})" for ext, cnt in sorted(ext_counts.items(), key=lambda x: (-x[1], x[0]))[:4]
+            f"{ext} ({cnt})"
+            for ext, cnt in sorted(ext_counts.items(), key=lambda x: (-x[1], x[0]))[:4]
         )
         parts.append(f"File types: {ext_summary}.")
     return " ".join(parts)
@@ -4054,7 +4580,9 @@ def _normalize_bisque_natural_language_filetype_terms(
 
     matched_terms: list[str] = []
     for token, aliases in _BISQUE_NL_FILETYPE_ALIASES.items():
-        if re.search(rf"(?<![a-z0-9])(?:\.{re.escape(token)}|{re.escape(token)})(?![a-z0-9])", normalized):
+        if re.search(
+            rf"(?<![a-z0-9])(?:\.{re.escape(token)}|{re.escape(token)})(?![a-z0-9])", normalized
+        ):
             for alias in aliases:
                 if alias not in matched_terms:
                     matched_terms.append(alias)
@@ -4142,7 +4670,9 @@ def _collect_bisque_resource_nodes(
         if not tag or tag in {"response", "value", "tag"}:
             return
         if tag == "resource":
-            child_elements = [child for child in node if isinstance(getattr(child, "tag", None), str)]
+            child_elements = [
+                child for child in node if isinstance(getattr(child, "tag", None), str)
+            ]
             explicit_type = str(node.get("resource_type") or node.get("type") or "").strip()
             if child_elements or not explicit_type:
                 return
@@ -4204,7 +4734,9 @@ def _filter_bisque_resource_rows(
     *,
     filter_terms: list[str] | None,
 ) -> list[dict[str, Any]]:
-    normalized_terms = [str(term or "").strip().lower() for term in (filter_terms or []) if str(term or "").strip()]
+    normalized_terms = [
+        str(term or "").strip().lower() for term in (filter_terms or []) if str(term or "").strip()
+    ]
     if not normalized_terms:
         return rows
     filtered: list[dict[str, Any]] = []
@@ -4234,7 +4766,9 @@ def _query_bisque_resources_with_fallback(
     except Exception as exc:  # noqa: BLE001
         query_error = exc
         collected = []
-        logger.warning("BisQue query(%s) failed; falling back to data_service XML: %s", candidate_type, exc)
+        logger.warning(
+            "BisQue query(%s) failed; falling back to data_service XML: %s", candidate_type, exc
+        )
     else:
         if collected:
             return collected, "query"
@@ -4267,7 +4801,9 @@ def _query_bisque_resources_with_fallback(
                     fallback_type=candidate_type,
                     bisque_root=bisque_root,
                 )
-                for node in _collect_bisque_resource_nodes(broad_payload, fallback_type=candidate_type)
+                for node in _collect_bisque_resource_nodes(
+                    broad_payload, fallback_type=candidate_type
+                )
             ]
             fallback_rows = _filter_bisque_resource_rows(
                 broad_rows,
@@ -4292,7 +4828,6 @@ def bisque_download_resource(resource_uri: str, output_path: str) -> dict[str, A
     """Download a BisQue resource blob to a local path."""
     try:
         from bqapi.comm import BQSession
-        from bqapi.bqclass import BQVertex
     except ImportError:
         return {"success": False, "error": "bqapi package not installed"}
 
@@ -4424,9 +4959,7 @@ def bisque_download_resource(resource_uri: str, output_path: str) -> dict[str, A
                     )
                 return {
                     "success": False,
-                    "error": (
-                        "Downloaded file appears to be XML/HTML instead of binary content."
-                    ),
+                    "error": ("Downloaded file appears to be XML/HTML instead of binary content."),
                     "resource_uri": normalized_uri,
                     "blob_uri": blob_uri,
                     "image_service_url": image_service_url or None,
@@ -4594,7 +5127,7 @@ def search_bisque_resources(
 ) -> dict[str, Any]:
     """
     Search for resources in BisQue repository.
-    
+
     Args:
         resource_type: Type of resource to search for (image, dataset, file, table, etc.).
             HDF5/DREAM3D aliases such as hdf5, h5, and dream3d are normalized to table.
@@ -4604,24 +5137,21 @@ def search_bisque_resources(
         text: Free-text search term (fuzzy match)
         limit: Maximum number of results to return
         offset: Number of results to skip (for pagination)
-        
+
     Returns:
         Dictionary with search results and metadata
     """
     try:
         from bqapi.comm import BQSession
     except ImportError:
-        return {
-            "success": False,
-            "error": "bqapi package not installed"
-        }
-    
+        return {"success": False, "error": "bqapi package not installed"}
+
     try:
         # Initialize session
         bq = BQSession()
         root, auth_mode, _ = _init_bisque_session_with_runtime_auth(bq=bq)
         logger.info("Searching BisQue for %s resources", resource_type)
-        
+
         raw_resource_type = resource_type
         original_text = text
         original_tag_query = tag_query
@@ -4629,12 +5159,15 @@ def search_bisque_resources(
         original_metadata_filters = _coerce_bisque_filter_mapping(metadata_filters)
         resource_type = _normalize_bisque_resource_type(resource_type)
         if hasattr(bq, "normalize_resource_type"):
-            resource_type = _normalize_bisque_resource_type(bq.normalize_resource_type(resource_type))
+            resource_type = _normalize_bisque_resource_type(
+                bq.normalize_resource_type(resource_type)
+            )
 
         # Seed a video hint when asked for videos but no text/filter provided.
         if (
             raw_resource_type
-            and str(raw_resource_type).strip().lower() in {"video", "movie", "mp4", "mov", "avi", "mkv", "webm"}
+            and str(raw_resource_type).strip().lower()
+            in {"video", "movie", "mp4", "mov", "avi", "mkv", "webm"}
             and not text
             and not tag_query
             and not tag_filters
@@ -4661,19 +5194,14 @@ def search_bisque_resources(
             normalized_order_by = None
 
         # Build query parameters
-        query_params = {
-            "limit": limit,
-            "offset": offset
-        }
+        query_params = {"limit": limit, "offset": offset}
 
         expanded_filters = _expand_bisque_tag_filters(tag_filters)
         expanded_meta = _expand_bisque_tag_filters(metadata_filters)
         if expanded_meta:
             for key, value in expanded_meta.items():
                 expanded_filters = expanded_filters or {}
-                expanded_filters[key] = _merge_filter_value(
-                    expanded_filters.get(key), value
-                )
+                expanded_filters[key] = _merge_filter_value(expanded_filters.get(key), value)
 
         normalized_tag_query = _rewrite_tag_query_aliases(tag_query)
         combined_tag_query = _build_tag_query_compat(
@@ -4689,7 +5217,7 @@ def search_bisque_resources(
             if order_key in {"name", "created", "ts", "owner"}:
                 order_key = f"@{order_key}"
             query_params["tag_order"] = f"{order_key}:{normalized_order}"
-        
+
         def _collect_resources(results_iter, fallback_type: str) -> list[dict[str, Any]]:
             collected: list[dict[str, Any]] = []
             for resource in results_iter:
@@ -4701,16 +5229,19 @@ def search_bisque_resources(
                     {
                         "uri": resource.uri if hasattr(resource, "uri") else None,
                         "resource_uri": (
-                            str(links.get("resource_uri") or getattr(resource, "uri", None) or "").strip() or None
+                            str(
+                                links.get("resource_uri") or getattr(resource, "uri", None) or ""
+                            ).strip()
+                            or None
                         ),
                         "client_view_url": str(links.get("client_view_url") or "").strip() or None,
-                        "image_service_url": str(links.get("image_service_url") or "").strip() or None,
+                        "image_service_url": str(links.get("image_service_url") or "").strip()
+                        or None,
                         "name": resource.name if hasattr(resource, "name") else None,
                         "resource_type": (
                             resource.tag
                             if hasattr(resource, "tag")
-                            else getattr(resource, "resource_type", None)
-                            or fallback_type
+                            else getattr(resource, "resource_type", None) or fallback_type
                         ),
                         "owner": resource.owner if hasattr(resource, "owner") else None,
                         "created": str(resource.ts) if hasattr(resource, "ts") else None,
@@ -4732,9 +5263,7 @@ def search_bisque_resources(
             fallback_filter_terms.append(str(original_text).strip())
         elif isinstance(original_text, list):
             fallback_filter_terms.extend(
-                str(item or "").strip()
-                for item in original_text
-                if str(item or "").strip()
+                str(item or "").strip() for item in original_text if str(item or "").strip()
             )
         if requested_dataset_name and requested_dataset_name not in fallback_filter_terms:
             fallback_filter_terms.append(requested_dataset_name)
@@ -4763,7 +5292,11 @@ def search_bisque_resources(
                 if resolved_resources:
                     break
 
-            if not resolved_resources and resolved_resource_type == "dataset" and requested_dataset_name:
+            if (
+                not resolved_resources
+                and resolved_resource_type == "dataset"
+                and requested_dataset_name
+            ):
                 resolved_dataset = _resolve_bisque_dataset_target_with_session(
                     bq=session,
                     bisque_root=bisque_root,
@@ -4777,13 +5310,21 @@ def search_bisque_resources(
 
                     def _dataset_result_row(item: dict[str, Any]) -> dict[str, Any]:
                         dataset_uri = str(item.get("dataset_uri") or "").strip() or None
-                        links = _build_bisque_resource_links(dataset_uri, bisque_root) if dataset_uri else {}
+                        links = (
+                            _build_bisque_resource_links(dataset_uri, bisque_root)
+                            if dataset_uri
+                            else {}
+                        )
                         return {
                             "uri": dataset_uri,
                             "resource_uri": dataset_uri,
-                            "client_view_url": str(links.get("client_view_url") or "").strip() or None,
+                            "client_view_url": str(links.get("client_view_url") or "").strip()
+                            or None,
                             "image_service_url": None,
-                            "name": str(item.get("dataset_name") or requested_dataset_name or "").strip() or None,
+                            "name": str(
+                                item.get("dataset_name") or requested_dataset_name or ""
+                            ).strip()
+                            or None,
                             "resource_type": "dataset",
                             "owner": None,
                             "created": str(item.get("created") or "").strip() or None,
@@ -4806,9 +5347,13 @@ def search_bisque_resources(
             )
 
         # Execute query with file-type-aware fallback ordering.
-        resources, resource_types_tried, resource_type, dataset_resolution_fallback, search_backend = (
-            _execute_search_with_session(bq, bisque_root=root)
-        )
+        (
+            resources,
+            resource_types_tried,
+            resource_type,
+            dataset_resolution_fallback,
+            search_backend,
+        ) = _execute_search_with_session(bq, bisque_root=root)
         auth_retry_used = False
         if not resources and auth_mode != "basic":
             runtime_user, runtime_password, _, _, _ = _resolve_bisque_runtime_auth()
@@ -4898,34 +5443,28 @@ def search_bisque_resources(
             },
             "ui_artifacts": ui_artifacts,
         }
-        
+
     except Exception as e:
         logger.error(f"BisQue search failed: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any]:
     """
     Load a specific resource from BisQue by URI.
-    
+
     Args:
         resource_uri: Full URI of the resource to load
         view: Level of detail to load (short, full, deep)
-        
+
     Returns:
         Dictionary with resource details
     """
     try:
         from bqapi.comm import BQSession
     except ImportError:
-        return {
-            "success": False,
-            "error": "bqapi package not installed"
-        }
-    
+        return {"success": False, "error": "bqapi package not installed"}
+
     try:
         bq = BQSession()
         root, _, _ = _init_bisque_session_with_runtime_auth(bq=bq)
@@ -4947,13 +5486,15 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
                     else f"Resource not found: {resource_uri}"
                 ),
             }
-        
+
         # Extract basic metadata
         metadata = {
             "uri": (
                 resource.uri
                 if resource is not None and hasattr(resource, "uri")
-                else str(resource_xml.get("uri") if resource_xml is not None else resource_uri or "")
+                else str(
+                    resource_xml.get("uri") if resource_xml is not None else resource_uri or ""
+                )
             ),
             "name": (
                 resource.name
@@ -4978,25 +5519,25 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
         }
 
         # Extract tags if available
-        if resource is not None and hasattr(resource, 'tags'):
+        if resource is not None and hasattr(resource, "tags"):
             metadata["tags"] = [
                 {
-                    "name": tag.name if hasattr(tag, 'name') else None,
-                    "value": tag.value if hasattr(tag, 'value') else None
+                    "name": tag.name if hasattr(tag, "name") else None,
+                    "value": tag.value if hasattr(tag, "value") else None,
                 }
                 for tag in resource.tags
             ]
-        
+
         # Extract dimensions for images
-        if resource is not None and hasattr(resource, 'image_num_x'):
+        if resource is not None and hasattr(resource, "image_num_x"):
             metadata["dimensions"] = {
                 "width": resource.image_num_x,
                 "height": resource.image_num_y,
-                "depth": getattr(resource, 'image_num_z', None),
-                "channels": getattr(resource, 'image_num_c', None),
-                "timepoints": getattr(resource, 'image_num_t', None),
+                "depth": getattr(resource, "image_num_z", None),
+                "channels": getattr(resource, "image_num_c", None),
+                "timepoints": getattr(resource, "image_num_t", None),
             }
-        
+
         logger.info(f"Successfully loaded resource: {metadata.get('name', resource_uri)}")
 
         ui_artifacts = [
@@ -5009,7 +5550,7 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
                 "type": "key_value",
                 "title": "Key details",
                 "payload": _bisque_metadata_key_values(metadata),
-            }
+            },
         ]
         if metadata.get("tags"):
             ui_artifacts.append(
@@ -5036,13 +5577,10 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
             "image_service_url": links.get("image_service_url"),
             "ui_artifacts": ui_artifacts,
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to load resource: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def _load_bisque_resource_with_probe(
@@ -5078,22 +5616,20 @@ def _load_bisque_resource_with_probe(
 def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
     """
     Delete a resource from BisQue.
-    
+
     Args:
         resource_uri: Full URI of the resource to delete
-        
+
     Returns:
         Dictionary with deletion status
     """
     try:
         from bqapi.comm import BQSession
     except ImportError:
-        return {
-            "success": False,
-            "error": "bqapi package not installed"
-        }
-    
+        return {"success": False, "error": "bqapi package not installed"}
+
     try:
+
         def _run_delete(
             *,
             active_bq: Any,
@@ -5109,15 +5645,14 @@ def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
             if resource is None and resource_xml is None:
                 if load_error is not None:
                     raise load_error
-                return {
-                    "success": False,
-                    "error": f"Resource not found: {resource_uri}"
-                }
+                return {"success": False, "error": f"Resource not found: {resource_uri}"}
 
             resource_name = (
                 resource.name
                 if resource is not None and hasattr(resource, "name")
-                else str(resource_xml.get("name") if resource_xml is not None else resource_uri or "")
+                else str(
+                    resource_xml.get("name") if resource_xml is not None else resource_uri or ""
+                )
             )
 
             cleanup_result = _remove_resource_from_all_bisque_datasets(
@@ -5125,9 +5660,13 @@ def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
                 bisque_root=active_root,
                 resource_uri=normalized_uri,
             )
-            cleanup_ok = int(cleanup_result.get("removed") or 0) >= int(cleanup_result.get("found") or 0)
+            cleanup_ok = int(cleanup_result.get("removed") or 0) >= int(
+                cleanup_result.get("found") or 0
+            )
             if not cleanup_ok:
-                deleted_client_view_url = _bisque_user_facing_resource_url(normalized_uri, active_root)
+                deleted_client_view_url = _bisque_user_facing_resource_url(
+                    normalized_uri, active_root
+                )
                 return {
                     "success": False,
                     "deleted_uri": normalized_uri,
@@ -5154,9 +5693,8 @@ def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
             _deleted_xml, deletion_verified, deletion_attempts = _wait_for_bisque_resource_state(
                 bq=active_bq,
                 resource_uri=normalized_uri,
-                predicate=lambda _xml, exc: exc is not None and (
-                    _is_bisque_missing_resource_error(exc) or _is_bisque_forbidden_error(exc)
-                ),
+                predicate=lambda _xml, exc: exc is not None
+                and (_is_bisque_missing_resource_error(exc) or _is_bisque_forbidden_error(exc)),
             )
 
             deleted_and_clean = deletion_verified and cleanup_ok
@@ -5293,7 +5831,9 @@ def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
                         return _run_delete(
                             active_bq=cookie_bq,
                             active_root=cookie_root,
-                            normalized_uri=_normalize_bisque_resource_uri(resource_uri, cookie_root),
+                            normalized_uri=_normalize_bisque_resource_uri(
+                                resource_uri, cookie_root
+                            ),
                         )
                 except Exception as cookie_exc:
                     logger.warning("BisQue delete cookie-session retry failed: %s", cookie_exc)
@@ -5316,10 +5856,7 @@ def delete_bisque_resource(resource_uri: str) -> dict[str, Any]:
             raise
     except Exception as e:
         logger.error(f"Failed to delete resource: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def _normalize_gobject_vertices(vertices: Any) -> list[Any]:
@@ -5505,8 +6042,7 @@ def _overlay_from_mask(mask: np.ndarray, base_rgb: np.ndarray) -> np.ndarray:
         color_map = {unique_labels[0]: np.array([255.0, 80.0, 80.0], dtype=np.float32)}
     else:
         color_map = {
-            label: _instance_preview_color(label).astype(np.float32)
-            for label in unique_labels
+            label: _instance_preview_color(label).astype(np.float32) for label in unique_labels
         }
     for label in unique_labels:
         region = labels == label
@@ -5623,7 +6159,9 @@ def _compose_side_by_side_preview(base_rgb: np.ndarray, mask_rgba: np.ndarray) -
     h, w = int(left.shape[0]), int(left.shape[1])
     right = np.asarray(mask_rgba).astype(np.uint8)
     if right.shape[:2] != (h, w):
-        right = _mask_rgba_from_plane(right[..., 3] if right.ndim == 3 and right.shape[-1] >= 4 else right, (h, w))
+        right = _mask_rgba_from_plane(
+            right[..., 3] if right.ndim == 3 and right.shape[-1] >= 4 else right, (h, w)
+        )
 
     pad = 10
     gap = 12
@@ -5651,7 +6189,10 @@ def _compose_side_by_side_preview(base_rgb: np.ndarray, mask_rgba: np.ndarray) -
     bg_patch[...] = np.array([8, 9, 12], dtype=np.uint8)
     blended = np.where(
         right_alpha[..., None] > 0,
-        (bg_patch.astype(np.float32) * (1.0 - right_alpha[..., None]) + right_rgb.astype(np.float32) * right_alpha[..., None]),
+        (
+            bg_patch.astype(np.float32) * (1.0 - right_alpha[..., None])
+            + right_rgb.astype(np.float32) * right_alpha[..., None]
+        ),
         bg_patch.astype(np.float32),
     )
     canvas[y0 : y0 + h, right_x0 : right_x0 + w] = np.clip(blended, 0, 255).astype(np.uint8)
@@ -5734,7 +6275,9 @@ def _save_segmentation_artifacts(
                 src_img = nib.load(str(source))
                 # Internal mask order is Z,Y,X; NIfTI data should be X,Y,Z.
                 mask_xyz = np.transpose(mask_u8, (2, 1, 0))
-                mask_img = nib.Nifti1Image(mask_xyz, affine=src_img.affine, header=src_img.header.copy())
+                mask_img = nib.Nifti1Image(
+                    mask_xyz, affine=src_img.affine, header=src_img.header.copy()
+                )
                 mask_img.set_data_dtype(np.uint8)
                 nii_path = output_dir / f"{stem}_{artifact_prefix}_mask.nii.gz"
                 nib.save(mask_img, str(nii_path))
@@ -5915,15 +6458,9 @@ def _infer_ct_like_volume_profile(
     )
 
     p01, p99 = _medsam2_percentile_window(array)
-    hu_like = bool(
-        p01 is not None
-        and p99 is not None
-        and p01 <= -300.0
-        and p99 >= 300.0
-    )
+    hu_like = bool(p01 is not None and p99 is not None and p01 <= -300.0 and p99 >= 300.0)
     token_hint = bool(
-        lower_tokens
-        & {"ct", "headct", "brainct", "chestct", "abdomenct", "thoraxct", "lesionct"}
+        lower_tokens & {"ct", "headct", "brainct", "chestct", "abdomenct", "thoraxct", "lesionct"}
     )
     is_ct_like = bool(has_medical_volume_hint and (hu_like or token_hint))
     reason = None
@@ -6034,12 +6571,14 @@ def segment_image_sam2(
 
             array = np.asarray(loaded.pop("_array"))
             array_order = str(loaded.get("array_order") or "YX")
-            selected_model_id, model_selection, selection_warnings = _select_medsam2_model_for_input(
-                file_path=str(file_path),
-                loaded=loaded,
-                array=array,
-                requested_model_id=requested_model_id,
-                default_model_id=default_model_id,
+            selected_model_id, model_selection, selection_warnings = (
+                _select_medsam2_model_for_input(
+                    file_path=str(file_path),
+                    loaded=loaded,
+                    array=array,
+                    requested_model_id=requested_model_id,
+                    default_model_id=default_model_id,
+                )
             )
             seg = segment_array_with_medsam2(
                 array,
@@ -6068,13 +6607,21 @@ def segment_image_sam2(
                 mask=mask,
                 save_visualization=bool(save_visualizations),
             )
-            preferred_upload_path = artifact_paths.get("mask_volume_path") or artifact_paths.get("mask_path")
+            preferred_upload_path = artifact_paths.get("mask_volume_path") or artifact_paths.get(
+                "mask_path"
+            )
             segmented_voxels = int(np.count_nonzero(mask))
             total_voxels = int(mask.size)
             coverage_pct = float((segmented_voxels / total_voxels) * 100.0) if total_voxels else 0.0
 
-            axis_sizes = loaded.get("axis_sizes") if isinstance(loaded.get("axis_sizes"), dict) else {}
-            artifact_warnings = artifact_paths.get("warnings") if isinstance(artifact_paths.get("warnings"), list) else []
+            axis_sizes = (
+                loaded.get("axis_sizes") if isinstance(loaded.get("axis_sizes"), dict) else {}
+            )
+            artifact_warnings = (
+                artifact_paths.get("warnings")
+                if isinstance(artifact_paths.get("warnings"), list)
+                else []
+            )
             result_data = {
                 "file": os.path.basename(str(file_path)),
                 "path": str(file_path),
@@ -6142,7 +6689,9 @@ def segment_image_sam2(
                     "min_points": auto_points.get("min_points"),
                     "max_points": auto_points.get("max_points"),
                     "point_density": auto_points.get("point_density"),
-                    "visualization_saved": bool(row.get("visualization") or row.get("visualizations")),
+                    "visualization_saved": bool(
+                        row.get("visualization") or row.get("visualizations")
+                    ),
                     "preferred_upload_path": row.get("preferred_upload_path"),
                 }
             )
@@ -6156,9 +6705,7 @@ def segment_image_sam2(
                     }
                 )
             row_visualizations = (
-                row.get("visualizations")
-                if isinstance(row.get("visualizations"), list)
-                else []
+                row.get("visualizations") if isinstance(row.get("visualizations"), list) else []
             )
             for visualization in row_visualizations:
                 if not isinstance(visualization, dict) or not visualization.get("path"):
@@ -6206,7 +6753,11 @@ def segment_image_sam2(
     ]
     ui_artifacts: list[dict[str, Any]] = [
         {"type": "metrics", "title": "MedSAM2 segmentation summary", "payload": summary_payload},
-        {"type": "table", "title": "Per-file segmentation coverage", "payload": coverage_rows[:200]},
+        {
+            "type": "table",
+            "title": "Per-file segmentation coverage",
+            "payload": coverage_rows[:200],
+        },
     ]
     for item in visualization_paths[:40]:
         if item.get("path"):
@@ -6342,7 +6893,11 @@ def sam2_prompt_image(
         labels = _normalize_prompt_labels(input_labels, points_value=points)
     if input_boxes:
         try:
-            boxes = [[float(v) for v in box[:4]] for box in input_boxes if isinstance(box, (list, tuple)) and len(box) >= 4]
+            boxes = [
+                [float(v) for v in box[:4]]
+                for box in input_boxes
+                if isinstance(box, (list, tuple)) and len(box) >= 4
+            ]
         except Exception:
             boxes = None
 
@@ -6355,7 +6910,10 @@ def sam2_prompt_image(
             return_array=True,
         )
         if not loaded.get("success"):
-            return {"success": False, "error": loaded.get("error") or "Failed to load image via bioio."}
+            return {
+                "success": False,
+                "error": loaded.get("error") or "Failed to load image via bioio.",
+            }
 
         array = np.asarray(loaded.pop("_array"))
         array_order = str(loaded.get("array_order") or "YX")
@@ -6398,11 +6956,11 @@ def sam2_prompt_image(
 
         score_map = seg.get("_slice_scores") if isinstance(seg.get("_slice_scores"), dict) else {}
         best_scores = [float(v) for _, v in sorted(score_map.items())]
-        mean_score = float(np.mean(best_scores)) if best_scores else float(seg.get("mean_iou", 0.0) or 0.0)
+        mean_score = (
+            float(np.mean(best_scores)) if best_scores else float(seg.get("mean_iou", 0.0) or 0.0)
+        )
         total_masks_generated = int(
-            seg.get("total_masks_generated")
-            or seg.get("instance_count")
-            or 0
+            seg.get("total_masks_generated") or seg.get("instance_count") or 0
         )
         if total_masks_generated <= 0 and bool(seg.get("success")):
             total_masks_generated = 1
@@ -6415,7 +6973,9 @@ def sam2_prompt_image(
                 "type": "metrics",
                 "title": "MedSAM2 prompt results",
                 "payload": {
-                    "model": seg.get("resolved_model_ref") or seg.get("model_id") or selected_model_id,
+                    "model": seg.get("resolved_model_ref")
+                    or seg.get("model_id")
+                    or selected_model_id,
                     "selection_mode": model_selection.get("selection_mode"),
                     "selection_reason": model_selection.get("selection_reason"),
                     "slice_count": seg.get("slice_count"),
@@ -6479,7 +7039,9 @@ def sam2_prompt_image(
             "visualization_path": artifact_paths.get("overlay_path"),
             "visualization_paths": visualizations,
             "model": seg.get("resolved_model_ref") or seg.get("model_id") or selected_model_id,
-            "resolved_model_ref": seg.get("resolved_model_ref") or seg.get("model_id") or selected_model_id,
+            "resolved_model_ref": seg.get("resolved_model_ref")
+            or seg.get("model_id")
+            or selected_model_id,
             "model_selection": model_selection,
             "backend": seg.get("backend"),
             "slice_count": seg.get("slice_count"),
@@ -6519,7 +7081,9 @@ def estimate_depth_pro(
 ) -> dict[str, Any]:
     """Estimate depth maps with DepthPro and persist visualization artifacts."""
     settings = get_settings()
-    model_ref = str(model_id or getattr(settings, "depth_pro_model_id", "apple/DepthPro-hf")).strip()
+    model_ref = str(
+        model_id or getattr(settings, "depth_pro_model_id", "apple/DepthPro-hf")
+    ).strip()
     resolved_use_fov = bool(
         use_fov_model
         if use_fov_model is not None
@@ -6648,11 +7212,7 @@ def estimate_depth_pro(
                 target_sizes=[(image_rgb.height, image_rgb.width)],
             )
             post = post_result[0] if isinstance(post_result, list) and post_result else {}
-            depth_tensor = (
-                post.get("predicted_depth")
-                if isinstance(post, dict)
-                else None
-            )
+            depth_tensor = post.get("predicted_depth") if isinstance(post, dict) else None
             if depth_tensor is None:
                 depth_tensor = getattr(outputs, "predicted_depth", None)
             if depth_tensor is None:
@@ -6731,9 +7291,7 @@ def estimate_depth_pro(
             depth_mean = float(np.mean(finite)) if finite.size else None
             depth_std = float(np.std(finite)) if finite.size else None
             preferred_upload_path = (
-                str(depth_map_path)
-                if bool(save_visualizations)
-                else depth_npy_saved
+                str(depth_map_path) if bool(save_visualizations) else depth_npy_saved
             )
 
             results.append(
@@ -6742,16 +7300,24 @@ def estimate_depth_pro(
                     "path": input_path,
                     "success": True,
                     "depth_map_path": str(depth_map_path) if bool(save_visualizations) else None,
-                    "depth_heatmap_path": str(depth_heatmap_path) if bool(save_visualizations) else None,
+                    "depth_heatmap_path": str(depth_heatmap_path)
+                    if bool(save_visualizations)
+                    else None,
                     "depth_overlay_path": str(overlay_path) if bool(save_visualizations) else None,
-                    "depth_side_by_side_path": str(side_by_side_path) if bool(save_visualizations) else None,
+                    "depth_side_by_side_path": str(side_by_side_path)
+                    if bool(save_visualizations)
+                    else None,
                     "depth_npy_path": depth_npy_saved,
                     "preferred_upload_path": preferred_upload_path,
                     "visualizations": file_visualizations,
                     "model": model_ref,
                     "device": torch_device,
-                    "field_of_view": _scalar(post.get("field_of_view") if isinstance(post, dict) else None),
-                    "focal_length": _scalar(post.get("focal_length") if isinstance(post, dict) else None),
+                    "field_of_view": _scalar(
+                        post.get("field_of_view") if isinstance(post, dict) else None
+                    ),
+                    "focal_length": _scalar(
+                        post.get("focal_length") if isinstance(post, dict) else None
+                    ),
                     "depth_min": depth_min,
                     "depth_max": depth_max,
                     "depth_mean": depth_mean,
@@ -7006,9 +7572,15 @@ def segment_image_sam3(
     point_density = float(
         point_density if point_density is not None else preset_values["point_density"]
     )
-    mask_threshold = float(mask_threshold if mask_threshold is not None else getattr(settings, "sam3_mask_threshold", 0.5))
+    mask_threshold = float(
+        mask_threshold
+        if mask_threshold is not None
+        else getattr(settings, "sam3_mask_threshold", 0.5)
+    )
     vote_threshold = float(
-        vote_threshold if vote_threshold is not None else getattr(settings, "sam3_vote_threshold", 0.5)
+        vote_threshold
+        if vote_threshold is not None
+        else getattr(settings, "sam3_vote_threshold", 0.5)
     )
     min_component_area_ratio = float(
         min_component_area_ratio
@@ -7021,11 +7593,7 @@ def segment_image_sam3(
         else getattr(settings, "sam3_modality_hint", "auto")
     )
     preprocess = bool(preprocess if preprocess is not None else preset_values["preprocess"])
-    refine_3d = bool(
-        refine_3d
-        if refine_3d is not None
-        else preset_values["refine_3d"]
-    )
+    refine_3d = bool(refine_3d if refine_3d is not None else preset_values["refine_3d"])
     fallback_to_medsam2 = bool(
         fallback_to_medsam2
         if fallback_to_medsam2 is not None
@@ -7061,9 +7629,7 @@ def segment_image_sam3(
     concept_prompt = str(concept_prompt or "").strip()
     concept_warnings: list[str] = []
     normalized_input_points = (
-        list(input_points)
-        if isinstance(input_points, list) and input_points
-        else []
+        list(input_points) if isinstance(input_points, list) and input_points else []
     )
     normalized_input_point_labels = (
         list(input_points_labels)
@@ -7095,7 +7661,9 @@ def segment_image_sam3(
     normalized_input_boxes_labels: list[int] | None = None
     if input_boxes_labels is not None:
         if not normalized_input_boxes:
-            concept_warnings.append("input_boxes_labels was provided without valid input_boxes; ignored.")
+            concept_warnings.append(
+                "input_boxes_labels was provided without valid input_boxes; ignored."
+            )
         elif len(input_boxes_labels) != len(normalized_input_boxes):
             return {
                 "success": False,
@@ -7135,9 +7703,7 @@ def segment_image_sam3(
     resolved_file_paths = [str(path) for path in expanded_inputs]
     if not resolved_file_paths:
         return {"success": False, "error": "No valid image or sequence frames found in file_paths."}
-    missing_paths = [
-        path for path in resolved_file_paths if not Path(path).expanduser().exists()
-    ]
+    missing_paths = [path for path in resolved_file_paths if not Path(path).expanduser().exists()]
     if missing_paths:
         return {
             "success": False,
@@ -7276,7 +7842,11 @@ def segment_image_sam3(
                 if attempt == 0:
                     logger.warning(
                         "SAM3 %s segmentation failed on first attempt for %s; retrying once.",
-                        "tracker-points" if point_prompt_mode else "concept" if concept_mode else "auto",
+                        "tracker-points"
+                        if point_prompt_mode
+                        else "concept"
+                        if concept_mode
+                        else "auto",
                         file_path,
                     )
             if not seg.get("success"):
@@ -7299,18 +7869,16 @@ def segment_image_sam3(
                 and len(auto_zero_mask_fallback_prompt_candidates) > 0
             ):
                 auto_mask_probe = np.asarray(seg.get("_mask"))
-                auto_nonzero = int(np.count_nonzero(auto_mask_probe)) if auto_mask_probe.size > 0 else 0
+                auto_nonzero = (
+                    int(np.count_nonzero(auto_mask_probe)) if auto_mask_probe.size > 0 else 0
+                )
                 auto_total = int(auto_mask_probe.size)
                 auto_coverage_percent = (
                     float((auto_nonzero / auto_total) * 100.0) if auto_total > 0 else 0.0
                 )
-                fallback_triggered = (
-                    auto_nonzero == 0
-                    or (
-                        float(auto_low_coverage_fallback_threshold_percent) > 0.0
-                        and auto_coverage_percent
-                        <= float(auto_low_coverage_fallback_threshold_percent)
-                    )
+                fallback_triggered = auto_nonzero == 0 or (
+                    float(auto_low_coverage_fallback_threshold_percent) > 0.0
+                    and auto_coverage_percent <= float(auto_low_coverage_fallback_threshold_percent)
                 )
                 if fallback_triggered:
                     best_prompt: str | None = None
@@ -7333,9 +7901,7 @@ def segment_image_sam3(
                             continue
                         fallback_mask = np.asarray(fallback_seg.get("_mask"))
                         fallback_nonzero = (
-                            int(np.count_nonzero(fallback_mask))
-                            if fallback_mask.size > 0
-                            else 0
+                            int(np.count_nonzero(fallback_mask)) if fallback_mask.size > 0 else 0
                         )
                         if fallback_nonzero > best_fallback_nonzero:
                             best_fallback_nonzero = fallback_nonzero
@@ -7359,7 +7925,9 @@ def segment_image_sam3(
                 save_visualization=bool(save_visualizations),
                 artifact_prefix="sam3",
             )
-            preferred_upload_path = artifact_paths.get("mask_volume_path") or artifact_paths.get("mask_path")
+            preferred_upload_path = artifact_paths.get("mask_volume_path") or artifact_paths.get(
+                "mask_path"
+            )
             segmented_voxels = int(np.count_nonzero(mask))
             total_voxels = int(mask.size)
             coverage_pct = float((segmented_voxels / total_voxels) * 100.0) if total_voxels else 0.0
@@ -7400,20 +7968,35 @@ def segment_image_sam3(
             )
             max_instance_values_reported = 4096
             instance_values_truncated = len(component_sizes) > max_instance_values_reported
-            instance_area_voxels_values = [int(value) for value in component_sizes[:max_instance_values_reported]]
+            instance_area_voxels_values = [
+                int(value) for value in component_sizes[:max_instance_values_reported]
+            ]
             instance_coverage_percent_values = [
                 round(float(value), 6)
                 for value in instance_coverage_values[:max_instance_values_reported]
             ]
 
-            axis_sizes = loaded.get("axis_sizes") if isinstance(loaded.get("axis_sizes"), dict) else {}
-            artifact_warnings = artifact_paths.get("warnings") if isinstance(artifact_paths.get("warnings"), list) else []
-            auto_summary = seg.get("auto_point_summary") if isinstance(seg.get("auto_point_summary"), dict) else {}
+            axis_sizes = (
+                loaded.get("axis_sizes") if isinstance(loaded.get("axis_sizes"), dict) else {}
+            )
+            artifact_warnings = (
+                artifact_paths.get("warnings")
+                if isinstance(artifact_paths.get("warnings"), list)
+                else []
+            )
+            auto_summary = (
+                seg.get("auto_point_summary")
+                if isinstance(seg.get("auto_point_summary"), dict)
+                else {}
+            )
             effective_mode = (
                 "interactive_points"
                 if (
                     point_prompt_mode
-                    or str(seg.get("backend") or "").strip().lower().startswith("sam3-tracker-points")
+                    or str(seg.get("backend") or "")
+                    .strip()
+                    .lower()
+                    .startswith("sam3-tracker-points")
                 )
                 else "concept"
                 if (
@@ -7425,11 +8008,17 @@ def segment_image_sam3(
             )
             estimated_instances = seg.get("estimated_instances")
             try:
-                total_masks = max(0, int(estimated_instances if estimated_instances is not None else 0))
+                total_masks = max(
+                    0, int(estimated_instances if estimated_instances is not None else 0)
+                )
             except Exception:
                 total_masks = 0
             mask_count_scope_warning: str | None = None
-            if total_masks > 0 and instance_count_measured > 0 and total_masks != instance_count_measured:
+            if (
+                total_masks > 0
+                and instance_count_measured > 0
+                and total_masks != instance_count_measured
+            ):
                 mask_count_scope_warning = (
                     "Reported mask count differs from measured instance count in this output. "
                     f"Per-instance area metrics use `{instance_count_scope}`."
@@ -7478,9 +8067,11 @@ def segment_image_sam3(
                 "modality_profile_stats": seg.get("modality_profile_stats"),
                 "concept_prompt": seg.get("concept_prompt"),
                 "input_points": seg.get("input_points") or normalized_input_points,
-                "input_point_labels": seg.get("input_point_labels") or normalized_input_point_labels,
+                "input_point_labels": seg.get("input_point_labels")
+                or normalized_input_point_labels,
                 "input_boxes": seg.get("input_boxes") or normalized_input_boxes,
-                "input_boxes_labels": seg.get("input_boxes_labels") or normalized_input_boxes_labels,
+                "input_boxes_labels": seg.get("input_boxes_labels")
+                or normalized_input_boxes_labels,
                 "mask_path": artifact_paths.get("mask_path"),
                 "mask_volume_path": artifact_paths.get("mask_volume_path"),
                 "preferred_upload_path": preferred_upload_path,
@@ -7623,7 +8214,9 @@ def segment_image_sam3(
                     "min_points": auto_points.get("min_points"),
                     "max_points": auto_points.get("max_points"),
                     "point_density": auto_points.get("point_density"),
-                    "visualization_saved": bool(row.get("visualization") or row.get("visualizations")),
+                    "visualization_saved": bool(
+                        row.get("visualization") or row.get("visualizations")
+                    ),
                     "preferred_upload_path": row.get("preferred_upload_path"),
                 }
             )
@@ -7641,9 +8234,7 @@ def segment_image_sam3(
                     }
                 )
             row_visualizations = (
-                row.get("visualizations")
-                if isinstance(row.get("visualizations"), list)
-                else []
+                row.get("visualizations") if isinstance(row.get("visualizations"), list) else []
             )
             for visualization in row_visualizations:
                 if not isinstance(visualization, dict) or not visualization.get("path"):
@@ -7686,10 +8277,18 @@ def segment_image_sam3(
             "estimated_instances": row.get("segmentation", {}).get("total_masks"),
             "instance_count_scope": row.get("segmentation", {}).get("instance_count_scope"),
             "instance_count_measured": row.get("segmentation", {}).get("instance_count_measured"),
-            "instance_coverage_percent_mean": row.get("segmentation", {}).get("instance_coverage_percent_mean"),
-            "instance_coverage_percent_min": row.get("segmentation", {}).get("instance_coverage_percent_min"),
-            "instance_coverage_percent_max": row.get("segmentation", {}).get("instance_coverage_percent_max"),
-            "instance_area_voxels_mean": row.get("segmentation", {}).get("instance_area_voxels_mean"),
+            "instance_coverage_percent_mean": row.get("segmentation", {}).get(
+                "instance_coverage_percent_mean"
+            ),
+            "instance_coverage_percent_min": row.get("segmentation", {}).get(
+                "instance_coverage_percent_min"
+            ),
+            "instance_coverage_percent_max": row.get("segmentation", {}).get(
+                "instance_coverage_percent_max"
+            ),
+            "instance_area_voxels_mean": row.get("segmentation", {}).get(
+                "instance_area_voxels_mean"
+            ),
             "instance_area_voxels_min": row.get("segmentation", {}).get("instance_area_voxels_min"),
             "instance_area_voxels_max": row.get("segmentation", {}).get("instance_area_voxels_max"),
         }
@@ -7733,9 +8332,15 @@ def segment_image_sam3(
         "instance_count_mismatch_files": int(instance_count_mismatch_files),
         "instance_count_scope": instance_count_scope,
         "coverage_scope": "union_mask_over_image",
-        "coverage_percent_mean": round(float(np.mean(coverage_values)), 6) if coverage_values else None,
-        "coverage_percent_min": round(float(np.min(coverage_values)), 6) if coverage_values else None,
-        "coverage_percent_max": round(float(np.max(coverage_values)), 6) if coverage_values else None,
+        "coverage_percent_mean": round(float(np.mean(coverage_values)), 6)
+        if coverage_values
+        else None,
+        "coverage_percent_min": round(float(np.min(coverage_values)), 6)
+        if coverage_values
+        else None,
+        "coverage_percent_max": round(float(np.max(coverage_values)), 6)
+        if coverage_values
+        else None,
         "instance_area_voxels_mean": (
             round(float(instance_area_weighted_sum) / float(instance_count_measured_total), 6)
             if instance_count_measured_total > 0
@@ -7796,7 +8401,11 @@ def segment_image_sam3(
             or model_id
         ),
         "backend": (
-            (successful[0].get("backend") if successful and isinstance(successful[0], dict) else None)
+            (
+                successful[0].get("backend")
+                if successful and isinstance(successful[0], dict)
+                else None
+            )
             or ("sam3-concept" if concept_mode else "sam3-tracker")
         ),
         "mode": "concept" if concept_mode else "auto",
@@ -7926,9 +8535,18 @@ def _segmentation_metrics(pred: np.ndarray, gt: np.ndarray) -> dict[str, float]:
     if p.shape != g.shape:
         # Conservative nearest-neighbor resize only for 2D inputs.
         if p.ndim == 2 and g.ndim == 2:
-            p = np.array(Image.fromarray(p.astype(np.uint8)).resize((g.shape[1], g.shape[0]), Image.NEAREST)) > 0
+            p = (
+                np.array(
+                    Image.fromarray(p.astype(np.uint8)).resize(
+                        (g.shape[1], g.shape[0]), Image.NEAREST
+                    )
+                )
+                > 0
+            )
         else:
-            raise ValueError(f"Shape mismatch between prediction and ground truth: {p.shape} vs {g.shape}")
+            raise ValueError(
+                f"Shape mismatch between prediction and ground truth: {p.shape} vs {g.shape}"
+            )
 
     tp = int(np.logical_and(p, g).sum())
     fp = int(np.logical_and(p, np.logical_not(g)).sum())
@@ -7982,7 +8600,10 @@ def _is_pairing_mismatch_error(result: dict[str, Any] | None) -> bool:
     error_text = str(result.get("error") or "").lower()
     if not error_text:
         return False
-    return "no prediction/ground-truth pairs matched" in error_text or "no prediction/ground truth pairs matched" in error_text
+    return (
+        "no prediction/ground-truth pairs matched" in error_text
+        or "no prediction/ground truth pairs matched" in error_text
+    )
 
 
 def evaluate_segmentation_masks(
@@ -8084,10 +8705,7 @@ def evaluate_segmentation_masks(
                 }
             )
 
-    means = {
-        k: round(float(np.mean(v)), 6) if v else None
-        for k, v in aggregate.items()
-    }
+    means = {k: round(float(np.mean(v)), 6) if v else None for k, v in aggregate.items()}
     success_count = sum(1 for r in rows if not r.get("error"))
 
     result = {
@@ -8174,7 +8792,9 @@ def quantify_segmentation_masks(
         total = int(mask_bin.size)
         coverage_fraction = float(foreground / total) if total else 0.0
         coverage_percent = float(coverage_fraction * 100.0)
-        component_sizes = _connected_component_sizes(mask_bin, min_component_size=min_component_size)
+        component_sizes = _connected_component_sizes(
+            mask_bin, min_component_size=min_component_size
+        )
         object_count = int(len(component_sizes))
         mean_component_size = float(np.mean(component_sizes)) if component_sizes else 0.0
         median_component_size = float(np.median(component_sizes)) if component_sizes else 0.0
@@ -8191,8 +8811,13 @@ def quantify_segmentation_masks(
             "mean_component_size_px": round(mean_component_size, 6),
             "median_component_size_px": round(median_component_size, 6),
         }
-        if pixel_size is not None and _safe_float(pixel_size, default=0.0) > 0:
-            scale = _safe_float(pixel_size, default=1.0)
+        scale: float | None = None
+        if pixel_size is not None:
+            try:
+                scale = float(pixel_size)
+            except (TypeError, ValueError):
+                scale = None
+        if scale is not None and scale > 0:
             unit = str(pixel_unit or "px")
             row[f"mean_component_size_{unit}"] = round(mean_component_size * scale, 6)
             row[f"median_component_size_{unit}"] = round(median_component_size * scale, 6)
@@ -8206,8 +8831,12 @@ def quantify_segmentation_masks(
     summary = {
         "mask_count": len(mask_paths),
         "successful_masks": len(success_rows),
-        "mean_coverage_percent": round(float(np.mean(coverage_values)), 6) if coverage_values else 0.0,
-        "median_coverage_percent": round(float(np.median(coverage_values)), 6) if coverage_values else 0.0,
+        "mean_coverage_percent": round(float(np.mean(coverage_values)), 6)
+        if coverage_values
+        else 0.0,
+        "median_coverage_percent": round(float(np.median(coverage_values)), 6)
+        if coverage_values
+        else 0.0,
         "mean_object_count": round(float(np.mean(object_counts)), 6) if object_counts else 0.0,
         "median_object_count": round(float(np.median(object_counts)), 6) if object_counts else 0.0,
     }
@@ -8240,7 +8869,11 @@ def quantify_segmentation_masks(
 
     measurements = [
         {"name": "mean_coverage_percent", "value": summary["mean_coverage_percent"], "unit": "%"},
-        {"name": "median_coverage_percent", "value": summary["median_coverage_percent"], "unit": "%"},
+        {
+            "name": "median_coverage_percent",
+            "value": summary["median_coverage_percent"],
+            "unit": "%",
+        },
         {"name": "mean_object_count", "value": summary["mean_object_count"], "unit": "count"},
     ]
     if eval_result and isinstance(eval_result.get("metrics_mean"), dict):
@@ -8248,7 +8881,9 @@ def quantify_segmentation_masks(
         for metric_name in ("dice", "iou", "precision", "recall"):
             metric_value = metrics_mean.get(metric_name)
             if isinstance(metric_value, (int, float)):
-                measurements.append({"name": f"mean_{metric_name}", "value": float(metric_value), "unit": "score"})
+                measurements.append(
+                    {"name": f"mean_{metric_name}", "value": float(metric_value), "unit": "score"}
+                )
 
     result: dict[str, Any] = {
         "success": len(success_rows) > 0,
@@ -8272,8 +8907,12 @@ def quantify_segmentation_masks(
     result["latest_result_refs"] = {
         "latest_segmentation_quant_rows": rows[:500],
         "latest_segmentation_quant_summary": summary,
-        "latest_eval_rows": ((eval_result or {}).get("rows") or [])[:200] if isinstance(eval_result, dict) else [],
-        "latest_eval_metrics_mean": (eval_result or {}).get("metrics_mean") if isinstance(eval_result, dict) else {},
+        "latest_eval_rows": ((eval_result or {}).get("rows") or [])[:200]
+        if isinstance(eval_result, dict)
+        else [],
+        "latest_eval_metrics_mean": (eval_result or {}).get("metrics_mean")
+        if isinstance(eval_result, dict)
+        else {},
     }
     return result
 
@@ -8312,7 +8951,9 @@ def segment_evaluate_batch(
 
     preferred_paths = [str(p) for p in seg.get("preferred_upload_paths") or [] if p]
     if not preferred_paths:
-        files_processed = seg.get("files_processed") if isinstance(seg.get("files_processed"), list) else []
+        files_processed = (
+            seg.get("files_processed") if isinstance(seg.get("files_processed"), list) else []
+        )
         preferred_paths = [
             str(item.get("preferred_upload_path"))
             for item in files_processed
@@ -8359,8 +9000,12 @@ def segment_evaluate_batch(
         result["ui_artifacts"].extend(eval_result.get("ui_artifacts"))
     result["latest_result_refs"] = {
         **(_tool_result_refs_for_segmentation(seg) if isinstance(seg, dict) else {}),
-        "latest_eval_rows": (eval_result.get("rows") or [])[:200] if isinstance(eval_result, dict) else [],
-        "latest_eval_metrics_mean": (eval_result.get("metrics_mean") or {}) if isinstance(eval_result, dict) else {},
+        "latest_eval_rows": (eval_result.get("rows") or [])[:200]
+        if isinstance(eval_result, dict)
+        else [],
+        "latest_eval_metrics_mean": (eval_result.get("metrics_mean") or {})
+        if isinstance(eval_result, dict)
+        else {},
     }
     return result
 
@@ -8387,7 +9032,9 @@ def yolo_list_finetuned_models(limit: int = 10) -> dict[str, Any]:
                 "created_at_utc": item.get("created_at_utc"),
                 "dataset_id": item.get("dataset_id"),
                 "map": float(map_value) if isinstance(map_value, (int, float)) else None,
-                "class_names": item.get("class_names") if isinstance(item.get("class_names"), list) else [],
+                "class_names": item.get("class_names")
+                if isinstance(item.get("class_names"), list)
+                else [],
             }
         )
 
@@ -8403,7 +9050,10 @@ def yolo_list_finetuned_models(limit: int = 10) -> dict[str, Any]:
                     "model_name": candidate.stem,
                     "model_path": str(candidate),
                     "base_model": None,
-                    "created_at_utc": datetime.utcfromtimestamp(candidate.stat().st_mtime).isoformat() + "Z",
+                    "created_at_utc": datetime.utcfromtimestamp(
+                        candidate.stat().st_mtime
+                    ).isoformat()
+                    + "Z",
                     "dataset_id": None,
                     "map": None,
                     "class_names": [],
@@ -8706,7 +9356,7 @@ def _extract_mex_status(mex_tree: etree._Element) -> str:
 def _extract_mex_uri(payload: Any) -> str | None:
     tree = _coerce_xml_element(payload)
     candidates: list[str] = [str(tree.get("uri") or "").strip()]
-    for node in tree.xpath('.//mex[@uri]'):
+    for node in tree.xpath(".//mex[@uri]"):
         candidates.append(str(node.get("uri") or "").strip())
     for node in tree.xpath('.//tag[@name="mex_url" or @name="mex_uri"]'):
         candidates.append(str(node.get("value") or "").strip())
@@ -8792,10 +9442,8 @@ def _poll_mex_until_terminal(
 
     statuses: list[str] = []
     last_status: str | None = None
-    final_mex: etree._Element | None = None
     while time.time() <= deadline:
         mex_tree = _session_fetchxml_safe(bq, mex_uri, view="deep")
-        final_mex = mex_tree
         status = _canonical_mex_status(_extract_mex_status(mex_tree))
         if status != last_status:
             statuses.append(status)
@@ -8810,9 +9458,7 @@ def _poll_mex_until_terminal(
             return mex_tree, statuses
         time.sleep(interval)
 
-    raise TimeoutError(
-        f"MEX timeout after {timeout}s (last_status={last_status or 'UNKNOWN'})"
-    )
+    raise TimeoutError(f"MEX timeout after {timeout}s (last_status={last_status or 'UNKNOWN'})")
 
 
 def _extract_output_resource_uri_from_mex(mex_tree: etree._Element) -> str | None:
@@ -8822,7 +9468,7 @@ def _extract_output_resource_uri_from_mex(mex_tree: etree._Element) -> str | Non
         './tag[@name="outputs"]//image',
         './tag[@name="outputs"]//tag',
         './/tag[@name="outputs"]//tag',
-        './/outputs//tag',
+        ".//outputs//tag",
         './/tag[@name="outputs"]//*',
     ]
     for expr in xpaths:
@@ -9171,26 +9817,26 @@ def segment_video_sam2(
     """
     Segment and track objects in videos using SAM2 (Segment Anything Model 2).
     Automatically tracks objects through all frames with point-based initialization.
-    
+
     Args:
         file_paths: List of video file paths to segment
         track_points: Optional list of [x, y] coordinates to track. If None, uses center point.
         save_visualizations: Whether to save video visualization overlays (default: True)
-        
+
     Returns:
         Dictionary with segmentation results and metadata
     """
     try:
+        import cv2
+        import torch
         from transformers import Sam2VideoModel, Sam2VideoProcessor
         from transformers.video_utils import load_video
-        import torch
-        import cv2
     except ImportError:
         return {
             "success": False,
-            "error": "Required packages not installed. Install with: pip install transformers opencv-python torch"
+            "error": "Required packages not installed. Install with: pip install transformers opencv-python torch",
         }
-    
+
     settings = get_settings()
     requested_model = str(model_id or getattr(settings, "medsam2_model_id", "wanglab/MedSAM2"))
     torch_device = "cpu"
@@ -9222,70 +9868,72 @@ def segment_video_sam2(
     except Exception as e:
         return {
             "success": False,
-            "error": f"Failed to initialize video segmentation model: {str(e)}. Ensure transformers and torch are installed with CUDA support."
+            "error": f"Failed to initialize video segmentation model: {str(e)}. Ensure transformers and torch are installed with CUDA support.",
         }
-    
+
     # Create output directory for visualizations
     output_dir = os.path.join("data", "sam2_video_results")
     os.makedirs(output_dir, exist_ok=True)
-    
+
     results = []
-    
+
     for file_path in file_paths:
         try:
             # Validate file exists
             if not os.path.exists(file_path):
-                results.append({
-                    "file": os.path.basename(file_path),
-                    "success": False,
-                    "error": f"File not found: {file_path}"
-                })
+                results.append(
+                    {
+                        "file": os.path.basename(file_path),
+                        "success": False,
+                        "error": f"File not found: {file_path}",
+                    }
+                )
                 continue
-            
+
             file_name = os.path.basename(file_path)
             base_name = os.path.splitext(file_name)[0]
             logger.info(f"Processing video {file_name} with SAM2")
-            
+
             # Load video frames
             video_frames, video_metadata = load_video(file_path)
             num_frames = len(video_frames)
-            
+
             # Extract FPS from metadata
-            if hasattr(video_metadata, 'fps'):
+            if hasattr(video_metadata, "fps"):
                 fps = float(video_metadata.fps)
-            elif hasattr(video_metadata, 'frame_rate'):
+            elif hasattr(video_metadata, "frame_rate"):
                 fps = float(video_metadata.frame_rate)
             else:
                 # Default to 30 fps if not available
                 fps = 30.0
                 logger.warning(f"Could not extract FPS from video metadata, using default: {fps}")
-            
+
             logger.info(f"Loaded {num_frames} frames from {file_name} (FPS: {fps})")
-            
+
             # Initialize video inference session
             inference_session = processor.init_video_session(
                 video=video_frames,
                 inference_device=torch_device,
                 dtype=dtype,
             )
-            
+
             # Determine tracking point (use center if not specified)
             video_height = inference_session.video_height
             video_width = inference_session.video_width
-            
+
             if track_points is None or len(track_points) == 0:
                 # Use center point by default
                 track_points = [[video_width // 2, video_height // 2]]
 
             logger.info(f"Tracking {len(track_points)} point(s)")
             track_x, track_y = track_points[0]
-            
+
             # Add click on first frame to select object
             ann_frame_idx = 0
             ann_obj_id = 1
             points = [[track_points]]
-            labels = [[ [1 for _ in track_points] ]]  # 1 = foreground point
-            
+            labels = [[[1 for _ in track_points]]]  # 1 = foreground point
+
             processor.add_inputs_to_inference_session(
                 inference_session=inference_session,
                 frame_idx=ann_frame_idx,
@@ -9293,57 +9941,61 @@ def segment_video_sam2(
                 input_points=points,
                 input_labels=labels,
             )
-            
+
             # Segment the object on the first frame
-            outputs = model(
+            model(
                 inference_session=inference_session,
                 frame_idx=ann_frame_idx,
             )
-            
+
             # Propagate through the entire video
             logger.info(f"Propagating segmentation through {num_frames} frames...")
             video_segments = {}
             for sam2_video_output in model.propagate_in_video_iterator(inference_session):
                 video_res_masks = processor.post_process_masks(
-                    [sam2_video_output.pred_masks], 
-                    original_sizes=[[video_height, video_width]], 
-                    binarize=False
+                    [sam2_video_output.pred_masks],
+                    original_sizes=[[video_height, video_width]],
+                    binarize=False,
                 )[0]
                 video_segments[sam2_video_output.frame_idx] = video_res_masks
-            
+
             logger.info(f"Successfully tracked object through {len(video_segments)} frames")
-            
+
             # Create visualization if requested
             visualization_path = None
             if save_visualizations:
                 try:
                     vis_filename = f"{base_name}_sam2_tracked.mp4"
                     visualization_path = os.path.join(output_dir, vis_filename)
-                    
+
                     # Get frame dimensions from first frame (already numpy array)
                     first_frame = video_frames[0]
                     if isinstance(first_frame, np.ndarray):
                         frame_height, frame_width = first_frame.shape[:2]
                     else:
                         # Fallback if it's a PIL Image
-                        first_frame_array = np.array(first_frame.convert('RGB'))
+                        first_frame_array = np.array(first_frame.convert("RGB"))
                         frame_height, frame_width = first_frame_array.shape[:2]
-                    
+
                     # Use H264 codec for better compatibility
-                    fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H264 codec
-                    out_video = cv2.VideoWriter(visualization_path, fourcc, float(fps), (frame_width, frame_height))
-                    
+                    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # H264 codec
+                    out_video = cv2.VideoWriter(
+                        visualization_path, fourcc, float(fps), (frame_width, frame_height)
+                    )
+
                     if not out_video.isOpened():
-                        logger.warning(f"Failed to open video writer with avc1, trying mp4v")
-                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        out_video = cv2.VideoWriter(visualization_path, fourcc, float(fps), (frame_width, frame_height))
-                    
+                        logger.warning("Failed to open video writer with avc1, trying mp4v")
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        out_video = cv2.VideoWriter(
+                            visualization_path, fourcc, float(fps), (frame_width, frame_height)
+                        )
+
                     # Generate color for the tracked object
                     np.random.seed(42)
                     color = np.random.randint(0, 255, size=3).tolist()
-                    
+
                     logger.info(f"Writing {len(video_frames)} frames to {visualization_path}...")
-                    
+
                     # Apply masks to each frame
                     for frame_idx, frame in enumerate(video_frames):
                         # Handle both numpy arrays and PIL Images
@@ -9357,80 +10009,98 @@ def segment_video_sam2(
                                 frame_array = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                             else:
                                 # Grayscale or other - convert to RGB
-                                frame_array = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB) if len(frame.shape) == 2 else frame
+                                frame_array = (
+                                    cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                                    if len(frame.shape) == 2
+                                    else frame
+                                )
                         else:
                             # PIL Image - convert to numpy
-                            frame_array = np.array(frame.convert('RGB'))
-                        
+                            frame_array = np.array(frame.convert("RGB"))
+
                         # Ensure frame dimensions match expected dimensions
-                        if frame_array.shape[0] != frame_height or frame_array.shape[1] != frame_width:
-                            logger.warning(f"Frame {frame_idx} size mismatch. Expected ({frame_height}, {frame_width}), got {frame_array.shape[:2]}. Resizing...")
+                        if (
+                            frame_array.shape[0] != frame_height
+                            or frame_array.shape[1] != frame_width
+                        ):
+                            logger.warning(
+                                f"Frame {frame_idx} size mismatch. Expected ({frame_height}, {frame_width}), got {frame_array.shape[:2]}. Resizing..."
+                            )
                             frame_array = cv2.resize(frame_array, (frame_width, frame_height))
-                        
+
                         if frame_idx in video_segments:
                             # Get mask for this frame
                             mask = video_segments[frame_idx][0, 0].cpu().numpy()  # [H, W]
-                            
+
                             # Ensure mask dimensions match frame dimensions
                             if mask.shape[0] != frame_height or mask.shape[1] != frame_width:
-                                logger.warning(f"Mask size mismatch at frame {frame_idx}. Resizing mask from {mask.shape} to ({frame_height}, {frame_width})")
+                                logger.warning(
+                                    f"Mask size mismatch at frame {frame_idx}. Resizing mask from {mask.shape} to ({frame_height}, {frame_width})"
+                                )
                                 mask = cv2.resize(mask, (frame_width, frame_height))
-                            
+
                             mask_binary = (mask > 0).astype(np.uint8)
-                            
+
                             # Create colored overlay
                             overlay = frame_array.copy().astype(np.float32)
                             for c in range(3):
                                 overlay[:, :, c] = np.where(
                                     mask_binary,
                                     overlay[:, :, c] * 0.5 + color[c] * 0.5,
-                                    overlay[:, :, c]
+                                    overlay[:, :, c],
                                 )
-                            
+
                             # Draw tracking point on first frame
                             if frame_idx == 0:
                                 overlay_uint8 = overlay.astype(np.uint8)
                                 cv2.circle(overlay_uint8, (track_x, track_y), 8, (0, 0, 255), -1)
-                                cv2.circle(overlay_uint8, (track_x, track_y), 10, (255, 255, 255), 2)
+                                cv2.circle(
+                                    overlay_uint8, (track_x, track_y), 10, (255, 255, 255), 2
+                                )
                                 frame_array = overlay_uint8
                             else:
                                 frame_array = overlay.astype(np.uint8)
-                        
+
                         # Ensure frame is uint8 and correct shape before writing
                         frame_array = frame_array.astype(np.uint8)
-                        
+
                         # Convert RGB to BGR for OpenCV
                         frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-                        
+
                         # Verify frame shape before writing
                         if frame_bgr.shape[0] != frame_height or frame_bgr.shape[1] != frame_width:
-                            logger.error(f"Frame {frame_idx} shape mismatch before writing: {frame_bgr.shape}")
+                            logger.error(
+                                f"Frame {frame_idx} shape mismatch before writing: {frame_bgr.shape}"
+                            )
                             frame_bgr = cv2.resize(frame_bgr, (frame_width, frame_height))
-                        
+
                         out_video.write(frame_bgr)
-                    
+
                     # Properly close the video writer
                     out_video.release()
                     cv2.destroyAllWindows()
-                    
+
                     # Verify the file was created and has size
                     if os.path.exists(visualization_path):
                         file_size = os.path.getsize(visualization_path)
                         if file_size > 0:
-                            logger.info(f"Successfully saved video visualization to {visualization_path} ({file_size:,} bytes)")
+                            logger.info(
+                                f"Successfully saved video visualization to {visualization_path} ({file_size:,} bytes)"
+                            )
                         else:
                             logger.error(f"Video file created but is empty: {visualization_path}")
                             visualization_path = None
                     else:
                         logger.error(f"Video file was not created: {visualization_path}")
                         visualization_path = None
-                    
+
                 except Exception as vis_error:
                     logger.error(f"Failed to create video visualization: {str(vis_error)}")
                     import traceback
+
                     logger.error(traceback.format_exc())
                     visualization_path = None
-            
+
             # Compile result
             result_data = {
                 "file": file_name,
@@ -9440,59 +10110,65 @@ def segment_video_sam2(
                     "width": video_width,
                     "height": video_height,
                     "frames": num_frames,
-                    "fps": fps
+                    "fps": fps,
                 },
                 "tracking": {
                     "point": [track_x, track_y],
                     "frames_tracked": len(video_segments),
-                    "tracking_success_rate": round(len(video_segments) / num_frames * 100, 1)
+                    "tracking_success_rate": round(len(video_segments) / num_frames * 100, 1),
                 },
-                "visualization": visualization_path
+                "visualization": visualization_path,
             }
-            
+
             results.append(result_data)
-            logger.info(f"Successfully segmented video {file_name}: tracked through {len(video_segments)} frames")
-            
+            logger.info(
+                f"Successfully segmented video {file_name}: tracked through {len(video_segments)} frames"
+            )
+
         except Exception as file_error:
-            results.append({
-                "file": os.path.basename(file_path),
-                "path": file_path,
-                "success": False,
-                "error": str(file_error)
-            })
+            results.append(
+                {
+                    "file": os.path.basename(file_path),
+                    "path": file_path,
+                    "success": False,
+                    "error": str(file_error),
+                }
+            )
             logger.error(f"Failed to segment video {file_path}: {str(file_error)}")
-    
+
     # Generate summary statistics
     successful = [r for r in results if r.get("success")]
     total_frames = sum(r["video_info"]["frames"] for r in successful)
-    
+
     # Create minimal summary for LLM
     results_summary = []
     visualization_paths = []
-    
+
     for r in results:
         if r.get("success"):
-            results_summary.append({
-                "file": r["file"],
-                "success": True,
-                "frames": r["video_info"]["frames"],
-                "tracking_rate": r["tracking"]["tracking_success_rate"],
-                "visualization_saved": r.get("visualization") is not None
-            })
-            if r.get("visualization"):
-                visualization_paths.append({
-                    "path": r["visualization"],
+            results_summary.append(
+                {
                     "file": r["file"],
+                    "success": True,
                     "frames": r["video_info"]["frames"],
-                    "tracking_rate": r["tracking"]["tracking_success_rate"]
-                })
+                    "tracking_rate": r["tracking"]["tracking_success_rate"],
+                    "visualization_saved": r.get("visualization") is not None,
+                }
+            )
+            if r.get("visualization"):
+                visualization_paths.append(
+                    {
+                        "path": r["visualization"],
+                        "file": r["file"],
+                        "frames": r["video_info"]["frames"],
+                        "tracking_rate": r["tracking"]["tracking_success_rate"],
+                    }
+                )
         else:
-            results_summary.append({
-                "file": r["file"],
-                "success": False,
-                "error": r.get("error", "Unknown error")
-            })
-    
+            results_summary.append(
+                {"file": r["file"], "success": False, "error": r.get("error", "Unknown error")}
+            )
+
     return {
         "success": len(successful) > 0,
         "processed": len(successful),
@@ -9503,7 +10179,7 @@ def segment_video_sam2(
         "model": resolved_model,
         "fallback_used": fallback_used,
         "device": torch_device,
-        "visualization_paths": visualization_paths
+        "visualization_paths": visualization_paths,
     }
 
 
@@ -9525,7 +10201,7 @@ def yolo_detect(
     Otherwise defaults to a pretrained model (default: yolo26x.pt, configurable via YOLO_DEFAULT_MODEL).
     """
     try:
-        YOLO = _require_ultralytics()
+        yolo_class = _require_ultralytics()
     except ImportError as e:
         return {"success": False, "error": str(e)}
 
@@ -9567,7 +10243,9 @@ def yolo_detect(
     resolved_model_name = model_name
     explicit_model_path = str(model_path).strip() if model_path else None
     if prairie_model_requested and not explicit_model_path:
-        prairie_model_name, prairie_model_path, prairie_resolution = _resolve_prairie_yolo_model_target()
+        prairie_model_name, prairie_model_path, prairie_resolution = (
+            _resolve_prairie_yolo_model_target()
+        )
         if prairie_model_path:
             explicit_model_path = prairie_model_path
             resolved_model_name = prairie_model_name or _PRAIRIE_YOLO_MODEL_KEY
@@ -9600,9 +10278,9 @@ def yolo_detect(
     if latest_path and latest_path not in candidate_paths:
         if explicit_model_path:
             signature = _checkpoint_file_signature(Path(explicit_model_path))
-            if (
-                not prairie_model_requested
-                and (signature.get("looks_html_or_xml") or signature.get("hint") == "File does not exist.")
+            if not prairie_model_requested and (
+                signature.get("looks_html_or_xml")
+                or signature.get("hint") == "File does not exist."
             ):
                 candidate_paths.append(latest_path)
                 warnings["model_path_invalid_fallback"] = {
@@ -9623,12 +10301,10 @@ def yolo_detect(
     for idx, candidate in enumerate(candidate_paths):
         signature = _checkpoint_file_signature(Path(candidate))
         if signature.get("looks_html_or_xml"):
-            load_errors.append(
-                f"{candidate}: {signature.get('hint') or 'invalid checkpoint file'}"
-            )
+            load_errors.append(f"{candidate}: {signature.get('hint') or 'invalid checkpoint file'}")
             continue
         try:
-            model = YOLO(candidate)
+            model = yolo_class(candidate)
             resolved_weights = candidate
             if idx > 0:
                 warnings["model_fallback_used"] = {
@@ -9674,9 +10350,10 @@ def yolo_detect(
                     iou=float(iou),
                 )
                 legacy_runtime_used = True
-                legacy_inference_backend = str(
-                    legacy_result.get("inference_backend") or "yolov5_detect_tiled"
-                ).strip() or "yolov5_detect_tiled"
+                legacy_inference_backend = (
+                    str(legacy_result.get("inference_backend") or "yolov5_detect_tiled").strip()
+                    or "yolov5_detect_tiled"
+                )
                 legacy_logs = {
                     key: legacy_result.get(key)
                     for key in ("stdout_log_path", "stderr_log_path")
@@ -9775,7 +10452,9 @@ def yolo_detect(
                 for cls_id, score, xyxy in zip(cls_list, conf_list, xyxy_list):
                     cls_name = str(names.get(int(cls_id), str(int(cls_id))))
                     counts_by_class[cls_name] = counts_by_class.get(cls_name, 0) + 1
-                    per_image["class_counts"][cls_name] = per_image["class_counts"].get(cls_name, 0) + 1
+                    per_image["class_counts"][cls_name] = (
+                        per_image["class_counts"].get(cls_name, 0) + 1
+                    )
                     conf_values.append(float(score))
                     per_image["boxes"].append(
                         {
@@ -9832,7 +10511,9 @@ def yolo_detect(
         )
         raw_boxes = prediction.get("boxes")
         boxes = raw_boxes if isinstance(raw_boxes, list) else []
-        preview_name = f"{index:03d}-{_safe_slug(Path(raw_source_name).stem)}__matplotlib_annotated.png"
+        preview_name = (
+            f"{index:03d}-{_safe_slug(Path(raw_source_name).stem)}__matplotlib_annotated.png"
+        )
         preview_path = annotated_dir / preview_name
         render_result = _render_yolo_detection_figure(
             source_path=raw_source_path,
@@ -9869,7 +10550,9 @@ def yolo_detect(
                 "raw_source_path": raw_source_path,
                 "raw_source_name": raw_source_name,
                 "image_width": int(image_width) if isinstance(image_width, (int, float)) else None,
-                "image_height": int(image_height) if isinstance(image_height, (int, float)) else None,
+                "image_height": int(image_height)
+                if isinstance(image_height, (int, float))
+                else None,
                 "box_count": len(boxes),
                 "class_counts": normalized_class_counts,
             }
@@ -9884,11 +10567,7 @@ def yolo_detect(
     avg_conf = (sum(conf_values) / len(conf_values)) if conf_values else 0.0
     total_boxes = sum(counts_by_class.values())
     finetune_recommended = total_boxes == 0 or avg_conf < 0.35
-    inference_backend = (
-        legacy_inference_backend
-        if legacy_runtime_used
-        else "ultralytics"
-    )
+    inference_backend = legacy_inference_backend if legacy_runtime_used else "ultralytics"
     metadata_context_by_path = {
         str(path): _image_metadata_context(
             str(path),
@@ -9900,7 +10579,9 @@ def yolo_detect(
         predictions=predictions,
         metadata_context_by_path=metadata_context_by_path,
     )
-    spatial_images = spatial_analysis.get("images", []) if isinstance(spatial_analysis, dict) else []
+    spatial_images = (
+        spatial_analysis.get("images", []) if isinstance(spatial_analysis, dict) else []
+    )
 
     counts_rows = [
         {"class": k, "count": int(v)}
@@ -9984,16 +10665,20 @@ def yolo_detect(
 
     inference_configuration = {
         "backend": inference_backend,
-        "tile_size": legacy_inference_configuration.get("tile_size") if legacy_runtime_used else None,
-        "tile_overlap": legacy_inference_configuration.get("tile_overlap") if legacy_runtime_used else None,
+        "tile_size": legacy_inference_configuration.get("tile_size")
+        if legacy_runtime_used
+        else None,
+        "tile_overlap": legacy_inference_configuration.get("tile_overlap")
+        if legacy_runtime_used
+        else None,
         "conf": round(float(conf), 4),
         "iou": round(float(iou), 4),
         "merge_iou": (
-            legacy_inference_configuration.get("merge_iou")
-            if legacy_runtime_used
-            else None
+            legacy_inference_configuration.get("merge_iou") if legacy_runtime_used else None
         ),
-        "tile_count": legacy_inference_configuration.get("tile_count") if legacy_runtime_used else None,
+        "tile_count": legacy_inference_configuration.get("tile_count")
+        if legacy_runtime_used
+        else None,
     }
     if legacy_runtime_used:
         inference_configuration["tile_strategy"] = "sliding_window_overlap"
@@ -10163,9 +10848,10 @@ def yolo_detect(
     if warnings:
         result["warnings"] = warnings
     if stability_audit and isinstance(stability_audit.get("ui_artifacts"), list):
-        result["ui_artifacts"] = list(result.get("ui_artifacts") or []) + list(
-            stability_audit.get("ui_artifacts") or []
-        )[:12]
+        result["ui_artifacts"] = (
+            list(result.get("ui_artifacts") or [])
+            + list(stability_audit.get("ui_artifacts") or [])[:12]
+        )
     return result
 
 
@@ -10196,7 +10882,9 @@ def _prediction_stability_review_candidates(
             reason = f"class identity changed for {class_jitter:.1f} matched detection(s)"
             dominant = "class_jitter"
         elif spatial_jitter > 0:
-            reason = f"box locations shifted under perturbation (spatial jitter {spatial_jitter:.2f})"
+            reason = (
+                f"box locations shifted under perturbation (spatial jitter {spatial_jitter:.2f})"
+            )
             dominant = "spatial_jitter"
         elif confidence_jitter > 0:
             reason = f"detection confidence shifted under perturbation (aggregate shift {confidence_jitter:.2f})"
@@ -10366,14 +11054,18 @@ def score_spectral_instability_tool(
     if not images:
         return {"success": False, "error": "No images found in file_paths."}
 
-    prairie_model_requested = _is_prairie_yolo_alias(model_name) or not str(model_name or "").strip()
+    prairie_model_requested = (
+        _is_prairie_yolo_alias(model_name) or not str(model_name or "").strip()
+    )
     explicit_model_path = str(model_path).strip() if model_path else ""
     resolved_model_name = str(model_name or "").strip() or _PRAIRIE_YOLO_MODEL_KEY
     resolved_weights_path = explicit_model_path
     warnings: dict[str, Any] = {}
 
     if prairie_model_requested and not explicit_model_path:
-        prairie_model_name, prairie_model_path, prairie_resolution = _resolve_prairie_yolo_model_target()
+        prairie_model_name, prairie_model_path, prairie_resolution = (
+            _resolve_prairie_yolo_model_target()
+        )
         if prairie_model_path:
             resolved_weights_path = prairie_model_path
             resolved_model_name = prairie_model_name or _PRAIRIE_YOLO_MODEL_KEY
@@ -10431,9 +11123,7 @@ def score_spectral_instability_tool(
             f"change more under spectral feature filtering. Top-ranked images: {top_bits}."
         )
     else:
-        message = (
-            "Spectral instability scoring completed, but no images produced nonzero instability under the current settings."
-        )
+        message = "Spectral instability scoring completed, but no images produced nonzero instability under the current settings."
 
     if sequence_expansions:
         warnings["sequence_expansions"] = sequence_expansions
@@ -10448,7 +11138,10 @@ def score_spectral_instability_tool(
             "kind": "bar",
             "title": "Spectral instability ranking",
             "data": [
-                {"image": str(item.get("file_name") or ""), "score": float(item.get("score") or 0.0)}
+                {
+                    "image": str(item.get("file_name") or ""),
+                    "score": float(item.get("score") or 0.0),
+                }
                 for item in results[:12]
                 if str(item.get("file_name") or "").strip()
             ],
@@ -10563,7 +11256,10 @@ def yolo_finetune_detect(
     if label_paths:
         raw_inputs.extend([str(p) for p in label_paths])
     if not raw_inputs:
-        return {"success": False, "error": "Provide file_paths (images + labels) or image_paths/label_paths."}
+        return {
+            "success": False,
+            "error": "Provide file_paths (images + labels) or image_paths/label_paths.",
+        }
 
     _emit("Collecting training inputs…", event="collect_inputs")
     try:
@@ -10973,13 +11669,13 @@ def yolo_finetune_detect(
 
     # Train starting from pretrained weights.
     try:
-        YOLO = _require_ultralytics()
+        yolo_class = _require_ultralytics()
     except ImportError as e:
         return {"success": False, "error": str(e)}
 
     _emit(f"Loading pretrained weights: {base_weights}", event="load_model")
     try:
-        model = YOLO(base_weights)
+        model = yolo_class(base_weights)
     except Exception as e:  # noqa: BLE001
         return {
             "success": False,
@@ -11145,11 +11841,13 @@ def yolo_finetune_detect(
     # Validate to obtain a reliable metric for naming/registry.
     metrics: dict[str, Any] = {}
     try:
-        val_model = YOLO(str(best_weights))
+        val_model = yolo_class(str(best_weights))
         val_out = val_model.val(data=str(dataset_yaml_path), verbose=False)
         results_dict = getattr(val_out, "results_dict", None)
         if isinstance(results_dict, dict):
-            metrics.update({str(k): float(v) for k, v in results_dict.items() if isinstance(v, (int, float))})
+            metrics.update(
+                {str(k): float(v) for k, v in results_dict.items() if isinstance(v, (int, float))}
+            )
         box = getattr(val_out, "box", None)
         if box is not None:
             for k in ("map", "map50", "map75"):
@@ -11246,7 +11944,7 @@ def yolo_finetune_detect(
 
 class DeepSeekPostProcessor:
     """Post-processor for DeepSeek OCR responses with layout detection."""
-    
+
     def __init__(self, output_dir="./data/ocr_results"):
         self.output_dir = output_dir
         os.makedirs(f"{output_dir}/crops", exist_ok=True)
@@ -11254,14 +11952,14 @@ class DeepSeekPostProcessor:
 
     def _re_match(self, text):
         """Extracts reference and detection tags from the raw text."""
-        pattern = r'(<\|ref\|>(.*?)<\|/ref\|><\|det\|>(.*?)<\|/det\|>)'
+        pattern = r"(<\|ref\|>(.*?)<\|/ref\|><\|det\|>(.*?)<\|/det\|>)"
         matches = re.findall(pattern, text, re.DOTALL)
-        
+
         matches_image = []
         matches_other = []
-        
+
         for full_match, ref_content, det_content in matches:
-            if 'image' in ref_content:
+            if "image" in ref_content:
                 matches_image.append((full_match, ref_content, det_content))
             else:
                 matches_other.append((full_match, ref_content, det_content))
@@ -11276,15 +11974,21 @@ class DeepSeekPostProcessor:
             return None
 
         def _normalize(parsed: Any) -> list[list[float]] | None:
-            if isinstance(parsed, (list, tuple)) and len(parsed) == 4 and all(
-                isinstance(v, (int, float)) for v in parsed
+            if (
+                isinstance(parsed, (list, tuple))
+                and len(parsed) == 4
+                and all(isinstance(v, (int, float)) for v in parsed)
             ):
                 return [[float(v) for v in parsed]]
-            if isinstance(parsed, (list, tuple)) and parsed and all(
-                isinstance(item, (list, tuple))
-                and len(item) == 4
-                and all(isinstance(v, (int, float)) for v in item)
-                for item in parsed
+            if (
+                isinstance(parsed, (list, tuple))
+                and parsed
+                and all(
+                    isinstance(item, (list, tuple))
+                    and len(item) == 4
+                    and all(isinstance(v, (int, float)) for v in item)
+                    for item in parsed
+                )
             ):
                 return [[float(v) for v in item] for item in parsed]
             return None
@@ -11311,7 +12015,7 @@ class DeepSeekPostProcessor:
         width, height = original_image.size
         draw_image = original_image.copy()
         draw = ImageDraw.Draw(draw_image, "RGBA")
-        
+
         # Parse the special tokens
         _, match_imgs, match_others = self._re_match(raw_response_text)
         clean_markdown = raw_response_text
@@ -11335,11 +12039,10 @@ class DeepSeekPostProcessor:
                     crop_filename = f"crop_{page_index}_{idx}.jpg"
                     crop_path = os.path.join(self.output_dir, "crops", crop_filename)
                     crop.save(crop_path)
-                    
+
                     # Update Markdown to link to local image
                     clean_markdown = clean_markdown.replace(
-                        full_string, 
-                        f"\n![Figure {idx}]({crop_path})\n"
+                        full_string, f"\n![Figure {idx}]({crop_path})\n"
                     )
                 except Exception as e:
                     logger.warning(f"Error cropping: {e}")
@@ -11352,16 +12055,16 @@ class DeepSeekPostProcessor:
             coords_list = self._extract_coords(det)
             if not coords_list:
                 continue
-            
+
             # Remove the special tokens from markdown
             clean_markdown = clean_markdown.replace(full_string, "")
-            
+
             for coords in coords_list:
                 x1 = int(coords[0] / 999 * width)
                 y1 = int(coords[1] / 999 * height)
                 x2 = int(coords[2] / 999 * width)
                 y2 = int(coords[3] / 999 * height)
-                
+
                 # Draw Box (Red for text/other)
                 self._draw_box(draw, x1, y1, x2, y2, label, (255, 0, 0))
 
@@ -11378,19 +12081,17 @@ class DeepSeekPostProcessor:
 
 
 def ocr_document(
-    file_paths: list[str],
-    process_all_pages: bool = True,
-    max_pages: int = 10
+    file_paths: list[str], process_all_pages: bool = True, max_pages: int = 10
 ) -> dict[str, Any]:
     """
     OCR documents (PDFs or images) using DeepSeek-OCR with layout detection.
     Automatically extracts text, tables, figures, and preserves document structure.
-    
+
     Args:
         file_paths: List of file paths to process (PDFs or images)
         process_all_pages: For PDFs, whether to process all pages or just first page
         max_pages: Maximum number of pages to process per PDF (default: 10)
-        
+
     Returns:
         Dictionary with OCR results, extracted text, and visualization paths
     """
@@ -11400,9 +12101,9 @@ def ocr_document(
     except ImportError:
         return {
             "success": False,
-            "error": "Required packages not installed. Install with: pip install openai pdf2image pillow"
+            "error": "Required packages not installed. Install with: pip install openai pdf2image pillow",
         }
-    
+
     settings = get_settings()
 
     # Initialize OCR client
@@ -11415,60 +12116,59 @@ def ocr_document(
         )
         logger.info("OCR client initialized at %s", settings.ocr_base_url)
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Failed to initialize OCR client: {str(e)}"
-        }
-    
+        return {"success": False, "error": f"Failed to initialize OCR client: {str(e)}"}
+
     # Initialize post-processor
     processor = DeepSeekPostProcessor()
-    
+
     results = []
-    
+
     for file_path in file_paths:
         try:
             if not os.path.exists(file_path):
-                results.append({
-                    "file": os.path.basename(file_path),
-                    "success": False,
-                    "error": f"File not found: {file_path}"
-                })
+                results.append(
+                    {
+                        "file": os.path.basename(file_path),
+                        "success": False,
+                        "error": f"File not found: {file_path}",
+                    }
+                )
                 continue
-            
+
             file_name = os.path.basename(file_path)
             file_ext = os.path.splitext(file_name)[1].lower()
-            
+
             logger.info(f"Processing {file_name} with DeepSeek OCR")
-            
+
             # Determine if PDF or image
-            is_pdf = file_ext == '.pdf'
-            
+            is_pdf = file_ext == ".pdf"
+
             if is_pdf:
                 # Convert PDF pages to images
-                logger.info(f"Converting PDF to images...")
+                logger.info("Converting PDF to images...")
                 images = convert_from_path(file_path, dpi=200)
-                
+
                 if not process_all_pages:
                     images = images[:1]
                 else:
                     images = images[:max_pages]
-                    
+
                 logger.info(f"Processing {len(images)} page(s)")
             else:
                 # Single image
                 images = [Image.open(file_path)]
-            
+
             # Process each page/image
             page_results = []
             all_markdown = []
-            
+
             for page_idx, img in enumerate(images):
                 # Encode image to base64
                 buffered = io.BytesIO()
                 img.save(buffered, format="JPEG")
                 img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 img_url = f"data:image/jpeg;base64,{img_b64}"
-                
+
                 # OCR request
                 logger.info(f"OCR processing page {page_idx + 1}/{len(images)}")
                 messages = [
@@ -11476,11 +12176,14 @@ def ocr_document(
                         "role": "user",
                         "content": [
                             {"type": "image_url", "image_url": {"url": img_url}},
-                            {"type": "text", "text": "Transcribe this document into markdown format. Extract all text, tables, and figures with their locations."}
-                        ]
+                            {
+                                "type": "text",
+                                "text": "Transcribe this document into markdown format. Extract all text, tables, and figures with their locations.",
+                            },
+                        ],
                     }
                 ]
-                
+
                 response = ocr_client.chat.completions.create(
                     model=settings.ocr_model,
                     messages=messages,
@@ -11495,57 +12198,57 @@ def ocr_document(
                         },
                     },
                 )
-                
+
                 raw_text = response.choices[0].message.content
-                
+
                 # Post-process to extract layout and clean markdown
                 clean_markdown, layout_path = processor.process(
-                    original_image=img,
-                    raw_response_text=raw_text,
-                    page_index=page_idx
+                    original_image=img, raw_response_text=raw_text, page_index=page_idx
                 )
-                
-                page_results.append({
-                    "page": page_idx + 1,
-                    "markdown": clean_markdown,
-                    "layout_image": layout_path
-                })
-                
+
+                page_results.append(
+                    {"page": page_idx + 1, "markdown": clean_markdown, "layout_image": layout_path}
+                )
+
                 # Add page marker for multi-page documents
                 if len(images) > 1:
                     all_markdown.append(f"\n\n--- Page {page_idx + 1} ---\n\n{clean_markdown}")
                 else:
                     all_markdown.append(clean_markdown)
-            
+
             # Combine all pages
             combined_markdown = "\n".join(all_markdown)
-            
-            results.append({
-                "file": file_name,
-                "path": file_path,
-                "success": True,
-                "type": "pdf" if is_pdf else "image",
-                "pages_processed": len(images),
-                "markdown": combined_markdown,
-                "page_details": page_results,
-                "output_directory": processor.output_dir
-            })
-            
+
+            results.append(
+                {
+                    "file": file_name,
+                    "path": file_path,
+                    "success": True,
+                    "type": "pdf" if is_pdf else "image",
+                    "pages_processed": len(images),
+                    "markdown": combined_markdown,
+                    "page_details": page_results,
+                    "output_directory": processor.output_dir,
+                }
+            )
+
             logger.info(f"Successfully processed {file_name}: {len(images)} page(s)")
-            
+
         except Exception as file_error:
-            results.append({
-                "file": os.path.basename(file_path),
-                "path": file_path,
-                "success": False,
-                "error": str(file_error)
-            })
+            results.append(
+                {
+                    "file": os.path.basename(file_path),
+                    "path": file_path,
+                    "success": False,
+                    "error": str(file_error),
+                }
+            )
             logger.error(f"Failed to process {file_path}: {str(file_error)}")
-    
+
     # Summary
     successful = [r for r in results if r.get("success")]
     total_pages = sum(r.get("pages_processed", 0) for r in successful)
-    
+
     return {
         "success": len(successful) > 0,
         "processed_files": len(successful),
@@ -11553,14 +12256,16 @@ def ocr_document(
         "total_pages_processed": total_pages,
         "results": results,
         "output_directory": processor.output_dir,
-        "model": settings.ocr_model
+        "model": settings.ocr_model,
     }
 
 
-def annotation_add(resource, ann='tag', ann_name=None, ann_value=None, ann_type=None, add_if_exists=False):
+def annotation_add(
+    resource, ann="tag", ann_name=None, ann_value=None, ann_type=None, add_if_exists=False
+):
     """
     Helper function to add annotation tags to a BisQue resource XML.
-    
+
     Args:
         resource: XML element representing the resource
         ann: Annotation element type (default: 'tag')
@@ -11568,49 +12273,43 @@ def annotation_add(resource, ann='tag', ann_name=None, ann_value=None, ann_type=
         ann_value: Value of the annotation
         ann_type: Type of annotation (default: 'annotation')
         add_if_exists: Whether to add duplicate annotations
-        
+
     Returns:
         List of modified elements
     """
     modified = []
     if ann_name is not None and ann_value is not None:
         # Check if annotation already exists
-        xpath = '//%s[@name="%s" and @value="%s"]' % (ann, ann_name, ann_value)
+        xpath = f'//{ann}[@name="{ann_name}" and @value="{ann_value}"]'
         if ann_type is not None:
-            xpath = xpath.replace(']', ' and @type="%s"]' % ann_type)
+            xpath = xpath.replace("]", f' and @type="{ann_type}"]')
         anns = resource.xpath(xpath)
-        
+
         # Add annotation if it doesn't exist or if add_if_exists is True
         if len(anns) < 1 or add_if_exists is True:
             g = etree.SubElement(resource, ann, name=ann_name, value=ann_value)
             if ann_type is not None:
-                g.set('type', ann_type)
-            modified.append({'g': g})
+                g.set("type", ann_type)
+            modified.append({"g": g})
     return modified
 
 
-def add_tags_to_resource(
-    resource_uri: str,
-    tags: list[dict[str, str]]
-) -> dict[str, Any]:
+def add_tags_to_resource(resource_uri: str, tags: list[dict[str, str]]) -> dict[str, Any]:
     """
     Add metadata tags to a BisQue resource.
-    
+
     Args:
         resource_uri: Full URI of the resource
         tags: List of tag dictionaries with 'name' and 'value' keys
-        
+
     Returns:
         Dictionary with operation status
     """
     try:
         from bqapi.comm import BQSession
     except ImportError:
-        return {
-            "success": False,
-            "error": "bqapi package not installed"
-        }
-    
+        return {"success": False, "error": "bqapi package not installed"}
+
     try:
         bq = BQSession()
         root, _, _ = _init_bisque_session_with_runtime_auth(bq=bq)
@@ -11618,18 +12317,18 @@ def add_tags_to_resource(
 
         # Initialize session
         logger.info(f"Adding tags to resource: {normalized}")
-        
+
         resource = bq.load(normalized, view="deep")
 
         if resource is None:
             return {
                 "success": False,
-                "error": f"Resource not found or failed to load: {resource_uri}"
+                "error": f"Resource not found or failed to load: {resource_uri}",
             }
 
         valid_tags: list[dict[str, str]] = []
         for tag_dict in tags:
-            if 'name' not in tag_dict or 'value' not in tag_dict:
+            if "name" not in tag_dict or "value" not in tag_dict:
                 logger.warning(f"Skipping invalid tag: {tag_dict}")
                 continue
             name = str(tag_dict["name"]).strip()
@@ -11698,13 +12397,10 @@ def add_tags_to_resource(
             "verification_attempts": verification_attempts,
             "ui_artifacts": ui_artifacts,
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to add tags: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def bisque_fetch_xml(
@@ -11724,7 +12420,6 @@ def bisque_fetch_xml(
     """
     try:
         from bqapi.comm import BQSession
-        from bqapi.bqclass import BQVertex
     except ImportError:
         return {"success": False, "error": "bqapi package not installed"}
 
@@ -11732,7 +12427,11 @@ def bisque_fetch_xml(
         bq = BQSession()
         root, _, _ = _init_bisque_session_with_runtime_auth(bq=bq)
 
-        if resource_uri and not resource_uri.startswith(("http://", "https://")) and "/" not in resource_uri:
+        if (
+            resource_uri
+            and not resource_uri.startswith(("http://", "https://"))
+            and "/" not in resource_uri
+        ):
             normalized = _normalize_bisque_resource_uri(resource_uri, root)
         else:
             normalized = _normalize_bisque_url(resource_uri, root)
@@ -11820,11 +12519,7 @@ def bisque_download_dataset(
             dataset_xml = dataset_xml[0]
 
         members = dataset_xml.findall('.//value[@type="object"]')
-        member_uris = [
-            _normalize_bisque_resource_uri(m.text, root)
-            for m in members
-            if m.text
-        ]
+        member_uris = [_normalize_bisque_resource_uri(m.text, root) for m in members if m.text]
         if limit:
             member_uris = member_uris[: int(limit)]
 
@@ -11960,9 +12655,9 @@ def _resolve_bisque_dataset_target_with_session(
         return None
 
     query_candidates = [
-        {"tag_query": f"\"name\":\"{requested_dataset_name}\"", "view": "deep"},
+        {"tag_query": f'"name":"{requested_dataset_name}"', "view": "deep"},
         {"name": requested_dataset_name, "view": "deep"},
-        {"tag_query": f"\"name\":\"{requested_dataset_name}\""},
+        {"tag_query": f'"name":"{requested_dataset_name}"'},
         {"view": "deep"},
     ]
     candidates: list[dict[str, Any]] = []
@@ -12012,7 +12707,9 @@ def _resolve_bisque_dataset_target_with_session(
         reverse=True,
     )
     best_score = int(ordered_matches[0].get("match_score") or 0)
-    best_matches = [item for item in ordered_matches if int(item.get("match_score") or 0) == best_score]
+    best_matches = [
+        item for item in ordered_matches if int(item.get("match_score") or 0) == best_score
+    ]
     candidate_names = sorted(
         {
             str(item.get("dataset_name") or "").strip()
@@ -12346,7 +13043,11 @@ def _wait_for_bisque_resource_state(
         if attempt_index < attempts - 1:
             time.sleep(interval)
 
-    if last_error is not None and last_xml is None and not _is_bisque_missing_resource_error(last_error):
+    if (
+        last_error is not None
+        and last_xml is None
+        and not _is_bisque_missing_resource_error(last_error)
+    ):
         raise last_error
     return last_xml, False, attempts
 
@@ -12437,7 +13138,9 @@ def _remove_resource_from_all_bisque_datasets(
     removed = 0
     for dataset in containing_datasets:
         dataset_uri = str(dataset.get("dataset_uri") or "").strip()
-        dataset_uniq = str(dataset.get("dataset_uniq") or "").strip() or _short_bisque_id(dataset_uri)
+        dataset_uniq = str(dataset.get("dataset_uniq") or "").strip() or _short_bisque_id(
+            dataset_uri
+        )
         dataset_name = str(dataset.get("dataset_name") or "").strip() or None
         removed_here = False
         error_message: str | None = None
@@ -12476,7 +13179,9 @@ def _remove_resource_from_all_bisque_datasets(
                         ),
                         (
                             "dataset_put",
-                            lambda: _session_postxml_safe(bq, dataset_uri, updated_document, method="PUT"),
+                            lambda: _session_postxml_safe(
+                                bq, dataset_uri, updated_document, method="PUT"
+                            ),
                         ),
                     ]
                 )
@@ -12484,11 +13189,13 @@ def _remove_resource_from_all_bisque_datasets(
                 for strategy_name, strategy in strategies:
                     try:
                         strategy()
-                        _verification_document, remaining_members, settle_attempts = _wait_for_bisque_dataset_membership_state(
-                            bq=bq,
-                            dataset_uri=dataset_uri,
-                            bisque_root=bisque_root,
-                            expected_absent={normalized_resource_uri},
+                        _verification_document, remaining_members, settle_attempts = (
+                            _wait_for_bisque_dataset_membership_state(
+                                bq=bq,
+                                dataset_uri=dataset_uri,
+                                bisque_root=bisque_root,
+                                expected_absent={normalized_resource_uri},
+                            )
                         )
                         removed_here = normalized_resource_uri not in remaining_members
                         if removed_here:
@@ -12586,11 +13293,11 @@ def _create_bisque_dataset_with_session(
     if not dataset_uri and len(created):
         dataset_uri = str(created[0].get("uri") or "").strip()
     dataset_links = _build_bisque_resource_links(dataset_uri, bisque_root) if dataset_uri else {}
-    resolved_dataset_uri = str(dataset_links.get("resource_uri") or dataset_uri or "").strip() or None
+    resolved_dataset_uri = (
+        str(dataset_links.get("resource_uri") or dataset_uri or "").strip() or None
+    )
     dataset_client_view_url = (
-        str(dataset_links.get("client_view_url") or "").strip() or None
-        if dataset_links
-        else None
+        str(dataset_links.get("client_view_url") or "").strip() or None if dataset_links else None
     )
     message = f"Created BisQue dataset '{dataset_name}' with {len(normalized_uris)} resource(s)."
     return {
@@ -12645,11 +13352,13 @@ def _append_resources_to_bisque_dataset_with_session(
         )
         _session_postxml_safe(bq, normalized_dataset_uri, dataset_document, method="PUT")
 
-        _verification_document, verified_members, settle_attempts = _wait_for_bisque_dataset_membership_state(
-            bq=bq,
-            dataset_uri=normalized_dataset_uri,
-            bisque_root=bisque_root,
-            expected_present=set(normalized_uris),
+        _verification_document, verified_members, settle_attempts = (
+            _wait_for_bisque_dataset_membership_state(
+                bq=bq,
+                dataset_uri=normalized_dataset_uri,
+                bisque_root=bisque_root,
+                expected_present=set(normalized_uris),
+            )
         )
 
         for normalized_uri in normalized_uris:
@@ -12688,11 +13397,7 @@ def _append_resources_to_bisque_dataset_with_session(
                 }
             )
 
-    added = sum(
-        1
-        for row in results
-        if row.get("success") and not bool(row.get("already_present"))
-    )
+    added = sum(1 for row in results if row.get("success") and not bool(row.get("already_present")))
     failed = len(results) - sum(1 for row in results if row.get("success"))
     dataset_links = _build_bisque_resource_links(normalized_dataset_uri, bisque_root)
     resolved_dataset_name = str(dataset_name or "").strip() or None
@@ -12777,15 +13482,14 @@ def _organize_bisque_resources_into_dataset_with_session(
                 "candidate_names": list(resolved.get("candidate_names") or []),
                 "candidate_datasets": list(resolved.get("candidate_datasets") or []),
                 "error": str(resolved.get("error") or "").strip() or "Dataset target is ambiguous.",
-                "message": str(resolved.get("message") or "").strip() or "Dataset target is ambiguous.",
+                "message": str(resolved.get("message") or "").strip()
+                or "Dataset target is ambiguous.",
             }
         return _append_resources_to_bisque_dataset_with_session(
             bq=bq,
             bisque_root=bisque_root,
             dataset_uri=str(resolved.get("dataset_uri") or requested_dataset_uri or ""),
-            dataset_name=str(
-                resolved.get("dataset_name") or requested_dataset_name or ""
-            ).strip()
+            dataset_name=str(resolved.get("dataset_name") or requested_dataset_name or "").strip()
             or None,
             resource_uris=list(resource_uris or []),
             match_type=str(resolved.get("match_type") or "").strip() or None,
@@ -12839,7 +13543,6 @@ def bisque_create_dataset(
     """
     try:
         from bqapi.comm import BQSession
-        from bqapi.bqclass import BQVertex
     except ImportError:
         return {"success": False, "error": "bqapi package not installed"}
 
@@ -12958,7 +13661,9 @@ def bisque_add_gobjects(
                 name = str(row.get("name") or "").strip()
                 vertex_count = int(row.get("vertices") or 0)
                 found = False
-                for match in xml.xpath("./gobject | ./point | ./label | ./polyline | ./polygon | ./circle | ./ellipse | ./rectangle | ./square"):
+                for match in xml.xpath(
+                    "./gobject | ./point | ./label | ./polyline | ./polygon | ./circle | ./ellipse | ./rectangle | ./square"
+                ):
                     local_name = etree.QName(match.tag).localname.lower()
                     match_type = str(match.get("type") or "").strip().lower()
                     match_name = str(match.get("name") or "").strip()
@@ -13077,9 +13782,7 @@ def bisque_advanced_search(
         if expanded_meta:
             for key, value in expanded_meta.items():
                 expanded_filters = expanded_filters or {}
-                expanded_filters[key] = _merge_filter_value(
-                    expanded_filters.get(key), value
-                )
+                expanded_filters[key] = _merge_filter_value(expanded_filters.get(key), value)
 
         normalized_tag_query = _rewrite_tag_query_aliases(tag_query)
         combined_tag_query = _build_tag_query_compat(
@@ -13208,7 +13911,9 @@ def _run_paper_segmentation_stats(payload: dict[str, Any] | None = None) -> dict
         if not summary_result.get("success"):
             metric_summaries[metric_name] = {"success": False, "error": summary_result.get("error")}
             continue
-        summary = summary_result.get("result") if isinstance(summary_result.get("result"), dict) else {}
+        summary = (
+            summary_result.get("result") if isinstance(summary_result.get("result"), dict) else {}
+        )
         summary["n"] = len(values)
         metric_summaries[metric_name] = summary
         mean_value = summary.get("mean")
@@ -13314,9 +14019,7 @@ def _run_paper_segmentation_stats(payload: dict[str, Any] | None = None) -> dict
                 "type": "table",
                 "title": "Paper segmentation metric summaries",
                 "payload": [
-                    {"metric": k, **v}
-                    for k, v in metric_summaries.items()
-                    if isinstance(v, dict)
+                    {"metric": k, **v} for k, v in metric_summaries.items() if isinstance(v, dict)
                 ],
             },
             {
@@ -13417,8 +14120,7 @@ def codegen_python_plan(
         )
         result.setdefault("success", True)
         result["message"] = (
-            f"Prepared Python job {result.get('job_id')} "
-            f"(attempt {result.get('attempt_index')})."
+            f"Prepared Python job {result.get('job_id')} (attempt {result.get('attempt_index')})."
         )
         return result
     except Exception as exc:  # noqa: BLE001
@@ -13440,7 +14142,7 @@ def _build_code_execution_plan(
     auto_repair: bool,
     max_repair_cycles: int | None,
 ) -> tuple[Any, Any]:
-    from src.orchestration.models import WorkflowPlan, ToolStep
+    from src.orchestration.models import ToolStep, WorkflowPlan
 
     step = ToolStep(
         id=f"codeexec-{uuid4().hex[:8]}",
@@ -13523,7 +14225,11 @@ def execute_python_job(
             "job_id": job_token,
         }
 
-    backend = str(execution_backend or getattr(settings, "code_execution_default_backend", "docker")).strip().lower()
+    backend = (
+        str(execution_backend or getattr(settings, "code_execution_default_backend", "docker"))
+        .strip()
+        .lower()
+    )
     effective_durable = (
         bool(getattr(settings, "code_execution_durable_default", True))
         if durable_execution is None
@@ -13666,6 +14372,7 @@ def _execute_python_job_once(
         max_repair_cycles=max_repair_cycles,
     )
 
+
 # Map function names to actual functions
 AVAILABLE_TOOLS: dict[str, Callable] = {
     "upload_to_bisque": upload_to_bisque,
@@ -13764,7 +14471,13 @@ def _infer_bisque_catalog_search_from_text(user_text: str | None) -> dict[str, A
         if not match:
             continue
         candidate = _clean_inferred_bisque_dataset_target(match.group(1))
-        if candidate and candidate.lower() not in {"bisque", "dataset", "datasets", "resource", "resources"}:
+        if candidate and candidate.lower() not in {
+            "bisque",
+            "dataset",
+            "datasets",
+            "resource",
+            "resources",
+        }:
             exact_name = candidate
             break
 
@@ -13921,7 +14634,10 @@ def _infer_sam3_concept_prompt_from_text(user_text: str | None) -> str | None:
         return None
 
     lowered = text.lower()
-    if not re.search(r"\b(segment|segmentation|mask|isolate|extract|outline|delineate|highlight|cut out)\b", lowered):
+    if not re.search(
+        r"\b(segment|segmentation|mask|isolate|extract|outline|delineate|highlight|cut out)\b",
+        lowered,
+    ):
         return None
 
     pattern_specs = [
@@ -13949,12 +14665,12 @@ def execute_tool_call(
 ) -> str:
     """
     Execute a tool call from the LLM.
-    
+
     Args:
         tool_name: Name of the tool to execute
         arguments: JSON string or dict of arguments
         uploaded_files: Optional list of uploaded files from the current request/session
-        
+
     Returns:
         JSON string result
     """
@@ -13973,19 +14689,14 @@ def execute_tool_call(
                     "error": f"Tool arguments must be a JSON object, got {type(args).__name__}",
                 }
             )
-        
+
         # Get the function
         if tool_name not in AVAILABLE_TOOLS:
-            return json.dumps({
-                "success": False,
-                "error": f"Tool '{tool_name}' not found"
-            })
+            return json.dumps({"success": False, "error": f"Tool '{tool_name}' not found"})
 
         func = AVAILABLE_TOOLS[tool_name]
         normalized_selection_context = (
-            dict(selection_context)
-            if isinstance(selection_context, dict)
-            else {}
+            dict(selection_context) if isinstance(selection_context, dict) else {}
         )
         selection_artifact_handles = (
             dict(normalized_selection_context.get("artifact_handles") or {})
@@ -14014,14 +14725,8 @@ def execute_tool_call(
                 )
                 if inferred_resource_type and (
                     not str(args.get("resource_type") or "").strip()
-                    or (
-                        current_resource_type == "image"
-                        and inferred_resource_type != "image"
-                    )
-                    or (
-                        inferred_resource_type == "dataset"
-                        and current_resource_type != "dataset"
-                    )
+                    or (current_resource_type == "image" and inferred_resource_type != "image")
+                    or (inferred_resource_type == "dataset" and current_resource_type != "dataset")
                 ):
                     args["resource_type"] = inferred_resource_type
                     logger.info(
@@ -14033,14 +14738,13 @@ def execute_tool_call(
                 inferred_text = str(inferred_catalog_target.get("text") or "").strip()
                 existing_text = args.get("text")
                 if inferred_text and (
-                    not existing_text
-                    or str(existing_text).strip() == str(user_text or "").strip()
+                    not existing_text or str(existing_text).strip() == str(user_text or "").strip()
                 ):
                     args["text"] = inferred_text
 
-                inferred_tag_filters = _coerce_bisque_filter_mapping(
-                    inferred_catalog_target.get("tag_filters")
-                ) or {}
+                inferred_tag_filters = (
+                    _coerce_bisque_filter_mapping(inferred_catalog_target.get("tag_filters")) or {}
+                )
                 # When we already inferred a precise quoted target into `text`,
                 # let search_bisque_resources build one canonical query from that
                 # text alone. Merging an extra inferred name tag-filter can
@@ -14050,7 +14754,9 @@ def execute_tool_call(
                     and not inferred_text
                     and not str(args.get("tag_query") or "").strip()
                 ):
-                    merged_tag_filters = _coerce_bisque_filter_mapping(args.get("tag_filters")) or {}
+                    merged_tag_filters = (
+                        _coerce_bisque_filter_mapping(args.get("tag_filters")) or {}
+                    )
                     for key, value in inferred_tag_filters.items():
                         merged_tag_filters.setdefault(key, value)
                     args["tag_filters"] = merged_tag_filters
@@ -14067,9 +14773,7 @@ def execute_tool_call(
             depth_map_paths = args.pop("depth_map_paths", None)
             if (not args.get("file_paths")) and isinstance(depth_map_paths, list):
                 normalized_depth_paths = [
-                    str(path).strip()
-                    for path in depth_map_paths
-                    if str(path or "").strip()
+                    str(path).strip() for path in depth_map_paths if str(path or "").strip()
                 ]
                 if normalized_depth_paths:
                     args["file_paths"] = normalized_depth_paths
@@ -14094,9 +14798,7 @@ def execute_tool_call(
                     )
 
         settings = get_settings()
-        force_tool_visualizations = bool(
-            getattr(settings, "ui_force_tool_visualizations", True)
-        )
+        force_tool_visualizations = bool(getattr(settings, "ui_force_tool_visualizations", True))
         if force_tool_visualizations and tool_name in {
             "segment_image_megaseg",
             "segment_image_sam2",
@@ -14109,10 +14811,7 @@ def execute_tool_call(
             args["save_visualizations"] = True
 
         def _looks_like_remote_path(value: Any) -> bool:
-            if not isinstance(value, str):
-                return False
-            lowered = value.strip().lower()
-            return lowered.startswith("http://") or lowered.startswith("https://")
+            return _looks_like_remote_input_path(value)
 
         def _list_arg(name: str) -> list[str]:
             value = args.get(name)
@@ -14128,7 +14827,6 @@ def execute_tool_call(
         def _paths_need_current_local_replacement(paths: list[str]) -> bool:
             if not paths:
                 return False
-            has_remote = any(_looks_like_remote_path(path) for path in paths)
             has_local_existing = any(
                 Path(path).expanduser().exists()
                 for path in paths
@@ -14139,7 +14837,7 @@ def execute_tool_call(
                 for path in paths
                 if not _looks_like_remote_path(path)
             )
-            return has_remote or (has_local_missing and not has_local_existing)
+            return has_local_missing and not has_local_existing
 
         def _safe_download_token(value: Any, *, default: str) -> str:
             token = str(value or "").strip().rstrip("/").split("/")[-1]
@@ -14154,7 +14852,11 @@ def execute_tool_call(
                     continue
                 for raw_value in values:
                     token = str(raw_value or "").strip()
-                    if not token or _looks_like_remote_path(token) or _looks_like_bisque_resource(token):
+                    if (
+                        not token
+                        or _looks_like_remote_path(token)
+                        or _looks_like_bisque_resource(token)
+                    ):
                         continue
                     path = Path(token).expanduser()
                     if not path.exists() or not _is_segmentation_image(path):
@@ -14174,7 +14876,9 @@ def execute_tool_call(
                     (Path(_science_output_root("bisque_downloads")) / resource_token).resolve()
                 )
                 download_result = bisque_download_resource(resource_uri, managed_output)
-                if not isinstance(download_result, dict) or not bool(download_result.get("success")):
+                if not isinstance(download_result, dict) or not bool(
+                    download_result.get("success")
+                ):
                     continue
                 candidate_paths: list[str] = []
                 for key in ("local_path", "output_path"):
@@ -14246,7 +14950,11 @@ def execute_tool_call(
                 tool_name,
                 args["output_dir"],
             )
-        if tool_name == "bisque_download_resource" and not args.get("output_path") and args.get("resource_uri"):
+        if (
+            tool_name == "bisque_download_resource"
+            and not args.get("output_path")
+            and args.get("resource_uri")
+        ):
             resource_token = _safe_download_token(args.get("resource_uri"), default="resource")
             args["output_path"] = str(
                 (Path(_science_output_root("bisque_downloads")) / resource_token).resolve()
@@ -14294,6 +15002,18 @@ def execute_tool_call(
             "estimate_depth_pro",
         }:
             selection_image_files = _selection_context_image_files()
+        prompt_image_files = (
+            infer_scientific_image_inputs_from_text(user_text)
+            if tool_name
+            in {
+                "bioio_load_image",
+                "segment_image_megaseg",
+                "segment_image_sam2",
+                "segment_image_sam3",
+                "estimate_depth_pro",
+            }
+            else []
+        )
         if tool_name == "bioio_load_image":
             provided_file_path = str(args.get("file_path") or "").strip()
             compatible_uploaded_files = [
@@ -14327,6 +15047,12 @@ def execute_tool_call(
                     "Injected selection-context scientific image '%s' into bioio_load_image tool call",
                     Path(args["file_path"]).name,
                 )
+            elif not provided_file_path and prompt_image_files:
+                args["file_path"] = prompt_image_files[0]
+                logger.info(
+                    "Inferred prompt-scoped scientific image '%s' into bioio_load_image tool call",
+                    args["file_path"],
+                )
             elif resolved_uploaded_local is not None:
                 args["file_path"] = str(resolved_uploaded_local)
                 logger.info(
@@ -14336,7 +15062,6 @@ def execute_tool_call(
                 )
             elif compatible_uploaded_files and (
                 _looks_like_bisque_resource(provided_file_path)
-                or (_looks_like_remote_path(provided_file_path))
                 or (provided_file_path and not provided_local_exists)
             ):
                 args["file_path"] = compatible_uploaded_files[0]
@@ -14347,12 +15072,24 @@ def execute_tool_call(
                 )
             elif compatible_selection_files and (
                 _looks_like_bisque_resource(provided_file_path)
-                or _looks_like_remote_path(provided_file_path)
                 or (provided_file_path and not provided_local_exists)
             ):
                 args["file_path"] = compatible_selection_files[0]
                 logger.info(
                     "Replaced unavailable bioio_load_image file_path '%s' with selection-context local file '%s'",
+                    provided_file_path,
+                    args["file_path"],
+                )
+            elif prompt_image_files and (
+                not provided_file_path
+                or (
+                    _looks_like_bisque_resource(provided_file_path)
+                    or (provided_file_path and not provided_local_exists)
+                )
+            ):
+                args["file_path"] = prompt_image_files[0]
+                logger.info(
+                    "Replaced unavailable bioio_load_image file_path '%s' with prompt-scoped image '%s'",
                     provided_file_path,
                     args["file_path"],
                 )
@@ -14409,11 +15146,7 @@ def execute_tool_call(
                     logger.info("Auto-enabled prediction stability audit for yolo_detect")
             elif tool_name == "analyze_prediction_stability":
                 provided_paths = _list_arg("file_paths")
-                compatible_files = [
-                    p
-                    for p in uploaded_files
-                    if _is_yolo_image(Path(str(p)))
-                ]
+                compatible_files = [p for p in uploaded_files if _is_yolo_image(Path(str(p)))]
                 if not args.get("file_paths") or args.get("file_paths") == []:
                     if compatible_files:
                         args["file_paths"] = compatible_files
@@ -14437,11 +15170,7 @@ def execute_tool_call(
                     logger.info("Auto-selected prairie YOLO model for analyze_prediction_stability")
             elif tool_name == "score_spectral_instability":
                 provided_paths = _list_arg("file_paths")
-                compatible_files = [
-                    p
-                    for p in uploaded_files
-                    if _is_yolo_image(Path(str(p)))
-                ]
+                compatible_files = [p for p in uploaded_files if _is_yolo_image(Path(str(p)))]
                 if not args.get("file_paths") or args.get("file_paths") == []:
                     if compatible_files:
                         args["file_paths"] = compatible_files
@@ -14506,7 +15235,9 @@ def execute_tool_call(
                         "",
                     )
                     if first_uploaded:
-                        normalized_inputs = {"Input Image": Path(first_uploaded).name or first_uploaded}
+                        normalized_inputs = {
+                            "Input Image": Path(first_uploaded).name or first_uploaded
+                        }
                         logger.info(
                             "Injected uploaded file '%s' into run_bisque_module input_resources",
                             Path(first_uploaded).name or first_uploaded,
@@ -14528,7 +15259,9 @@ def execute_tool_call(
                         else:
                             args.pop("bisque_root", None)
                     if "bisque_user" in args:
-                        sanitized_user = _sanitize_bisque_credential(str(args.get("bisque_user") or ""))
+                        sanitized_user = _sanitize_bisque_credential(
+                            str(args.get("bisque_user") or "")
+                        )
                         if sanitized_user:
                             args["bisque_user"] = sanitized_user
                         else:
@@ -14556,10 +15289,17 @@ def execute_tool_call(
                         "Replaced unavailable analyze_csv inputs with %s uploaded CSV/tabular file(s)",
                         len(csv_files),
                     )
-            elif tool_name in {"segment_image_megaseg", "segment_image_sam2", "segment_image_sam3", "estimate_depth_pro"}:
+            elif tool_name in {
+                "segment_image_megaseg",
+                "segment_image_sam2",
+                "segment_image_sam3",
+                "estimate_depth_pro",
+            }:
                 provided_paths = _list_arg("file_paths")
                 if not args.get("file_paths") or args.get("file_paths") == []:
-                    image_files = [p for p in uploaded_files if _is_segmentation_image(Path(str(p)))]
+                    image_files = [
+                        p for p in uploaded_files if _is_segmentation_image(Path(str(p)))
+                    ]
                     if image_files:
                         args["file_paths"] = image_files
                         logger.info(
@@ -14568,7 +15308,9 @@ def execute_tool_call(
                             tool_name,
                         )
                 else:
-                    image_files = [p for p in uploaded_files if _is_segmentation_image(Path(str(p)))]
+                    image_files = [
+                        p for p in uploaded_files if _is_segmentation_image(Path(str(p)))
+                    ]
                     if image_files and _paths_need_current_local_replacement(provided_paths):
                         args["file_paths"] = image_files
                         logger.info(
@@ -14579,9 +15321,13 @@ def execute_tool_call(
             elif tool_name == "segment_evaluate_batch":
                 provided_image_paths = _list_arg("image_paths")
                 provided_gt_paths = _list_arg("ground_truth_paths")
-                provided_image_has_remote = any(_looks_like_remote_path(path) for path in provided_image_paths)
+                provided_image_has_remote = any(
+                    _looks_like_remote_path(path) for path in provided_image_paths
+                )
                 provided_image_has_local = bool(_existing_local_paths(provided_image_paths))
-                provided_gt_has_remote = any(_looks_like_remote_path(path) for path in provided_gt_paths)
+                provided_gt_has_remote = any(
+                    _looks_like_remote_path(path) for path in provided_gt_paths
+                )
                 provided_gt_has_local = bool(_existing_local_paths(provided_gt_paths))
                 uploaded_gt_files = [
                     str(p)
@@ -14594,7 +15340,11 @@ def execute_tool_call(
                     if _is_segmentation_image(Path(str(p)))
                     and not _looks_like_uploaded_mask_artifact(Path(str(p)))
                 ]
-                if (not provided_image_paths or provided_image_has_remote or not provided_image_has_local) and uploaded_image_files:
+                if (
+                    not provided_image_paths
+                    or provided_image_has_remote
+                    or not provided_image_has_local
+                ) and uploaded_image_files:
                     args["image_paths"] = uploaded_image_files
                     logger.info(
                         "Injected %s uploaded scientific image(s) into segment_evaluate_batch tool call",
@@ -14612,7 +15362,9 @@ def execute_tool_call(
                         },
                         ensure_ascii=False,
                     )
-                if (not provided_gt_paths or provided_gt_has_remote or not provided_gt_has_local) and uploaded_gt_files:
+                if (
+                    not provided_gt_paths or provided_gt_has_remote or not provided_gt_has_local
+                ) and uploaded_gt_files:
                     args["ground_truth_paths"] = uploaded_gt_files
                     logger.info(
                         "Injected %s uploaded ground-truth mask(s) into segment_evaluate_batch tool call",
@@ -14716,8 +15468,10 @@ def execute_tool_call(
                         "Injected %s ground-truth mask path(s) into quantify_segmentation_masks tool call",
                         len(args["ground_truth_paths"]),
                     )
-                elif provided_gt_paths and replacement_gt_paths and (
-                    not explicit_gt_locals or not explicit_gt_is_plausible
+                elif (
+                    provided_gt_paths
+                    and replacement_gt_paths
+                    and (not explicit_gt_locals or not explicit_gt_is_plausible)
                 ):
                     args["ground_truth_paths"] = replacement_gt_paths[:8]
                     logger.info(
@@ -14746,11 +15500,22 @@ def execute_tool_call(
             "estimate_depth_pro",
         }:
             provided_paths = _list_arg("file_paths")
-            if (not args.get("file_paths") or args.get("file_paths") == []) and selection_image_files:
+            if (
+                not args.get("file_paths") or args.get("file_paths") == []
+            ) and selection_image_files:
                 args["file_paths"] = selection_image_files
                 logger.info(
                     "Injected %s selection-context scientific image(s) into %s tool call",
                     len(selection_image_files),
+                    tool_name,
+                )
+            elif (
+                not args.get("file_paths") or args.get("file_paths") == []
+            ) and prompt_image_files:
+                args["file_paths"] = prompt_image_files
+                logger.info(
+                    "Inferred %s prompt-scoped scientific image(s) into %s tool call",
+                    len(prompt_image_files),
                     tool_name,
                 )
             elif selection_image_files and _paths_need_current_local_replacement(provided_paths):
@@ -14760,7 +15525,14 @@ def execute_tool_call(
                     tool_name,
                     len(selection_image_files),
                 )
-        
+            elif prompt_image_files and _paths_need_current_local_replacement(provided_paths):
+                args["file_paths"] = prompt_image_files
+                logger.info(
+                    "Replaced unavailable %s inputs with %s prompt-scoped image(s)",
+                    tool_name,
+                    len(prompt_image_files),
+                )
+
         signature = inspect.signature(func)
         accepts_var_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -14805,10 +15577,7 @@ def execute_tool_call(
             if note not in warnings:
                 result["warnings"] = list(warnings) + [note]
         return json.dumps(result)
-        
+
     except Exception as e:
         logger.error(f"Tool execution error: {str(e)}")
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        })
+        return json.dumps({"success": False, "error": str(e)})

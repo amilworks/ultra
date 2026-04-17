@@ -8,35 +8,36 @@ BisQue Ultra runs cleanly in production when you separate three concerns:
 
 This repo now includes the deployment scaffolding for that split.
 
-## Current UCSB Production Topology
+## Private Deployment Topology
 
-The live UCSB production deployment currently uses:
+Keep concrete production hostnames, usernames, and URLs in a private operator runbook outside this public repo.
 
-- public hostname: `https://ultra.ece.ucsb.edu`
-- app node: `nail01.ece.ucsb.edu`
-- platform node: `nail04.ece.ucsb.edu`
+Use a split-node layout like:
 
-Current responsibilities:
+- public hostname: `https://<public-host>`
+- app node: `<app-node>`
+- platform node: `<platform-node>`
 
-- `nail01`
+Typical responsibilities:
+
+- app node
   - public `Caddy` edge
   - static frontend from `/srv/ultra/frontend-current`
   - `ultra-backend@1`
   - `ultra-backend@2`
-- `nail04`
+- platform node
   - platform `docker compose` stack
   - BisQue
   - Keycloak
   - Postgres
-  - internal platform `Caddy`
+  - internal platform proxy
 
-Current SSH entry points:
+Typical SSH entry points:
 
-- app node: `ssh bisque_amil@nail01.ece.ucsb.edu`
-- platform node: `ssh amil@nail04.ece.ucsb.edu`
+- app node: `ssh <app-user>@<app-node>`
+- platform node: `ssh <platform-user>@<platform-node>`
 
-Treat `nail01` as the normal target for frontend/backend releases and `nail04`
-as the normal target for BisQue/Keycloak/Postgres/platform work.
+Treat the app node as the normal target for frontend/backend releases and the platform node as the normal target for BisQue/Keycloak/Postgres/platform work.
 
 ## Recommended Topology
 
@@ -130,10 +131,10 @@ The deployment scripts assume this filesystem layout on the app node:
     science/
 ```
 
-On the platform node, use the shared barrel mount only for BisQue file storage:
+On the platform node, use a dedicated shared data root only for BisQue file storage:
 
 ```text
-/mnt/barrel-data/ultra/platform/
+<platform-data-root>/
   bisque-config/
   bisque-data/
   bisque-public/
@@ -142,7 +143,7 @@ On the platform node, use the shared barrel mount only for BisQue file storage:
 ```
 
 Postgres and Keycloak should use local Docker volumes on the platform node. Do
-not place Postgres data on the barrel NFS mount: transient NFS stalls can leave
+not place Postgres data on shared network storage: transient stalls can leave
 postgres processes in uninterruptible sleep and prevent fresh connections.
 
 The backend continues to use local-disk roots, so both backend instances stay
@@ -280,7 +281,7 @@ client list with only the configured production client(s).
 ### Fresh Install Reset
 
 If you need a clean rebuild of the platform node, wipe the platform containers
-and the local Docker volumes, but keep the BisQue barrel-backed file store if
+and the local Docker volumes, but keep the BisQue shared file store if
 you want to preserve uploaded images:
 
 ```bash
@@ -295,8 +296,9 @@ docker compose \
 docker volume rm -f ultra-platform-postgres ultra-platform-keycloak || true
 ```
 
-If you truly want a full wipe, remove `/mnt/barrel-data/ultra/platform/bisque-*`
-after the containers are down and then redeploy.
+If you truly want a full wipe, remove the BisQue data directories under
+`<platform-data-root>/` after the containers are down and then redeploy.
+
 7. Install the `systemd` units from `deploy/systemd/` into `/etc/systemd/system/` and run `sudo systemctl daemon-reload`.
 8. Enable the backend target on the app node:
 
@@ -325,7 +327,7 @@ PLATFORM_DEPLOY_MODE=platform-node \
 
 The production overrides:
 
-- switch all stateful services to barrel-backed bind mounts
+- switch shared BisQue file storage to an operator-managed data root
 - switch Keycloak out of `start-dev`
 - render a production realm import with public redirect URIs and web origins
 - strip dev users and dev-only client baggage from the rendered realm
@@ -376,8 +378,8 @@ Manual rollout:
 sudo ULTRA_RELEASE_ROOT=/srv/ultra ./scripts/deploy_ultra_frontend.sh <git-sha>
 ```
 
-On current UCSB production, this means validating and reloading `Caddy`, not
-`nginx`.
+If your public edge uses `Caddy`, this means validating and reloading `Caddy`
+rather than `nginx`.
 
 ## GitHub Actions
 
@@ -420,10 +422,25 @@ Do not put the full app runtime `.env` into GitHub Secrets unless you intentiona
 
 - `make verify-platform-smoke`
 - `make verify-integration`
+- `uv sync --frozen --extra dev`
+- `pnpm --dir frontend install --frozen-lockfile`
+- `make quality`
+- `uv run pytest -q`
+- `pnpm --dir frontend lint`
+- `pnpm --dir frontend typecheck`
+- `pnpm --dir frontend test:unit`
 - `pnpm --dir frontend build`
+- `pnpm --dir frontend bundle:check`
+- `pnpm --dir frontend test:smoke`
+- `./scripts/release_codescan.sh`
 - `bash -n scripts/deploy_ultra_backend.sh scripts/deploy_ultra_frontend.sh scripts/deploy_platform_manual.sh scripts/bootstrap_production_host.sh`
 - `python3 scripts/render_production_templates.py --help`
 - `docker compose --env-file deploy/env/platform.env.example -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml config`
+
+These commands are the closest local equivalent of the active GitHub workflows.
+The manual platform workflow still needs real SSH targets and deploy secrets, so
+the local contract for that workflow is script syntax, template rendering, and
+Docker Compose config validation.
 
 ### After a live deploy
 
@@ -439,9 +456,9 @@ Do not put the full app runtime `.env` into GitHub Secrets unless you intentiona
 - one Pro Mode run
 - one artifact-producing tool run
 
-### Current UCSB quick checks
+### Operator quick checks
 
-On `nail01` after an app deploy:
+On the app node after an app deploy:
 
 ```bash
 readlink -f /srv/ultra/current
@@ -450,7 +467,7 @@ systemctl is-active ultra-backend@1 ultra-backend@2
 systemctl is-active caddy
 ```
 
-On `nail04` after a platform deploy:
+On the platform node after a platform deploy:
 
 ```bash
 cd /srv/ultra/platform-current

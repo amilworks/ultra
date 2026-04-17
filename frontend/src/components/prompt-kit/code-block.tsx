@@ -13,7 +13,6 @@ import {
   normalizeCodeForDisplay,
   writeClipboardText,
 } from "@/lib/clipboard";
-import { codeToHtml } from "@/lib/shiki";
 import { cn } from "@/lib/utils";
 
 export type CodeBlockProps = {
@@ -229,6 +228,7 @@ function CodeBlockCode({
         return;
       }
       try {
+        const { codeToHtml } = await import("@/lib/shiki");
         const html = await codeToHtml({
           code: source,
           lang: languageText,
@@ -240,6 +240,7 @@ function CodeBlockCode({
         return;
       } catch {
         try {
+          const { codeToHtml } = await import("@/lib/shiki");
           const fallback = await codeToHtml({
             code: source,
             lang: "text",

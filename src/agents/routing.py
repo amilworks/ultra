@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from .contracts import RouteDecision, TurnIntent
 from .profiles import DOMAIN_PROFILES, DomainId
 from .reasoning import is_mcq_prompt
-
 
 _DOMAIN_KEYWORDS: dict[DomainId, tuple[str, ...]] = {
     "bio": (
@@ -357,14 +356,10 @@ def _compose_intent_text(turn_intent: TurnIntent) -> str:
     if originating and originating not in parts:
         parts.append(originating)
     parts.extend(
-        str(item).strip()
-        for item in resource_focus.resource_uris
-        if str(item or "").strip()
+        str(item).strip() for item in resource_focus.resource_uris if str(item or "").strip()
     )
     parts.extend(
-        str(item).strip()
-        for item in resource_focus.dataset_uris
-        if str(item or "").strip()
+        str(item).strip() for item in resource_focus.dataset_uris if str(item or "").strip()
     )
     return "\n".join(part for part in parts if part)
 
@@ -414,7 +409,10 @@ def classify_operation_intent(turn_intent: TurnIntent) -> tuple[str, list[str]]:
     if any(_keyword_match(normalized, cue) for cue in _DIAGNOSE_CUES):
         signals.append("diagnose_cue")
         return "diagnose", signals
-    if any(_keyword_match(normalized, cue) for cue in _SEGMENT_CUES) or workflow_id == "segment_sam3":
+    if (
+        any(_keyword_match(normalized, cue) for cue in _SEGMENT_CUES)
+        or workflow_id == "segment_sam3"
+    ):
         signals.append("segment_cue")
         return "segment", signals
     if (
@@ -484,14 +482,21 @@ def compose_route_decision(turn_intent: TurnIntent) -> RouteDecision:
     elif artifact_modality == "table":
         scores["materials"] = float(scores.get("materials", 0.0)) + 1.5
 
-    if operation_intent in {"detect", "segment", "count"} and artifact_modality == "microscopy_image":
+    if (
+        operation_intent in {"detect", "segment", "count"}
+        and artifact_modality == "microscopy_image"
+    ):
         scores["bio"] = float(scores.get("bio", 0.0)) + 1.5
     if operation_intent in {"detect", "count", "analyze"} and has_ecology_priority_cues:
         scores["ecology"] = float(scores.get("ecology", 0.0)) + 1.5
     if operation_intent == "diagnose":
         scores["medical"] = float(scores.get("medical", 0.0)) + 4.0
         evidence_signals.append("diagnostic_intent")
-    if operation_intent in {"search", "load", "upload"} and not scores and suggested_domain in DOMAIN_PROFILES:
+    if (
+        operation_intent in {"search", "load", "upload"}
+        and not scores
+        and suggested_domain in DOMAIN_PROFILES
+    ):
         scores[suggested_domain] = 1.5
 
     if has_theory_cues(intent_text):
@@ -500,17 +505,15 @@ def compose_route_decision(turn_intent: TurnIntent) -> RouteDecision:
     if is_mcq_prompt(intent_text):
         bio_score = float(scores.get("bio", 0.0))
         core_score = float(scores.get("core", 0.0))
-        clear_bio_primary = bio_score >= 2.0 and bio_score > core_score and not has_theory_cues(intent_text)
+        clear_bio_primary = (
+            bio_score >= 2.0 and bio_score > core_score and not has_theory_cues(intent_text)
+        )
         if not clear_bio_primary:
             scores["core"] = core_score + 0.75
             evidence_signals.append("mcq_backstop")
 
     ordered = sorted(
-        (
-            (domain_id, score)
-            for domain_id, score in scores.items()
-            if float(score) > 0.0
-        ),
+        ((domain_id, score) for domain_id, score in scores.items() if float(score) > 0.0),
         key=lambda item: (-float(item[1]), item[0]),
     )
     if not ordered:
@@ -536,7 +539,10 @@ def compose_route_decision(turn_intent: TurnIntent) -> RouteDecision:
     margin = max(0.0, top_score - second_score)
     confidence = min(0.97, 0.35 + min(top_score, 6.0) * 0.08 + margin * 0.07)
 
-    if operation_intent == "diagnose" and artifact_modality in {"clinical_image", "clinical_volume"}:
+    if operation_intent == "diagnose" and artifact_modality in {
+        "clinical_image",
+        "clinical_volume",
+    }:
         selected = ["medical", *[domain_id for domain_id in selected if domain_id != "medical"]]
         confidence = max(confidence, 0.82)
         evidence_signals.append("medical_guardrail")
@@ -568,7 +574,9 @@ def compose_route_decision(turn_intent: TurnIntent) -> RouteDecision:
         evidence_signals=evidence_signals,
         confidence=max(0.0, min(1.0, confidence)),
         reason=reason,
-        route_source=("intent_guardrail" if "medical_guardrail" in evidence_signals else "heuristic"),
+        route_source=(
+            "intent_guardrail" if "medical_guardrail" in evidence_signals else "heuristic"
+        ),
         used_model_classifier=False,
     )
 
@@ -642,17 +650,29 @@ def _has_bisque_catalog_search_intent(normalized_text: str) -> bool:
     mentions_filetype = any(_keyword_match(normalized_text, cue) for cue in _BISQUE_FILETYPE_CUES)
     mentions_resource_noun = any(
         _keyword_match(normalized_text, cue)
-        for cue in ("file", "files", "image", "images", "resource", "resources", "dataset", "datasets")
+        for cue in (
+            "file",
+            "files",
+            "image",
+            "images",
+            "resource",
+            "resources",
+            "dataset",
+            "datasets",
+        )
     )
-    mentions_recency = any(_keyword_match(normalized_text, cue) for cue in ("recent", "latest", "uploaded"))
+    mentions_recency = any(
+        _keyword_match(normalized_text, cue) for cue in ("recent", "latest", "uploaded")
+    )
     starts_like_question = normalized_text.startswith(("what ", "which ", "show me ", "list "))
     asks_inventory = any(
-        phrase in normalized_text
-        for phrase in ("are there any", "do i have any", "what do i have")
+        phrase in normalized_text for phrase in ("are there any", "do i have any", "what do i have")
     )
     if mentions_resource_noun and asks_inventory:
         return True
-    return bool(starts_like_question and mentions_resource_noun and (mentions_filetype or mentions_recency))
+    return bool(
+        starts_like_question and mentions_resource_noun and (mentions_filetype or mentions_recency)
+    )
 
 
 def parse_domain_csv(value: str | None) -> list[DomainId]:

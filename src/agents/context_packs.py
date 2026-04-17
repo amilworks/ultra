@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Sequence
 
 try:  # Python 3.11+
     import tomllib  # type: ignore[attr-defined]
@@ -175,7 +175,9 @@ def select_reference_context(
     for pack in load_context_packs(root):
         if pack.domain_ids and _normalize_token(domain_id) not in pack.domain_ids:
             continue
-        keyword_hits = [keyword for keyword in pack.keywords if _keyword_match(normalized_text, keyword)]
+        keyword_hits = [
+            keyword for keyword in pack.keywords if _keyword_match(normalized_text, keyword)
+        ]
         if (
             pack.collaborator_ids
             and (
@@ -193,11 +195,7 @@ def select_reference_context(
             pack.project_ids
             and (
                 (project_id and project_id not in pack.project_ids)
-                or (
-                    not project_id
-                    and not keyword_hits
-                    and pack.pack_id not in explicit_pack_ids
-                )
+                or (not project_id and not keyword_hits and pack.pack_id not in explicit_pack_ids)
             )
             and pack.pack_id not in explicit_pack_ids
         ):
@@ -262,7 +260,9 @@ def render_reference_context_block(snippets: Sequence[ContextSnippet]) -> str:
     return "\n".join(lines).strip()
 
 
-def _compose_lookup_text(*, turn_intent: TurnIntent, selected_tool_names: Iterable[str] | None) -> str:
+def _compose_lookup_text(
+    *, turn_intent: TurnIntent, selected_tool_names: Iterable[str] | None
+) -> str:
     parts = [str(turn_intent.original_user_text or "").strip()]
     resolved_context = str(turn_intent.resolved_context_text or "").strip()
     if resolved_context:
@@ -284,7 +284,9 @@ def _compose_lookup_text(*, turn_intent: TurnIntent, selected_tool_names: Iterab
         for item in turn_intent.knowledge_context.pack_ids
         if str(item or "").strip()
     )
-    parts.extend(str(name or "").strip() for name in (selected_tool_names or []) if str(name or "").strip())
+    parts.extend(
+        str(name or "").strip() for name in (selected_tool_names or []) if str(name or "").strip()
+    )
     parts.extend(
         str(name or "").strip()
         for name in turn_intent.resource_focus.suggested_tool_names

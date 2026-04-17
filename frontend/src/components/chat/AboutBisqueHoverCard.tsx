@@ -40,28 +40,20 @@ export function AboutBisqueHoverCard() {
           <SheetHeader className="space-y-2 text-left">
             <SheetTitle className="text-base">About BisQue Ultra</SheetTitle>
             <SheetDescription className="text-sm leading-6 text-muted-foreground">
-              BisQue Ultra was created by Amil Khan, a PhD student in the UCSB Vision
-              Research Lab.
+              BisQue Ultra is a scientific imaging workbench for reproducible,
+              tool-guided analysis.
             </SheetDescription>
           </SheetHeader>
           <div className="mt-4 space-y-3">
             <p className="text-sm leading-6 text-muted-foreground">
-              The lab is led by Professor B.S. Manjunath, principal investigator of the
-              Vision Research Lab at UCSB, with research spanning computer vision, image
-              processing, and machine learning applications.
+              It combines BisQue-backed data management, a FastAPI control plane,
+              and a React interface so image review, model calls, and long-running
+              workflows stay visible in one place.
             </p>
             <p className="text-sm leading-6 text-muted-foreground">
-              For praise, feature requests, or the occasional friendly complaint, please
-              begin with the creator.
+              The goal is a system that another team can trust, extend, and
+              operate without relying on hidden local context.
             </p>
-            <a
-              href="https://example.com/vision-lab"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex text-sm font-medium text-foreground underline underline-offset-4 transition-colors hover:text-primary"
-            >
-              Visit UCSB VRL
-            </a>
           </div>
         </SheetContent>
       </Sheet>
@@ -88,27 +80,19 @@ export function AboutBisqueHoverCard() {
         <div className="space-y-1.5">
           <p className="text-sm font-semibold">About BisQue Ultra</p>
           <p className="text-sm leading-6 text-muted-foreground">
-            BisQue Ultra was created by Amil Khan, a PhD student in the UCSB Vision
-            Research Lab.
+            BisQue Ultra is a scientific imaging workbench for reproducible,
+            tool-guided analysis.
           </p>
           <p className="text-sm leading-6 text-muted-foreground">
-            The lab is led by Professor B.S. Manjunath, principal investigator of the
-            Vision Research Lab at UCSB, with research spanning computer vision, image
-            processing, and machine learning applications.
+            It combines BisQue-backed data management, a FastAPI control plane,
+            and a React interface so image review, model calls, and long-running
+            workflows stay visible in one place.
           </p>
         </div>
         <p className="text-sm leading-6 text-muted-foreground">
-          For praise, feature requests, or the occasional friendly complaint, please
-          begin with the creator.
+          The goal is a system that another team can trust, extend, and
+          operate without relying on hidden local context.
         </p>
-        <a
-          href="https://example.com/vision-lab"
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex text-sm font-medium text-foreground underline underline-offset-4 transition-colors hover:text-primary"
-        >
-          Visit UCSB VRL
-        </a>
       </HoverCardContent>
     </HoverCard>
   );

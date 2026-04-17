@@ -1,10 +1,9 @@
 """Application configuration management using pydantic-settings."""
 
-from functools import lru_cache
 import os
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -192,9 +191,7 @@ class Settings(BaseSettings):
     pro_mode_timeout_seconds: int | None = Field(
         default=None,
         ge=1,
-        description=(
-            "Optional request timeout override (seconds) for Pro Mode model calls."
-        ),
+        description=("Optional request timeout override (seconds) for Pro Mode model calls."),
     )
     pro_mode_fallback_enabled: bool = Field(
         default=True,
@@ -238,11 +235,70 @@ class Settings(BaseSettings):
             "transport. Falls back to AWS_SESSION_TOKEN."
         ),
     )
+    pro_mode_aws_bearer_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional AWS Bedrock bearer token override for the native Pro Mode Bedrock "
+            "Claude transport. Falls back to AWS_BEARER_TOKEN_BEDROCK and then "
+            "AWS_BEDROCK_API_KEY for compatibility with current Agno docs. "
+            "Do not point this at API Gateway X-API-Key publishes."
+        ),
+    )
     pro_mode_aws_sso_auth: bool = Field(
         default=False,
         description=(
             "When true, the native Pro Mode Bedrock Claude transport uses the current AWS "
             "SSO/profile session instead of explicit access keys."
+        ),
+    )
+    pro_mode_max_tokens: int | None = Field(
+        default=None,
+        ge=256,
+        description=(
+            "Optional output token cap for the dedicated Pro Mode model path. "
+            "Applied directly to native Claude transports and passed through on "
+            "OpenAI-compatible routes when supported."
+        ),
+    )
+    pro_mode_temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional sampling temperature for the dedicated Pro Mode model path. "
+            "Prefer lower values for technical analysis and evaluation."
+        ),
+    )
+    pro_mode_top_p: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description=("Optional nucleus sampling parameter for the dedicated Pro Mode model path."),
+    )
+    pro_mode_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description=("Optional top-k sampling parameter for the dedicated Pro Mode model path."),
+    )
+    pro_mode_claude_thinking_enabled: bool = Field(
+        default=True,
+        description=(
+            "When true, native Claude transports attach an explicit thinking budget "
+            "for deep/high-reasoning phases."
+        ),
+    )
+    pro_mode_claude_thinking_budget_tokens: int = Field(
+        default=4096,
+        ge=1024,
+        le=128000,
+        description=("Thinking-token budget used for native Claude deep/high-reasoning phases."),
+    )
+    pro_mode_claude_thinking_display: Literal["summarized", "omitted"] | None = Field(
+        default=None,
+        description=(
+            "Optional Claude thinking display mode for native transports. "
+            "Leave unset to use the provider default."
         ),
     )
     llm_mock_mode: bool = Field(
@@ -643,6 +699,13 @@ class Settings(BaseSettings):
         default=None,
         description="Optional API key required by FastAPI orchestrator endpoints.",
     )
+    allow_query_api_key_compat: bool | None = Field(
+        default=None,
+        description=(
+            "Temporary compatibility bridge for accepting `api_key` query parameters on "
+            "protected endpoints. Defaults on in development and off in production."
+        ),
+    )
     run_store_path: str = Field(
         default="data/runs.db",
         description="SQLite path for run metadata and trace events.",
@@ -989,17 +1052,13 @@ class Settings(BaseSettings):
         default=1400,
         ge=256,
         le=24000,
-        description=(
-            "Minimum max_tokens budget used by phased high-effort finalization."
-        ),
+        description=("Minimum max_tokens budget used by phased high-effort finalization."),
     )
     prompt_workpad_phase_h_max_tokens: int = Field(
         default=6000,
         ge=512,
         le=32000,
-        description=(
-            "Maximum max_tokens budget used by phased high-effort finalization."
-        ),
+        description=("Maximum max_tokens budget used by phased high-effort finalization."),
     )
     prompt_workpad_quality_repair_enabled: bool = Field(
         default=True,
@@ -1011,17 +1070,13 @@ class Settings(BaseSettings):
         default=0.35,
         ge=0.0,
         le=1.0,
-        description=(
-            "Maximum tolerated meta-narration rate before quality repair triggers."
-        ),
+        description=("Maximum tolerated meta-narration rate before quality repair triggers."),
     )
     prompt_workpad_quality_min_completeness: float = Field(
         default=0.58,
         ge=0.0,
         le=1.0,
-        description=(
-            "Minimum answer completeness score required to skip quality repair."
-        ),
+        description=("Minimum answer completeness score required to skip quality repair."),
     )
     prompt_workpad_quality_min_numeric_density: float = Field(
         default=0.45,
@@ -1082,6 +1137,61 @@ class Settings(BaseSettings):
     medsam2_max_slices: int = Field(
         default=160,
         description="Maximum number of volume slices processed directly for MedSAM2.",
+    )
+
+    # Megaseg defaults
+    megaseg_python: str | None = Field(
+        default=None,
+        description=(
+            "Optional dedicated Python interpreter path used for Megaseg/cyto-dl inference. "
+            "Prefer an absolute path in production."
+        ),
+    )
+    cytodl_python: str | None = Field(
+        default=None,
+        description=("Backward-compatible alias for the Megaseg runtime Python interpreter path."),
+    )
+    megaseg_checkpoint_path: str | None = Field(
+        default=None,
+        description=("Optional Megaseg checkpoint path. Prefer an absolute path in production."),
+    )
+    megaseg_benchmark_root: str | None = Field(
+        default=None,
+        description=(
+            "Optional Megaseg benchmark checkout root used to discover default "
+            "checkpoint locations."
+        ),
+    )
+    megaseg_service_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional private Megaseg inference service base URL. When set, "
+            "segment_image_megaseg submits inference jobs to the remote service "
+            "instead of launching the local runner subprocess."
+        ),
+    )
+    megaseg_service_api_key: str | None = Field(
+        default=None,
+        description="Bearer token used when authenticating to the private Megaseg service.",
+    )
+    megaseg_service_timeout_seconds: float = Field(
+        default=60.0,
+        description="Per-request HTTP timeout in seconds when calling the Megaseg service.",
+    )
+    megaseg_service_poll_interval_seconds: float = Field(
+        default=2.0,
+        description="Polling interval in seconds while waiting for Megaseg service jobs.",
+    )
+    megaseg_service_wait_timeout_seconds: float = Field(
+        default=7200.0,
+        description="Maximum wall-clock time in seconds to wait for a Megaseg service job.",
+    )
+    megaseg_service_download_artifacts: bool = Field(
+        default=True,
+        description=(
+            "When true, download Megaseg service artifacts into the app science output "
+            "tree so downstream tools can use the usual local artifact layout."
+        ),
     )
 
     # SAM3 defaults
@@ -1192,6 +1302,10 @@ class Settings(BaseSettings):
             "upload_store_root",
             "medsam2_runtime_root",
             "medsam2_checkpoint_dir",
+            "megaseg_python",
+            "cytodl_python",
+            "megaseg_checkpoint_path",
+            "megaseg_benchmark_root",
             "tool_call_napkin_path",
             "tool_call_napkin_skill_path",
         )
@@ -1309,6 +1423,65 @@ class Settings(BaseSettings):
         return max(1, int(self.openai_timeout or 60))
 
     @property
+    def resolved_allow_query_api_key_compat(self) -> bool:
+        """Whether protected endpoints should still accept `api_key` query parameters."""
+        if self.allow_query_api_key_compat is not None:
+            return bool(self.allow_query_api_key_compat)
+        return str(self.environment).strip().lower() != "production"
+
+    @property
+    def resolved_megaseg_python(self) -> str | None:
+        """Resolved Python interpreter path used for Megaseg inference."""
+        for candidate in (self.megaseg_python, self.cytodl_python):
+            if candidate and candidate.strip():
+                return candidate.strip()
+        for env_name in ("MEGASEG_PYTHON", "CYTODL_PYTHON"):
+            env_value = os.getenv(env_name)
+            if env_value and env_value.strip():
+                return _resolve_project_path(env_value)
+        return None
+
+    @property
+    def resolved_megaseg_checkpoint_path(self) -> str | None:
+        """Resolved Megaseg checkpoint path from settings or environment."""
+        if self.megaseg_checkpoint_path and self.megaseg_checkpoint_path.strip():
+            return self.megaseg_checkpoint_path.strip()
+        env_value = os.getenv("MEGASEG_CHECKPOINT_PATH")
+        if env_value and env_value.strip():
+            return _resolve_project_path(env_value)
+        return None
+
+    @property
+    def resolved_megaseg_benchmark_root(self) -> str | None:
+        """Resolved Megaseg benchmark checkout root from settings or environment."""
+        if self.megaseg_benchmark_root and self.megaseg_benchmark_root.strip():
+            return self.megaseg_benchmark_root.strip()
+        env_value = os.getenv("MEGASEG_BENCHMARK_ROOT")
+        if env_value and env_value.strip():
+            return _resolve_project_path(env_value)
+        return None
+
+    @property
+    def resolved_megaseg_service_url(self) -> str | None:
+        """Resolved Megaseg inference service base URL."""
+        if self.megaseg_service_url and self.megaseg_service_url.strip():
+            return self.megaseg_service_url.strip().rstrip("/")
+        env_value = os.getenv("MEGASEG_SERVICE_URL")
+        if env_value and env_value.strip():
+            return env_value.strip().rstrip("/")
+        return None
+
+    @property
+    def resolved_megaseg_service_api_key(self) -> str | None:
+        """Resolved bearer token for the private Megaseg inference service."""
+        if self.megaseg_service_api_key and self.megaseg_service_api_key.strip():
+            return self.megaseg_service_api_key.strip()
+        env_value = os.getenv("MEGASEG_SERVICE_API_KEY")
+        if env_value and env_value.strip():
+            return env_value.strip()
+        return None
+
+    @property
     def resolved_pro_mode_aws_region(self) -> str | None:
         """Resolved AWS region for the native Pro Mode Bedrock Claude transport."""
         if self.pro_mode_aws_region and self.pro_mode_aws_region.strip():
@@ -1347,6 +1520,17 @@ class Settings(BaseSettings):
             return self.pro_mode_aws_session_token.strip()
         env_value = os.getenv("AWS_SESSION_TOKEN")
         return env_value.strip() if env_value and env_value.strip() else None
+
+    @property
+    def resolved_pro_mode_aws_bearer_token(self) -> str | None:
+        """Resolved AWS Bedrock bearer token for the native Pro Mode transport."""
+        if self.pro_mode_aws_bearer_token and self.pro_mode_aws_bearer_token.strip():
+            return self.pro_mode_aws_bearer_token.strip()
+        for env_name in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_BEDROCK_API_KEY"):
+            env_value = os.getenv(env_name)
+            if env_value and env_value.strip():
+                return env_value.strip()
+        return None
 
 
 @lru_cache

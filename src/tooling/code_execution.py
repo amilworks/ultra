@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
-import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from openai import OpenAI
-
 from src.config import get_settings
 from src.logger import logger
 
@@ -126,11 +125,7 @@ def _normalize_job_inputs(inputs: list[dict[str, Any]] | None) -> list[dict[str,
             except Exception:
                 pass
         normalized.append(
-            {
-                key: value
-                for key, value in normalized_item.items()
-                if value not in (None, "")
-            }
+            {key: value for key, value in normalized_item.items() if value not in (None, "")}
         )
     return normalized
 
@@ -236,13 +231,17 @@ def _fallback_spec(
     *,
     previous_failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    note = str(previous_failure.get("error_message") or "").strip() if isinstance(previous_failure, dict) else ""
+    note = (
+        str(previous_failure.get("error_message") or "").strip()
+        if isinstance(previous_failure, dict)
+        else ""
+    )
     body = [
         "import json",
         "from pathlib import Path",
         "",
-        f'TASK = {json.dumps(str(task_summary or "").strip())}',
-        f'PREVIOUS_FAILURE = {json.dumps(note)}',
+        f"TASK = {json.dumps(str(task_summary or '').strip())}",
+        f"PREVIOUS_FAILURE = {json.dumps(note)}",
         "",
         "def main() -> None:",
         "    output = {",
@@ -274,7 +273,9 @@ def _resolved_codegen_client() -> tuple[OpenAI, str]:
     api_key = getattr(settings, "resolved_codegen_api_key", None)
     if not api_key and provider in {"vllm", "ollama"}:
         api_key = "EMPTY"
-    timeout = int(getattr(settings, "codegen_timeout_seconds", 0) or getattr(settings, "openai_timeout", 60))
+    timeout = int(
+        getattr(settings, "codegen_timeout_seconds", 0) or getattr(settings, "openai_timeout", 60)
+    )
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -426,7 +427,9 @@ def persist_python_job_spec(
                     "print('No valid Python entrypoint generated.')\n",
                     encoding="utf-8",
                 )
-                persisted_files.append({"path": _DEFAULT_ENTRYPOINT, "size_bytes": fallback_path.stat().st_size})
+                persisted_files.append(
+                    {"path": _DEFAULT_ENTRYPOINT, "size_bytes": fallback_path.stat().st_size}
+                )
                 source_manifest[_DEFAULT_ENTRYPOINT] = _sha256_file(fallback_path)
                 entrypoint = _DEFAULT_ENTRYPOINT
 
@@ -731,7 +734,11 @@ def _extract_csv_artifact_summary(path: Path, *, relative_path: str) -> dict[str
     try:
         with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
             reader = csv.DictReader(handle)
-            fieldnames = [str(item or "").strip() for item in (reader.fieldnames or []) if str(item or "").strip()]
+            fieldnames = [
+                str(item or "").strip()
+                for item in (reader.fieldnames or [])
+                if str(item or "").strip()
+            ]
             numeric_stats: dict[str, dict[str, float]] = {}
             row_count = 0
             for row in reader:
@@ -787,10 +794,14 @@ def _extract_csv_artifact_summary(path: Path, *, relative_path: str) -> dict[str
         measurements.append({"name": f"{stem}.{field}.mean", "value": sum_value / count})
         if len(measurements) >= _MAX_MEASUREMENT_CANDIDATES:
             break
-        measurements.append({"name": f"{stem}.{field}.min", "value": float(stats.get("min") or 0.0)})
+        measurements.append(
+            {"name": f"{stem}.{field}.min", "value": float(stats.get("min") or 0.0)}
+        )
         if len(measurements) >= _MAX_MEASUREMENT_CANDIDATES:
             break
-        measurements.append({"name": f"{stem}.{field}.max", "value": float(stats.get("max") or 0.0)})
+        measurements.append(
+            {"name": f"{stem}.{field}.max", "value": float(stats.get("max") or 0.0)}
+        )
         if len(measurements) >= _MAX_MEASUREMENT_CANDIDATES:
             break
 
@@ -960,7 +971,7 @@ def _execute_python_job_attempt(
             "export XDG_CACHE_HOME=/tmp/xdg-cache",
             "export MPLCONFIGDIR=/tmp/matplotlib",
             "export MPLBACKEND=Agg",
-            "mkdir -p \"$HOME\" \"$XDG_CONFIG_HOME\" \"$XDG_CACHE_HOME\" \"$MPLCONFIGDIR\"",
+            'mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MPLCONFIGDIR"',
             command,
         ]
     )
@@ -1087,7 +1098,11 @@ def _execute_python_job_attempt(
                     "measurement_count": len(stdout_summary.get("measurement_candidates") or []),
                 }
             )
-        seen_measurements = {str(item.get("name") or "").strip() for item in measurement_candidates if isinstance(item, dict)}
+        seen_measurements = {
+            str(item.get("name") or "").strip()
+            for item in measurement_candidates
+            if isinstance(item, dict)
+        }
         for metric in stdout_summary.get("measurement_candidates") or []:
             if not isinstance(metric, dict):
                 continue
@@ -1136,9 +1151,7 @@ def _execute_python_job_attempt(
         "stderr_tail": stderr_text[-_MAX_STDIO_CHARS:],
         "error_class": error_class,
         "error_message": (
-            ""
-            if success
-            else (stderr_text[-_MAX_STDIO_CHARS:] or "Python execution failed.")
+            "" if success else (stderr_text[-_MAX_STDIO_CHARS:] or "Python execution failed.")
         ),
         "failure_signature": failure_signature or None,
         "repair_hint": None if success else _repair_hint(error_class),
@@ -1181,7 +1194,11 @@ def execute_python_job_once(
     execution_backend: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    backend = str(execution_backend or getattr(settings, "code_execution_default_backend", "docker")).strip().lower()
+    backend = (
+        str(execution_backend or getattr(settings, "code_execution_default_backend", "docker"))
+        .strip()
+        .lower()
+    )
     if backend != "docker":
         return {
             "success": False,
@@ -1197,7 +1214,9 @@ def execute_python_job_once(
             "error_message": "Docker is not available. Build/start Docker and retry execute_python_job.",
         }
 
-    image = str(getattr(settings, "code_execution_docker_image", "bisque-ultra-codeexec:py311")).strip()
+    image = str(
+        getattr(settings, "code_execution_docker_image", "bisque-ultra-codeexec:py311")
+    ).strip()
     network = str(getattr(settings, "code_execution_docker_network", "none")).strip() or "none"
     timeout_default = int(getattr(settings, "code_execution_default_timeout_seconds", 900))
     timeout_cap = int(getattr(settings, "code_execution_max_timeout_seconds", 3600))
@@ -1301,7 +1320,9 @@ def execute_python_job_once(
                 task_summary=str(spec.get("task_summary") or ""),
                 job_id=str(job_id),
                 inputs=spec.get("inputs") if isinstance(spec.get("inputs"), list) else [],
-                constraints=spec.get("constraints") if isinstance(spec.get("constraints"), dict) else {},
+                constraints=spec.get("constraints")
+                if isinstance(spec.get("constraints"), dict)
+                else {},
                 attempt_index=attempt_index + 1,
                 previous_failure=previous_failure,
             )
@@ -1328,9 +1349,7 @@ def execute_python_job_once(
         result["repair_stop_reason"] = stop_reason
     if result.get("success"):
         if cycles_used > 0:
-            result["message"] = (
-                f"Python job succeeded after {cycles_used} repair cycle(s)."
-            )
+            result["message"] = f"Python job succeeded after {cycles_used} repair cycle(s)."
     else:
         result["repair_exhausted"] = stop_reason in {
             "max_repair_cycles_exhausted",

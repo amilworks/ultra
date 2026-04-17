@@ -43,6 +43,7 @@ def _named_values_array_schema(*, description: str, values_description: str) -> 
         },
     }
 
+
 BISQUE_UPLOAD_TOOL = {
     "type": "function",
     "function": {

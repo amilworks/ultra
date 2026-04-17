@@ -6,6 +6,8 @@ PLATFORM_SERVICES := bisque postgres keycloak
 PLATFORM_PROD_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml
 PYTHON_QUALITY_SCOPE := src tests
 PYTHON_TYPECHECK_SCOPE := --explicit-package-bases src/config.py src/auth src/api/client.py src/api/v3.py src/tooling/domains src/evals/golden_tasks.py
+PYTHON_STRICT_SCOPE := src/auth src/config.py src/api/client.py src/api/v3.py src/tooling/domains src/tooling/engine.py src/evals/golden_tasks.py src/agno_backend/runtime.py src/agno_backend/pro_mode.py src/training/adapters.py src/api/main.py
+PYTHON_STRICT_RULES := --select B,RUF,SIM,RET
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -145,6 +147,9 @@ test-cov: ## Run tests with coverage report
 lint: ## Run linting checks
 	uv run ruff check $(PYTHON_QUALITY_SCOPE)
 
+lint-strict: ## Run stricter backend lint checks on ratcheted backend scope
+	uv run ruff check $(PYTHON_STRICT_SCOPE) $(PYTHON_STRICT_RULES)
+
 format: ## Format backend code with Ruff
 	uv run ruff format $(PYTHON_QUALITY_SCOPE)
 
@@ -154,7 +159,7 @@ format-check: ## Check backend formatting without making changes
 type-check: ## Run type checking with mypy
 	uv run mypy $(PYTHON_TYPECHECK_SCOPE)
 
-quality: lint format-check type-check ## Run all quality checks
+quality: lint format-check type-check lint-strict ## Run all quality checks
 
 frontend-lint: ## Run frontend lint checks
 	pnpm --dir frontend lint

@@ -7,9 +7,10 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -743,9 +744,8 @@ class AgnoChatRuntime:
         text = (
             text.replace("\\le", "<=").replace("\\ge", ">=").replace("≤", "<=").replace("≥", ">=")
         )
-        text = text.replace("‑", "-").replace("–", "-").replace("—", "-")
-        text = re.sub(r"\s+", " ", text).strip().lower()
-        return text
+        text = text.replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
+        return re.sub(r"\s+", " ", text).strip().lower()
 
     @classmethod
     def _proof_sanity_findings_for_texts(cls, texts: list[str]) -> list[str]:
@@ -1102,28 +1102,20 @@ class AgnoChatRuntime:
         kwargs: dict[str, Any] = {}
         max_tokens = self._setting(self.settings, "pro_mode_max_tokens", None)
         if max_tokens is not None:
-            try:
+            with suppress(TypeError, ValueError):
                 kwargs["max_tokens"] = max(256, int(max_tokens))
-            except Exception:
-                pass
         temperature = self._setting(self.settings, "pro_mode_temperature", None)
         if temperature is not None:
-            try:
+            with suppress(TypeError, ValueError):
                 kwargs["temperature"] = max(0.0, min(1.0, float(temperature)))
-            except Exception:
-                pass
         top_p = self._setting(self.settings, "pro_mode_top_p", None)
         if top_p is not None:
-            try:
+            with suppress(TypeError, ValueError):
                 kwargs["top_p"] = max(1e-6, min(1.0, float(top_p)))
-            except Exception:
-                pass
         top_k = self._setting(self.settings, "pro_mode_top_k", None)
         if top_k is not None:
-            try:
+            with suppress(TypeError, ValueError):
                 kwargs["top_k"] = max(1, int(top_k))
-            except Exception:
-                pass
         return kwargs
 
     def _native_claude_thinking_config(
@@ -1495,15 +1487,13 @@ class AgnoChatRuntime:
         lowered = str(user_text or "").strip().lower()
         if not lowered:
             return False
-        if bool(
+        return bool(
             re.search(
                 r"\b(relativistic|collider|beam|kinetic energy|total energy|convention|assumption|"
                 r"alternative interpretation|counterfactual|which statement|which option|mcq|multiple choice)\b",
                 lowered,
             )
-        ):
-            return True
-        return False
+        )
 
     @staticmethod
     def _rtd_problem_frame_for_turn(
@@ -2624,9 +2614,8 @@ class AgnoChatRuntime:
             r"my uploads|your uploads|uploaded files|uploaded images|uploaded resources"
             r")\b",
             lowered,
-        ):
-            if re.search(r"\b(show|find|list|search|what|which|see|browse|open)\b", lowered):
-                return False
+        ) and re.search(r"\b(show|find|list|search|what|which|see|browse|open)\b", lowered):
+            return False
 
         explicit_upload_intent = bool(
             re.search(
@@ -3420,7 +3409,7 @@ class AgnoChatRuntime:
         if cls._prompt_explicitly_requests_prior_results_load(user_text):
             return False
         lowered = str(user_text or "").strip().lower()
-        direct_image_request = bool(
+        return bool(
             cls._is_depth_request(user_text)
             or cls._is_segmentation_request(user_text)
             or cls._is_image_metadata_request(user_text)
@@ -3434,7 +3423,6 @@ class AgnoChatRuntime:
                 lowered,
             )
         )
-        return direct_image_request
 
     @classmethod
     def _selection_context_replaces_saved_image_target(
@@ -4093,8 +4081,7 @@ class AgnoChatRuntime:
                 or prior_analysis_follow_up
                 or numeric_signal
                 or AgnoChatRuntime._has_follow_up_reference(user_text)
-                or multi_stage_signal
-                and len(lowered) > 120
+                or (multi_stage_signal and len(lowered) > 120)
             )
         )
 
@@ -10622,9 +10609,7 @@ class AgnoChatRuntime:
             }
         ):
             return True
-        if not str(response_text or "").strip():
-            return True
-        return False
+        return not str(response_text or "").strip()
 
     def _tool_catalog_for_names(self, tool_names: list[str]) -> list[dict[str, str]]:
         catalog: list[dict[str, str]] = []
@@ -12557,7 +12542,7 @@ class AgnoChatRuntime:
             or "Carry out the requested scientific analysis.",
             reasoning_summary="Fallback planning path selected because structured planning was unavailable.",
             actions=actions[:3],
-            ready_to_answer=False if actions else True,
+            ready_to_answer=not actions,
             answer_outline=[],
             remaining_questions=[]
             if actions
@@ -13119,7 +13104,7 @@ class AgnoChatRuntime:
                 "Accept": "application/json",
             },
         )
-        with urlopen(request, timeout=3.0) as response:  # noqa: S310
+        with urlopen(request, timeout=3.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, dict):
             return {}
@@ -14300,7 +14285,7 @@ class AgnoChatRuntime:
                     y = dimensions.get("Y")
                     z = dimensions.get("Z")
                     if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                        image_bits.append(f"the attached image spans {int(x)} × {int(y)} pixels")
+                        image_bits.append(f"the attached image spans {int(x)} x {int(y)} pixels")
                     if isinstance(z, (int, float)) and int(z) > 1:
                         image_bits.append(f"with {int(z)} axial slices")
                 array_shape = image_summary.get("array_shape")
@@ -14361,7 +14346,7 @@ class AgnoChatRuntime:
                         )
                         current_image_bits.append(f"with class counts {rendered_counts}")
                     if width is not None and height is not None:
-                        current_image_bits.append(f"across a {width} × {height} pixel frame")
+                        current_image_bits.append(f"across a {width} x {height} pixel frame")
                     evidence_basis.append("uploaded-image detection")
             if image_bits:
                 response_parts.append("For the new image, " + ", and ".join(image_bits) + ".")
@@ -14575,17 +14560,20 @@ class AgnoChatRuntime:
                     max_runtime_seconds=step_cap,
                     debug=debug,
                 )
-                if report_text and (
-                    len(report_text) >= max(len(response_text), 600)
-                    or self._report_text_has_internal_orchestration(response_text)
+                if (
+                    report_text
+                    and (
+                        len(report_text) >= max(len(response_text), 600)
+                        or self._report_text_has_internal_orchestration(response_text)
+                    )
+                    and not self._report_text_has_internal_orchestration(report_text)
                 ):
-                    if not self._report_text_has_internal_orchestration(report_text):
-                        synthesis = ToolProgramSynthesis(
-                            response_text=report_text,
-                            evidence_basis=list(synthesis.evidence_basis or []),
-                            unresolved_points=list(synthesis.unresolved_points or []),
-                            confidence=synthesis.confidence,
-                        )
+                    synthesis = ToolProgramSynthesis(
+                        response_text=report_text,
+                        evidence_basis=list(synthesis.evidence_basis or []),
+                        unresolved_points=list(synthesis.unresolved_points or []),
+                        confidence=synthesis.confidence,
+                    )
             phase_timings["research_program_synthesis"] = round(time.monotonic() - started, 3)
             state["synthesis"] = synthesis.model_dump(mode="json")
             self._emit_event(
@@ -15035,9 +15023,9 @@ class AgnoChatRuntime:
                 payload.update(envelope)
             if isinstance(summary, dict):
                 for key, value in summary.items():
-                    if payload.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
-                        payload[key] = value
-                    elif key not in payload:
+                    if (
+                        payload.get(key) in (None, "", [], {}) and value not in (None, "", [], {})
+                    ) or key not in payload:
                         payload[key] = value
             text = cls._deterministic_segmentation_response_from_payload(
                 tool_name=tool_name,
@@ -18167,10 +18155,8 @@ class AgnoChatRuntime:
                 continue
 
         if runtime_status != "completed" and hasattr(iterator, "aclose"):
-            try:
+            with suppress(Exception):
                 await iterator.aclose()
-            except Exception:
-                pass
         if runtime_status != "completed":
             self._emit_event(
                 event_callback,
@@ -18340,7 +18326,7 @@ class AgnoChatRuntime:
             "metadata": {"runtime": "agno_tool_endpoint"},
         }
 
-    _CORE_TOOL_NAMES = {
+    _CORE_TOOL_NAMES: ClassVar[set[str]] = {
         "upload_to_bisque",
         "add_tags_to_resource",
         "bisque_add_to_dataset",

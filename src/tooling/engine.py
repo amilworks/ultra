@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -501,23 +502,35 @@ class ToolEngine:
                         outcome: dict[str, Any] = {"raw": None, "exc": None}
                         start_ts = time.time()
 
-                        def _progress_cb(payload: dict[str, Any]) -> None:
+                        def _progress_cb(
+                            payload: dict[str, Any],
+                            *,
+                            _tool_name: str = tool_name,
+                            _progress_queue: queue.Queue[object] = progress_queue,
+                        ) -> None:
                             if not isinstance(payload, dict):
                                 return
-                            payload.setdefault("tool", tool_name)
-                            progress_queue.put(payload)
+                            payload.setdefault("tool", _tool_name)
+                            _progress_queue.put(payload)
 
-                        def _run_tool() -> None:
+                        def _run_tool(
+                            *,
+                            _tool_name: str = tool_name,
+                            _tool_args_text: str = tool_args_text,
+                            _outcome: dict[str, Any] = outcome,
+                            _progress_queue: queue.Queue[object] = progress_queue,
+                            _progress_done: object = progress_done,
+                        ) -> None:
                             token = set_progress_callback(_progress_cb)
                             try:
-                                outcome["raw"] = self.tool_executor(
-                                    tool_name, tool_args_text, uploaded_files
+                                _outcome["raw"] = self.tool_executor(
+                                    _tool_name, _tool_args_text, uploaded_files
                                 )
-                            except Exception as exc:  # noqa: BLE001
-                                outcome["exc"] = exc
+                            except Exception as exc:
+                                _outcome["exc"] = exc
                             finally:
                                 reset_progress_callback(token)
-                                progress_queue.put(progress_done)
+                                _progress_queue.put(_progress_done)
 
                         thread = threading.Thread(target=_run_tool, daemon=True)
                         thread.start()
@@ -564,7 +577,7 @@ class ToolEngine:
                         raw_result = outcome["raw"]
                     else:
                         raw_result = self.tool_executor(tool_name, tool_args_text, uploaded_files)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     tool_runtime_error = str(exc)
                     logger.exception("Tool execution failed: %s", tool_name)
                     raw_result = {
@@ -1146,10 +1159,8 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
                 xyxy_values: list[float] = []
                 if isinstance(xyxy, list):
                     for value in xyxy[:4]:
-                        try:
+                        with suppress(TypeError, ValueError):
                             xyxy_values.append(float(value))
-                        except Exception:
-                            pass
                 detections.append(
                     {
                         "file": file_name,

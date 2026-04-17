@@ -65,6 +65,9 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check src tests
 
+      - name: Ruff strict ratchet
+        run: uv run ruff check src/auth src/config.py src/api/client.py src/api/v3.py src/tooling/domains src/tooling/engine.py src/evals/golden_tasks.py src/agno_backend/runtime.py src/agno_backend/pro_mode.py src/training/adapters.py src/api/main.py --select B,RUF,SIM,RET
+
       - name: Ruff format
         run: uv run ruff format --check src tests
 

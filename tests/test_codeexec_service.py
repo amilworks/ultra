@@ -27,7 +27,7 @@ def test_codeexec_service_job_lifecycle_and_artifact_download(
     )
 
     def fake_run_attempt(*, job_id: str, work_dir: Path, **_kwargs):
-        outputs = work_dir / "outputs"
+        outputs = work_dir / "source" / "outputs"
         outputs.mkdir(parents=True, exist_ok=True)
         (outputs / "metrics.json").write_text('{"accuracy": 0.94}', encoding="utf-8")
         return {

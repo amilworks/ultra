@@ -175,7 +175,10 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     @app.get("/v1/jobs/{job_id}/artifacts/{artifact_path:path}")
     async def get_artifact(job_id: str, artifact_path: str, request: Request):
         _require_auth(request)
-        path = resolved_settings.artifact_root / job_id / "workdir" / artifact_path
+        work_dir = resolved_settings.artifact_root / job_id / "workdir"
+        source_candidate = (work_dir / "source" / artifact_path).resolve()
+        root_candidate = (work_dir / artifact_path).resolve()
+        path = source_candidate if source_candidate.exists() else root_candidate
         if not path.exists():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
         return FileResponse(path)

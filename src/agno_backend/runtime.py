@@ -13593,6 +13593,10 @@ class AgnoChatRuntime:
         normalized_draft = str(draft_response_text or "").strip()
         if not normalized_draft:
             return "", {}
+        code_execution_failed = any(
+            "Code execution failed in this turn." in str(item or "")
+            for item in list(reservations or [])
+        )
         math_explainer_request = self._is_math_explanation_request(latest_user_text)
         proof_writer_instructions: list[str] = []
         report_writer_instructions: list[str] = []
@@ -13775,6 +13779,15 @@ class AgnoChatRuntime:
                 ),
                 *(
                     [
+                        "A requested code execution step failed in this turn.",
+                        "Do not report expected, estimated, approximate, or visually inferred numeric outputs as if they were measured.",
+                        "If the user requested metrics or fitted parameters, state that the computation failed and omit those values unless a trusted tool actually returned them.",
+                    ]
+                    if code_execution_failed
+                    else []
+                ),
+                *(
+                    [
                         "Because this is a mathematical explanation, use this cadence wherever it helps: intuition, formal statement or equation, interpretation, consequence.",
                         "Keep equations that clarify the concept, and trim equations that merely display formalism without explanatory payoff.",
                         "Review any practical recommendations and make them robust, conditional, and audience-appropriate for student readers.",
@@ -13856,7 +13869,11 @@ class AgnoChatRuntime:
                 **dict(compression_stats),
                 "model_route": dict(model_route),
             }
-        if re.search(r"\d", normalized_draft) and not re.search(r"\d", normalized_response):
+        if (
+            re.search(r"\d", normalized_draft)
+            and not re.search(r"\d", normalized_response)
+            and not code_execution_failed
+        ):
             return "", {
                 **dict(compression_stats),
                 "model_route": dict(model_route),
@@ -15502,6 +15519,71 @@ class AgnoChatRuntime:
                 lines.append(prefix + rendered)
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def _latest_failed_code_execution_summary(
+        tool_invocations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        latest_failure: dict[str, Any] | None = None
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("tool") or "").strip() != "execute_python_job":
+                continue
+            status = str(invocation.get("status") or "").strip().lower()
+            raw_summary = invocation.get("output_summary")
+            summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+            if bool(summary.get("success")) or status == "completed":
+                latest_failure = None
+                continue
+            if (
+                status in {"failed", "error"}
+                or summary.get("success") is False
+                or str(summary.get("error_message") or "").strip()
+                or str(summary.get("error_class") or "").strip()
+            ):
+                latest_failure = {
+                    **summary,
+                    "status": status or str(summary.get("status") or "").strip().lower(),
+                    "output_preview": str(invocation.get("output_preview") or "").strip(),
+                }
+        return latest_failure
+
+    def _code_execution_fail_closed_text(
+        self,
+        tool_invocations: list[dict[str, Any]],
+    ) -> str | None:
+        failure = self._latest_failed_code_execution_summary(tool_invocations)
+        if not isinstance(failure, dict):
+            return None
+        error_class = str(failure.get("error_class") or "").strip()
+        error_message = str(failure.get("error_message") or failure.get("output_preview") or "").strip()
+        lines = [
+            "The requested code execution did not complete successfully, so this turn does not include measured code-derived outputs."
+        ]
+        if error_class and error_message:
+            lines.append(f"The latest execution failed with {error_class}: {error_message}")
+        elif error_message:
+            lines.append(f"The latest execution failed: {error_message}")
+        elif error_class:
+            lines.append(f"The latest execution failed with {error_class}.")
+        lines.append(
+            "I am not reporting expected, approximate, or inferred numeric results from the failed run."
+        )
+        return " ".join(line.rstrip(".") + "." for line in lines if line).strip()
+
+    def _code_execution_fail_closed_reservations(
+        self,
+        tool_invocations: list[dict[str, Any]],
+    ) -> list[str]:
+        failure = self._latest_failed_code_execution_summary(tool_invocations)
+        if not isinstance(failure, dict):
+            return []
+        notes = [
+            "Code execution failed in this turn. Do not report expected, estimated, approximate, or visually inferred numeric outputs as measured results."
+        ]
+        error_message = str(failure.get("error_message") or failure.get("output_preview") or "").strip()
+        if error_message:
+            notes.append(f"Latest code execution failure: {error_message}")
+        return notes
+
     def _resume_requirements(
         self,
         *,
@@ -16262,6 +16344,11 @@ class AgnoChatRuntime:
                     ):
                         response_text = str(metadata_specialist.direct_answer or "").strip()
                 if response_text:
+                    fail_closed_text = self._code_execution_fail_closed_text(
+                        list(tool_result.get("tool_invocations") or [])
+                    )
+                    if fail_closed_text:
+                        response_text = fail_closed_text
                     supporting_points = [
                         str(item.get("output_summary") or "").strip()
                         for item in list(tool_result.get("tool_invocations") or [])
@@ -16306,6 +16393,11 @@ class AgnoChatRuntime:
                             ]
                             if str(item or "").strip()
                         ]
+                    )
+                    reservations.extend(
+                        self._code_execution_fail_closed_reservations(
+                            list(tool_result.get("tool_invocations") or [])
+                        )
                     )
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                         latest_user_text=latest_user_text,
@@ -17797,6 +17889,11 @@ class AgnoChatRuntime:
                 ):
                     response_text = str(metadata_specialist.direct_answer or "").strip()
             if response_text and execution_regime and execution_regime != "fast_dialogue":
+                fail_closed_text = self._code_execution_fail_closed_text(
+                    list(pro_mode_result.tool_invocations or [])
+                )
+                if fail_closed_text:
+                    response_text = fail_closed_text
                 supporting_points = [
                     str(item.get("output_summary") or "").strip()
                     for item in list(pro_mode_result.tool_invocations or [])
@@ -17838,6 +17935,11 @@ class AgnoChatRuntime:
                         ]
                         if str(item or "").strip()
                     ]
+                )
+                reservations.extend(
+                    self._code_execution_fail_closed_reservations(
+                        list(pro_mode_result.tool_invocations or [])
+                    )
                 )
                 polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                     latest_user_text=latest_user_text,

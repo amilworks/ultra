@@ -1636,3 +1636,72 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
     assert metadata["pro_mode"]["model_routes"]["pro_mode_final_writer"]["transport"] == (
         "aws_bedrock_claude"
     )
+
+
+def test_tool_workflow_fail_closes_when_code_execution_does_not_produce_measurements(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="sandbox-profile",
+        pro_mode_aws_sso_auth=True,
+    )
+    tool_invocations = [
+        {
+            "tool": "execute_python_job",
+            "status": "failed",
+            "output_summary": {
+                "success": False,
+                "error_class": "backend_unavailable",
+                "error_message": (
+                    "Docker is not available. Build/start Docker and retry "
+                    "execute_python_job."
+                ),
+            },
+        }
+    ]
+    fail_closed_text = runtime._code_execution_fail_closed_text(tool_invocations)
+    reservations = runtime._code_execution_fail_closed_reservations(tool_invocations)
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_writer_phase(**kwargs):
+        captured_prompt["prompt"] = str(kwargs.get("prompt") or "")
+        return str(fail_closed_text or ""), {
+            "transport": "aws_bedrock_claude",
+            "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+            "fallback_used": False,
+        }
+
+    runtime._arun_text_phase_with_optional_pro_mode_transport = fake_writer_phase  # type: ignore[method-assign]
+
+    response_text, _writer_stats = asyncio.run(
+        runtime._run_pro_mode_final_writer(
+            latest_user_text="Fit a 4-parameter logistic curve and report EC50 and Hill slope.",
+            draft_response_text="Expected Results: EC50 ~ 1.7 uM and Hill slope ~ 1.2.",
+            execution_regime="tool_workflow",
+            task_regime="programmatic_experiment",
+            supporting_points=["Code execution failed before producing measured outputs."],
+            reservations=reservations,
+            session_state={"pro_mode_context": {}},
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            max_runtime_seconds=30,
+            debug=False,
+        )
+    )
+
+    prompt = captured_prompt["prompt"]
+    assert fail_closed_text is not None
+    assert "did not complete successfully" in fail_closed_text
+    assert "EC50" not in fail_closed_text
+    assert "Hill slope" not in fail_closed_text
+    assert any(
+        "Code execution failed in this turn." in str(item or "") for item in reservations
+    )
+    assert "A requested code execution step failed in this turn." in prompt
+    assert "Do not report expected, estimated, approximate" in prompt
+    assert response_text == fail_closed_text

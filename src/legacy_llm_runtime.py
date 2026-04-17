@@ -2097,6 +2097,7 @@ def stream_chat_completion_with_tools(
         "- If execute_python_job fails, pass the failure payload to codegen_python_plan.previous_failure and iterate.\n"
         "- Keep code execution retries bounded; stop after budget is exhausted and report limitations clearly.\n"
         "- For code execution outputs, report concrete method + metrics + artifacts (for example dataset shape/class balance, PCA variance metrics, model performance metrics, output filenames) instead of a one-line status.\n"
+        "- If code execution fails or does not return trusted measured outputs, do not report expected, approximate, or visually inferred numeric values as if they were measured.\n"
         "- Use advanced/interactive tools (sam2_prompt_image, segment_image_sam2, segment_video_sam2, stats_*, bisque_advanced_search, run_bisque_module) only when explicitly requested or strictly necessary.\n"
         "- For segmentation uploads, use preferred_upload_path (or preferred_upload_paths) when available; do not upload overlay visualizations unless explicitly requested.\n"
         "- If a system message provides follow-up artifact context with local paths, reuse those paths for follow-up analyses/actions (for example bioio_load_image, segment_image_sam3, execute_python_job inputs, upload_to_bisque) before asking the user to regenerate outputs.\n"
@@ -2262,6 +2263,9 @@ def stream_chat_completion_with_tools(
         )
         dynamic_rules.append(
             "Final JSON for code execution must include at least 3 quantitative measurements, at least 1 evidence item citing produced artifacts, and explicit limitations tied to observed tool signals."
+        )
+        dynamic_rules.append(
+            "If code execution fails, state that failure in result first and omit any unmeasured fitted parameters or estimated numeric outputs."
         )
     elif code_execution_prompt and not code_execution_enabled:
         dynamic_rules.append(

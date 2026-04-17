@@ -63,6 +63,7 @@ from .memory import (
     ScientificMemoryService,
     ScientificMemoryUpdate,
 )
+from .codeexec_reasoning import build_codeexec_reasoning_agent
 from .pro_mode import (
     ProModeIntakeDecision,
     ProModeSynthesis,
@@ -3126,6 +3127,13 @@ class AgnoChatRuntime:
                 for tool_name in list(early_bisque_plan.selected_tool_names or [])
             ):
                 return early_bisque_plan
+        if AgnoChatRuntime._is_code_execution_request(user_text):
+            return ProModeToolPlan(
+                category="code_execution",
+                selected_tool_names=["codegen_python_plan", "execute_python_job"],
+                strict_validation=True,
+                reason="Prompt explicitly requests code generation and sandbox execution.",
+            )
         if AgnoChatRuntime._requires_iterative_research_program(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -3145,14 +3153,6 @@ class AgnoChatRuntime:
                     "Prompt requires a multi-step scientific evidence program rather than a single-tool pass."
                 ),
             )
-        if AgnoChatRuntime._is_code_execution_request(user_text):
-            return ProModeToolPlan(
-                category="code_execution",
-                selected_tool_names=["codegen_python_plan", "execute_python_job"],
-                strict_validation=True,
-                reason="Prompt explicitly requests code generation and sandbox execution.",
-            )
-
         if AgnoChatRuntime._requires_validated_numeric_workflow(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -4504,6 +4504,23 @@ class AgnoChatRuntime:
         return len(lowered) > 280 or sentence_count >= 3
 
     @staticmethod
+    def _requires_codeexec_reasoning_agent(user_text: str) -> bool:
+        lowered = str(user_text or "").strip().lower()
+        if not lowered or not AgnoChatRuntime._is_code_execution_request(lowered):
+            return False
+        return AgnoChatRuntime._requires_deep_reasoning(lowered) or bool(
+            re.search(
+                r"\b("
+                r"bootstrap|cross[- ]?validation|diagnostic plot|diagnostic plots|"
+                r"compare .*model|compare .*famil|model famil(?:y|ies)|nonlinear model|"
+                r"confidence interval|uncertainty|justify|best model|why .* preferable|"
+                r"quality[- ]control report|qc report|outlier"
+                r")\b",
+                lowered,
+            )
+        )
+
+    @staticmethod
     def _requires_validated_numeric_workflow(
         *,
         user_text: str,
@@ -4847,6 +4864,25 @@ class AgnoChatRuntime:
             )
             return stabilized
         if tool_plan is not None:
+            if tool_plan.category == "code_execution" and self._requires_codeexec_reasoning_agent(
+                latest_user_text
+            ):
+                stabilized.route = "deep_reasoning"
+                stabilized.reason = (
+                    str(tool_plan.reason or stabilized.reason or "").strip()
+                    + " Hard computational prompt upgraded to the dedicated code-execution reasoning agent."
+                ).strip()
+                stabilized.direct_response = None
+                stabilized.selected_tool_names = list(tool_plan.selected_tool_names)
+                stabilized.tool_plan_category = str(tool_plan.category or "").strip() or None
+                stabilized.strict_tool_validation = bool(tool_plan.strict_validation)
+                _apply_policy(
+                    route="deep_reasoning",
+                    tool_plan_override=tool_plan,
+                    regime_override="reasoning_solver",
+                    task_regime_override="self_contained_reasoning",
+                )
+                return stabilized
             stabilized.route = "tool_workflow"
             stabilized.reason = str(tool_plan.reason or stabilized.reason or "").strip()
             stabilized.direct_response = None
@@ -6210,6 +6246,185 @@ class AgnoChatRuntime:
                     },
                     "summary": "Completed a focused multi-agent team pass with Cartesian planning and one controlled Socratic crux round.",
                 }
+            },
+            runtime_status="completed",
+        )
+
+    async def _run_pro_mode_codeexec_reasoning_solver(
+        self,
+        *,
+        latest_user_text: str,
+        task_regime: str | None,
+        shared_context: dict[str, Any],
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+        selected_tool_names: list[str],
+        conversation_id: str | None,
+        run_id: str | None,
+        user_id: str | None,
+        max_runtime_seconds: int,
+        debug: bool | None,
+    ) -> ProModeWorkflowResult:
+        tool_names = [
+            tool_name
+            for tool_name in self._normalize_selected_tool_names(selected_tool_names)
+            if tool_name in {"codegen_python_plan", "execute_python_job"}
+        ] or ["codegen_python_plan", "execute_python_job"]
+        memory_messages = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("memory_messages") or [])
+            if str(item or "").strip()
+        ]
+        knowledge_messages = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("knowledge_messages") or [])
+            if str(item or "").strip()
+        ]
+        analysis_brief_lines = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("analysis_brief_lines") or [])
+            if str(item or "").strip()
+        ]
+        context_sections: list[str] = []
+        if memory_messages:
+            context_sections.append(
+                "Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6])
+            )
+        if knowledge_messages:
+            context_sections.append(
+                "Relevant knowledge context:\n"
+                + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+            )
+        if analysis_brief_lines:
+            context_sections.append(
+                "Relevant running summary:\n"
+                + "\n".join(f"- {item}" for item in analysis_brief_lines[:4])
+            )
+
+        prompt = "\n\n".join(
+            [
+                "Solve the following hard computational research request.",
+                "Use reasoning first to decide the minimum code workflow needed.",
+                "When execution is needed, you must ground the answer in produced artifacts or structured tool outputs.",
+                "If the execution fails or yields incomplete evidence, say so explicitly and do not fabricate measured outputs.",
+                "Return a scientist-facing answer with methods, key findings, interpretation, and limitations.",
+                *context_sections,
+                f"Request: {latest_user_text}",
+            ]
+        )
+        session_payload = {
+            "pro_mode_context": {
+                "memory_messages": memory_messages[:6],
+                "knowledge_messages": knowledge_messages[:6],
+                "analysis_brief_lines": analysis_brief_lines[:4],
+            }
+        }
+        tool_functions = self._build_tool_functions(
+            tool_names=tool_names,
+            uploaded_files=uploaded_files,
+            user_text=latest_user_text,
+            selection_context=selection_context,
+        )
+
+        def _build_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
+            return build_codeexec_reasoning_agent(
+                model_builder=model_builder,
+                tools=tool_functions,
+                max_runtime_seconds=max_runtime_seconds,
+                session_state=session_payload,
+                debug_mode=bool(debug),
+            )
+
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
+        )
+        try:
+            if self._uses_published_pro_mode_api():
+                result = await _build_agent(self._build_model).arun(
+                    prompt,
+                    stream=False,
+                    user_id=user_id,
+                    session_id=self._scope_session_id(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        run_id=f"{str(run_id or '').strip()}::codeexec_reasoning_solver"
+                        if run_id
+                        else "codeexec_reasoning_solver",
+                    ),
+                    debug_mode=bool(debug),
+                )
+                model_route = self._pro_mode_model_route_metadata(
+                    fallback_used=True,
+                    failure_code="structured_phase_requires_tool_capable_model",
+                    active_model=self.model,
+                )
+            else:
+                result, model_route = await self._arun_with_optional_pro_mode_fallback(
+                    phase_name="codeexec_reasoning_solver",
+                    prompt=prompt,
+                    build_agent=_build_agent,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    debug=debug,
+                )
+        except Exception as exc:
+            return ProModeWorkflowResult(
+                response_text="",
+                metadata={
+                    "pro_mode": {
+                        "execution_path": "codeexec_reasoning_solver",
+                        "runtime_status": "failed",
+                        "model_route": model_route,
+                    },
+                    "tool_invocations": [],
+                },
+                runtime_status="failed",
+                runtime_error=str(exc or exc.__class__.__name__),
+            )
+
+        run_output = result if isinstance(result, RunOutput) else None
+        tool_invocations = self._tool_invocations_from_run_output(run_output)
+        response_text, _source = self._coerce_visible_output(result)
+        normalized_response_text = str(response_text or "").strip()
+        fail_closed_text = self._code_execution_fail_closed_text(tool_invocations)
+        if fail_closed_text and not normalized_response_text:
+            normalized_response_text = fail_closed_text
+        if not normalized_response_text and not tool_invocations:
+            return ProModeWorkflowResult(
+                response_text="",
+                metadata={
+                    "pro_mode": {
+                        "execution_path": "codeexec_reasoning_solver",
+                        "runtime_status": "failed",
+                        "model_route": model_route,
+                    },
+                    "tool_invocations": [],
+                },
+                runtime_status="failed",
+                runtime_error="Code-execution reasoning agent returned no answer and no tool outputs.",
+            )
+        verifier_issues = self._code_execution_fail_closed_reservations(tool_invocations)
+        verifier_report = ProModeVerifierReport(
+            passed=not bool(verifier_issues),
+            issues=list(verifier_issues),
+            suggested_changes=[],
+            confidence="medium" if tool_invocations else "low",
+        )
+        return ProModeWorkflowResult(
+            response_text=normalized_response_text,
+            metadata={
+                "pro_mode": {
+                    "execution_path": "codeexec_reasoning_solver",
+                    "task_regime": str(task_regime or "self_contained_reasoning").strip().lower()
+                    or "self_contained_reasoning",
+                    "model_route": model_route,
+                    "verifier": verifier_report.model_dump(mode="json"),
+                },
+                "tool_invocations": tool_invocations,
             },
             runtime_status="completed",
         )
@@ -17619,6 +17834,15 @@ class AgnoChatRuntime:
                 }
                 return
             if intake_decision.execution_regime == "reasoning_solver":
+                codeexec_reasoning_turn = (
+                    str(intake_decision.tool_plan_category or "").strip() == "code_execution"
+                    and {
+                        tool_name
+                        for tool_name in list(intake_decision.selected_tool_names or [])
+                        if str(tool_name or "").strip()
+                    }
+                    >= {"codegen_python_plan", "execute_python_job"}
+                )
                 self._emit_event(
                     event_callback,
                     {
@@ -17626,19 +17850,46 @@ class AgnoChatRuntime:
                         "event_type": "pro_mode.phase_started",
                         "phase": "reasoning_solver",
                         "status": "started",
-                        "message": "Delegating to the self-contained reasoning solver.",
-                        "payload": {"task_regime": intake_decision.task_regime},
+                        "message": (
+                            "Delegating to the dedicated code-execution reasoning agent."
+                            if codeexec_reasoning_turn
+                            else "Delegating to the self-contained reasoning solver."
+                        ),
+                        "payload": {
+                            "task_regime": intake_decision.task_regime,
+                            "selected_tool_names": list(intake_decision.selected_tool_names or []),
+                        },
                     },
                 )
-                pro_mode_result = await self._run_pro_mode_reasoning_solver(
-                    latest_user_text=latest_user_text,
-                    task_regime=intake_decision.task_regime,
-                    shared_context=shared_context,
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    user_id=user_id,
-                    max_runtime_seconds=effective_max_runtime_seconds,
-                    debug=pro_mode_debug,
+                if codeexec_reasoning_turn:
+                    pro_mode_result = await self._run_pro_mode_codeexec_reasoning_solver(
+                        latest_user_text=latest_user_text,
+                        task_regime=intake_decision.task_regime,
+                        shared_context=shared_context,
+                        uploaded_files=uploaded_files,
+                        selection_context=effective_selection_context,
+                        selected_tool_names=list(intake_decision.selected_tool_names or []),
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        max_runtime_seconds=effective_max_runtime_seconds,
+                        debug=pro_mode_debug,
+                    )
+                else:
+                    pro_mode_result = await self._run_pro_mode_reasoning_solver(
+                        latest_user_text=latest_user_text,
+                        task_regime=intake_decision.task_regime,
+                        shared_context=shared_context,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        max_runtime_seconds=effective_max_runtime_seconds,
+                        debug=pro_mode_debug,
+                    )
+                solver_tool_invocations = (
+                    list(pro_mode_result.metadata.get("tool_invocations") or [])
+                    if isinstance(pro_mode_result.metadata, dict)
+                    else []
                 )
                 if not str(pro_mode_result.response_text or "").strip():
                     self._emit_event(
@@ -17707,7 +17958,7 @@ class AgnoChatRuntime:
                         knowledge_context=knowledge_context,
                         memory_context=memory_context.metadata(),
                         knowledge_result=knowledge_result.metadata(),
-                        fallback_tool_invocations=[],
+                        fallback_tool_invocations=solver_tool_invocations,
                         runtime_status=pro_mode_result.runtime_status,
                         runtime_error=pro_mode_result.runtime_error,
                         extra_metadata={
@@ -17768,13 +18019,21 @@ class AgnoChatRuntime:
                     )
                     verifier_payload = dict(solver_runtime_meta.get("verifier") or {})
                     solver_metadata = {
-                        "execution_path": "reasoning_solver",
+                        "execution_path": (
+                            "codeexec_reasoning_solver"
+                            if codeexec_reasoning_turn
+                            else "reasoning_solver"
+                        ),
                         "route": intake_decision.route,
                         "execution_regime": "reasoning_solver",
                         "task_regime": intake_decision.task_regime,
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
-                        "active_roles": ["Front Door Triage", "Reasoning Solver"],
+                        "active_roles": (
+                            ["Front Door Triage", "Code Execution Reasoner"]
+                            if codeexec_reasoning_turn
+                            else ["Front Door Triage", "Reasoning Solver"]
+                        ),
                         "phase_order": [
                             "intake",
                             "context_policy",
@@ -17857,7 +18116,7 @@ class AgnoChatRuntime:
                         knowledge_context=knowledge_context,
                         memory_context=memory_context.metadata(),
                         knowledge_result=knowledge_result.metadata(),
-                        fallback_tool_invocations=[],
+                        fallback_tool_invocations=solver_tool_invocations,
                         runtime_status=pro_mode_result.runtime_status,
                         runtime_error=pro_mode_result.runtime_error,
                         extra_metadata={

@@ -2938,6 +2938,48 @@ def create_app() -> FastAPI:
             return manifest
         return _update_manifest_with_entries(run_id, added_entries)
 
+    def _backfill_progress_output_artifacts(
+        run_id: str, manifest: dict[str, Any]
+    ) -> dict[str, Any]:
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = []
+
+        progress_events: list[dict[str, Any]] = []
+        for event in store.list_events(run_id, limit=300):
+            if str(event.get("event_type") or "").strip() != "chat_done_payload":
+                continue
+            payload = event.get("payload")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            response = payload_dict.get("response")
+            response_dict = response if isinstance(response, dict) else {}
+            progress_items = response_dict.get("progress_events")
+            if not isinstance(progress_items, list):
+                continue
+            progress_events.extend(
+                item for item in progress_items[:300] if isinstance(item, dict)
+            )
+
+        if not progress_events:
+            return manifest
+
+        existing_paths = {
+            str(item.get("path") or "").strip()
+            for item in artifacts
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        }
+        added_entries: list[dict[str, Any]] = []
+        for entry in _snapshot_progress_artifacts(run_id, progress_events):
+            rel_path = str(entry.get("path") or "").strip()
+            if not rel_path or rel_path in existing_paths:
+                continue
+            existing_paths.add(rel_path)
+            added_entries.append(entry)
+
+        if not added_entries:
+            return manifest
+        return _update_manifest_with_entries(run_id, added_entries)
+
     def _update_manifest_with_entries(run_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
         manifest = _load_manifest(run_id)
         artifacts = manifest.get("artifacts")
@@ -4903,7 +4945,9 @@ def create_app() -> FastAPI:
     def _materialize_manifest_if_missing(run_id: str) -> dict[str, Any]:
         manifest_path = _manifest_path(run_id)
         if manifest_path.exists():
-            return _backfill_yolo_annotated_artifacts(run_id, _load_manifest(run_id))
+            manifest = _load_manifest(run_id)
+            manifest = _backfill_progress_output_artifacts(run_id, manifest)
+            return _backfill_yolo_annotated_artifacts(run_id, manifest)
 
         run_dir = _ensure_run_artifact_dir(run_id)
         entries: list[dict[str, Any]] = []
@@ -4911,6 +4955,7 @@ def create_app() -> FastAPI:
             if file_path.is_file() and file_path.name != "artifact_manifest.json":
                 entries.append(_artifact_entry(run_id, file_path))
         manifest = _update_manifest_with_entries(run_id, entries)
+        manifest = _backfill_progress_output_artifacts(run_id, manifest)
         return _backfill_yolo_annotated_artifacts(run_id, manifest)
 
     def _request_hash(payload: Any) -> str:

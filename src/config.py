@@ -946,6 +946,26 @@ class Settings(BaseSettings):
             "for completion."
         ),
     )
+    code_execution_service_url: str | None = Field(
+        default=None,
+        description="Private base URL for the dedicated code execution service.",
+    )
+    code_execution_service_api_key: str | None = Field(
+        default=None,
+        description="Bearer token used by the backend when calling the code execution service.",
+    )
+    code_execution_service_timeout_seconds: int = Field(
+        default=60,
+        description="HTTP timeout for individual code execution service requests.",
+    )
+    code_execution_service_poll_interval_seconds: float = Field(
+        default=1.5,
+        description="Poll interval when waiting for code execution service jobs.",
+    )
+    code_execution_service_wait_timeout_seconds: int = Field(
+        default=7200,
+        description="Maximum wait time for a code execution service job before timing out.",
+    )
     code_execution_default_timeout_seconds: int = Field(
         default=900,
         description="Default wall-clock timeout for Python execution jobs.",

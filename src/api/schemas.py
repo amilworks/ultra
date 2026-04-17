@@ -476,6 +476,7 @@ class V2ArtifactRecord(BaseModel):
     source_path: str | None = None
     preview_path: str | None = None
     title: str | None = None
+    result_group_id: str | None = None
     mime_type: str | None = None
     size_bytes: int | None = None
     sha256: str | None = None
@@ -907,6 +908,7 @@ class ArtifactRecord(BaseModel):
     modified_at: datetime
     source_path: str | None = None
     title: str | None = None
+    result_group_id: str | None = None
 
 
 class ArtifactListResponse(BaseModel):
@@ -1810,6 +1812,7 @@ class V3ArtifactRecord(BaseModel):
     path: str | None = None
     source_path: str | None = None
     preview_path: str | None = None
+    result_group_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

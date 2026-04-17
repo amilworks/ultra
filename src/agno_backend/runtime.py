@@ -4603,6 +4603,54 @@ class AgnoChatRuntime:
             return set(required).issubset(used_tool_names)
         return bool(used_tool_names.intersection(required))
 
+    @staticmethod
+    def _completed_tool_names(tool_invocations: list[dict[str, Any]]) -> set[str]:
+        return {
+            str(invocation.get("tool") or "").strip()
+            for invocation in list(tool_invocations or [])
+            if str(invocation.get("status") or "").strip().lower() == "completed"
+            and str(invocation.get("tool") or "").strip()
+        }
+
+    @classmethod
+    def _missing_required_tool_names(
+        cls,
+        *,
+        tool_invocations: list[dict[str, Any]],
+        required_tool_names: list[str],
+    ) -> list[str]:
+        completed = cls._completed_tool_names(tool_invocations)
+        return [
+            str(tool_name or "").strip()
+            for tool_name in list(required_tool_names or [])
+            if str(tool_name or "").strip() and str(tool_name or "").strip() not in completed
+        ]
+
+    @staticmethod
+    def _latest_result_refs_from_tool_invocations(
+        tool_invocations: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        refs: dict[str, Any] = {}
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("status") or "").strip().lower() != "completed":
+                continue
+            envelope = invocation.get("output_envelope")
+            if not isinstance(envelope, dict):
+                continue
+            raw_refs = envelope.get("latest_result_refs")
+            if isinstance(raw_refs, dict):
+                for key, value in raw_refs.items():
+                    if value is None:
+                        continue
+                    refs[str(key)] = value
+            result_group_id = (
+                str(envelope.get("result_group_id") or "").strip()
+                or str(refs.get("latest_segmentation_result_group_id") or "").strip()
+            )
+            if result_group_id:
+                refs.setdefault("latest_segmentation_result_group_id", result_group_id)
+        return refs
+
     def _stabilize_pro_mode_intake_decision(
         self,
         *,
@@ -5345,6 +5393,7 @@ class AgnoChatRuntime:
                 "prairie_dog_count",
                 "burrow_count",
                 "output_directory",
+                "result_group_id",
             ):
                 if key in parsed:
                     summary[key] = parsed[key]
@@ -5631,6 +5680,20 @@ class AgnoChatRuntime:
             rendered = self._presentation_text(item, max_chars=160)
             if rendered:
                 lines.append(f"Key measurement: {rendered}")
+        active_result_group_id = str(state.get("active_result_group_id") or "").strip()
+        if active_result_group_id:
+            lines.append(
+                f"Active result group: {self._presentation_text(active_result_group_id, max_chars=120)}"
+            )
+        active_report_handle = str(state.get("active_report_handle") or "").strip()
+        if active_report_handle:
+            lines.append(
+                f"Active report: {self._presentation_text(Path(active_report_handle).name, max_chars=120)}"
+            )
+        for item in list(state.get("active_selected_files") or [])[:2]:
+            rendered = self._presentation_text(Path(str(item)).name, max_chars=120)
+            if rendered:
+                lines.append(f"Selected file: {rendered}")
         for item in list(state.get("recommended_next_steps") or [])[:2]:
             rendered = self._presentation_text(item, max_chars=180)
             if rendered:
@@ -10268,6 +10331,11 @@ class AgnoChatRuntime:
                 strict_validation=True,
             )
         ):
+            existing_tool_invocations = list(last_result.get("tool_invocations") or [])
+            missing_required_tool_names = self._missing_required_tool_names(
+                tool_invocations=existing_tool_invocations,
+                required_tool_names=required_tool_names,
+            )
             fallback_actions = [
                 ToolProgramAction(
                     tool_name=tool_name,
@@ -10277,7 +10345,7 @@ class AgnoChatRuntime:
                     ),
                     args={},
                 )
-                for tool_name in list(required_tool_names)
+                for tool_name in missing_required_tool_names
                 if str(tool_name or "").strip()
             ]
             if fallback_actions:
@@ -10291,6 +10359,7 @@ class AgnoChatRuntime:
                         "message": "Running the required tool directly because the earlier answer skipped it.",
                         "payload": {
                             "required_tool_names": list(required_tool_names),
+                            "missing_required_tool_names": missing_required_tool_names,
                             "tool_plan_category": str(
                                 tool_plan.category if tool_plan is not None else ""
                             ),
@@ -10305,11 +10374,14 @@ class AgnoChatRuntime:
                     latest_user_text=latest_user_text,
                     selection_context=selection_context,
                     event_callback=event_callback,
+                    latest_result_refs_seed=self._latest_result_refs_from_tool_invocations(
+                        existing_tool_invocations
+                    ),
                     request_bisque_auth=request_bisque_auth,
                 )
                 if deterministic_invocations:
                     merged_tool_invocations = self._merge_tool_invocations(
-                        list(last_result.get("tool_invocations") or []),
+                        existing_tool_invocations,
                         deterministic_invocations,
                     )
                     deterministic_satisfied = self._tool_workflow_satisfied(
@@ -10330,6 +10402,7 @@ class AgnoChatRuntime:
                     )
                     deterministic_tool_workflow_meta["deterministic_required_tool_fallback"] = {
                         "required_tool_names": list(required_tool_names),
+                        "missing_required_tool_names": missing_required_tool_names,
                         "tool_invocation_count": len(deterministic_invocations),
                     }
                     deterministic_metadata["tool_workflow"] = deterministic_tool_workflow_meta
@@ -10670,6 +10743,8 @@ class AgnoChatRuntime:
             "preview_paths": [],
             "array_paths": [],
             "job_ids": [],
+            "report_paths": [],
+            "summary_csv_paths": [],
         }
 
         for key, raw_values in dict(
@@ -10765,6 +10840,8 @@ class AgnoChatRuntime:
                         continue
                     for key in ("preferred_upload_path", "mask_path", "mask_volume_path"):
                         _append("mask_paths", row.get(key))
+                _append("report_paths", envelope.get("report_path"))
+                _append("summary_csv_paths", envelope.get("summary_csv_path"))
             elif tool_name == "yolo_detect":
                 _append(
                     "prediction_json_paths",
@@ -11242,6 +11319,15 @@ class AgnoChatRuntime:
             state["last_next_steps"] = contract_brief["next_steps"][-4:]
         if contract_brief["limitations"]:
             state["last_limitations"] = contract_brief["limitations"][-4:]
+        scientific_handles = self._scientific_result_handles_from_tool_invocations(tool_invocations)
+        if scientific_handles["active_result_group_id"]:
+            state["active_result_group_id"] = scientific_handles["active_result_group_id"]
+        if scientific_handles["active_report_handle"]:
+            state["active_report_handle"] = scientific_handles["active_report_handle"]
+        if scientific_handles["active_summary_csv_handle"]:
+            state["active_summary_csv_handle"] = scientific_handles["active_summary_csv_handle"]
+        if scientific_handles["active_selected_files"]:
+            state["active_selected_files"] = scientific_handles["active_selected_files"][-8:]
         self._save_analysis_conversation_state(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -11249,6 +11335,61 @@ class AgnoChatRuntime:
             state=state,
             title=title,
         )
+
+    @staticmethod
+    def _scientific_result_handles_from_tool_invocations(
+        tool_invocations: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        active_result_group_id = ""
+        active_report_handle = ""
+        active_summary_csv_handle = ""
+        active_selected_files: list[str] = []
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("status") or "").strip().lower() != "completed":
+                continue
+            tool_name = str(invocation.get("tool") or "").strip()
+            if tool_name not in {
+                "segment_image_megaseg",
+                "quantify_segmentation_masks",
+                "segment_image_sam2",
+                "segment_image_sam3",
+            }:
+                continue
+            envelope = invocation.get("output_envelope")
+            if not isinstance(envelope, dict):
+                continue
+            refs = envelope.get("latest_result_refs")
+            refs_dict = dict(refs) if isinstance(refs, dict) else {}
+            candidate_group_id = (
+                str(envelope.get("result_group_id") or "").strip()
+                or str(refs_dict.get("latest_segmentation_result_group_id") or "").strip()
+            )
+            if candidate_group_id:
+                active_result_group_id = candidate_group_id
+            candidate_report = (
+                str(envelope.get("report_path") or "").strip()
+                or str(refs_dict.get("segment_image_megaseg.report_path") or "").strip()
+            )
+            if candidate_report:
+                active_report_handle = candidate_report
+            candidate_summary_csv = (
+                str(envelope.get("summary_csv_path") or "").strip()
+                or str(refs_dict.get("segment_image_megaseg.summary_csv_path") or "").strip()
+            )
+            if candidate_summary_csv:
+                active_summary_csv_handle = candidate_summary_csv
+            for row in list(envelope.get("files_processed") or []):
+                if not isinstance(row, dict):
+                    continue
+                file_label = str(row.get("file") or row.get("path") or "").strip()
+                if file_label and file_label not in active_selected_files:
+                    active_selected_files.append(file_label)
+        return {
+            "active_result_group_id": active_result_group_id,
+            "active_report_handle": active_report_handle,
+            "active_summary_csv_handle": active_summary_csv_handle,
+            "active_selected_files": active_selected_files,
+        }
 
     def _analysis_session_state_payload(
         self,
@@ -11319,6 +11460,20 @@ class AgnoChatRuntime:
                 "open_limits": [
                     str(item or "").strip()
                     for item in list(state.get("last_limitations") or [])[:3]
+                    if str(item or "").strip()
+                ],
+                "active_result_group_id": (
+                    str(state.get("active_result_group_id") or "").strip() or None
+                ),
+                "active_report_handle": (
+                    str(state.get("active_report_handle") or "").strip() or None
+                ),
+                "active_summary_csv_handle": (
+                    str(state.get("active_summary_csv_handle") or "").strip() or None
+                ),
+                "active_selected_files": [
+                    str(item or "").strip()
+                    for item in list(state.get("active_selected_files") or [])[:4]
                     if str(item or "").strip()
                 ],
                 "handle_counts": handle_counts,
@@ -11921,6 +12076,8 @@ class AgnoChatRuntime:
             "array_paths",
             "job_ids",
             "image_files",
+            "report_paths",
+            "summary_csv_paths",
         ):
             if current_turn_replaces_saved_image_target and key in {
                 "download_dirs",
@@ -13670,6 +13827,7 @@ class AgnoChatRuntime:
         latest_user_text: str,
         selection_context: dict[str, Any] | None,
         event_callback: Callable[[dict[str, Any]], None] | None,
+        latest_result_refs_seed: dict[str, Any] | None = None,
         request_bisque_auth: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         normalized_actions = [
@@ -13679,7 +13837,11 @@ class AgnoChatRuntime:
             return []
 
         results: list[dict[str, Any]] = []
-        latest_result_refs: dict[str, Any] = {}
+        latest_result_refs: dict[str, Any] = {
+            str(key): value
+            for key, value in dict(latest_result_refs_seed or {}).items()
+            if value is not None
+        }
         for action in normalized_actions:
             tool_name = str(action.tool_name or "").strip()
             args = dict(action.args or {})

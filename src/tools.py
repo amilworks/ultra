@@ -3146,6 +3146,9 @@ def _segmentation_result_paths_exist(result: dict[str, Any]) -> bool:
 
 def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]:
     refs: dict[str, Any] = {}
+    result_group_id = str(result.get("result_group_id") or "").strip()
+    if result_group_id:
+        refs["latest_segmentation_result_group_id"] = result_group_id
     preferred = result.get("preferred_upload_paths")
     if isinstance(preferred, list) and preferred:
         refs["latest_segmentation_mask_path"] = str(preferred[-1])
@@ -3165,6 +3168,36 @@ def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]
     if result.get("output_directory"):
         refs["latest_segmentation_output_directory"] = str(result.get("output_directory"))
     return refs
+
+
+def _stable_result_group_id(prefix: str, *parts: Any) -> str:
+    normalized_parts = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    digest_input = "||".join(normalized_parts) or prefix
+    digest = hashlib.sha1(digest_input.encode("utf-8")).hexdigest()[:12]
+    safe_prefix = _safe_slug(prefix).replace("-", "_")
+    return f"{safe_prefix}_{digest}"
+
+
+def _segmentation_result_group_id(result: dict[str, Any], *, tool_name: str) -> str:
+    explicit = str(result.get("result_group_id") or "").strip()
+    if explicit:
+        return explicit
+    output_directory = str(result.get("output_directory") or "").strip()
+    if output_directory:
+        return _stable_result_group_id(tool_name, output_directory)
+    preferred = result.get("preferred_upload_paths")
+    preferred_paths = (
+        [str(item or "").strip() for item in preferred if str(item or "").strip()]
+        if isinstance(preferred, list)
+        else []
+    )
+    files_processed = result.get("files_processed")
+    file_tokens = [
+        str((row or {}).get("file") or "").strip()
+        for row in list(files_processed or [])
+        if isinstance(row, dict) and str((row or {}).get("file") or "").strip()
+    ]
+    return _stable_result_group_id(tool_name, *preferred_paths[:8], *file_tokens[:8])
 
 
 def _rewrite_megaseg_payload_paths(value: Any, path_map: dict[str, str]) -> Any:
@@ -3279,6 +3312,11 @@ def _build_megaseg_tool_response(
     aggregate = (
         runner_result.get("aggregate") if isinstance(runner_result.get("aggregate"), dict) else {}
     )
+    result_group_id = _stable_result_group_id(
+        "megaseg",
+        str(output_dir),
+        *preferred_upload_paths[:8],
+    )
     summary_payload = {
         "processed_files": len(successful),
         "total_files": len(runner_files),
@@ -3292,11 +3330,13 @@ def _build_megaseg_tool_response(
         {
             "type": "metrics",
             "title": "Megaseg summary",
+            "result_group_id": result_group_id,
             "payload": summary_payload,
         },
         {
             "type": "table",
             "title": "Megaseg per-file metrics",
+            "result_group_id": result_group_id,
             "payload": scientific_rows[:200],
         },
     ]
@@ -3307,6 +3347,7 @@ def _build_megaseg_tool_response(
                     "type": "image",
                     "title": item.get("title") or "Megaseg overlay",
                     "path": item.get("path"),
+                    "result_group_id": result_group_id,
                 }
             )
 
@@ -3323,6 +3364,7 @@ def _build_megaseg_tool_response(
         "success": len(successful) > 0,
         "processed": len(successful),
         "total_files": len(runner_files),
+        "result_group_id": result_group_id,
         "files_processed": files_processed,
         "output_directory": str(output_dir),
         "model": "Megaseg DynUNet",
@@ -3362,6 +3404,7 @@ def _build_megaseg_tool_response(
                     str(path) for path in preferred_upload_paths
                 ],
                 "segment_image_megaseg.latest_mask_path": str(preferred_upload_paths[-1]),
+                "segment_image_megaseg.result_group_id": result_group_id,
             }
         )
     if response.get("report_path"):
@@ -8769,6 +8812,7 @@ def quantify_segmentation_masks(
     pixel_size: float | None = None,
     pixel_unit: str = "px",
     stem_strip_tokens: list[str] | None = None,
+    result_group_id: str | None = None,
 ) -> dict[str, Any]:
     """Quantify segmentation masks into per-mask morphology summaries."""
     if not mask_paths:
@@ -8885,8 +8929,13 @@ def quantify_segmentation_masks(
                     {"name": f"mean_{metric_name}", "value": float(metric_value), "unit": "score"}
                 )
 
+    normalized_result_group_id = (
+        str(result_group_id or "").strip()
+        or _stable_result_group_id("quantify_segmentation_masks", *list(mask_paths or [])[:8])
+    )
     result: dict[str, Any] = {
         "success": len(success_rows) > 0,
+        "result_group_id": normalized_result_group_id,
         "summary": summary,
         "rows": rows,
         "component_size_count": len(all_component_sizes),
@@ -8894,15 +8943,30 @@ def quantify_segmentation_masks(
         "evaluation": eval_result,
         "evaluation_pairing_fallback_used": bool(eval_pairing_fallback_used),
         "ui_artifacts": [
-            {"type": "metrics", "title": "Mask quantification summary", "payload": summary},
-            {"type": "table", "title": "Per-mask quantification", "payload": rows[:500]},
+            {
+                "type": "metrics",
+                "title": "Mask quantification summary",
+                "result_group_id": normalized_result_group_id,
+                "payload": summary,
+            },
+            {
+                "type": "table",
+                "title": "Per-mask quantification",
+                "result_group_id": normalized_result_group_id,
+                "payload": rows[:500],
+            },
         ],
     }
     if eval_result and isinstance(eval_result, dict):
         metrics_payload = eval_result.get("metrics_mean")
         if isinstance(metrics_payload, dict):
             result["ui_artifacts"].append(
-                {"type": "metrics", "title": "Overlap metrics (mean)", "payload": metrics_payload}
+                {
+                    "type": "metrics",
+                    "title": "Overlap metrics (mean)",
+                    "result_group_id": normalized_result_group_id,
+                    "payload": metrics_payload,
+                }
             )
     result["latest_result_refs"] = {
         "latest_segmentation_quant_rows": rows[:500],
@@ -8913,6 +8977,7 @@ def quantify_segmentation_masks(
         "latest_eval_metrics_mean": (eval_result or {}).get("metrics_mean")
         if isinstance(eval_result, dict)
         else {},
+        "latest_segmentation_result_group_id": normalized_result_group_id,
     }
     return result
 
@@ -15446,6 +15511,9 @@ def execute_tool_call(
                 )
                 replacement_mask_paths = latest_mask_paths or uploaded_mask_files
                 replacement_gt_paths = latest_gt_paths or uploaded_gt_files
+                latest_result_group_id = str(
+                    (latest_result_refs or {}).get("latest_segmentation_result_group_id") or ""
+                ).strip()
 
                 if not provided_mask_paths:
                     if replacement_mask_paths:
@@ -15519,6 +15587,9 @@ def execute_tool_call(
                     )
                 elif explicit_gt_locals:
                     args["ground_truth_paths"] = explicit_gt_locals
+
+                if latest_result_group_id and not str(args.get("result_group_id") or "").strip():
+                    args["result_group_id"] = latest_result_group_id
 
         if (not uploaded_files) and tool_name in {
             "segment_image_megaseg",

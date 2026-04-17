@@ -206,9 +206,10 @@ from src.auth import (
 from src.auth import (
     touch_bisque_session as shared_touch_bisque_session,
 )
+from src.chat_titles import generate_chat_title
 from src.config import get_settings
 from src.evals.research_review import audit_contract_payload, score_research_value
-from src.llm import _select_tool_subset, generate_chat_title, get_openai_client
+from src.llm_client import get_openai_client
 from src.orchestration.executor import PlanExecutor
 from src.orchestration.models import RunStatus, WorkflowPlan, WorkflowRun
 from src.orchestration.store import RunStore
@@ -246,6 +247,7 @@ from src.science.viewer import (
 )
 from src.tooling.domains import BISQUE_TOOL_SCHEMAS
 from src.tooling.progress import decode_progress_chunk
+from src.tooling.tool_selection import _select_tool_subset
 from src.tools import _render_yolo_detection_figure, sam2_prompt_image, segment_image_sam3
 from src.training import (
     ContinuousLearningPolicy,
@@ -1786,6 +1788,7 @@ def create_app() -> FastAPI:
                         modified_at=modified_at,
                         source_path=source_path,
                         title=str(item.get("title") or "") or None,
+                        result_group_id=str(item.get("result_group_id") or "").strip() or None,
                     )
                 )
             if manifest_updated:
@@ -1804,6 +1807,7 @@ def create_app() -> FastAPI:
                     size_bytes=int(stat.st_size),
                     mime_type=mimetypes.guess_type(file_path.name)[0],
                     modified_at=datetime.utcfromtimestamp(stat.st_mtime),
+                    result_group_id=None,
                 )
             )
             if len(records) >= limit:
@@ -2699,6 +2703,7 @@ def create_app() -> FastAPI:
             "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
             "sha256": _sha256_file(resolved),
             "source_path": source_path,
+            "result_group_id": None,
         }
 
     def _manifest_path(run_id: str) -> Path:
@@ -3102,9 +3107,14 @@ def create_app() -> FastAPI:
                 continue
             artifacts = event.get("artifacts")
             candidate_items: list[Any] = []
+            summary = event.get("summary")
+            summary_result_group_id = (
+                str(summary.get("result_group_id") or "").strip()
+                if isinstance(summary, dict)
+                else ""
+            )
             if isinstance(artifacts, list) and artifacts:
                 candidate_items.extend(artifacts[:160])
-            summary = event.get("summary")
             output_dir_raw = summary.get("output_directory") if isinstance(summary, dict) else None
             output_dir = _resolve_existing_path(str(output_dir_raw or ""), allow_directory=True)
             if output_dir is not None and output_dir.is_dir():
@@ -3125,9 +3135,15 @@ def create_app() -> FastAPI:
                 if isinstance(item, dict):
                     source_raw = item.get("path")
                     title = str(item.get("title") or "").strip() or None
+                    result_group_id = (
+                        str(item.get("result_group_id") or "").strip()
+                        or summary_result_group_id
+                        or None
+                    )
                 else:
                     source_raw = item
                     title = None
+                    result_group_id = summary_result_group_id or None
 
                 source_path = _resolve_source_path(str(source_raw or ""))
                 if source_path is None:
@@ -3149,6 +3165,7 @@ def create_app() -> FastAPI:
                 entry["category"] = "tool_output"
                 entry["tool"] = tool_name
                 entry["kind"] = "image" if _is_image_artifact(source_path) else "file"
+                entry["result_group_id"] = result_group_id
                 if title:
                     entry["title"] = title
                 entries.append(entry)
@@ -3160,6 +3177,7 @@ def create_app() -> FastAPI:
                     )
                     preview_entry["category"] = "tool_output_preview"
                     preview_entry["tool"] = tool_name
+                    preview_entry["result_group_id"] = result_group_id
                     preview_entry["title"] = f"{title or source_path.name} (preview)"
                     entries.append(preview_entry)
 
@@ -4161,6 +4179,13 @@ def create_app() -> FastAPI:
             envelope_dict = envelope if isinstance(envelope, dict) else {}
             summary = invocation.get("output_summary")
             summary_dict = dict(summary) if isinstance(summary, dict) else {}
+            result_group_id = str(
+                summary_dict.get("result_group_id")
+                or envelope_dict.get("result_group_id")
+                or ""
+            ).strip()
+            if result_group_id and "result_group_id" not in summary_dict:
+                summary_dict["result_group_id"] = result_group_id
             if tool_name == "yolo_detect" and "classes" not in summary_dict:
                 top_classes = (
                     summary_dict.get("top_classes")
@@ -4192,6 +4217,12 @@ def create_app() -> FastAPI:
                             "path": path_value,
                             "title": str(item.get("title") or "").strip() or Path(path_value).name,
                             "kind": ("image" if artifact_group == "ui_artifacts" else "artifact"),
+                            "source_path": str(item.get("file") or "").strip() or None,
+                            "result_group_id": (
+                                str(item.get("result_group_id") or "").strip()
+                                or result_group_id
+                                or None
+                            ),
                         }
                     )
             progress_events.append(
@@ -11928,6 +11959,7 @@ def create_app() -> FastAPI:
             source_path=str(artifact.source_path or "").strip() or None,
             preview_path=None,
             title=str(artifact.title or "").strip() or None,
+            result_group_id=str(artifact.result_group_id or "").strip() or None,
             mime_type=str(artifact.mime_type or "").strip() or None,
             size_bytes=int(artifact.size_bytes or 0),
             created_at=created_at,

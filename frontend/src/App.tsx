@@ -35,6 +35,7 @@ import {
 } from "./components/prompt-kit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -112,6 +113,10 @@ import {
   listRunEvents,
   listSessionConversations,
 } from "./features/chat/client";
+import {
+  buildScientificResultGroups,
+  type ScientificResultFigure,
+} from "./features/chat/scientific-results";
 import {
   loadComposerResources,
   loadLibraryResources,
@@ -206,6 +211,7 @@ type RunImageArtifact = {
   previewable: boolean;
   downloadUrl?: string;
   linkedFileId?: string | null;
+  resultGroupId?: string | null;
 };
 
 type ToolCardMetric = {
@@ -356,8 +362,15 @@ type MegasegFileInsight = {
 };
 
 type MegasegInsights = {
-  figureCards: ScientificFigureCard[];
+  resultGroupId: string;
+  heroFigure: ScientificResultFigure | null;
+  secondaryFigures: ScientificResultFigure[];
   fileRows: MegasegFileInsight[];
+  reportPath?: string | null;
+  summaryCsvPath?: string | null;
+  reportDownloadUrl?: string | null;
+  summaryCsvDownloadUrl?: string | null;
+  technicalSummary?: string | null;
   collectionLabel?: string;
   device?: string | null;
   structureChannel?: number | null;
@@ -1990,9 +2003,10 @@ const ConversationMessageRow = memo(
           ? buildResearchDigestData({
               message,
               hasToolCards: toolResultCards.length > 0,
+              hasScientificPrimary: toolResultCards.some((card) => Boolean(card.megasegInsights)),
             })
           : null,
-      [isAssistant, message, toolResultCards.length]
+      [isAssistant, message, toolResultCards]
     );
     const hasPrimaryToolCard = toolResultCards.length > 0;
     const showResearchDigest =
@@ -3384,9 +3398,11 @@ const extractAssistantContractFromMessage = (message: UiMessage): AssistantContr
 const buildResearchDigestData = ({
   message,
   hasToolCards,
+  hasScientificPrimary,
 }: {
   message: UiMessage;
   hasToolCards: boolean;
+  hasScientificPrimary: boolean;
 }): ResearchDigestData | null => {
   const contract = extractAssistantContractFromMessage(message);
   if (!contract) {
@@ -3446,6 +3462,15 @@ const buildResearchDigestData = ({
     return null;
   }
   if (!hasToolBackedContext || !hasQuantitativeEvidence) {
+    return null;
+  }
+  if (
+    hasScientificPrimary &&
+    statisticalAnalysis.length === 0 &&
+    qcWarnings.length === 0 &&
+    limitations.length === 0 &&
+    nextSteps.length === 0
+  ) {
     return null;
   }
   if (!hasToolCards && populatedSections < 2 && result.length < 120) {
@@ -3649,10 +3674,16 @@ const buildToolResultCards = (
   const toolInvocations = Array.isArray(responseMetadataRecord?.tool_invocations)
     ? responseMetadataRecord.tool_invocations
     : [];
-  toolInvocations
+  const toolInvocationRecords = toolInvocations
     .map((entry) => toRecord(entry))
-    .filter((entry): entry is Record<string, unknown> => entry !== null)
-    .forEach((entry) => {
+    .filter((entry): entry is Record<string, unknown> => entry !== null);
+  const scientificToolInvocations = toolInvocationRecords.map((entry) => ({
+    tool: String(entry.tool ?? ""),
+    status: String(entry.status ?? ""),
+    output_summary: toRecord(entry.output_summary),
+    output_envelope: toRecord(entry.output_envelope),
+  }));
+  toolInvocationRecords.forEach((entry) => {
       const tool = normalizeToolName(entry.tool);
       const outputSummary = toRecord(entry.output_summary);
       if (!tool || !outputSummary) {
@@ -3691,6 +3722,112 @@ const buildToolResultCards = (
   let bestBisqueFindAssetsScore = Number.NEGATIVE_INFINITY;
   let bestBisqueFindAssetsIndex = -1;
   let hasSuccessfulBisqueModule = false;
+  const scientificResultGroups = buildScientificResultGroups({
+    progressEvents,
+    toolInvocations: scientificToolInvocations,
+    runArtifacts: runArtifacts.map((artifact) => ({
+      path: artifact.path,
+      title: artifact.title,
+      sourcePath: artifact.sourcePath,
+      url: artifact.url,
+      downloadUrl: artifact.downloadUrl,
+      previewable: artifact.previewable,
+      resultGroupId: artifact.resultGroupId ?? null,
+    })),
+  });
+  scientificResultGroups.forEach((group, groupIndex) => {
+    const singleFile = group.fileRows.length <= 1;
+    const firstRow = group.fileRows[0];
+    cards.push({
+      id: `scientific-result-${group.resultGroupId}-${groupIndex}`,
+      tool: "segment_image_megaseg",
+      title:
+        group.fileRows.length > 1 ? "Megaseg cohort summary" : "Megaseg segmentation",
+      metrics: singleFile
+        ? [
+            {
+              label: "Coverage",
+              value: formatPercentMetric(group.metrics.coveragePercent),
+            },
+            {
+              label: "Objects",
+              value: formatIntegerMetric(group.metrics.objectCount),
+            },
+            {
+              label: "Active z-slices",
+              value:
+                group.metrics.activeSliceCount !== null &&
+                group.metrics.activeSliceCount !== undefined &&
+                group.metrics.zSliceCount !== null &&
+                group.metrics.zSliceCount !== undefined
+                  ? `${formatIntegerMetric(group.metrics.activeSliceCount)}/${formatIntegerMetric(group.metrics.zSliceCount)}`
+                  : "n/a",
+            },
+            {
+              label: "Largest component",
+              value: formatIntegerMetric(group.metrics.largestComponentVoxels),
+            },
+          ]
+        : [
+            {
+              label: "Images",
+              value: `${group.fileRows.length}`,
+            },
+            {
+              label: "Mean coverage",
+              value: formatPercentMetric(group.metrics.coveragePercent),
+            },
+            {
+              label: "Mean objects",
+              value: formatIntegerMetric(group.metrics.objectCount),
+            },
+            {
+              label: "Representative figures",
+              value: `${1 + group.secondaryFigures.length}`,
+            },
+          ],
+      classes: [],
+      images: [],
+      resourceRows: [],
+      downloadRows: [],
+      placement: "before_text",
+      narrative:
+        group.technicalSummary ??
+        buildMegasegNarrative({
+          fileRows: group.fileRows,
+          processed: group.fileRows.length,
+          meanCoverage: group.metrics.coveragePercent,
+          meanObjectCount: group.metrics.objectCount,
+        }),
+      megasegInsights: {
+        resultGroupId: group.resultGroupId,
+        heroFigure: group.heroFigure,
+        secondaryFigures: group.secondaryFigures,
+        fileRows: group.fileRows,
+        reportPath: group.reportPath ?? null,
+        summaryCsvPath: group.summaryCsvPath ?? null,
+        reportDownloadUrl:
+          group.reportPath && options?.runId && options?.buildArtifactDownloadUrl
+            ? options.buildArtifactDownloadUrl(options.runId, group.reportPath)
+            : null,
+        summaryCsvDownloadUrl:
+          group.summaryCsvPath && options?.runId && options?.buildArtifactDownloadUrl
+            ? options.buildArtifactDownloadUrl(options.runId, group.summaryCsvPath)
+            : null,
+        technicalSummary: group.technicalSummary ?? null,
+        collectionLabel:
+          group.fileRows.length > 1
+            ? `${group.fileRows.length} images summarized in one report-first result`
+            : firstRow?.file
+              ? toDisplayFileLabel(firstRow.file)
+              : undefined,
+        device: null,
+        structureChannel: null,
+        nucleusChannel: null,
+      },
+    });
+  });
+  const hasMegasegScientificResultSurface = scientificResultGroups.length > 0;
   const mergeBisqueResourceRows = (
     left: ToolResourceRow[],
     right: ToolResourceRow[]
@@ -3737,6 +3874,14 @@ const buildToolResultCards = (
       toolName !== "search_bisque_resources" &&
       toolName !== "bisque_advanced_search" &&
       toolName !== "bisque_find_assets"
+    ) {
+      return;
+    }
+
+    if (
+      hasMegasegScientificResultSurface &&
+      (toolName === "segment_image_megaseg" ||
+        toolName === "quantify_segmentation_masks")
     ) {
       return;
     }
@@ -4827,8 +4972,48 @@ const buildToolResultCards = (
         placement: "before_text",
         scientificFigures: figureCardsFromHydratedArtifacts,
         megasegInsights: {
-          figureCards: figureCardsFromHydratedArtifacts,
+          resultGroupId:
+            String(megasegSummary.result_group_id ?? megasegSummary.output_directory ?? `${toolName}-${index}`),
+          heroFigure:
+            figureCardsFromHydratedArtifacts[0]
+              ? {
+                  key: figureCardsFromHydratedArtifacts[0].key,
+                  kind: "overlay_mip",
+                  title: figureCardsFromHydratedArtifacts[0].title,
+                  file: figureCardsFromHydratedArtifacts[0].subtitle,
+                  summary: figureCardsFromHydratedArtifacts[0].summary,
+                  url: figureCardsFromHydratedArtifacts[0].previewUrl,
+                  downloadUrl:
+                    figureCardsFromHydratedArtifacts[0].downloadUrl ??
+                    figureCardsFromHydratedArtifacts[0].previewUrl,
+                  previewable: figureCardsFromHydratedArtifacts[0].previewable,
+                }
+              : null,
+          secondaryFigures: figureCardsFromHydratedArtifacts.slice(1).map((figure) => ({
+            key: figure.key,
+            kind: /overlay_midz|mid[-\s]?z/i.test(`${figure.title} ${figure.summary}`)
+              ? "overlay_mid_z"
+              : /mask_preview/i.test(`${figure.title} ${figure.summary}`)
+                ? "mask_preview"
+                : "figure",
+            title: figure.title,
+            file: figure.subtitle,
+            summary: figure.summary,
+            url: figure.previewUrl,
+            downloadUrl: figure.downloadUrl ?? figure.previewUrl,
+            previewable: figure.previewable,
+          })),
           fileRows,
+          reportPath:
+            typeof megasegSummary.report_path === "string" ? megasegSummary.report_path : null,
+          summaryCsvPath:
+            typeof megasegSummary.summary_csv_path === "string"
+              ? megasegSummary.summary_csv_path
+              : null,
+          reportDownloadUrl: null,
+          summaryCsvDownloadUrl: null,
+          technicalSummary:
+            typeof firstRow?.technicalSummary === "string" ? firstRow.technicalSummary : null,
           collectionLabel:
             processed !== null && totalFiles !== null
               ? `${formatIntegerMetric(processed)} of ${formatIntegerMetric(totalFiles)} images processed`
@@ -7902,6 +8087,23 @@ function ScientificFigureStack({
   );
 }
 
+const scientificFigureTabLabel = (figure: ScientificResultFigure): string => {
+  const kind = String(figure.kind || "").trim().toLowerCase();
+  if (kind === "overlay_mid_z") {
+    return "Mid-Z";
+  }
+  if (kind === "overlay_mip") {
+    return "MIP";
+  }
+  if (kind === "mask_preview") {
+    return "Mask";
+  }
+  if (kind === "probability_preview") {
+    return "Probability";
+  }
+  return figure.title;
+};
+
 function MegasegCardBody({
   card,
 }: {
@@ -7912,24 +8114,155 @@ function MegasegCardBody({
     return null;
   }
 
+  const heroFigure = insights.heroFigure;
+  const visibleSecondaryFigures = insights.secondaryFigures.filter(
+    (figure) => figure.kind !== "mask_preview"
+  );
+  const deferredFigures = insights.secondaryFigures.filter(
+    (figure) => figure.kind === "mask_preview"
+  );
+  const defaultSecondaryFigure =
+    visibleSecondaryFigures[0] ?? deferredFigures[0] ?? null;
+
   return (
-    <div className="chat-tool-megaseg-shell" data-testid="megaseg-card">
-      {insights.figureCards.length > 0 ? (
-        <ScientificFigureStack figures={insights.figureCards} />
-      ) : card.images.length > 0 ? (
-        <ToolImageCarousel images={card.images} />
+    <div className="chat-scientific-result-shell" data-testid="megaseg-card">
+      {heroFigure ? (
+        <figure className="chat-scientific-hero">
+          <div className="chat-scientific-hero-media">
+            {heroFigure.previewable ? (
+              <img
+                src={heroFigure.url}
+                alt={heroFigure.title}
+                loading="eager"
+                className="chat-scientific-hero-image"
+              />
+            ) : (
+              <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
+                <ImageIcon className="size-5" />
+                <span>Preview unavailable</span>
+              </div>
+            )}
+          </div>
+          <figcaption className="chat-scientific-caption">
+            <div className="chat-scientific-caption-copy">
+              <p className="chat-tool-figure-title">{heroFigure.title}</p>
+              {heroFigure.file ? (
+                <p className="chat-tool-figure-subtitle">
+                  {toDisplayFileLabel(heroFigure.file)}
+                </p>
+              ) : null}
+              {heroFigure.summary ? (
+                <p className="chat-tool-figure-summary">{heroFigure.summary}</p>
+              ) : null}
+            </div>
+            <div className="chat-scientific-caption-actions">
+              <Button asChild variant="outline" size="sm">
+                <a href={heroFigure.url} target="_blank" rel="noreferrer">
+                  Open figure
+                </a>
+              </Button>
+              <Button asChild variant="ghost" size="sm">
+                <a
+                  href={heroFigure.downloadUrl ?? heroFigure.url}
+                  download
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </a>
+              </Button>
+            </div>
+          </figcaption>
+        </figure>
       ) : null}
       {card.narrative ? (
-        <div className="chat-tool-insight-panel">
-          <p className="chat-tool-insight-title">Scientific takeaway</p>
+        <div className="chat-scientific-takeaway">
+          <p className="chat-scientific-section-label">Takeaway</p>
           <p className="chat-tool-insight-body">{card.narrative}</p>
         </div>
+      ) : null}
+      {(insights.reportDownloadUrl || insights.summaryCsvDownloadUrl) ? (
+        <div className="chat-scientific-downloads">
+          {insights.reportDownloadUrl ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={insights.reportDownloadUrl} target="_blank" rel="noreferrer">
+                Open report
+              </a>
+            </Button>
+          ) : null}
+          {insights.summaryCsvDownloadUrl ? (
+            <Button asChild variant="ghost" size="sm">
+              <a href={insights.summaryCsvDownloadUrl} download target="_blank" rel="noreferrer">
+                Download CSV
+              </a>
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {defaultSecondaryFigure ? (
+        <Tabs
+          defaultValue={defaultSecondaryFigure.key}
+          className="chat-scientific-secondary"
+        >
+          <TabsList className="chat-scientific-tabs-list">
+            {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
+              <TabsTrigger key={figure.key} value={figure.key}>
+                {scientificFigureTabLabel(figure)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
+            <TabsContent
+              key={figure.key}
+              value={figure.key}
+              className="chat-scientific-tab-panel"
+            >
+              <figure className="chat-scientific-secondary-figure">
+                <div className="chat-scientific-secondary-media">
+                  {figure.previewable ? (
+                    <img
+                      src={figure.url}
+                      alt={figure.title}
+                      loading="lazy"
+                      className="chat-scientific-secondary-image"
+                    />
+                  ) : (
+                    <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
+                      <ImageIcon className="size-5" />
+                      <span>Preview unavailable</span>
+                    </div>
+                  )}
+                </div>
+                <figcaption className="chat-scientific-secondary-caption">
+                  <div>
+                    <p className="chat-tool-figure-title">{figure.title}</p>
+                    {figure.file ? (
+                      <p className="chat-tool-figure-subtitle">
+                        {toDisplayFileLabel(figure.file)}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Button asChild variant="ghost" size="sm">
+                    <a
+                      href={figure.downloadUrl ?? figure.url}
+                      download
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Download
+                    </a>
+                  </Button>
+                </figcaption>
+              </figure>
+            </TabsContent>
+          ))}
+        </Tabs>
       ) : null}
       {insights.fileRows.length > 0 ? (
         <div className="chat-tool-resource-table-wrap">
           <div className="chat-tool-megaseg-table-head">
             <div>
-              <p className="chat-tool-card-subtitle">Quantitative summary</p>
+              <p className="chat-scientific-section-label">Quantitative summary</p>
               {insights.collectionLabel ? (
                 <p className="chat-tool-card-summary">{insights.collectionLabel}</p>
               ) : null}
@@ -7984,6 +8317,43 @@ function MegasegCardBody({
             </tbody>
           </table>
         </div>
+      ) : null}
+      {(insights.technicalSummary ||
+        deferredFigures.length > 0 ||
+        insights.reportPath ||
+        insights.summaryCsvPath) ? (
+        <details className="chat-scientific-appendix">
+          <summary>Methods & evidence</summary>
+          <div className="chat-scientific-appendix-body">
+            {insights.technicalSummary ? (
+              <p className="chat-tool-card-summary">{insights.technicalSummary}</p>
+            ) : null}
+            {deferredFigures.length > 0 ? (
+              <ul className="chat-research-list">
+                {deferredFigures.map((figure) => (
+                  <li key={figure.key}>
+                    {figure.title}
+                    {figure.file ? ` (${toDisplayFileLabel(figure.file)})` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {(insights.reportPath || insights.summaryCsvPath) ? (
+              <ul className="chat-research-list">
+                {insights.reportPath ? (
+                  <li>
+                    <strong>Report</strong>: {toDisplayFileLabel(insights.reportPath)}
+                  </li>
+                ) : null}
+                {insights.summaryCsvPath ? (
+                  <li>
+                    <strong>CSV</strong>: {toDisplayFileLabel(insights.summaryCsvPath)}
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+          </div>
+        </details>
       ) : null}
     </div>
   );
@@ -11034,6 +11404,9 @@ export function App() {
                       sourcePath: String(artifact.source_path || "").trim() || undefined,
                       previewable: matchedUpload ? true : canInlinePreview,
                       linkedFileId: matchedUpload?.file_id ?? null,
+                      resultGroupId:
+                        String(artifact.result_group_id || "").trim() ||
+                        null,
                     } satisfies RunImageArtifact;
                   }),
                 }

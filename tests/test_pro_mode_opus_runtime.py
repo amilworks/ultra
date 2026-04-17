@@ -191,6 +191,10 @@ def test_analysis_session_state_payload_includes_contract_brief_fields(tmp_path:
             "last_limitations": ["Only one field of view was analyzed."],
             "evidence_summaries": ["answer_summary: The mask is sparse."],
             "handles": {"mask_paths": ["/tmp/mask.tiff"]},
+            "active_result_group_id": "megaseg-group-1",
+            "active_report_handle": "/tmp/megaseg_report.md",
+            "active_summary_csv_handle": "/tmp/megaseg_summary.csv",
+            "active_selected_files": ["NPM1_13054_IM.tiff"],
         },
         selection_context=None,
         uploaded_files=[],
@@ -206,6 +210,10 @@ def test_analysis_session_state_payload_includes_contract_brief_fields(tmp_path:
         "Compare the same metric against a matched control."
     ]
     assert analysis_state["open_limits"] == ["Only one field of view was analyzed."]
+    assert analysis_state["active_result_group_id"] == "megaseg-group-1"
+    assert analysis_state["active_report_handle"] == "/tmp/megaseg_report.md"
+    assert analysis_state["active_summary_csv_handle"] == "/tmp/megaseg_summary.csv"
+    assert analysis_state["active_selected_files"] == ["NPM1_13054_IM.tiff"]
 
 
 def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: Path) -> None:
@@ -1196,6 +1204,108 @@ def test_deterministic_required_tool_fallback_threads_latest_result_refs_between
         "quantify_segmentation_masks",
     ]
     assert result["tool_invocations"][1]["status"] == "completed"
+
+
+def test_deterministic_required_tool_fallback_skips_completed_megaseg_and_reuses_refs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    mask_path = "/tmp/NPM1_13054_IM__megaseg_mask.tiff"
+    executed_tools: list[str] = []
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "Segmentation finished.",
+                "metadata": {
+                    "tool_invocations": [
+                        {
+                            "tool": "segment_image_megaseg",
+                            "status": "completed",
+                            "output_summary": {
+                                "success": True,
+                                "processed": 1,
+                                "result_group_id": "megaseg-group-1",
+                            },
+                            "output_envelope": {
+                                "success": True,
+                                "result_group_id": "megaseg-group-1",
+                                "preferred_upload_paths": [mask_path],
+                                "latest_result_refs": {
+                                    "latest_segmentation_mask_path": mask_path,
+                                    "latest_segmentation_mask_paths": [mask_path],
+                                    "segment_image_megaseg.mask_paths": [mask_path],
+                                    "segment_image_megaseg.latest_mask_path": mask_path,
+                                    "segment_image_megaseg.result_group_id": "megaseg-group-1",
+                                    "latest_segmentation_result_group_id": "megaseg-group-1",
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **kwargs):
+        executed_tools.append(str(tool_name))
+        assert tool_name == "quantify_segmentation_masks"
+        assert args == {}
+        assert kwargs["latest_result_refs"]["latest_segmentation_mask_path"] == mask_path
+        assert (
+            kwargs["latest_result_refs"]["latest_segmentation_result_group_id"]
+            == "megaseg-group-1"
+        )
+        return {
+            "success": True,
+            "summary": {"mask_count": 1, "successful_masks": 1},
+            "rows": [{"mask_path": mask_path, "success": True}],
+            "latest_result_refs": {
+                "latest_segmentation_quant_rows": [
+                    {"mask_path": mask_path, "success": True}
+                ],
+                "latest_segmentation_result_group_id": "megaseg-group-1",
+            },
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run MegaSeg on the selected image and quantify the mask.",
+                }
+            ],
+            latest_user_text="Run MegaSeg on the selected image and quantify the mask.",
+            uploaded_files=["/tmp/NPM1_13054_IM.tiff"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            tool_plan_category="segmentation",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert executed_tools == ["quantify_segmentation_masks"]
+    assert [item["tool"] for item in result["tool_invocations"]] == [
+        "segment_image_megaseg",
+        "quantify_segmentation_masks",
+    ]
 
 
 def test_tool_program_phase_records_native_bedrock_model_route_in_compression_stats(

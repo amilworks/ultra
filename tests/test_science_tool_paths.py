@@ -445,9 +445,11 @@ def test_segment_image_megaseg_uses_remote_service_and_downloads_artifacts(monke
     assert captured["request_payload"]["sources"] == [
         {"uri": "s3://allencell/aics/example.ome.zarr/"}
     ]
+    assert str(result["result_group_id"]).startswith("megaseg_")
     assert Path(result["preferred_upload_paths"][0]).exists()
     assert result["checkpoint_path"] == "/srv/ultra/models/megaseg/epoch_650.ckpt"
     assert str(result["report_path"]).startswith(str(tmp_path / "science" / "megaseg_results"))
+    assert result["latest_result_refs"]["latest_segmentation_result_group_id"] == result["result_group_id"]
 
 
 def test_infer_scientific_image_inputs_prefers_remote_prompt_source():

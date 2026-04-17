@@ -625,9 +625,7 @@ def create_app() -> FastAPI:
         if request is None:
             return True
         hostname = str(getattr(request.url, "hostname", "") or "").strip().lower()
-        if hostname in {"localhost", "127.0.0.1", "::1"}:
-            return False
-        return True
+        return hostname not in {"localhost", "127.0.0.1", "::1"}
 
     def _issue_anonymous_auth_context(
         response: FastAPIResponse,
@@ -945,12 +943,10 @@ def create_app() -> FastAPI:
         allowed_hosts = {host for host in (request_host, configured_host) if host}
         if target_host in allowed_hosts:
             return True
-        if target_host and any(
+        return bool(target_host) and any(
             _is_loopback_host(candidate) and _is_loopback_host(target_host)
             for candidate in allowed_hosts
-        ):
-            return True
-        return False
+        )
 
     def _resolve_frontend_redirect_target(
         request: FastAPIRequest,
@@ -2294,10 +2290,8 @@ def create_app() -> FastAPI:
 
         try:
             with Image.open(source_path) as image:
-                try:
+                with suppress(Exception):
                     image.seek(0)
-                except Exception:
-                    pass
                 if image.mode not in {"RGB", "RGBA"}:
                     image = image.convert("RGB")
                 resampling = getattr(Image, "Resampling", Image)
@@ -3072,9 +3066,7 @@ def create_app() -> FastAPI:
             name = path.name.lower()
             if suffix in image_exts or suffix in artifact_file_exts:
                 return True
-            if name.endswith(".nii.gz"):
-                return True
-            return False
+            return bool(name.endswith(".nii.gz"))
 
         def _is_image_artifact(path: Path) -> bool:
             return path.suffix.lower() in image_exts
@@ -3091,10 +3083,8 @@ def create_app() -> FastAPI:
                 if preview_path.exists() and preview_path.is_file():
                     return preview_path
                 with Image.open(source_path) as image:
-                    try:
+                    with suppress(Exception):
                         image.seek(0)
-                    except Exception:
-                        pass
                     if image.mode not in {"RGB", "RGBA"}:
                         image = image.convert("RGB")
                     resampling = getattr(Image, "Resampling", Image)
@@ -3247,11 +3237,12 @@ def create_app() -> FastAPI:
             if suffix == ".pdf" or content_type == "application/pdf":
                 pdf_names.append(file_name)
             lowered_hint = re.sub(r"[^a-z0-9]+", " ", f"{file_name} {path}".lower()).strip()
-            if lowered_hint and any(
-                token in lowered_hint for token in ("prairie", "burrow", "rarespot")
+            if (
+                lowered_hint
+                and any(token in lowered_hint for token in ("prairie", "burrow", "rarespot"))
+                and file_name not in prairie_hint_names
             ):
-                if file_name not in prairie_hint_names:
-                    prairie_hint_names.append(file_name)
+                prairie_hint_names.append(file_name)
 
             line = f"- {file_name} ({_format_size_mb(size_bytes)})"
             if file_id:
@@ -3929,12 +3920,9 @@ def create_app() -> FastAPI:
             payload_dict = payload if isinstance(payload, dict) else {}
             if event_type == "chat_completed":
                 raw_duration = payload_dict.get("duration_seconds")
-                try:
-                    duration_seconds = (
-                        float(raw_duration) if raw_duration is not None else duration_seconds
-                    )
-                except Exception:
-                    pass
+                with suppress(TypeError, ValueError):
+                    if raw_duration is not None:
+                        duration_seconds = float(raw_duration)
                 continue
 
             if event_type == "uploads_snapshot":
@@ -6259,7 +6247,7 @@ def create_app() -> FastAPI:
         if staged_path is None or not staged_path.exists() or not staged_path.is_file():
             raise HTTPException(
                 status_code=404,
-                detail=f"Local staged upload missing for file_id={str(upload_row.get('file_id') or file_id)}",
+                detail=f"Local staged upload missing for file_id={upload_row.get('file_id') or file_id!s}",
             )
         try:
             from bqapi.comm import BQSession  # type: ignore
@@ -6517,10 +6505,8 @@ def create_app() -> FastAPI:
                     status_code=500, detail=f"Failed to store upload: {exc}"
                 ) from exc
             finally:
-                try:
+                with suppress(Exception):
                     await upload.close()
-                except Exception:
-                    pass
 
             sha256 = digest.hexdigest()
             final_name = f"{file_id}__{sha256[:12]}__{original_name}"
@@ -6854,9 +6840,8 @@ def create_app() -> FastAPI:
                 access_token = str(bisque_auth.get("access_token") or "").strip() or None
                 cookie_header = str(bisque_auth.get("bisque_cookie_header") or "").strip() or None
                 password = str(bisque_auth.get("password") or "").strip() or None
-        if not (access_token or cookie_header):
-            if username and not password:
-                username = None
+        if not (access_token or cookie_header) and username and not password:
+            username = None
         if password and not username:
             password = None
         if allow_settings_fallback and not any((username, password, access_token, cookie_header)):
@@ -7894,7 +7879,7 @@ def create_app() -> FastAPI:
             dimensions = geometry.get("dimensions") if isinstance(geometry, dict) else None
             dimension_text = ""
             if isinstance(dimensions, list) and dimensions:
-                dimension_text = f" with geometry {'×'.join(str(value) for value in dimensions)}"
+                dimension_text = f" with geometry {'x'.join(str(value) for value in dimensions)}"
             return (
                 f"Caption: HDF5 scientific container with {group_count} groups and "
                 f"{dataset_count} datasets{dimension_text}, summarized from file structure metadata."
@@ -7908,7 +7893,7 @@ def create_app() -> FastAPI:
         structure = "3D microscopy volume" if z_size > 1 else "2D microscopy image"
         channel_text = f"{c_size} channel{'s' if c_size != 1 else ''}"
         time_text = f"{t_size} timepoint{'s' if t_size != 1 else ''}"
-        size_text = f"{x_size}×{y_size}" if x_size > 0 and y_size > 0 else "native resolution"
+        size_text = f"{x_size}x{y_size}" if x_size > 0 and y_size > 0 else "native resolution"
         depth_text = f", {z_size} z-slices" if z_size > 1 else ""
         return (
             f"Caption: {structure} ({size_text}{depth_text}) with {channel_text} and {time_text}, "
@@ -7981,8 +7966,8 @@ def create_app() -> FastAPI:
         max_side = max(int(pil_image.width), int(pil_image.height))
         if max_dimension and max_side > int(max_dimension):
             scale = float(max_dimension) / float(max_side)
-            target_width = max(1, int(round(pil_image.width * scale)))
-            target_height = max(1, int(round(pil_image.height * scale)))
+            target_width = max(1, round(pil_image.width * scale))
+            target_height = max(1, round(pil_image.height * scale))
             resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
             pil_image = pil_image.resize((target_width, target_height), resample)
         buffer = BytesIO()
@@ -9147,8 +9132,8 @@ def create_app() -> FastAPI:
         height: int | None = None,
     ) -> dict[str, int] | None:
         try:
-            point_x = int(round(float(x)))
-            point_y = int(round(float(y)))
+            point_x = round(float(x))
+            point_y = round(float(y))
         except Exception:
             return None
         if width is not None and width > 0:
@@ -9365,12 +9350,12 @@ def create_app() -> FastAPI:
             point_prompt_box_labels.append(int(point["label"]))
 
         stats = {
-            "point_count": int(len(resolved_points)),
-            "positive_point_count": int(len(positive_points)),
-            "negative_point_count": int(len(negative_points)),
-            "box_count": int(len(resolved_boxes)),
+            "point_count": len(resolved_points),
+            "positive_point_count": len(positive_points),
+            "negative_point_count": len(negative_points),
+            "box_count": len(resolved_boxes),
             "prompt_count": int(len(resolved_points) + len(resolved_boxes)),
-            "tracker_object_count": int(len(tracker_input_points)),
+            "tracker_object_count": len(tracker_input_points),
             "tracker_prompt_mode": resolved_tracker_mode,
             "source_size_resolved": bool(canvas_size),
             "point_box_size_used": float(adaptive_box_size),
@@ -9676,7 +9661,7 @@ def create_app() -> FastAPI:
                         reported_mask_count = max(
                             1,
                             int(prompt_stats.get("positive_point_count") or 0),
-                            int(len(explicit_boxes)),
+                            len(explicit_boxes),
                         )
                     if measured_mask_count <= 0 and bool(medsam_result.get("success")):
                         measured_mask_count = reported_mask_count
@@ -10076,7 +10061,7 @@ def create_app() -> FastAPI:
 
         summary = {
             "processed": int(processed_files),
-            "total_files": int(len(resolved_records)),
+            "total_files": len(resolved_records),
             "total_masks_generated": int(total_masks_generated),
             "coverage_percent_mean": coverage_mean,
             "coverage_percent_min": coverage_min,
@@ -10157,7 +10142,7 @@ def create_app() -> FastAPI:
 
         response_result = {
             "processed": int(processed_files),
-            "total_files": int(len(resolved_records)),
+            "total_files": len(resolved_records),
             "total_masks_generated": int(total_masks_generated),
             "files_processed": combined_files_processed,
             "preferred_upload_paths": combined_preferred_upload_paths,
@@ -14318,7 +14303,7 @@ def create_app() -> FastAPI:
         if len(ordered_ids) == 1:
             token = ordered_ids[0]
             return {token}, {token}
-        val_count = max(1, int(round(len(ordered_ids) * 0.2)))
+        val_count = max(1, round(len(ordered_ids) * 0.2))
         val_members = set(ordered_ids[-val_count:])
         train_members = set(ordered_ids) - val_members
         if not train_members:
@@ -15485,10 +15470,8 @@ def create_app() -> FastAPI:
             )
             run_id = str(row.get("artifact_run_id") or "").strip()
             if run_id:
-                try:
+                with suppress(Exception):
                     store.update_status(run_id, RunStatus.FAILED, error=message)
-                except Exception:
-                    pass
 
     def _training_control_callback(job_id: str, user_id: str) -> None:
         paused_once = False
@@ -15915,7 +15898,7 @@ def create_app() -> FastAPI:
                 )
                 window = int(time.time() // max(300, continuous_scheduler_interval_seconds))
                 idempotency_key = (
-                    f"auto:{lineage_id}:{str(trigger.get('reason') or 'data_threshold')}:{window}"
+                    f"auto:{lineage_id}:{trigger.get('reason') or 'data_threshold'!s}:{window}"
                 )
                 store.create_training_update_proposal(
                     proposal_id=f"proposal-{uuid4().hex[:18]}",
@@ -16007,10 +15990,8 @@ def create_app() -> FastAPI:
 
     def _prairie_sync_scheduler_loop() -> None:
         while not prairie_sync_scheduler_stop.is_set():
-            try:
+            with suppress(Exception):
                 _run_prairie_sync_scheduler_once()
-            except Exception:
-                pass
             interrupted = prairie_sync_scheduler_stop.wait(prairie_sync_interval_seconds)
             if interrupted:
                 break
@@ -16387,7 +16368,7 @@ def create_app() -> FastAPI:
         except Exception as exc:
             store.append_event(run_id, "benchmark_failed", {"error": str(exc)})
             store.update_status(run_id, RunStatus.FAILED, error=str(exc))
-            raise HTTPException(status_code=500, detail=f"Benchmark run failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Benchmark run failed: {exc}") from exc
 
     @v1.post("/training/prairie/retrain-request", response_model=TrainingJobResponse)
     @legacy.post("/training/prairie/retrain-request", response_model=TrainingJobResponse)

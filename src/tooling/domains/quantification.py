@@ -319,9 +319,7 @@ def _delimiter_choice_looks_invalid(frame: Any, sample_text: str, delimiter: str
     header = lines[0]
     this_hits = header.count(delimiter)
     alt_hits = max([header.count(d) for d in _CSV_DEFAULT_DELIMITERS if d != delimiter] + [0])
-    if this_hits == 0 and alt_hits > 0 and int(frame.shape[1]) <= 1:
-        return True
-    return False
+    return this_hits == 0 and alt_hits > 0 and int(frame.shape[1]) <= 1
 
 
 def _normalize_column_names(frame: Any) -> tuple[Any, list[str], list[str]]:
@@ -405,7 +403,7 @@ def _read_csv_with_repair(
 
     for enc in enc_candidates:
         for delim in delim_candidates:
-            parse_attempts.append(f"strict encoding={enc} delimiter={repr(delim)}")
+            parse_attempts.append(f"strict encoding={enc} delimiter={delim!r}")
             try:
                 dataframe = pd.read_csv(
                     working_path,
@@ -433,7 +431,7 @@ def _read_csv_with_repair(
         parse_issues.append("Strict CSV parsing failed; fallback parser skipped malformed rows.")
         for enc in enc_candidates:
             for delim in delim_candidates:
-                parse_attempts.append(f"tolerant encoding={enc} delimiter={repr(delim)}")
+                parse_attempts.append(f"tolerant encoding={enc} delimiter={delim!r}")
                 try:
                     dataframe = pd.read_csv(
                         working_path,
@@ -474,7 +472,7 @@ def _read_csv_with_repair(
 
     malformed_rows_estimate: int | None = None
     if line_count > 0:
-        malformed_rows_estimate = max(0, line_count - (int(len(dataframe)) + 1))
+        malformed_rows_estimate = max(0, line_count - (len(dataframe) + 1))
         if parse_mode == "tolerant" and malformed_rows_estimate > 0:
             parse_issues.append(
                 f"Estimated malformed/skipped rows: {malformed_rows_estimate} (approximate)."
@@ -797,10 +795,7 @@ def _apply_csv_operations(
                 detail = "Grouped and aggregated data."
             elif op_name in {"limit_rows", "head", "tail"}:
                 n = _safe_int(raw_op.get("n", 10), default=10, minimum=1, maximum=1000000)
-                if op_name == "tail":
-                    transformed = transformed.tail(n)
-                else:
-                    transformed = transformed.head(n)
+                transformed = transformed.tail(n) if op_name == "tail" else transformed.head(n)
                 detail = f"Kept {n} row(s) via {op_name}."
             else:
                 raise ValueError(
@@ -843,7 +838,7 @@ def _apply_csv_operations(
 
 def _column_profile(frame: Any, *, max_columns: int = 40) -> list[dict[str, Any]]:
     profiles: list[dict[str, Any]] = []
-    total_rows = int(len(frame))
+    total_rows = len(frame)
     for column in list(frame.columns)[:max_columns]:
         series = frame[column]
         non_null = int(series.notna().sum())
@@ -1248,7 +1243,7 @@ def quantify_objects(
         )
 
     total_objects = int(sum(counts_by_class.values()))
-    classes_detected = int(len(counts_by_class))
+    classes_detected = len(counts_by_class)
     mean_conf = round(sum(all_confidences) / len(all_confidences), 6) if all_confidences else 0.0
     median_conf = round(median(all_confidences), 6) if all_confidences else 0.0
 
@@ -1426,7 +1421,7 @@ def plot_quantified_detections(
     low_confidence_fill = "#ff5c8a"
 
     image_title = Path(source_name).name
-    total_count = int(len(frame))
+    total_count = len(frame)
     low_count = int(frame["is_low_confidence"].sum())
     counts_by_class = {
         str(key): int(value) for key, value in frame["class"].value_counts().sort_index().items()
@@ -1590,7 +1585,7 @@ def plot_quantified_detections(
         ax.set_xlabel("X (pixels)")
         ax.set_ylabel("Y (pixels)")
         ax.invert_yaxis()
-        handles, labels = ax.get_legend_handles_labels()
+        handles, _labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend(loc="best", frameon=True)
         fig.tight_layout()
@@ -1744,7 +1739,7 @@ def compare_conditions(
         f"{condition_a_name}_total": int(sum(counts_a.values())),
         f"{condition_b_name}_total": int(sum(counts_b.values())),
         "total_delta": int(sum(counts_b.values()) - sum(counts_a.values())),
-        "classes_compared": int(len(all_classes)),
+        "classes_compared": len(all_classes),
     }
 
     rows_a = _extract_object_rows(condition_a)
@@ -2324,20 +2319,20 @@ ANALYSIS_TOOL_SCHEMAS = [
 
 
 __all__ = [
-    "analyze_csv",
+    "ANALYSIS_TOOL_SCHEMAS",
     "ANALYZE_CSV_TOOL",
-    "quantify_objects",
-    "plot_quantified_detections",
-    "QUANTIFY_SEGMENTATION_MASKS_TOOL",
-    "compare_conditions",
-    "stats_list_curated_tools",
-    "stats_run_curated_tool",
-    "repro_report",
-    "QUANTIFY_OBJECTS_TOOL",
-    "PLOT_QUANTIFIED_DETECTIONS_TOOL",
     "COMPARE_CONDITIONS_TOOL",
+    "PLOT_QUANTIFIED_DETECTIONS_TOOL",
+    "QUANTIFY_OBJECTS_TOOL",
+    "QUANTIFY_SEGMENTATION_MASKS_TOOL",
+    "REPRO_REPORT_TOOL",
     "STATS_LIST_CURATED_TOOLS_TOOL",
     "STATS_RUN_CURATED_TOOL",
-    "REPRO_REPORT_TOOL",
-    "ANALYSIS_TOOL_SCHEMAS",
+    "analyze_csv",
+    "compare_conditions",
+    "plot_quantified_detections",
+    "quantify_objects",
+    "repro_report",
+    "stats_list_curated_tools",
+    "stats_run_curated_tool",
 ]

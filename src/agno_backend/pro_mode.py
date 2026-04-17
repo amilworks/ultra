@@ -2211,10 +2211,10 @@ class ProModeWorkflowRunner:
         consensus_level: ConsensusLevel = "low"
         if ready and all(vote == "agree" for vote in votes.values()):
             consensus_level = "high"
-        elif ready:
-            consensus_level = "medium"
-        elif votes and sum(1 for vote in votes.values() if vote != "needs_revision") >= max(
-            1, len(votes) - 2
+        elif ready or (
+            votes
+            and sum(1 for vote in votes.values() if vote != "needs_revision")
+            >= max(1, len(votes) - 2)
         ):
             consensus_level = "medium"
         return ConvergenceState(

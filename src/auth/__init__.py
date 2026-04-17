@@ -16,12 +16,12 @@ from .context import (
 
 __all__ = [
     "BisqueAuthContext",
-    "get_request_bisque_auth",
-    "set_request_bisque_auth",
-    "reset_request_bisque_auth",
     "cleanup_expired_bisque_sessions",
     "create_bisque_session",
     "delete_bisque_session",
     "get_bisque_session",
+    "get_request_bisque_auth",
+    "reset_request_bisque_auth",
+    "set_request_bisque_auth",
     "touch_bisque_session",
 ]

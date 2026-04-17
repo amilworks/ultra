@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1510,7 +1511,7 @@ def _build_sliding_tiles(
 ) -> list[dict[str, int]]:
     tile = max(8, int(tile_size))
     overlap_clamped = _clamp_overlap(overlap, default=0.0)
-    stride = max(1, int(round(tile * (1.0 - overlap_clamped))))
+    stride = max(1, round(tile * (1.0 - overlap_clamped)))
     x_starts = _tile_start_positions(width, tile, stride)
     y_starts = _tile_start_positions(height, tile, stride)
     tiles: list[dict[str, int]] = []
@@ -2201,10 +2202,8 @@ def _run_subprocess_with_heartbeat(
                         process.wait(timeout=10.0)
                     except Exception:
                         process.kill()
-                        try:
+                        with suppress(Exception):
                             process.wait(timeout=5.0)
-                        except Exception:
-                            pass
                 raise
 
             poll_code = process.poll()
@@ -2793,9 +2792,7 @@ class YOLOv5Adapter(BaseTrainingAdapter):
             tile_counts[split]["positive_tiles_all_intersections"] = len(tile_rows_with_objects)
             selected_rows = list(tile_rows_with_objects)
             if include_empty_tiles and tile_rows_empty:
-                empty_target = int(
-                    round(float(len(tile_rows_with_objects)) * float(empty_tile_ratio))
-                )
+                empty_target = round(float(len(tile_rows_with_objects)) * float(empty_tile_ratio))
                 if len(tile_rows_with_objects) <= 0:
                     empty_target = min(
                         len(tile_rows_empty), max(1, int(len(tile_rows_empty) * 0.25))
@@ -2822,7 +2819,7 @@ class YOLOv5Adapter(BaseTrainingAdapter):
 
             if split == "train" and selected_rows:
                 replay_ratio = replay_old_ratio / max(1e-9, replay_new_ratio)
-                replay_target = max(0, int(round(float(len(selected_rows)) * replay_ratio)))
+                replay_target = max(0, round(float(len(selected_rows)) * replay_ratio))
                 if replay_target > 0:
                     try:
                         canonical_spec = self._load_canonical_benchmark_spec(config=config)
@@ -2924,10 +2921,8 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 ]
                 label_path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
             for cached_image in image_cache.values():
-                try:
+                with suppress(Exception):
                     cached_image.close()
-                except Exception:
-                    pass
 
         if int(tile_counts["train"]["tiles_selected"]) <= 0:
             raise ValueError(
@@ -3501,11 +3496,11 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 if category is not None:
                     if hasattr(category, "id"):
                         try:
-                            class_id = int(getattr(category, "id"))
+                            class_id = int(category.id)
                         except Exception:
                             class_id = None
                     if hasattr(category, "name"):
-                        class_name = str(getattr(category, "name") or "").strip() or None
+                        class_name = str(category.name or "").strip() or None
                 if class_name and class_name in _YOLO_CLASS_TO_ID:
                     class_id = _YOLO_CLASS_TO_ID[class_name]
                 if class_id is None and class_name in _YOLO_CLASS_TO_ID:
@@ -3522,7 +3517,7 @@ class YOLOv5Adapter(BaseTrainingAdapter):
                 confidence = None
                 if score is not None and hasattr(score, "value"):
                     try:
-                        confidence = float(getattr(score, "value"))
+                        confidence = float(score.value)
                     except Exception:
                         confidence = None
                 merged_rows.append(

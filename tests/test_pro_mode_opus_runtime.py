@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 
+import src.llm as llm_module
 import src.agno_backend.pro_mode as pro_mode_module
 import src.agno_backend.runtime as runtime_module
 from src.agno_backend.pro_mode import (
@@ -1705,3 +1706,23 @@ def test_tool_workflow_fail_closes_when_code_execution_does_not_produce_measurem
     assert "A requested code execution step failed in this turn." in prompt
     assert "Do not report expected, estimated, approximate" in prompt
     assert response_text == fail_closed_text
+
+
+def test_code_execution_request_classifier_distinguishes_heavy_vs_lightweight_numeric_turns(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path, code_execution_enabled=True)
+
+    assert runtime._is_code_execution_request(
+        "Fit a random forest on this CSV, run cross-validation, and save a figure."
+    )
+    assert not runtime._is_code_execution_request(
+        "Using numpy notation, what is the mean of the list [1, 2, 3, 4]?"
+    )
+
+
+def test_tool_guide_includes_code_execution_usage_rubric_when_enabled() -> None:
+    rules = llm_module._code_execution_usage_rules(code_execution_enabled=True)
+
+    assert "Use execute_python_job for reproducible, multi-step computation" in rules
+    assert "Use numpy_calculator for a single deterministic expression" in rules

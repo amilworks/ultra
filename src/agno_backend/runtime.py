@@ -2339,21 +2339,89 @@ class AgnoChatRuntime:
         }
 
     @staticmethod
-    def _is_code_execution_request(user_text: str) -> bool:
-        lowered = str(user_text or "").strip().lower()
-        return bool(
+    def _is_lightweight_numeric_request(user_text: str) -> bool:
+        lowered = " ".join(str(user_text or "").strip().lower().split())
+        if not lowered:
+            return False
+        if re.search(
+            r"\b("
+            r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+            r"plot|figure|chart|save|export|report|image|images|mask|segmentation|random forest|"
+            r"cross[- ]?validation|train|fit|classifier|regressor|cluster|clustering|pca|umap|"
+            r"opencv|scikit-learn|sklearn|pandas|scipy|pipeline|batch"
+            r")\b",
+            lowered,
+        ):
+            return False
+        asks_for_closed_form_value = bool(
             re.search(
                 r"\b("
-                r"write|generate|create|produce|run|execute|debug|fix|test|profile|benchmark|optimi[sz]e"
-                r")\s+(python|code|script)\b",
-                lowered,
-            )
-            or re.search(
-                r"\b("
-                r"python|script|sandbox|notebook|numpy|pandas|scipy|sklearn|scikit-learn|opencv"
+                r"calculate|compute|derive|evaluate|solve|determine|find|what is|what's|"
+                r"mean|average|median|sum|difference|product|variance|standard deviation|std|"
+                r"covariance|correlation|dot product|norm|determinant|eigenvalue|integral|derivative"
                 r")\b",
                 lowered,
             )
+        )
+        has_inline_expression = bool(
+            re.search(r"(\[[^\]]+\]|\([^\)]*\)|\{[^\}]*\}|[-+]?\d+(?:\.\d+)?|=)", lowered)
+        )
+        return asks_for_closed_form_value and has_inline_expression and len(lowered) <= 220
+
+    @staticmethod
+    def _is_code_execution_request(user_text: str) -> bool:
+        lowered = " ".join(str(user_text or "").strip().lower().split())
+        if not lowered or AgnoChatRuntime._is_lightweight_numeric_request(lowered):
+            return False
+        explicit_code_signal = bool(
+            re.search(
+                r"\b("
+                r"write|generate|create|produce|run|execute|debug|fix|test|profile|benchmark|optimi[sz]e"
+                r")\s+(python|code|script|program|notebook)\b",
+                lowered,
+            )
+        )
+        heavy_analysis_signal = bool(
+            re.search(
+                r"\b("
+                r"random forest|xgboost|lightgbm|svm|logistic regression|linear regression|"
+                r"cross[- ]?validation|grid search|hyperparameter|feature importance|confusion matrix|"
+                r"roc|auc|precision-recall|bootstrap|monte carlo|principal component|pca|umap|"
+                r"cluster(?:ing)?|classifier|regressor|image processing|computer vision|opencv|"
+                r"scikit-learn|sklearn"
+                r")\b",
+                lowered,
+            )
+        )
+        scientific_stack_signal = bool(
+            re.search(
+                r"\b("
+                r"python|script|sandbox|notebook|numpy|pandas|scipy|matplotlib|seaborn|"
+                r"scikit-learn|sklearn|opencv"
+                r")\b",
+                lowered,
+            )
+        )
+        dataset_or_artifact_signal = bool(
+            re.search(
+                r"\b("
+                r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+                r"plot|figure|chart|report|artifact|png|pdf"
+                r")\b",
+                lowered,
+            )
+        )
+        workflow_signal = bool(
+            re.search(
+                r"\b("
+                r"fit|train|benchmark|profile|process|analy[sz]e|classify|segment|detect|featurize|"
+                r"preprocess|clean|aggregate|transform|simulate|save|export|compare"
+                r")\b",
+                lowered,
+            )
+        )
+        return explicit_code_signal or heavy_analysis_signal or (
+            workflow_signal and (scientific_stack_signal or dataset_or_artifact_signal)
         )
 
     @staticmethod

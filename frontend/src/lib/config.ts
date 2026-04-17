@@ -6,23 +6,6 @@ const readEnvString = (value: unknown): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
-const readEnvBoolean = (value: unknown): boolean | undefined => {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const token = value.trim().toLowerCase();
-  if (token === "1" || token === "true" || token === "yes" || token === "on") {
-    return true;
-  }
-  if (token === "0" || token === "false" || token === "no" || token === "off") {
-    return false;
-  }
-  return undefined;
-};
-
 export const DEFAULT_API_BASE_URL =
   readEnvString(import.meta.env.VITE_API_BASE_URL) ??
   (typeof window === "undefined"
@@ -30,7 +13,9 @@ export const DEFAULT_API_BASE_URL =
     : window.location.origin);
 
 export const DEFAULT_API_KEY =
-  readEnvString(import.meta.env.VITE_ORCHESTRATOR_API_KEY) ?? "";
+  import.meta.env.DEV
+    ? readEnvString(import.meta.env.VITE_ORCHESTRATOR_API_KEY) ?? ""
+    : "";
 
 export const DEFAULT_BISQUE_BROWSER_URL =
   readEnvString(import.meta.env.VITE_BISQUE_BROWSER_URL) ?? "";

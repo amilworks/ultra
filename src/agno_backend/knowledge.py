@@ -103,11 +103,18 @@ class ScientificKnowledgeHub:
     ) -> ScientificKnowledgeContext:
         resolved_user_id = str(user_id or "").strip()
         resolved_session_id = str(session_id or "").strip()
-        resolved_project_id = str(
-            scope.project_id
-            or ((knowledge_context or {}).get("project_id") if isinstance(knowledge_context, dict) else "")
-            or ""
-        ).strip() or None
+        resolved_project_id = (
+            str(
+                scope.project_id
+                or (
+                    (knowledge_context or {}).get("project_id")
+                    if isinstance(knowledge_context, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            or None
+        )
         normalized_namespaces = self._normalize_namespaces(scope.namespaces)
         context = ScientificKnowledgeContext(
             scope=scope,
@@ -116,7 +123,11 @@ class ScientificKnowledgeHub:
         )
 
         ordered_hits: list[KnowledgeHit] = []
-        if "project_notes" in normalized_namespaces and scope.include_project_notes and resolved_user_id:
+        if (
+            "project_notes" in normalized_namespaces
+            and scope.include_project_notes
+            and resolved_user_id
+        ):
             ordered_hits.extend(
                 self._note_hits(
                     query=query,
@@ -263,7 +274,9 @@ class ScientificKnowledgeHub:
             if pack.pack_id in explicit_pack_ids:
                 score += 5.0 + float(pack.priority)
                 reasons["pack_id"] = pack.pack_id
-            keyword_hits = [keyword for keyword in pack.keywords if self._keyword_match(query_text, keyword)]
+            keyword_hits = [
+                keyword for keyword in pack.keywords if self._keyword_match(query_text, keyword)
+            ]
             if keyword_hits:
                 score += min(3.0, 0.85 * len(keyword_hits)) + float(pack.priority)
                 reasons["keywords"] = keyword_hits[:4]

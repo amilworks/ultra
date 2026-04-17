@@ -8,7 +8,6 @@ from pydantic import AliasChoices, BaseModel, Field
 from src.agno_backend.knowledge import ScientificKnowledgeScope
 from src.agno_backend.memory import ScientificMemoryPolicy
 
-
 ChatRole = Literal["system", "user", "assistant", "tool"]
 ConfidenceLevel = Literal["low", "medium", "high"]
 BenchmarkAnswerFormat = Literal["mcq_letter"]
@@ -1034,8 +1033,12 @@ class ViewerDisplayDefaults(BaseModel):
     time_index: int = 0
     z_index: int = 0
     volume_channel: int | None = None
-    volume_clip_min: dict[str, float] = Field(default_factory=lambda: {"x": 0.0, "y": 0.0, "z": 0.0})
-    volume_clip_max: dict[str, float] = Field(default_factory=lambda: {"x": 1.0, "y": 1.0, "z": 1.0})
+    volume_clip_min: dict[str, float] = Field(
+        default_factory=lambda: {"x": 0.0, "y": 0.0, "z": 0.0}
+    )
+    volume_clip_max: dict[str, float] = Field(
+        default_factory=lambda: {"x": 1.0, "y": 1.0, "z": 1.0}
+    )
 
 
 class ViewerTileLevel(BaseModel):
@@ -1074,7 +1077,7 @@ class Hdf5TreeNode(BaseModel):
     shape: list[int] | None = None
     dtype: str | None = None
     preview_kind: str | None = None
-    children: list["Hdf5TreeNode"] = Field(default_factory=list)
+    children: list[Hdf5TreeNode] = Field(default_factory=list)
 
 
 class Hdf5GeometrySummary(BaseModel):

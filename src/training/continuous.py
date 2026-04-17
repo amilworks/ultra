@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any
 
-
 PROPOSAL_STATUS_VALUES = {
     "pending_approval",
     "approved",
@@ -366,7 +365,9 @@ def evaluate_promotion_guardrails(
                 },
             }
 
-        canonical_drop = max(0.0, float(canonical_baseline_map50) - float(canonical_candidate_map50))
+        canonical_drop = max(
+            0.0, float(canonical_baseline_map50) - float(canonical_candidate_map50)
+        )
         prairie_dog_drop = max(0.0, float(prairie_baseline_map50) - float(prairie_candidate_map50))
         active_drop = max(0.0, float(active_baseline_map50) - float(active_candidate_map50))
         baseline_fp = float(canonical_baseline_fp)
@@ -468,18 +469,15 @@ def evaluate_promotion_guardrails(
 
     legacy_ok = legacy_drop <= float(current_policy.legacy_drop_cap)
     worst_ok = worst_drop <= float(current_policy.worst_class_drop_cap)
-    progress_ok = (
-        new_gain >= float(current_policy.new_holdout_gain_min)
-        or drift_reduction_ratio >= float(current_policy.drift_reduction_min)
-    )
+    progress_ok = new_gain >= float(
+        current_policy.new_holdout_gain_min
+    ) or drift_reduction_ratio >= float(current_policy.drift_reduction_min)
     map_non_regression_ok = (
         True
         if not active_map_available
         else map50_drop_from_active <= float(current_policy.legacy_drop_cap)
     )
-    baseline_floor_ok = (
-        True if not baseline_map_available else map50_drop_from_baseline <= 0.01
-    )
+    baseline_floor_ok = True if not baseline_map_available else map50_drop_from_baseline <= 0.01
 
     detection_mode = bool(active_map_available or candidate_map_available or baseline_map_available)
     if detection_mode:
@@ -573,7 +571,9 @@ def evaluate_promotion_guardrails(
     }
 
 
-def next_trigger_check_at(*, checked_at: datetime | None = None, policy: ContinuousLearningPolicy | None = None) -> str:
+def next_trigger_check_at(
+    *, checked_at: datetime | None = None, policy: ContinuousLearningPolicy | None = None
+) -> str:
     now_dt = checked_at or datetime.utcnow()
     current_policy = policy or ContinuousLearningPolicy()
     next_dt = now_dt + timedelta(hours=max(1, int(current_policy.trigger_interval_hours)))

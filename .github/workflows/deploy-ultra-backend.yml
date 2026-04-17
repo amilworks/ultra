@@ -8,6 +8,7 @@ on:
       - "feature/**"
     paths:
       - "src/**"
+      - "tests/**"
       - "bqapi/**"
       - "docker/codeexec/**"
       - "third_party/yolov5/**"
@@ -15,11 +16,13 @@ on:
       - "uv.lock"
       - ".python-version"
       - ".env.example"
+      - "Makefile"
       - "scripts/deploy_ultra_backend.sh"
       - ".github/workflows/deploy-ultra-backend.yml"
   pull_request:
     paths:
       - "src/**"
+      - "tests/**"
       - "bqapi/**"
       - "docker/codeexec/**"
       - "third_party/yolov5/**"
@@ -27,6 +30,7 @@ on:
       - "uv.lock"
       - ".python-version"
       - ".env.example"
+      - "Makefile"
       - "scripts/deploy_ultra_backend.sh"
       - ".github/workflows/deploy-ultra-backend.yml"
 
@@ -35,7 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  quality:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,20 +52,67 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Sync backend environment
-        run: uv sync --frozen
+      - name: Sync backend environment with dev tools
+        run: uv sync --frozen --extra dev
 
-      - name: Compile backend modules
+      - name: Ensure runtime artifacts are not tracked
         run: |
-          uv run python -m py_compile \
-            src/config.py \
-            src/agno_backend/runtime.py \
-            src/api/main.py \
-            src/tools.py
+          if git ls-files --error-unmatch .pytest_cache htmlcov .coverage frontend/dist frontend/node_modules >/dev/null 2>&1; then
+            echo "Tracked runtime artifacts detected."
+            exit 1
+          fi
 
-      - name: Run focused backend tests
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: Ruff format
+        run: uv run ruff format --check src tests
+
+      - name: Mypy supported scope
+        run: uv run mypy --explicit-package-bases src/config.py src/auth src/api/client.py src/api/v3.py src/tooling/domains src/evals/golden_tasks.py
+
+      - name: Compile backend entry points
+        run: uv run python -m py_compile src/config.py src/api/main.py
+
+  unit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync backend environment with dev tools
+        run: uv sync --frozen --extra dev
+
+      - name: Run backend unit tests
+        run: uv run pytest -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync backend environment with dev tools
+        run: uv sync --frozen --extra dev
+
+      - name: Run backend smoke tests
         run: |
-          uv run --with pytest python -m pytest \
-            tests/test_pro_mode_opus_runtime.py \
+          uv run pytest \
+            tests/test_auth_bridge.py \
+            tests/test_bisque_auth_hardening.py \
             tests/test_bisque_oidc_user_reconciliation.py \
             -q

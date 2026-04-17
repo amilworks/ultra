@@ -2,7 +2,7 @@
 # Updated by Wahid Sadique Koly on 2025-07-29 to align with the new upgraded codebase.
 
 set -ex
-# INDEX="https://biodev.ece.ucsb.edu/py/bisque/d8/+simple"
+# INDEX="https://packages.example.com/py/bisque/d8/+simple"
 
 # Use VENV variable or default
 VENV=${VENV:=/usr/lib/bisque}
@@ -58,6 +58,12 @@ cd /source
 # Now install local BisQue packages (they depend on the legacy packages above)
 echo "Installing local Bisque packages..."
 
+# Install the path-based CLI used for zero-copy registration.
+echo "Installing bisque_paths..."
+cd /source/contrib/bisque_paths
+pip install . || { echo "Failed to install bisque_paths"; exit 1; }
+cd /source
+
 # Install bqcore first (it's a dependency for others and provides bq-admin)
 echo "Installing bqcore..."
 cd /source/bqcore 
@@ -112,6 +118,12 @@ cd /source
 echo "Installing bqserver..."
 cd /source/bqserver 
 pip install . || { echo "Failed to install bqserver"; exit 1; }
+cd /source
+
+# Install bq-path admin CLI for zero-copy path registration helpers.
+echo "Installing bisque_paths..."
+cd /source/contrib/bisque_paths
+pip install . || { echo "Failed to install bisque_paths"; exit 1; }
 cd /source
 
 #export  PIP_INDEX_URL=$INDEX

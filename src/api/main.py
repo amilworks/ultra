@@ -11,22 +11,22 @@ import re
 import shutil
 import tempfile
 import time
-import csv
-from http.cookies import SimpleCookie
 from base64 import b64encode, urlsafe_b64decode
-from copy import deepcopy
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-from functools import lru_cache
-from io import BytesIO
+from copy import deepcopy
 from datetime import datetime, timedelta
+from functools import lru_cache
+from http.cookies import SimpleCookie
+from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Any, AsyncIterator, Callable, Iterator, cast
-from xml.etree import ElementTree
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
+from xml.etree import ElementTree
 
 import httpx
 import numpy as np
@@ -40,36 +40,38 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
-    Request as FastAPIRequest,
-    Response as FastAPIResponse,
     UploadFile,
+)
+from fastapi import (
+    Request as FastAPIRequest,
+)
+from fastapi import (
+    Response as FastAPIResponse,
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 
 from src.agno_backend import AgnoChatRuntime, build_agno_v3_services
-from src.auth import (
-    BisqueAuthContext,
-    cleanup_expired_bisque_sessions as shared_cleanup_expired_bisque_sessions,
-    create_bisque_session as shared_create_bisque_session,
-    delete_bisque_session as shared_delete_bisque_session,
-    get_request_bisque_auth,
-    get_bisque_session as shared_get_bisque_session,
-    reset_request_bisque_auth,
-    set_request_bisque_auth,
-    touch_bisque_session as shared_touch_bisque_session,
-)
-from src.api.v3 import build_v3_router
 from src.api.schemas import (
     AdminConversationActionResponse,
     AdminIssueListResponse,
     AdminIssueRecord,
     AdminOverviewResponse,
+    AdminPlatformKpis,
     AdminRunActionResponse,
     AdminRunListResponse,
     AdminRunRecord,
+    AdminToolUsageRecord,
+    AdminUsageBucket,
     AdminUserListResponse,
     AdminUserSummary,
     AnalysisHistoryResponse,
@@ -80,24 +82,34 @@ from src.api.schemas import (
     BisqueAuthLoginRequest,
     BisqueAuthSessionResponse,
     BisqueGuestProfile,
+    BisqueImportItem,
+    BisqueImportRequest,
+    BisqueImportResponse,
     ChatRequest,
     ChatResponse,
     ChatTitleRequest,
     ChatTitleResponse,
+    ContractAuditRecord,
+    ContractAuditRequest,
+    ContractAuditResponse,
     ConversationListResponse,
     ConversationRecord,
     ConversationSearchResponse,
     ConversationUpsertRequest,
-    ContractAuditRequest,
-    ContractAuditRecord,
-    ContractAuditResponse,
     CreateRunRequest,
     CreateRunResponse,
-    BisqueImportItem,
-    BisqueImportRequest,
-    BisqueImportResponse,
     ImageLoadRequest,
     ImageLoadResponse,
+    InferenceJobCreateRequest,
+    ModelHealthRecord,
+    ModelHealthResponse,
+    PrairieBenchmarkRunRequest,
+    PrairieBenchmarkRunResponse,
+    PrairieRetrainListResponse,
+    PrairieRetrainRecord,
+    PrairieRetrainRequest,
+    PrairieStatusResponse,
+    PrairieSyncResponse,
     ReproReportRequest,
     ReproReportResponse,
     ResourceComputationLookupRequest,
@@ -105,22 +117,33 @@ from src.api.schemas import (
     ResourceComputationSuggestion,
     ResourceListResponse,
     ResourceRecord,
-    Sam3InteractiveRequest,
-    Sam3InteractiveResponse,
     ResumableUploadChunkResponse,
     ResumableUploadCompleteResponse,
     ResumableUploadInitRequest,
     ResumableUploadSessionResponse,
-    RunResultResponse,
     RunEventsResponse,
     RunResponse,
-    InferenceJobCreateRequest,
-    ModelHealthRecord,
-    ModelHealthResponse,
+    RunResultResponse,
+    Sam3InteractiveRequest,
+    Sam3InteractiveResponse,
+    SantaBarbaraWeatherResponse,
+    StatsRunRequest,
+    StatsRunResponse,
+    StatsToolRecord,
+    StatsToolsResponse,
+    TrainingDatasetCreateRequest,
+    TrainingDatasetItemsRequest,
+    TrainingDatasetListResponse,
+    TrainingDatasetRecord,
+    TrainingDatasetResponse,
     TrainingDomainCreateRequest,
     TrainingDomainListResponse,
     TrainingDomainRecord,
     TrainingForkLineageRequest,
+    TrainingJobControlRequest,
+    TrainingJobCreateRequest,
+    TrainingJobRecord,
+    TrainingJobResponse,
     TrainingLineageListResponse,
     TrainingLineageRecord,
     TrainingMergeRequestCreateRequest,
@@ -128,9 +151,13 @@ from src.api.schemas import (
     TrainingMergeRequestListResponse,
     TrainingMergeRequestRecord,
     TrainingMergeRequestResponse,
+    TrainingModelRecord,
+    TrainingModelsResponse,
     TrainingModelVersionListResponse,
     TrainingModelVersionRecord,
     TrainingModelVersionResponse,
+    TrainingPreflightRequest,
+    TrainingPreflightResponse,
     TrainingUpdateProposalDecisionRequest,
     TrainingUpdateProposalListResponse,
     TrainingUpdateProposalPreviewRequest,
@@ -139,14 +166,6 @@ from src.api.schemas import (
     TrainingUpdateProposalResponse,
     TrainingVersionPromoteRequest,
     TrainingVersionRollbackRequest,
-    StatsRunRequest,
-    StatsRunResponse,
-    StatsToolRecord,
-    StatsToolsResponse,
-    SantaBarbaraWeatherResponse,
-    AdminPlatformKpis,
-    AdminToolUsageRecord,
-    AdminUsageBucket,
     UploadedFileRecord,
     UploadFilesResponse,
     V2ArtifactListResponse,
@@ -164,26 +183,28 @@ from src.api.schemas import (
     V2ThreadMessage,
     V2ThreadMessageListResponse,
     V2ThreadRecord,
-    TrainingDatasetCreateRequest,
-    TrainingDatasetItemsRequest,
-    TrainingDatasetListResponse,
-    TrainingDatasetRecord,
-    TrainingDatasetResponse,
-    TrainingJobControlRequest,
-    TrainingJobCreateRequest,
-    TrainingPreflightRequest,
-    TrainingPreflightResponse,
-    TrainingJobRecord,
-    TrainingJobResponse,
-    TrainingModelsResponse,
-    TrainingModelRecord,
-    PrairieSyncResponse,
-    PrairieStatusResponse,
-    PrairieRetrainRequest,
-    PrairieRetrainRecord,
-    PrairieRetrainListResponse,
-    PrairieBenchmarkRunRequest,
-    PrairieBenchmarkRunResponse,
+)
+from src.api.v3 import build_v3_router
+from src.auth import (
+    BisqueAuthContext,
+    get_request_bisque_auth,
+    reset_request_bisque_auth,
+    set_request_bisque_auth,
+)
+from src.auth import (
+    cleanup_expired_bisque_sessions as shared_cleanup_expired_bisque_sessions,
+)
+from src.auth import (
+    create_bisque_session as shared_create_bisque_session,
+)
+from src.auth import (
+    delete_bisque_session as shared_delete_bisque_session,
+)
+from src.auth import (
+    get_bisque_session as shared_get_bisque_session,
+)
+from src.auth import (
+    touch_bisque_session as shared_touch_bisque_session,
 )
 from src.config import get_settings
 from src.evals.research_review import audit_contract_payload, score_research_value
@@ -198,32 +219,33 @@ from src.science.imaging import (
     load_scientific_image,
     probe_scientific_image,
 )
+from src.science.reporting import generate_repro_report
+from src.science.stats import list_curated_stat_tools, run_stat_tool
 from src.science.viewer import (
     DEFAULT_HISTOGRAM_BINS,
     VIEWER_TILE_SIZE,
-    build_hdf5_materials_dashboard,
-    build_hdf5_dataset_summary,
     build_hdf5_dataset_histogram,
+    build_hdf5_dataset_summary,
     build_hdf5_dataset_table_preview,
+    build_hdf5_materials_dashboard,
     build_hdf5_viewer_manifest,
     build_viewer_manifest,
     is_hdf5_viewer_path,
     is_ordinary_display_image_path,
     load_scalar_volume_texture,
-    load_view_plane,
     load_view_volume_source,
     normalize_view_axis,
     plan_volume_source_atlas,
     purge_scalar_volume_persistent_cache,
     render_hdf5_dataset_slice,
-    render_volume_source_atlas_png,
     render_view_atlas_png,
     render_view_histogram,
     render_view_plane_image,
     render_view_tile_png,
+    render_volume_source_atlas_png,
 )
-from src.science.reporting import generate_repro_report
-from src.science.stats import list_curated_stat_tools, run_stat_tool
+from src.tooling.domains import BISQUE_TOOL_SCHEMAS
+from src.tooling.progress import decode_progress_chunk
 from src.tools import _render_yolo_detection_figure, sam2_prompt_image, segment_image_sam3
 from src.training import (
     ContinuousLearningPolicy,
@@ -242,14 +264,11 @@ from src.training import (
     merge_transition_allowed,
     normalize_merge_status,
     normalize_proposal_status,
-    normalize_version_status,
     normalize_spatial_dims,
+    normalize_version_status,
     proposal_transition_allowed,
     version_transition_allowed,
 )
-from src.tooling.domains import BISQUE_TOOL_SCHEMAS
-from src.tooling.progress import decode_progress_chunk
-
 
 # Optional test hook for injecting legacy chunk stream behavior in unit tests.
 stream_chat_completion: Any | None = None
@@ -281,8 +300,7 @@ def _public_request_origin(
 ) -> str | None:
     if request is not None:
         forwarded_proto = _first_csv_header_value(
-            request.headers.get("x-forwarded-proto")
-            or request.headers.get("x-forwarded-scheme")
+            request.headers.get("x-forwarded-proto") or request.headers.get("x-forwarded-scheme")
         )
         forwarded_host = _first_csv_header_value(request.headers.get("x-forwarded-host"))
         forwarded_port = _first_csv_header_value(request.headers.get("x-forwarded-port"))
@@ -329,8 +347,12 @@ def _normalize_bisque_resource_uri_with_root(resource: str, bisque_root: str) ->
         if path.startswith("/data_service/"):
             return f"{root}{path}"
         if "/data_service/" in path:
-            return f"{root}{path[path.index('/data_service/'):]}"
-        return value.replace("/image_service/", "/data_service/", 1) if "/image_service/" in value else value
+            return f"{root}{path[path.index('/data_service/') :]}"
+        return (
+            value.replace("/image_service/", "/data_service/", 1)
+            if "/image_service/" in value
+            else value
+        )
 
     if value.startswith("/data_service/"):
         return f"{root}{value}"
@@ -345,7 +367,9 @@ def _build_bisque_links_for_root(resource: str, bisque_root: str) -> dict[str, s
     resource_uniq = resource_uri.rstrip("/").split("/")[-1] or None
     root = bisque_root.rstrip("/")
     image_service_url = f"{root}/image_service/{resource_uniq}" if resource_uniq else None
-    client_view_url = f"{root}/client_service/view?resource={resource_uri}" if resource_uri else None
+    client_view_url = (
+        f"{root}/client_service/view?resource={resource_uri}" if resource_uri else None
+    )
     return {
         "resource_uri": resource_uri,
         "resource_uniq": resource_uniq,
@@ -438,10 +462,6 @@ def create_app() -> FastAPI:
     upload_sync_status_failed = "bisque_sync_failed"
     caption_cache: dict[str, str] = {}
     viewer_payload_cache_lock = Lock()
-    slice_png_cache_lock = Lock()
-    viewer_tile_cache_lock = Lock()
-    viewer_atlas_cache_lock = Lock()
-    viewer_histogram_cache_lock = Lock()
     viewer_hdf5_preview_cache_lock = Lock()
     viewer_hdf5_atlas_cache_lock = Lock()
     bisque_session_cookie_name = "bisque_ultra_session"
@@ -528,7 +548,21 @@ def create_app() -> FastAPI:
     v1 = APIRouter(prefix="/v1")
     v2 = APIRouter(prefix="/v2")
     legacy = APIRouter()
-    api_key_required = (getattr(settings, "orchestrator_api_key", None) or "").strip()
+    metrics_registry = CollectorRegistry()
+    http_request_counter = Counter(
+        "ultra_http_requests_total",
+        "Count of HTTP requests served by the Ultra API.",
+        ["method", "route", "status_code"],
+        registry=metrics_registry,
+    )
+    http_request_latency_seconds = Histogram(
+        "ultra_http_request_duration_seconds",
+        "Latency of HTTP requests served by the Ultra API.",
+        ["method", "route"],
+        registry=metrics_registry,
+    )
+    request_id_header_name = "X-Request-Id"
+    query_api_key_deprecation_warning = '299 - "Query-string api_key authentication is deprecated; use X-API-Key or a browser session."'
 
     def _utc_now_epoch() -> float:
         return time.time()
@@ -871,7 +905,9 @@ def create_app() -> FastAPI:
         return f"{issuer}/protocol/openid-connect/{path_suffix}"
 
     def _frontend_oidc_redirect_url(request: FastAPIRequest | None = None) -> str:
-        configured = str(getattr(settings, "bisque_auth_oidc_frontend_redirect_url", "") or "").strip()
+        configured = str(
+            getattr(settings, "bisque_auth_oidc_frontend_redirect_url", "") or ""
+        ).strip()
         if configured:
             return configured
         if request is not None:
@@ -903,9 +939,9 @@ def create_app() -> FastAPI:
 
         target_host = str(parsed.hostname or "").strip().lower()
         request_host = str(getattr(request.url, "hostname", "") or "").strip().lower()
-        configured_host = str(
-            urlparse(_frontend_oidc_redirect_url(request)).hostname or ""
-        ).strip().lower()
+        configured_host = (
+            str(urlparse(_frontend_oidc_redirect_url(request)).hostname or "").strip().lower()
+        )
         allowed_hosts = {host for host in (request_host, configured_host) if host}
         if target_host in allowed_hosts:
             return True
@@ -1006,7 +1042,9 @@ def create_app() -> FastAPI:
         userinfo_claims: dict[str, Any],
         id_token_claims: dict[str, Any],
     ) -> str | None:
-        configured_claim = str(getattr(settings, "bisque_auth_oidc_username_claim", "") or "").strip()
+        configured_claim = str(
+            getattr(settings, "bisque_auth_oidc_username_claim", "") or ""
+        ).strip()
         candidate_claims: list[str] = []
         for claim in (
             configured_claim,
@@ -1155,7 +1193,9 @@ def create_app() -> FastAPI:
                 detail=f"BisQue local token request failed: {exc.reason}",
             ) from exc
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail="BisQue local token request timed out.") from exc
+            raise HTTPException(
+                status_code=504, detail="BisQue local token request timed out."
+            ) from exc
         except HTTPException:
             raise
         except Exception as exc:
@@ -1221,7 +1261,9 @@ def create_app() -> FastAPI:
                 detail=f"BisQue token validation failed: {exc.reason}",
             ) from exc
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail="BisQue token validation timed out.") from exc
+            raise HTTPException(
+                status_code=504, detail="BisQue token validation timed out."
+            ) from exc
         except HTTPException:
             raise
         except Exception as exc:
@@ -1262,7 +1304,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail="BisQue root is not configured.")
 
         normalized_requested_username = _normalize_bisque_username(username)
-        creds = f"{username}:{password}".encode("utf-8")
+        creds = f"{username}:{password}".encode()
         request = Request(
             f"{normalized_root}/auth_service/session",
             headers={
@@ -1392,6 +1434,120 @@ def create_app() -> FastAPI:
             anonymous_session=anonymous_session,
         )
 
+    def _get_existing_bisque_auth_optional(
+        request: FastAPIRequest,
+        response: FastAPIResponse,
+        bisque_session: str | None = Cookie(default=None, alias=bisque_session_cookie_name),
+    ) -> dict[str, Any] | None:
+        session = _get_bisque_session(bisque_session)
+        if session:
+            session = _refresh_bisque_session_from_browser_cookie_if_needed(
+                session=session,
+                request=request,
+                response=response,
+            )
+            return _touch_bisque_session(session)
+        return _bootstrap_bisque_session_from_browser_cookie(
+            request=request,
+            response=response,
+        )
+
+    def _has_authenticated_browser_session(bisque_auth: dict[str, Any] | None) -> bool:
+        if not bisque_auth or bool(bisque_auth.get("anonymous_session")):
+            return False
+        mode = str(bisque_auth.get("mode") or "").strip().lower()
+        if mode == "guest":
+            return True
+        username = str(bisque_auth.get("username") or "").strip()
+        return mode == "bisque" and bool(username)
+
+    def _record_request_auth_context(
+        request: FastAPIRequest,
+        *,
+        auth_source: str,
+        user_id: str | None = None,
+    ) -> None:
+        request.state.auth_source = auth_source
+        if user_id:
+            request.state.auth_user_id = user_id
+
+    def _resolve_authenticated_session_user_id(
+        bisque_auth: dict[str, Any] | None,
+    ) -> str | None:
+        if not _has_authenticated_browser_session(bisque_auth):
+            return None
+        try:
+            return _current_user_id(bisque_auth, allow_anonymous=False)
+        except HTTPException:
+            return None
+
+    def _extract_presented_api_key(
+        *,
+        x_api_key: str | None,
+        authorization: str | None,
+        api_key_query: str | None,
+    ) -> tuple[str, str | None]:
+        presented = (x_api_key or "").strip()
+        if presented:
+            return presented, "header"
+
+        auth_header = (authorization or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+            if token:
+                return token, "bearer"
+
+        query_token = (api_key_query or "").strip()
+        if query_token:
+            return query_token, "query"
+        return "", None
+
+    def _validate_presented_api_key(
+        request: FastAPIRequest,
+        *,
+        x_api_key: str | None,
+        authorization: str | None,
+        api_key_query: str | None,
+    ) -> str:
+        required_api_key = (getattr(settings, "orchestrator_api_key", None) or "").strip()
+        if not required_api_key:
+            _record_request_auth_context(request, auth_source="unprotected")
+            return "unprotected"
+
+        presented, source = _extract_presented_api_key(
+            x_api_key=x_api_key,
+            authorization=authorization,
+            api_key_query=api_key_query,
+        )
+        if not presented or not source:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        if source == "query":
+            if not bool(settings.resolved_allow_query_api_key_compat):
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            request.state.query_api_key_compat_used = True
+            logger.warning(
+                "Deprecated query-string api_key authentication used for %s %s",
+                request.method,
+                request.url.path,
+            )
+        if presented != required_api_key:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        _record_request_auth_context(request, auth_source=f"api_key:{source}")
+        return source
+
+    def _require_authenticated_session(
+        request: FastAPIRequest,
+        bisque_auth: dict[str, Any] | None = Depends(_get_existing_bisque_auth_optional),
+    ) -> dict[str, Any]:
+        if not _has_authenticated_browser_session(bisque_auth):
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        _record_request_auth_context(
+            request,
+            auth_source="browser_session",
+            user_id=_resolve_authenticated_session_user_id(bisque_auth),
+        )
+        return cast(dict[str, Any], bisque_auth)
+
     def _require_authenticated_bisque_auth(
         bisque_auth: dict[str, Any] | None,
         *,
@@ -1520,9 +1676,7 @@ def create_app() -> FastAPI:
     ) -> list[str]:
         upload_hints = [str(path or "") for path in (uploaded_files or [])]
         upload_hints.extend(
-            str(file_id or "").strip()
-            for file_id in (file_ids or [])
-            if str(file_id or "").strip()
+            str(file_id or "").strip() for file_id in (file_ids or []) if str(file_id or "").strip()
         )
         selected_tools = _select_tool_subset(
             messages,
@@ -1550,9 +1704,7 @@ def create_app() -> FastAPI:
         if not selected_names:
             return []
         user_text = _latest_user_text(messages).strip().lower()
-        explicit_tool_mentions = {
-            name for name in selected_names if name.lower() in user_text
-        }
+        explicit_tool_mentions = {name for name in selected_names if name.lower() in user_text}
         strong_signal_tokens = (
             "data_service",
             "image_service",
@@ -1816,13 +1968,18 @@ def create_app() -> FastAPI:
                 password,
                 access_token,
                 cookie_header,
-                bisque_root or str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
+                bisque_root
+                or str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
                 or None,
             )
 
-        metadata = upload_row.get("metadata") if isinstance(upload_row.get("metadata"), dict) else {}
+        metadata = (
+            upload_row.get("metadata") if isinstance(upload_row.get("metadata"), dict) else {}
+        )
         session_username, session_password, session_token, session_cookie, session_root = (
-            _session_bisque_auth_material(str(metadata.get("bisque_session_id") or "").strip() or None)
+            _session_bisque_auth_material(
+                str(metadata.get("bisque_session_id") or "").strip() or None
+            )
         )
         if any((session_username, session_password, session_token, session_cookie)):
             return (
@@ -1830,11 +1987,14 @@ def create_app() -> FastAPI:
                 session_password,
                 session_token,
                 session_cookie,
-                session_root or str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
+                session_root
+                or str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
                 or None,
             )
 
-        configured_root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/") or None
+        configured_root = (
+            str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/") or None
+        )
         configured_user = str(getattr(settings, "bisque_user", "") or "").strip() or None
         configured_password = str(getattr(settings, "bisque_password", "") or "").strip() or None
         return configured_user, configured_password, None, None, configured_root
@@ -1889,7 +2049,8 @@ def create_app() -> FastAPI:
             deleted_at=str(merged.get("deleted_at") or "").strip() or None,
             staging_path=str(merged.get("staging_path") or "").strip() or None,
             cache_path=str(merged.get("cache_path") or "").strip() or None,
-            canonical_resource_uniq=str(merged.get("canonical_resource_uniq") or "").strip() or None,
+            canonical_resource_uniq=str(merged.get("canonical_resource_uniq") or "").strip()
+            or None,
             canonical_resource_uri=str(merged.get("canonical_resource_uri") or "").strip() or None,
             sync_status=str(merged.get("sync_status") or "").strip() or None,
             sync_error=str(merged.get("sync_error") or "").strip() or None,
@@ -1935,12 +2096,21 @@ def create_app() -> FastAPI:
         }
 
     def _enrich_upload_metadata_context(upload_row: dict[str, Any]) -> None:
-        metadata = upload_row.get("metadata") if isinstance(upload_row.get("metadata"), dict) else {}
-        existing = metadata.get("analysis_context") if isinstance(metadata.get("analysis_context"), dict) else {}
+        metadata = (
+            upload_row.get("metadata") if isinstance(upload_row.get("metadata"), dict) else {}
+        )
+        existing = (
+            metadata.get("analysis_context")
+            if isinstance(metadata.get("analysis_context"), dict)
+            else {}
+        )
         if existing.get("version") == "v1":
             return
         analysis_context = _build_upload_analysis_context(
-            stored_path=str(upload_row.get("stored_path") or upload_row.get("staging_path") or "").strip() or None,
+            stored_path=str(
+                upload_row.get("stored_path") or upload_row.get("staging_path") or ""
+            ).strip()
+            or None,
             original_name=str(upload_row.get("original_name") or "").strip() or "upload.bin",
             resource_kind=str(upload_row.get("resource_kind") or "").strip() or None,
         )
@@ -1981,10 +2151,9 @@ def create_app() -> FastAPI:
         )
         if not resource_uri:
             return None
-        resource_uniq = (
-            str(upload_row.get("canonical_resource_uniq") or "").strip()
-            or _extract_bisque_resource_uniq(resource_uri)
-        )
+        resource_uniq = str(
+            upload_row.get("canonical_resource_uniq") or ""
+        ).strip() or _extract_bisque_resource_uniq(resource_uri)
         destination = _cache_path_for_upload(upload_row, user_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp_path = destination.parent / f".materialize-{uuid4().hex}.part"
@@ -2057,10 +2226,10 @@ def create_app() -> FastAPI:
     def _thumbnail_root_for_user(user_id: str | None) -> Path:
         return upload_store_root / ".thumbnails" / _safe_user_storage_segment(user_id)
 
-    _THUMBNAIL_SCHEMA_VERSION = "v2"
+    thumbnail_schema_version = "v2"
 
     def _thumbnail_path_for_upload(file_id: str, user_id: str | None) -> Path:
-        return _thumbnail_root_for_user(user_id) / f"{file_id}-{_THUMBNAIL_SCHEMA_VERSION}.png"
+        return _thumbnail_root_for_user(user_id) / f"{file_id}-{thumbnail_schema_version}.png"
 
     def _build_upload_thumbnail(
         *,
@@ -2369,7 +2538,7 @@ def create_app() -> FastAPI:
         elif resolved_cookie_header:
             headers["Cookie"] = resolved_cookie_header
         elif resolved_user and resolved_password:
-            creds = f"{resolved_user}:{resolved_password}".encode("utf-8")
+            creds = f"{resolved_user}:{resolved_password}".encode()
             headers["Authorization"] = f"Basic {b64encode(creds).decode('ascii')}"
         attempts: list[str] = []
         candidate_urls = [url for url in [image_service_url, blob_url, resource_uri] if url]
@@ -2592,7 +2761,9 @@ def create_app() -> FastAPI:
         def _append_relative(raw_value: str) -> None:
             if not raw_value:
                 return
-            relative = Path(*[part for part in Path(raw_value).parts if part not in {"", ".", ".."}])
+            relative = Path(
+                *[part for part in Path(raw_value).parts if part not in {"", ".", ".."}]
+            )
             if not str(relative):
                 return
             _append_candidate(run_dir / relative)
@@ -2610,20 +2781,19 @@ def create_app() -> FastAPI:
                 normalized_raw,
                 normalized_source,
                 f"workspace/{normalized_raw}" if normalized_raw else "",
-                f"workspace/{normalized_source}" if normalized_source and not Path(normalized_source).is_absolute() else "",
+                f"workspace/{normalized_source}"
+                if normalized_source and not Path(normalized_source).is_absolute()
+                else "",
             ]
             matches = sorted(
-                (
-                    path.resolve()
-                    for path in run_dir.rglob(basename)
-                    if path.is_file()
-                ),
+                (path.resolve() for path in run_dir.rglob(basename) if path.is_file()),
                 key=lambda path: (
                     next(
                         (
                             index
                             for index, suffix in enumerate(suffix_preferences)
-                            if suffix and str(path.relative_to(run_dir)).replace("\\", "/").endswith(suffix)
+                            if suffix
+                            and str(path.relative_to(run_dir)).replace("\\", "/").endswith(suffix)
                         ),
                         len(suffix_preferences),
                     ),
@@ -2682,8 +2852,7 @@ def create_app() -> FastAPI:
             return manifest
 
         if any(
-            isinstance(item, dict)
-            and "matplotlib_annotated" in str(item.get("path") or "")
+            isinstance(item, dict) and "matplotlib_annotated" in str(item.get("path") or "")
             for item in artifacts
         ):
             return manifest
@@ -2738,9 +2907,7 @@ def create_app() -> FastAPI:
                     f"{index:03d}-{source_path.stem}__matplotlib_annotated.png"
                 )
                 temp_root = (
-                    Path(tempfile.gettempdir())
-                    / "bisque_ultra_yolo_backfill"
-                    / str(run_id).strip()
+                    Path(tempfile.gettempdir()) / "bisque_ultra_yolo_backfill" / str(run_id).strip()
                 )
                 temp_root.mkdir(parents=True, exist_ok=True)
                 temp_output = temp_root / logical_name
@@ -3063,8 +3230,6 @@ def create_app() -> FastAPI:
             size_bytes = int(row.get("size_bytes") or 0)
             path = str(row.get("path") or "").strip()
             file_id = str(row.get("file_id") or "").strip()
-            source_type = str(row.get("source_type") or "").strip().lower()
-            source_uri = str(row.get("source_uri") or "").strip()
             client_view_url = str(row.get("client_view_url") or "").strip()
             suffix = Path(file_name).suffix.lower()
             content_type = str(row.get("content_type") or "").lower()
@@ -3082,7 +3247,9 @@ def create_app() -> FastAPI:
             if suffix == ".pdf" or content_type == "application/pdf":
                 pdf_names.append(file_name)
             lowered_hint = re.sub(r"[^a-z0-9]+", " ", f"{file_name} {path}".lower()).strip()
-            if lowered_hint and any(token in lowered_hint for token in ("prairie", "burrow", "rarespot")):
+            if lowered_hint and any(
+                token in lowered_hint for token in ("prairie", "burrow", "rarespot")
+            ):
                 if file_name not in prairie_hint_names:
                     prairie_hint_names.append(file_name)
 
@@ -3107,7 +3274,9 @@ def create_app() -> FastAPI:
             captured_at = str(analysis_summary.get("captured_at") or "").strip()
             if captured_at:
                 metadata_bits.append(f"captured_at={captured_at}")
-            geo = analysis_summary.get("geo") if isinstance(analysis_summary.get("geo"), dict) else {}
+            geo = (
+                analysis_summary.get("geo") if isinstance(analysis_summary.get("geo"), dict) else {}
+            )
             latitude = geo.get("latitude") if isinstance(geo, dict) else None
             longitude = geo.get("longitude") if isinstance(geo, dict) else None
             if latitude is not None and longitude is not None:
@@ -3471,9 +3640,9 @@ def create_app() -> FastAPI:
         ):
             compacted_messages.pop(0)
 
-        token_estimate_after = _estimate_messages_tokens(system_context_messages) + _estimate_messages_tokens(
-            compacted_messages
-        )
+        token_estimate_after = _estimate_messages_tokens(
+            system_context_messages
+        ) + _estimate_messages_tokens(compacted_messages)
         meta.update(
             {
                 "used": True,
@@ -3582,7 +3751,16 @@ def create_app() -> FastAPI:
         }
         alias_map: dict[str, list[str]] = {
             "detect": ["yolo", "yolo_detect", "detection", "detections", "bbox", "bounding"],
-            "segment": ["sam", "sam2", "sam3", "medsam", "medsam2", "segmentation", "mask", "masks"],
+            "segment": [
+                "sam",
+                "sam2",
+                "sam3",
+                "medsam",
+                "medsam2",
+                "segmentation",
+                "mask",
+                "masks",
+            ],
             "depth": ["depth", "depthpro", "depth_map", "estimate_depth_pro"],
             "quant": ["quantification", "metrics", "measurements"],
             "csv": ["csv", "table", "dataframe", "analyze_csv"],
@@ -3803,7 +3981,16 @@ def create_app() -> FastAPI:
             return "segment_image_sam3"
         if any(
             token in normalized
-            for token in ("segment_image_sam2", "medsam2", "medsam", "segmentation", "segment", "mask", "sam2", "sam")
+            for token in (
+                "segment_image_sam2",
+                "medsam2",
+                "medsam",
+                "segmentation",
+                "segment",
+                "mask",
+                "sam2",
+                "sam",
+            )
         ):
             return "segment_image_sam2"
         if any(
@@ -3838,7 +4025,10 @@ def create_app() -> FastAPI:
             selected.append("segment_image_megaseg")
         elif re.search(r"\b(segment_image_sam3|sam3)\b", normalized_prompt):
             selected.append("segment_image_sam3")
-        elif re.search(r"\b(segment_image_sam2|medsam2|medsam|segment|segmentation|mask|sam2|sam)\b", normalized_prompt):
+        elif re.search(
+            r"\b(segment_image_sam2|medsam2|medsam|segment|segmentation|mask|sam2|sam)\b",
+            normalized_prompt,
+        ):
             selected.append("segment_image_sam2")
 
         inferred_candidates = [
@@ -4013,11 +4203,7 @@ def create_app() -> FastAPI:
                         {
                             "path": path_value,
                             "title": str(item.get("title") or "").strip() or Path(path_value).name,
-                            "kind": (
-                                "image"
-                                if artifact_group == "ui_artifacts"
-                                else "artifact"
-                            ),
+                            "kind": ("image" if artifact_group == "ui_artifacts" else "artifact"),
                         }
                     )
             progress_events.append(
@@ -4622,8 +4808,7 @@ def create_app() -> FastAPI:
             "For follow-up tool calls that can reuse local file paths (for example bioio_load_image, "
             "segment_image_sam2, quantify_segmentation_masks, yolo_detect, execute_python_job inputs, upload_to_bisque), "
             "use these exact paths before asking for regeneration. For quantify_segmentation_masks, prefer paths that are mask-only files "
-            "or preferred_upload paths from segmentation tools:\n"
-            + "\n".join(lines),
+            "or preferred_upload paths from segmentation tools:\n" + "\n".join(lines),
             reusable_paths,
         )
 
@@ -4653,11 +4838,7 @@ def create_app() -> FastAPI:
         for idx, candidate in enumerate(candidate_queries):
             if idx >= 1 and len(seen) >= max(limit, 20):
                 break
-            query_limit = (
-                max(limit * 2, 36)
-                if idx == 0
-                else max(limit, 20)
-            )
+            query_limit = max(limit * 2, 36) if idx == 0 else max(limit, 20)
             hits = store.search_conversation_messages(
                 user_id=user_id,
                 query=candidate,
@@ -4736,9 +4917,9 @@ def create_app() -> FastAPI:
     def _bisque_browser_url() -> str:
         return _bisque_nav_links()["images"]
 
-    _SANTA_BARBARA_WEATHER_PROFILE = {
+    santa_barbara_weather_profile = {
         "location": "Santa Barbara, CA",
-        "micro_location": "UCSB / Campus Point",
+        "micro_location": "Campus Point",
         "forecast_latitude": "34.4139",
         "forecast_longitude": "-119.8489",
         "marine_latitude": "34.4080",
@@ -4825,8 +5006,7 @@ def create_app() -> FastAPI:
         is_foggy = "fog" in safe_label
         is_wet = bool(re.search(r"rain|drizzle|thunderstorm|snow", safe_label))
         dry_enough = (
-            precipitation_probability_percent is None
-            or precipitation_probability_percent <= 20
+            precipitation_probability_percent is None or precipitation_probability_percent <= 20
         )
         breezy = wind_speed_mph is not None and wind_speed_mph >= 15
         mellow_wind = wind_speed_mph is None or wind_speed_mph <= 12
@@ -4865,29 +5045,29 @@ def create_app() -> FastAPI:
                     "Campus Point worth a look after class."
                 )
             return (
-                f"Small-but-possibly-fun surf setup near Campus Point today, with light wind and "
+                "Small-but-possibly-fun surf setup near Campus Point today, with light wind and "
                 "enough swell to justify a quick post-class check."
             )
         if walkable:
             return (
-                f"Classic UCSB weather today: easy walk-to-class conditions and a nice window for "
+                "Classic coastal weather today: easy walk-to-class conditions and a nice window for "
                 "a stroll out to Campus Point."
             )
         if breezy and dry_enough:
             return (
-                f"Dry but breezier along the coast today, so it feels better for class and a quick "
+                "Dry but breezier along the coast today, so it feels better for class and a quick "
                 "campus loop than a long beach hang."
             )
         return (
-            f"Steady Santa Barbara coastal weather today — probably best for class, a short walk, "
+            "Steady Santa Barbara coastal weather today — probably best for class, a short walk, "
             "and checking Campus Point if you're already headed that way."
         )
 
     def _fetch_santa_barbara_weather() -> SantaBarbaraWeatherResponse:
         query = urlencode(
             {
-                "latitude": _SANTA_BARBARA_WEATHER_PROFILE["forecast_latitude"],
-                "longitude": _SANTA_BARBARA_WEATHER_PROFILE["forecast_longitude"],
+                "latitude": santa_barbara_weather_profile["forecast_latitude"],
+                "longitude": santa_barbara_weather_profile["forecast_longitude"],
                 "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
                 "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
                 "forecast_days": "1",
@@ -4934,8 +5114,8 @@ def create_app() -> FastAPI:
         wave_period_seconds = None
         marine_query = urlencode(
             {
-                "latitude": _SANTA_BARBARA_WEATHER_PROFILE["marine_latitude"],
-                "longitude": _SANTA_BARBARA_WEATHER_PROFILE["marine_longitude"],
+                "latitude": santa_barbara_weather_profile["marine_latitude"],
+                "longitude": santa_barbara_weather_profile["marine_longitude"],
                 "daily": "wave_height_max,swell_wave_height_max,wave_period_max",
                 "forecast_days": "1",
                 "timezone": "America/Los_Angeles",
@@ -4950,7 +5130,9 @@ def create_app() -> FastAPI:
                 swell_values = marine_daily.get("swell_wave_height_max")
                 period_values = marine_daily.get("wave_period_max")
                 wave_height_ft = _meters_to_feet(
-                    _to_float(wave_values[0]) if isinstance(wave_values, list) and wave_values else None
+                    _to_float(wave_values[0])
+                    if isinstance(wave_values, list) and wave_values
+                    else None
                 )
                 swell_wave_height_ft = _meters_to_feet(
                     _to_float(swell_values[0])
@@ -4978,7 +5160,7 @@ def create_app() -> FastAPI:
             summary_bits.append(f"Campus Point waves ~{wave_height_ft:.1f} ft")
         summary = "Santa Barbara right now: " + ", ".join(summary_bits) + "."
         blip = _build_santa_barbara_weather_blip(
-            micro_location=str(_SANTA_BARBARA_WEATHER_PROFILE["micro_location"]),
+            micro_location=str(santa_barbara_weather_profile["micro_location"]),
             observed_at=observed_at,
             weather_label=weather_label,
             wind_speed_mph=wind_speed_mph,
@@ -4989,8 +5171,8 @@ def create_app() -> FastAPI:
 
         return SantaBarbaraWeatherResponse(
             success=True,
-            location=str(_SANTA_BARBARA_WEATHER_PROFILE["location"]),
-            micro_location=str(_SANTA_BARBARA_WEATHER_PROFILE["micro_location"]),
+            location=str(santa_barbara_weather_profile["location"]),
+            micro_location=str(santa_barbara_weather_profile["micro_location"]),
             observed_at=observed_at,
             temperature_f=temperature_f,
             apparent_temperature_f=apparent_temperature_f,
@@ -5008,29 +5190,44 @@ def create_app() -> FastAPI:
             source="open-meteo forecast + marine",
         )
 
-    def _require_api_key(
+    def _require_api_key_only(
+        request: FastAPIRequest,
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
         authorization: str | None = Header(default=None, alias="Authorization"),
         api_key_query: str | None = Query(default=None, alias="api_key"),
     ) -> None:
-        if not api_key_required:
+        _validate_presented_api_key(
+            request,
+            x_api_key=x_api_key,
+            authorization=authorization,
+            api_key_query=api_key_query,
+        )
+
+    def _require_api_key(
+        request: FastAPIRequest,
+        bisque_auth: dict[str, Any] | None = Depends(_get_existing_bisque_auth_optional),
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+        authorization: str | None = Header(default=None, alias="Authorization"),
+        api_key_query: str | None = Query(default=None, alias="api_key"),
+    ) -> None:
+        if _has_authenticated_browser_session(bisque_auth):
+            _record_request_auth_context(
+                request,
+                auth_source="browser_session",
+                user_id=_resolve_authenticated_session_user_id(bisque_auth),
+            )
             return
+        _validate_presented_api_key(
+            request,
+            x_api_key=x_api_key,
+            authorization=authorization,
+            api_key_query=api_key_query,
+        )
 
-        presented = (x_api_key or "").strip()
-        if not presented and authorization:
-            auth = authorization.strip()
-            if auth.lower().startswith("bearer "):
-                presented = auth[7:].strip()
-        if not presented:
-            presented = (api_key_query or "").strip()
-        if presented != api_key_required:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-
-    def _require_admin_access(
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+    def _require_admin_session(
+        request: FastAPIRequest,
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         if not bisque_auth:
             raise HTTPException(status_code=401, detail="Authentication required.")
         mode = str(bisque_auth.get("mode") or "guest").strip().lower()
@@ -5042,15 +5239,101 @@ def create_app() -> FastAPI:
             )
         if not _is_admin_username(username):
             raise HTTPException(status_code=403, detail="Admin access denied.")
-        return {
+        admin_context = {
             "username": username,
             "user_id": _current_user_id(bisque_auth, allow_anonymous=False),
         }
+        _record_request_auth_context(
+            request,
+            auth_source="admin_session",
+            user_id=admin_context["user_id"],
+        )
+        return admin_context
+
+    @app.middleware("http")
+    async def _request_observability_middleware(
+        request: FastAPIRequest,
+        call_next: Callable[[FastAPIRequest], Any],
+    ) -> FastAPIResponse:
+        request_id = str(request.headers.get(request_id_header_name) or "").strip() or uuid4().hex
+        request.state.request_id = request_id
+        started_at = time.perf_counter()
+        route_path = str(request.url.path)
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_seconds = max(time.perf_counter() - started_at, 0.0)
+            http_request_counter.labels(
+                method=request.method,
+                route=route_path,
+                status_code="500",
+            ).inc()
+            http_request_latency_seconds.labels(
+                method=request.method,
+                route=route_path,
+            ).observe(elapsed_seconds)
+            logger.exception(
+                json.dumps(
+                    {
+                        "event": "http_request_failed",
+                        "request_id": request_id,
+                        "method": request.method,
+                        "route": route_path,
+                        "status_code": 500,
+                        "duration_ms": round(elapsed_seconds * 1000, 2),
+                        "auth_source": getattr(request.state, "auth_source", None),
+                        "user_id": getattr(request.state, "auth_user_id", None),
+                    }
+                )
+            )
+            raise
+
+        route = request.scope.get("route")
+        route_path = str(getattr(route, "path", route_path))
+        elapsed_seconds = max(time.perf_counter() - started_at, 0.0)
+        response.headers[request_id_header_name] = request_id
+        if bool(getattr(request.state, "query_api_key_compat_used", False)):
+            response.headers.setdefault("Warning", query_api_key_deprecation_warning)
+        http_request_counter.labels(
+            method=request.method,
+            route=route_path,
+            status_code=str(response.status_code),
+        ).inc()
+        http_request_latency_seconds.labels(
+            method=request.method,
+            route=route_path,
+        ).observe(elapsed_seconds)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "http_request_completed",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "route": route_path,
+                    "status_code": int(response.status_code),
+                    "duration_ms": round(elapsed_seconds * 1000, 2),
+                    "auth_source": getattr(request.state, "auth_source", None),
+                    "user_id": getattr(request.state, "auth_user_id", None),
+                }
+            )
+        )
+        return response
 
     @v1.get("/health")
     @legacy.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "ts": datetime.utcnow().isoformat()}
+
+    @v1.get("/metrics", include_in_schema=False)
+    @legacy.get("/metrics", include_in_schema=False)
+    def metrics(
+        _auth: None = Depends(_require_api_key_only),
+    ) -> FastAPIResponse:
+        del _auth
+        return FastAPIResponse(
+            content=generate_latest(metrics_registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
     @v1.get("/config/public")
     @legacy.get("/config/public")
@@ -5080,8 +5363,8 @@ def create_app() -> FastAPI:
         except Exception:
             return SantaBarbaraWeatherResponse(
                 success=False,
-                location=str(_SANTA_BARBARA_WEATHER_PROFILE["location"]),
-                micro_location=str(_SANTA_BARBARA_WEATHER_PROFILE["micro_location"]),
+                location=str(santa_barbara_weather_profile["location"]),
+                micro_location=str(santa_barbara_weather_profile["micro_location"]),
                 blip="Santa Barbara weather is temporarily unavailable. We can still dive into your analysis.",
                 summary="Santa Barbara weather is temporarily unavailable. Want to continue with your analysis?",
                 source="open-meteo",
@@ -5298,9 +5581,7 @@ def create_app() -> FastAPI:
         req: BisqueAuthLoginRequest,
         request: FastAPIRequest,
         response: FastAPIResponse,
-        _auth: None = Depends(_require_api_key),
     ) -> BisqueAuthSessionResponse:
-        del _auth
         auth_mode = _bisque_auth_mode()
         if auth_mode == "oidc":
             if not _is_browser_oidc_enabled():
@@ -5319,9 +5600,9 @@ def create_app() -> FastAPI:
 
         root = str(getattr(settings, "bisque_root", "") or "").strip().rstrip("/")
         passthrough_cookie_header = _extract_passthrough_bisque_cookie_header(request)
-        should_try_local_token = bool(
-            getattr(settings, "bisque_auth_local_token_enabled", False)
-        ) or auth_mode == "dual"
+        should_try_local_token = (
+            bool(getattr(settings, "bisque_auth_local_token_enabled", False)) or auth_mode == "dual"
+        )
         local_access_token: str | None = None
         token_username: str | None = None
         if should_try_local_token:
@@ -5381,9 +5662,7 @@ def create_app() -> FastAPI:
         req: BisqueAuthGuestRequest,
         request: FastAPIRequest,
         response: FastAPIResponse,
-        _auth: None = Depends(_require_api_key),
     ) -> BisqueAuthSessionResponse:
-        del _auth
         if _bisque_auth_mode() == "oidc":
             raise HTTPException(
                 status_code=403,
@@ -5421,9 +5700,7 @@ def create_app() -> FastAPI:
         response: FastAPIResponse,
         bisque_session: str | None = Cookie(default=None, alias=bisque_session_cookie_name),
         anonymous_session: str | None = Cookie(default=None, alias=anonymous_session_cookie_name),
-        _auth: None = Depends(_require_api_key),
     ) -> BisqueAuthSessionResponse:
-        del _auth
         del anonymous_session
         session = _get_bisque_session(bisque_session)
         if session:
@@ -5447,9 +5724,7 @@ def create_app() -> FastAPI:
     def auth_logout(
         response: FastAPIResponse,
         bisque_session: str | None = Cookie(default=None, alias=bisque_session_cookie_name),
-        _auth: None = Depends(_require_api_key),
     ) -> BisqueAuthSessionResponse:
-        del _auth
         _delete_bisque_session(bisque_session)
         response.delete_cookie(
             key=bisque_session_cookie_name,
@@ -5485,10 +5760,16 @@ def create_app() -> FastAPI:
             if root:
                 redirect_target = _append_query_params(
                     f"{root}/auth_service/oidc_logout",
-                    {"came_from": _default_logout_redirect_url(request, preferred=preferred_redirect)},
+                    {
+                        "came_from": _default_logout_redirect_url(
+                            request, preferred=preferred_redirect
+                        )
+                    },
                 )
             else:
-                redirect_target = _default_logout_redirect_url(request, preferred=preferred_redirect)
+                redirect_target = _default_logout_redirect_url(
+                    request, preferred=preferred_redirect
+                )
         else:
             redirect_target = (
                 _build_oidc_logout_url(
@@ -5535,7 +5816,7 @@ def create_app() -> FastAPI:
     def admin_overview(
         top_users: int = Query(default=8, ge=1, le=50),
         issue_limit: int = Query(default=12, ge=1, le=100),
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminOverviewResponse:
         del _admin
         payload = store.admin_overview(
@@ -5567,7 +5848,7 @@ def create_app() -> FastAPI:
     def admin_users(
         limit: int = Query(default=200, ge=1, le=1000),
         q: str | None = Query(default=None),
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminUserListResponse:
         del _admin
         rows = store.list_admin_users_summary(limit=max(1, int(limit)), query=q)
@@ -5582,7 +5863,7 @@ def create_app() -> FastAPI:
         status: str | None = Query(default=None),
         user_id: str | None = Query(default=None),
         q: str | None = Query(default=None),
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminRunListResponse:
         del _admin
         rows = store.list_admin_runs(
@@ -5599,7 +5880,7 @@ def create_app() -> FastAPI:
     @legacy.get("/admin/issues", response_model=AdminIssueListResponse)
     def admin_issues(
         limit: int = Query(default=25, ge=1, le=200),
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminIssueListResponse:
         del _admin
         rows = store.list_admin_issues(limit=max(1, int(limit)))
@@ -5610,7 +5891,7 @@ def create_app() -> FastAPI:
     @legacy.post("/admin/runs/{run_id}/cancel", response_model=AdminRunActionResponse)
     def admin_cancel_run(
         run_id: str,
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminRunActionResponse:
         result = store.admin_cancel_run(
             run_id=run_id,
@@ -5640,7 +5921,7 @@ def create_app() -> FastAPI:
     def admin_delete_conversation(
         conversation_id: str,
         user_id: str = Query(..., min_length=1),
-        _admin: dict[str, Any] = Depends(_require_admin_access),
+        _admin: dict[str, Any] = Depends(_require_admin_session),
     ) -> AdminConversationActionResponse:
         del _admin
         deleted = store.admin_delete_conversation_for_user(
@@ -5922,9 +6203,12 @@ def create_app() -> FastAPI:
             return
         try:
             from bqapi.comm import BQSession  # type: ignore
+
             from src.tools import _apply_bisque_auth_preference, _init_bq_session
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"BisQue delete support unavailable: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"BisQue delete support unavailable: {exc}"
+            ) from exc
 
         username, password, access_token, cookie_header, bisque_root = (
             _resolve_upload_bisque_auth_material(upload_row, bisque_auth)
@@ -5953,7 +6237,9 @@ def create_app() -> FastAPI:
             error_text = str(exc).lower()
             if "404" in error_text or "not found" in error_text:
                 return
-            raise HTTPException(status_code=502, detail=f"Failed to delete BisQue resource: {exc}") from exc
+            raise HTTPException(
+                status_code=502, detail=f"Failed to delete BisQue resource: {exc}"
+            ) from exc
 
     def _execute_upload_sync(
         *,
@@ -5977,14 +6263,21 @@ def create_app() -> FastAPI:
             )
         try:
             from bqapi.comm import BQSession  # type: ignore
+
             from src.tools import (
                 _build_bisque_resource_links,
-                _extract_bisque_resource_uniq as _extract_postblob_resource_uniq,
-                _extract_bisque_resource_uri as _extract_postblob_resource_uri,
                 _init_bq_session,
             )
+            from src.tools import (
+                _extract_bisque_resource_uniq as _extract_postblob_resource_uniq,
+            )
+            from src.tools import (
+                _extract_bisque_resource_uri as _extract_postblob_resource_uri,
+            )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"BisQue upload support unavailable: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"BisQue upload support unavailable: {exc}"
+            ) from exc
 
         username, password, access_token, cookie_header, bisque_root = (
             _resolve_upload_bisque_auth_material(upload_row, None)
@@ -6031,10 +6324,9 @@ def create_app() -> FastAPI:
                 raise ValueError("BisQue upload did not return a resource URI.")
             links = _build_bisque_resource_links(resource_uri, bisque_root)
             resolved_uri = str(links.get("resource_uri") or resource_uri).strip()
-            resolved_uniq = (
-                str(links.get("resource_uniq") or resource_uniq or "").strip()
-                or _extract_bisque_resource_uniq(resolved_uri)
-            )
+            resolved_uniq = str(
+                links.get("resource_uniq") or resource_uniq or ""
+            ).strip() or _extract_bisque_resource_uniq(resolved_uri)
             cache_destination = _cache_path_for_upload(upload_row, user_id)
             cache_destination.parent.mkdir(parents=True, exist_ok=True)
             staged_path.replace(cache_destination)
@@ -6569,7 +6861,9 @@ def create_app() -> FastAPI:
             password = None
         if allow_settings_fallback and not any((username, password, access_token, cookie_header)):
             configured_username = str(getattr(settings, "bisque_user", "") or "").strip() or None
-            configured_password = str(getattr(settings, "bisque_password", "") or "").strip() or None
+            configured_password = (
+                str(getattr(settings, "bisque_password", "") or "").strip() or None
+            )
             if configured_username and configured_password:
                 username = configured_username
                 password = configured_password
@@ -6756,7 +7050,9 @@ def create_app() -> FastAPI:
         file_id = uuid4().hex
         store.put_upload(
             file_id=file_id,
-            original_name=str(metadata_payload.get("original_name") or resource_uniq or "bisque-resource"),
+            original_name=str(
+                metadata_payload.get("original_name") or resource_uniq or "bisque-resource"
+            ),
             stored_path="",
             content_type=str(metadata_payload.get("content_type") or "").strip() or None,
             size_bytes=0,
@@ -6848,14 +7144,10 @@ def create_app() -> FastAPI:
         bisque_auth: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         requested_resource_uris = [
-            str(item or "").strip()
-            for item in req.resource_uris
-            if str(item or "").strip()
+            str(item or "").strip() for item in req.resource_uris if str(item or "").strip()
         ]
         requested_dataset_uris = [
-            str(item or "").strip()
-            for item in req.dataset_uris
-            if str(item or "").strip()
+            str(item or "").strip() for item in req.dataset_uris if str(item or "").strip()
         ]
         if not requested_resource_uris and not requested_dataset_uris:
             return [], [], []
@@ -7249,7 +7541,9 @@ def create_app() -> FastAPI:
                         download_source=(
                             str(import_result.get("download_source") or "").strip() or None
                         ),
-                        uploaded=uploaded_record if isinstance(uploaded_record, UploadedFileRecord) else None,
+                        uploaded=uploaded_record
+                        if isinstance(uploaded_record, UploadedFileRecord)
+                        else None,
                     )
                 )
             except Exception as exc:
@@ -7471,10 +7765,8 @@ def create_app() -> FastAPI:
     @legacy.get("/resources/{file_id}/thumbnail")
     async def resource_thumbnail(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> FileResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_row = store.get_upload(file_id, user_id=user_id)
         if not upload_row:
@@ -7824,7 +8116,9 @@ def create_app() -> FastAPI:
         component: int | None,
     ) -> bytes:
         with viewer_hdf5_preview_cache_lock:
-            return _load_hdf5_slice_png_cached(file_id, file_path, dataset_path, axis, index, component)
+            return _load_hdf5_slice_png_cached(
+                file_id, file_path, dataset_path, axis, index, component
+            )
 
     def _format_texture_bytes(value: int) -> str:
         safe_value = max(0, int(value or 0))
@@ -7837,11 +8131,16 @@ def create_app() -> FastAPI:
     def _validate_hdf5_atlas_budget(summary: dict[str, Any]) -> dict[str, Any]:
         if not bool(summary.get("volume_eligible")):
             raise ValueError(
-                str(summary.get("volume_reason") or "Selected HDF5 dataset is not eligible for native 3D.")
+                str(
+                    summary.get("volume_reason")
+                    or "Selected HDF5 dataset is not eligible for native 3D."
+                )
             )
         axis_sizes = summary.get("axis_sizes")
         if not isinstance(axis_sizes, dict):
-            raise ValueError("Selected HDF5 dataset is missing normalized axis sizes for native 3D.")
+            raise ValueError(
+                "Selected HDF5 dataset is missing normalized axis sizes for native 3D."
+            )
         atlas_plan = plan_volume_source_atlas(
             axis_sizes=axis_sizes,
             atlas_max_dimension=upload_viewer_max_dimension,
@@ -7964,7 +8263,9 @@ def create_app() -> FastAPI:
         bins: int,
     ) -> dict[str, Any]:
         with viewer_hdf5_preview_cache_lock:
-            return deepcopy(_load_hdf5_histogram_cached(file_id, file_path, dataset_path, component, bins))
+            return deepcopy(
+                _load_hdf5_histogram_cached(file_id, file_path, dataset_path, component, bins)
+            )
 
     @lru_cache(maxsize=192)
     def _load_hdf5_table_preview_cached(
@@ -7990,7 +8291,9 @@ def create_app() -> FastAPI:
         limit: int,
     ) -> dict[str, Any]:
         with viewer_hdf5_preview_cache_lock:
-            return deepcopy(_load_hdf5_table_preview_cached(file_id, file_path, dataset_path, offset, limit))
+            return deepcopy(
+                _load_hdf5_table_preview_cached(file_id, file_path, dataset_path, offset, limit)
+            )
 
     @lru_cache(maxsize=64)
     def _load_hdf5_materials_dashboard_cached(
@@ -8243,10 +8546,8 @@ def create_app() -> FastAPI:
     @legacy.get("/uploads/{file_id}/viewer")
     async def upload_viewer_info(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8279,10 +8580,8 @@ def create_app() -> FastAPI:
     async def upload_hdf5_dataset_summary(
         file_id: str,
         dataset_path: str = Query(..., min_length=1),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8315,10 +8614,8 @@ def create_app() -> FastAPI:
         axis: str = Query(default="z"),
         index: int | None = Query(default=None),
         component: int | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8358,10 +8655,8 @@ def create_app() -> FastAPI:
         fusion_method: str = Query(default="m"),
         negative: bool = Query(default=False),
         channels: str | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8400,10 +8695,8 @@ def create_app() -> FastAPI:
         file_id: str,
         dataset_path: str = Query(..., min_length=1),
         channel: int | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> FastAPIResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8439,7 +8732,9 @@ def create_app() -> FastAPI:
         }
         if metadata.get("selected_channel") is not None:
             headers["X-Volume-Channel"] = str(int(metadata["selected_channel"]))
-        return FastAPIResponse(content=volume_bytes, media_type="application/octet-stream", headers=headers)
+        return FastAPIResponse(
+            content=volume_bytes, media_type="application/octet-stream", headers=headers
+        )
 
     @v1.get("/uploads/{file_id}/hdf5/preview/histogram")
     @legacy.get("/uploads/{file_id}/hdf5/preview/histogram")
@@ -8448,10 +8743,8 @@ def create_app() -> FastAPI:
         dataset_path: str = Query(..., min_length=1),
         component: int | None = Query(default=None),
         bins: int = Query(default=DEFAULT_HISTOGRAM_BINS),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8482,10 +8775,8 @@ def create_app() -> FastAPI:
     @legacy.get("/uploads/{file_id}/hdf5/materials/dashboard")
     async def upload_hdf5_materials_dashboard(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8516,10 +8807,8 @@ def create_app() -> FastAPI:
         dataset_path: str = Query(..., min_length=1),
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=32, ge=1, le=128),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8550,14 +8839,12 @@ def create_app() -> FastAPI:
     @legacy.get("/uploads/{file_id}/caption")
     async def upload_caption(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         if file_id in caption_cache:
             return {"file_id": file_id, "caption": caption_cache[file_id], "source": "cache"}
 
-        info = await upload_viewer_info(file_id=file_id, bisque_auth=bisque_auth, _auth=None)
+        info = await upload_viewer_info(file_id=file_id, bisque_auth=bisque_auth)
         if str(info.get("kind") or "").strip().lower() == "hdf5":
             caption = _fallback_metadata_caption(info)
         else:
@@ -8582,10 +8869,8 @@ def create_app() -> FastAPI:
         channels: str | None = Query(default=None),
         channel_colors: str | None = Query(default=None),
         full_resolution: bool = Query(default=False),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8626,10 +8911,8 @@ def create_app() -> FastAPI:
     @legacy.get("/uploads/{file_id}/preview")
     def upload_preview(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         return upload_slice(
             file_id=file_id,
             axis="z",
@@ -8645,17 +8928,14 @@ def create_app() -> FastAPI:
             channel_colors=None,
             full_resolution=False,
             bisque_auth=bisque_auth,
-            _auth=None,
         )
 
     @v1.get("/uploads/{file_id}/display")
     @legacy.get("/uploads/{file_id}/display")
     def upload_display_image(
         file_id: str,
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> FileResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8689,10 +8969,8 @@ def create_app() -> FastAPI:
         file_id: str,
         t: int | None = Query(default=None),
         channel: int | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> FastAPIResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8721,7 +8999,9 @@ def create_app() -> FastAPI:
         }
         if metadata.get("selected_channel") is not None:
             headers["X-Volume-Channel"] = str(int(metadata["selected_channel"]))
-        return FastAPIResponse(content=volume_bytes, media_type="application/octet-stream", headers=headers)
+        return FastAPIResponse(
+            content=volume_bytes, media_type="application/octet-stream", headers=headers
+        )
 
     @v1.get("/uploads/{file_id}/atlas")
     @legacy.get("/uploads/{file_id}/atlas")
@@ -8733,10 +9013,8 @@ def create_app() -> FastAPI:
         channels: str | None = Query(default=None),
         channel_colors: str | None = Query(default=None),
         t: int | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8776,10 +9054,8 @@ def create_app() -> FastAPI:
         channels: str | None = Query(default=None),
         t: int | None = Query(default=None),
         bins: int = Query(default=DEFAULT_HISTOGRAM_BINS),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> dict[str, Any]:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         _upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8815,10 +9091,8 @@ def create_app() -> FastAPI:
         z: int | None = Query(default=None),
         c: int | None = Query(default=None),
         t: int | None = Query(default=None),
-        bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
-        _auth: None = Depends(_require_api_key),
+        bisque_auth: dict[str, Any] = Depends(_require_authenticated_session),
     ) -> StreamingResponse:
-        del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         upload_record, stored_path = _resolve_upload_path(
             file_id,
@@ -8922,7 +9196,9 @@ def create_app() -> FastAPI:
             return None
         if not bool(payload.get("success")):
             return None
-        axis_sizes = payload.get("axis_sizes") if isinstance(payload.get("axis_sizes"), dict) else {}
+        axis_sizes = (
+            payload.get("axis_sizes") if isinstance(payload.get("axis_sizes"), dict) else {}
+        )
         try:
             width = int(axis_sizes.get("X") or 0)
             height = int(axis_sizes.get("Y") or 0)
@@ -9049,8 +9325,7 @@ def create_app() -> FastAPI:
         if positive_points:
             resolved_tracker_mode = (
                 "per_positive_point_instance"
-                if str(tracker_prompt_mode or "").strip().lower()
-                == "per_positive_point_instance"
+                if str(tracker_prompt_mode or "").strip().lower() == "per_positive_point_instance"
                 else "single_object_refine"
             )
             if resolved_tracker_mode == "per_positive_point_instance":
@@ -9065,8 +9340,7 @@ def create_app() -> FastAPI:
         else:
             resolved_tracker_mode = (
                 "per_positive_point_instance"
-                if str(tracker_prompt_mode or "").strip().lower()
-                == "per_positive_point_instance"
+                if str(tracker_prompt_mode or "").strip().lower() == "per_positive_point_instance"
                 else "single_object_refine"
             )
 
@@ -9183,13 +9457,13 @@ def create_app() -> FastAPI:
         instance_measured = int(result.get("instance_count_measured_total") or 0)
         instance_scope_raw = str(result.get("instance_count_scope") or "").strip()
         instance_scope = (
-            instance_scope_raw.replace("_", " ")
-            if instance_scope_raw
-            else "per-instance masks"
+            instance_scope_raw.replace("_", " ") if instance_scope_raw else "per-instance masks"
         )
         if isinstance(instance_cov_mean, (int, float)):
             range_text = ""
-            if isinstance(instance_cov_min, (int, float)) and isinstance(instance_cov_max, (int, float)):
+            if isinstance(instance_cov_min, (int, float)) and isinstance(
+                instance_cov_max, (int, float)
+            ):
                 range_text = (
                     f" (min={float(instance_cov_min):.2f}%, max={float(instance_cov_max):.2f}%)"
                 )
@@ -9204,7 +9478,9 @@ def create_app() -> FastAPI:
                 "Reported mask count and measured per-instance count differed in "
                 f"{mismatch_files} file(s)."
             )
-        file_rows = result.get("files_processed") if isinstance(result.get("files_processed"), list) else []
+        file_rows = (
+            result.get("files_processed") if isinstance(result.get("files_processed"), list) else []
+        )
         volume_rows = [
             row
             for row in file_rows
@@ -9212,7 +9488,9 @@ def create_app() -> FastAPI:
         ]
         if volume_rows:
             total_slice_count = sum(int(row.get("slice_count") or 0) for row in volume_rows)
-            total_slices_processed = sum(int(row.get("slices_processed") or 0) for row in volume_rows)
+            total_slices_processed = sum(
+                int(row.get("slices_processed") or 0) for row in volume_rows
+            )
             processed_all_slices = all(bool(row.get("processed_all_slices")) for row in volume_rows)
             if processed_all_slices and total_slice_count > 0:
                 parts.append(
@@ -9429,17 +9707,31 @@ def create_app() -> FastAPI:
                     medsam_file_row: dict[str, Any] = {
                         "file": original_name,
                         "success": bool(medsam_result.get("success")),
-                        "total_masks": reported_mask_count if bool(medsam_result.get("success")) else 0,
-                        "instance_count_reported": reported_mask_count if bool(medsam_result.get("success")) else 0,
-                        "instance_count_measured": measured_mask_count if bool(medsam_result.get("success")) else 0,
+                        "total_masks": reported_mask_count
+                        if bool(medsam_result.get("success"))
+                        else 0,
+                        "instance_count_reported": reported_mask_count
+                        if bool(medsam_result.get("success"))
+                        else 0,
+                        "instance_count_measured": measured_mask_count
+                        if bool(medsam_result.get("success"))
+                        else 0,
                         "instance_count_scope": (
                             str(medsam_result.get("instance_count_scope") or "").strip()
                             or "prompt_object_masks"
                         ),
-                        "instance_coverage_percent_mean": medsam_result.get("instance_coverage_percent_mean"),
-                        "instance_coverage_percent_min": medsam_result.get("instance_coverage_percent_min"),
-                        "instance_coverage_percent_max": medsam_result.get("instance_coverage_percent_max"),
-                        "instance_coverage_percent_values": medsam_result.get("instance_coverage_percent_values"),
+                        "instance_coverage_percent_mean": medsam_result.get(
+                            "instance_coverage_percent_mean"
+                        ),
+                        "instance_coverage_percent_min": medsam_result.get(
+                            "instance_coverage_percent_min"
+                        ),
+                        "instance_coverage_percent_max": medsam_result.get(
+                            "instance_coverage_percent_max"
+                        ),
+                        "instance_coverage_percent_values": medsam_result.get(
+                            "instance_coverage_percent_values"
+                        ),
                         "coverage_percent": medsam_result.get("coverage_percent"),
                         "model": "MedSAM2",
                         "backend": str(medsam_result.get("backend") or "").strip() or None,
@@ -9458,7 +9750,9 @@ def create_app() -> FastAPI:
                         "success": bool(medsam_result.get("success")),
                         "processed": 1 if bool(medsam_result.get("success")) else 0,
                         "total_files": 1,
-                        "total_masks_generated": reported_mask_count if bool(medsam_result.get("success")) else 0,
+                        "total_masks_generated": reported_mask_count
+                        if bool(medsam_result.get("success"))
+                        else 0,
                         "files_processed": [medsam_file_row],
                         "preferred_upload_paths": preferred_upload_paths,
                         "visualization_paths": medsam_visualizations,
@@ -9712,7 +10006,9 @@ def create_app() -> FastAPI:
                 pass
             try:
                 if measured_count > 0 and coverage_mean_row is not None:
-                    instance_coverage_weighted_sum += float(coverage_mean_row) * float(measured_count)
+                    instance_coverage_weighted_sum += float(coverage_mean_row) * float(
+                        measured_count
+                    )
             except Exception:
                 pass
 
@@ -9761,7 +10057,9 @@ def create_app() -> FastAPI:
             {
                 str(row.get("instance_count_scope") or "").strip()
                 for row in combined_files_processed
-                if isinstance(row, dict) and bool(row.get("success")) and str(row.get("instance_count_scope") or "").strip()
+                if isinstance(row, dict)
+                and bool(row.get("success"))
+                and str(row.get("instance_count_scope") or "").strip()
             }
         )
         if not unique_instance_scopes:
@@ -9803,7 +10101,9 @@ def create_app() -> FastAPI:
                 else None
             ),
             "instance_coverage_percent_mean": (
-                round(float(instance_coverage_weighted_sum) / float(instance_count_measured_total), 6)
+                round(
+                    float(instance_coverage_weighted_sum) / float(instance_count_measured_total), 6
+                )
                 if instance_count_measured_total > 0
                 else None
             ),
@@ -9916,7 +10216,9 @@ def create_app() -> FastAPI:
                     ][:12]
                 tool_synthesis_used = bool(synthesis_payload.get("synthesized"))
         except Exception as exc:
-            logger.warning("%s interactive synthesis fallback engaged: %s", selected_model_label, exc)
+            logger.warning(
+                "%s interactive synthesis fallback engaged: %s", selected_model_label, exc
+            )
 
         response_result["tool_insights"] = tool_insights_payload
         contract_evidence = [
@@ -10005,7 +10307,9 @@ def create_app() -> FastAPI:
                 {
                     "file_id": str(item.get("file_id") or "").strip() or None,
                     "file_name": str(item.get("original_name") or "").strip()
-                    or Path(str(item.get("_resolved_local_path") or item.get("stored_path") or "")).name,
+                    or Path(
+                        str(item.get("_resolved_local_path") or item.get("stored_path") or "")
+                    ).name,
                     "file_sha256": str(item.get("sha256") or "").strip().lower(),
                     "source_path": str(
                         item.get("_resolved_local_path") or item.get("stored_path") or ""
@@ -10250,7 +10554,9 @@ def create_app() -> FastAPI:
             candidate = store.get_run(run_id)
             if candidate is None:
                 continue
-            checkpoint_state = candidate.checkpoint_state if isinstance(candidate.checkpoint_state, dict) else {}
+            checkpoint_state = (
+                candidate.checkpoint_state if isinstance(candidate.checkpoint_state, dict) else {}
+            )
             if str(checkpoint_state.get("phase") or "").strip().lower() != "pending_approval":
                 continue
             pending_hitl = checkpoint_state.get("pending_hitl")
@@ -10268,7 +10574,9 @@ def create_app() -> FastAPI:
         pending_run = _find_pending_hitl_chat_run(user_id=user_id, conversation_id=conversation_id)
         if pending_run is not None and decision is not None:
             checkpoint_state = (
-                pending_run.checkpoint_state if isinstance(pending_run.checkpoint_state, dict) else {}
+                pending_run.checkpoint_state
+                if isinstance(pending_run.checkpoint_state, dict)
+                else {}
             )
             pending_hitl = (
                 dict(checkpoint_state.get("pending_hitl") or {})
@@ -10530,14 +10838,16 @@ def create_app() -> FastAPI:
         dataset_import_summaries: list[dict[str, Any]] = []
         bisque_import_summaries: list[dict[str, Any]] = []
         if req.resource_uris or req.dataset_uris:
-            imported_bisque_rows, dataset_import_summaries, bisque_import_summaries = (
-                await _prepare_bisque_chat_inputs(
-                    active_run=active_run,
-                    req=req,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    bisque_auth=bisque_auth,
-                )
+            (
+                imported_bisque_rows,
+                dataset_import_summaries,
+                bisque_import_summaries,
+            ) = await _prepare_bisque_chat_inputs(
+                active_run=active_run,
+                req=req,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                bisque_auth=bisque_auth,
             )
 
         source_meta: dict[str, dict[str, Any]] = {}
@@ -10628,7 +10938,9 @@ def create_app() -> FastAPI:
                     "source_uri": meta.get("source_uri"),
                     "client_view_url": meta.get("client_view_url"),
                     "resource_kind": meta.get("resource_kind"),
-                    "metadata": meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {},
+                    "metadata": meta.get("metadata")
+                    if isinstance(meta.get("metadata"), dict)
+                    else {},
                 }
             )
             if file_sha:
@@ -10847,7 +11159,9 @@ def create_app() -> FastAPI:
 
                 response_text = "".join(response_chunks)
                 duration = round(time.monotonic() - started, 3)
-                tool_artifact_entries = _snapshot_progress_artifacts(active_run.run_id, progress_events)
+                tool_artifact_entries = _snapshot_progress_artifacts(
+                    active_run.run_id, progress_events
+                )
                 if tool_artifact_entries:
                     _update_manifest_with_entries(active_run.run_id, tool_artifact_entries)
                     store.append_event(
@@ -10921,7 +11235,8 @@ def create_app() -> FastAPI:
             saw_done = False
             workflow_hint_payload = _chat_workflow_hint_payload(req) or {}
             autonomous_transport_watchdog_seconds = float(
-                getattr(settings, "pro_mode_autonomous_cycle_transport_watchdog_seconds", 1800) or 1800
+                getattr(settings, "pro_mode_autonomous_cycle_transport_watchdog_seconds", 1800)
+                or 1800
             )
             transport_timeout_seconds = float(req.budgets.max_runtime_seconds)
             autonomous_transport_selected = False
@@ -10936,12 +11251,20 @@ def create_app() -> FastAPI:
                 payload = dict(record.get("payload") or {}) if isinstance(record, dict) else {}
                 phase = str(payload.get("phase") or "").strip().lower()
                 event_type = str(record.get("event_type") or "").strip().lower()
-                nested_payload = dict(payload.get("payload") or {}) if isinstance(payload.get("payload"), dict) else {}
-                execution_regime = str(
-                    nested_payload.get("execution_regime")
-                    or payload.get("execution_regime")
-                    or ""
-                ).strip().lower()
+                nested_payload = (
+                    dict(payload.get("payload") or {})
+                    if isinstance(payload.get("payload"), dict)
+                    else {}
+                )
+                execution_regime = (
+                    str(
+                        nested_payload.get("execution_regime")
+                        or payload.get("execution_regime")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                )
                 if (
                     phase == "execution_router"
                     and event_type == "pro_mode.phase_completed"
@@ -10965,38 +11288,79 @@ def create_app() -> FastAPI:
                 runtime_stream_signature = inspect.signature(agno_runtime.stream)
             except (TypeError, ValueError):
                 runtime_stream_signature = None
-            if runtime_stream_signature is not None and "event_callback" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "event_callback" in runtime_stream_signature.parameters
+            ):
+
                 def _emit_runtime_event(payload: dict[str, Any]) -> None:
                     record = _persist_agent_runtime_event(active_run.run_id, payload)
                     runtime_events_queue.put_nowait(("run_event", record))
 
                 runtime_stream_kwargs["event_callback"] = _emit_runtime_event
-            if runtime_stream_signature is not None and "reasoning_mode" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "reasoning_mode" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["reasoning_mode"] = str(req.reasoning_mode or "deep")
-            if runtime_stream_signature is not None and "benchmark" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "benchmark" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["benchmark"] = (
                     req.benchmark.model_dump(mode="json") if req.benchmark is not None else None
                 )
-            if runtime_stream_signature is not None and "selected_tool_names" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "selected_tool_names" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["selected_tool_names"] = _chat_selected_tool_names(req)
-            if runtime_stream_signature is not None and "knowledge_context" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "knowledge_context" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["knowledge_context"] = _chat_knowledge_context_payload(req)
-            if runtime_stream_signature is not None and "memory_policy" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "memory_policy" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["memory_policy"] = _chat_memory_policy_payload(req)
-            if runtime_stream_signature is not None and "knowledge_scope" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "knowledge_scope" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["knowledge_scope"] = _chat_knowledge_scope_payload(req)
-            if runtime_stream_signature is not None and "workflow_hint" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "workflow_hint" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["workflow_hint"] = _chat_workflow_hint_payload(req)
-            if runtime_stream_signature is not None and "selection_context" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "selection_context" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["selection_context"] = _chat_selection_context_payload(req)
-            if runtime_stream_signature is not None and "hitl_resume" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "hitl_resume" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["hitl_resume"] = hitl_resume
-            if runtime_stream_signature is not None and "run_id" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "run_id" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["run_id"] = active_run.run_id
-            if runtime_stream_signature is not None and "user_id" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "user_id" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["user_id"] = user_id
-            if runtime_stream_signature is not None and "debug" in runtime_stream_signature.parameters:
+            if (
+                runtime_stream_signature is not None
+                and "debug" in runtime_stream_signature.parameters
+            ):
                 runtime_stream_kwargs["debug"] = _chat_debug_requested(req)
+
             async def _runtime_stream_producer() -> None:
                 try:
                     async for runtime_event in agno_runtime.stream(**runtime_stream_kwargs):
@@ -11234,14 +11598,30 @@ def create_app() -> FastAPI:
                             input_files=reuse_index_input_rows,
                         )
 
+                    response_metadata = dict(runtime_metadata or {})
+                    latest_contract = next(
+                        (
+                            dict(event.get("contract") or {})
+                            for event in reversed(progress_events)
+                            if isinstance(event, dict)
+                            and str(event.get("event") or "").strip().lower() == "workpad_contract"
+                            and isinstance(event.get("contract"), dict)
+                        ),
+                        {},
+                    )
+                    if latest_contract and not isinstance(response_metadata.get("contract"), dict):
+                        response_metadata["contract"] = latest_contract
+
                     response = ChatResponse(
                         run_id=active_run.run_id,
                         model=runtime_model,
                         response_text=str(response_text),
                         duration_seconds=duration,
                         progress_events=progress_events,
-                        benchmark=benchmark_payload if isinstance(benchmark_payload, dict) else None,
-                        metadata=runtime_metadata or None,
+                        benchmark=benchmark_payload
+                        if isinstance(benchmark_payload, dict)
+                        else None,
+                        metadata=response_metadata or None,
                     )
                     store.append_event(
                         active_run.run_id,
@@ -11252,7 +11632,7 @@ def create_app() -> FastAPI:
                             "selected_domains": selected_domains,
                             "domain_outputs": domain_outputs,
                             "tool_calls": tool_call_count,
-                            "runtime_metadata": runtime_metadata,
+                            "runtime_metadata": response_metadata or runtime_metadata,
                         },
                     )
                     yield {"event": "done", "data": response}
@@ -11344,7 +11724,9 @@ def create_app() -> FastAPI:
                         or str(payload.get("createdAt") or "").strip()
                         or now
                     ),
-                    "runId": str(payload.get("run_id") or payload.get("runId") or run_id or "").strip()
+                    "runId": str(
+                        payload.get("run_id") or payload.get("runId") or run_id or ""
+                    ).strip()
                     or None,
                     "metadata": (
                         dict(payload.get("metadata") or {})
@@ -11361,8 +11743,12 @@ def create_app() -> FastAPI:
             user_id=str(thread_row.get("user_id") or "").strip() or None,
             title=str(thread_row.get("title") or "").strip() or None,
             status=str(thread_row.get("status") or "active"),
-            created_at=datetime.fromisoformat(str(thread_row.get("created_at") or datetime.utcnow().isoformat())),
-            updated_at=datetime.fromisoformat(str(thread_row.get("updated_at") or datetime.utcnow().isoformat())),
+            created_at=datetime.fromisoformat(
+                str(thread_row.get("created_at") or datetime.utcnow().isoformat())
+            ),
+            updated_at=datetime.fromisoformat(
+                str(thread_row.get("updated_at") or datetime.utcnow().isoformat())
+            ),
             latest_run_id=str(thread_row.get("latest_run_id") or "").strip() or None,
             checkpoint_id=str(thread_row.get("checkpoint_id") or "").strip() or None,
             summary=str(thread_row.get("summary") or "").strip() or None,
@@ -11382,7 +11768,9 @@ def create_app() -> FastAPI:
             run_id=str(message_row.get("run_id") or "").strip() or None,
         )
 
-    def _map_run_status_to_v2(run: WorkflowRun, response_payload: ChatResponse | None = None) -> str:
+    def _map_run_status_to_v2(
+        run: WorkflowRun, response_payload: ChatResponse | None = None
+    ) -> str:
         checkpoint_state = run.checkpoint_state if isinstance(run.checkpoint_state, dict) else {}
         phase = str(checkpoint_state.get("phase") or "").strip().lower()
         if run.status == RunStatus.PENDING:
@@ -11467,7 +11855,11 @@ def create_app() -> FastAPI:
             created_at=run.created_at,
             updated_at=run.updated_at,
             started_at=run.created_at,
-            completed_at=(run.updated_at if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED} else None),
+            completed_at=(
+                run.updated_at
+                if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}
+                else None
+            ),
             metadata=metadata,
         )
 
@@ -11519,9 +11911,7 @@ def create_app() -> FastAPI:
             thread_id=thread_id,
             event_kind=event_kind,  # type: ignore[arg-type]
             event_type=event_type or event_kind,
-            node_name=(
-                str(payload.get("node") or payload.get("phase") or "").strip() or None
-            ),
+            node_name=(str(payload.get("node") or payload.get("phase") or "").strip() or None),
             task_id=str(payload.get("task_id") or "").strip() or None,
             checkpoint_id=str(payload.get("checkpoint_id") or "").strip() or None,
             scope_id=str(payload.get("scope_id") or "").strip() or None,
@@ -11539,7 +11929,11 @@ def create_app() -> FastAPI:
         artifact: ArtifactRecord,
     ) -> V2ArtifactRecord:
         artifact_path = str(artifact.path or "").strip()
-        created_at = artifact.modified_at if isinstance(artifact.modified_at, datetime) else datetime.utcnow()
+        created_at = (
+            artifact.modified_at
+            if isinstance(artifact.modified_at, datetime)
+            else datetime.utcnow()
+        )
         return V2ArtifactRecord(
             artifact_id=f"{run_id}::{artifact_path}",
             run_id=run_id,
@@ -11666,7 +12060,10 @@ def create_app() -> FastAPI:
         chat_req = _chat_request_from_v2(thread_id, req)
         request_messages = _v2_message_payloads_to_snapshot(req.messages, thread_id=thread_id)
         thread_row = store.get_thread(thread_id=thread_id, user_id=request_user_id)
-        title = str((thread_row or {}).get("title") or "").strip() or str(req.metadata.get("title") or "").strip()
+        title = (
+            str((thread_row or {}).get("title") or "").strip()
+            or str(req.metadata.get("title") or "").strip()
+        )
         if not title:
             title = _v2_thread_title(request_messages)
         metadata = dict((thread_row or {}).get("metadata") or {})
@@ -11719,7 +12116,9 @@ def create_app() -> FastAPI:
             "runId": latest_run.run_id,
             "metadata": {},
         }
-        checkpoint_state = latest_run.checkpoint_state if isinstance(latest_run.checkpoint_state, dict) else {}
+        checkpoint_state = (
+            latest_run.checkpoint_state if isinstance(latest_run.checkpoint_state, dict) else {}
+        )
         checkpoint_id = str(checkpoint_state.get("checkpoint_id") or "").strip() or None
         summary = str(final_response.response_text or "").strip()[:400] or None
         _sync_v2_thread_projection(
@@ -11782,7 +12181,9 @@ def create_app() -> FastAPI:
             _v2_thread_message_record(row)
             for row in store.list_thread_messages(thread_id=thread_id, user_id=user_id, limit=limit)
         ]
-        return V2ThreadMessageListResponse(thread_id=thread_id, count=len(messages), messages=messages)
+        return V2ThreadMessageListResponse(
+            thread_id=thread_id, count=len(messages), messages=messages
+        )
 
     @v2.post("/threads/{thread_id}/runs", response_model=V2RunRecord)
     async def create_run_v2(
@@ -11804,7 +12205,9 @@ def create_app() -> FastAPI:
                 user_id=request_user_id,
                 title=title,
                 metadata=metadata,
-                messages=store.list_thread_messages(thread_id=thread_id, user_id=request_user_id, limit=1000),
+                messages=store.list_thread_messages(
+                    thread_id=thread_id, user_id=request_user_id, limit=1000
+                ),
                 latest_run_id=str((thread_row or {}).get("latest_run_id") or "").strip() or None,
                 checkpoint_id=str((thread_row or {}).get("checkpoint_id") or "").strip() or None,
                 summary=str((thread_row or {}).get("summary") or "").strip() or None,
@@ -11855,7 +12258,9 @@ def create_app() -> FastAPI:
                 checkpoint_id=None,
                 summary=str((thread_row or {}).get("summary") or "").strip() or None,
                 metadata=metadata,
-                created_at=str((thread_row or {}).get("created_at") or datetime.utcnow().isoformat()),
+                created_at=str(
+                    (thread_row or {}).get("created_at") or datetime.utcnow().isoformat()
+                ),
                 updated_at=datetime.utcnow().isoformat(),
             )
             return _v2_run_record(run, thread_id=thread_id, user_id=request_user_id)
@@ -11949,7 +12354,10 @@ def create_app() -> FastAPI:
         _assert_run_owner_access(run_id=run_id, request_user_id=request_user_id)
         checkpoint_state = run.checkpoint_state if isinstance(run.checkpoint_state, dict) else {}
         phase = str(checkpoint_state.get("phase") or "").strip().lower()
-        if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED} and phase != "pending_approval":
+        if (
+            run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}
+            and phase != "pending_approval"
+        ):
             raise HTTPException(status_code=409, detail="Run is already terminal")
         reason = str(req.reason or "Canceled by user.").strip() or "Canceled by user."
         store.update_status(run_id, RunStatus.CANCELED, error=reason)
@@ -11986,12 +12394,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="Run is missing thread linkage")
         thread_messages = [
             _v2_thread_message_record(row)
-            for row in store.list_thread_messages(thread_id=thread_id, user_id=request_user_id, limit=1000)
+            for row in store.list_thread_messages(
+                thread_id=thread_id, user_id=request_user_id, limit=1000
+            )
         ]
         decision = str(req.decision or "").strip().lower()
         if decision not in {"approve", "reject"}:
             note_text = str(req.note or "").strip().lower()
-            if note_text.startswith(("approve", "approved", "yes", "y", "go ahead", "continue", "proceed")):
+            if note_text.startswith(
+                ("approve", "approved", "yes", "y", "go ahead", "continue", "proceed")
+            ):
                 decision = "approve"
             elif note_text.startswith(("reject", "rejected", "cancel", "no", "stop", "deny")):
                 decision = "reject"
@@ -12008,15 +12420,21 @@ def create_app() -> FastAPI:
         resumed_req = V2RunCreateRequest(
             goal=run.goal,
             messages=[*thread_messages, resume_message],
-            selected_tool_names=list(budget_state.get("selected_tool_names") or checkpoint_state.get("selected_tool_names") or []),
+            selected_tool_names=list(
+                budget_state.get("selected_tool_names")
+                or checkpoint_state.get("selected_tool_names")
+                or []
+            ),
             knowledge_context=(
                 req_model
                 if isinstance(
-                    (req_model := (
-                        checkpoint_state.get("knowledge_context")
-                        if isinstance(checkpoint_state.get("knowledge_context"), dict)
-                        else budget_state.get("knowledge_context")
-                    )),
+                    (
+                        req_model := (
+                            checkpoint_state.get("knowledge_context")
+                            if isinstance(checkpoint_state.get("knowledge_context"), dict)
+                            else budget_state.get("knowledge_context")
+                        )
+                    ),
                     dict,
                 )
                 else None
@@ -12024,11 +12442,13 @@ def create_app() -> FastAPI:
             selection_context=(
                 req_model
                 if isinstance(
-                    (req_model := (
-                        checkpoint_state.get("selection_context")
-                        if isinstance(checkpoint_state.get("selection_context"), dict)
-                        else budget_state.get("selection_context")
-                    )),
+                    (
+                        req_model := (
+                            checkpoint_state.get("selection_context")
+                            if isinstance(checkpoint_state.get("selection_context"), dict)
+                            else budget_state.get("selection_context")
+                        )
+                    ),
                     dict,
                 )
                 else None
@@ -12036,11 +12456,13 @@ def create_app() -> FastAPI:
             workflow_hint=(
                 req_model
                 if isinstance(
-                    (req_model := (
-                        checkpoint_state.get("workflow_hint")
-                        if isinstance(checkpoint_state.get("workflow_hint"), dict)
-                        else budget_state.get("workflow_hint")
-                    )),
+                    (
+                        req_model := (
+                            checkpoint_state.get("workflow_hint")
+                            if isinstance(checkpoint_state.get("workflow_hint"), dict)
+                            else budget_state.get("workflow_hint")
+                        )
+                    ),
                     dict,
                 )
                 else None
@@ -12073,7 +12495,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found")
         request_user_id = _resolve_request_user_id(bisque_auth)
         _assert_run_owner_access(run_id=run_id, request_user_id=request_user_id)
-        thread_id = str((store.get_run_metadata(run_id) or {}).get("conversation_id") or "").strip() or None
+        thread_id = (
+            str((store.get_run_metadata(run_id) or {}).get("conversation_id") or "").strip() or None
+        )
         artifacts = [
             _v2_artifact_record(run_id, thread_id=thread_id, artifact=artifact)
             for artifact in _list_artifacts(run_id, limit=limit)
@@ -12095,7 +12519,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found")
         request_user_id = _resolve_request_user_id(bisque_auth)
         _assert_run_owner_access(run_id=run_id, request_user_id=request_user_id)
-        thread_id = str((store.get_run_metadata(run_id) or {}).get("conversation_id") or "").strip() or None
+        thread_id = (
+            str((store.get_run_metadata(run_id) or {}).get("conversation_id") or "").strip() or None
+        )
         artifacts = _list_artifacts(run_id, limit=5000)
         for artifact in artifacts:
             if str(artifact.path or "").strip() != artifact_path:
@@ -12186,10 +12612,7 @@ def create_app() -> FastAPI:
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         total_count = store.count_conversations(user_id=user_id)
         rows = store.list_conversations(user_id=user_id, limit=limit, offset=offset)
-        records = [
-            _conversation_record_from_row(row, include_state=include_state)
-            for row in rows
-        ]
+        records = [_conversation_record_from_row(row, include_state=include_state) for row in rows]
         return ConversationListResponse(
             count=len(records),
             total_count=total_count,
@@ -12529,7 +12952,8 @@ def create_app() -> FastAPI:
         if (
             result_payload is not None
             and checkpoint_phase != "pending_approval"
-            and status_value in {
+            and status_value
+            in {
                 RunStatus.PENDING.value,
                 RunStatus.RUNNING.value,
             }
@@ -12797,7 +13221,9 @@ def create_app() -> FastAPI:
             ),
         )
 
-    def _assert_training_domain_access(*, row: dict[str, Any] | None, user_id: str) -> dict[str, Any]:
+    def _assert_training_domain_access(
+        *, row: dict[str, Any] | None, user_id: str
+    ) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail="Training domain not found.")
         owner_scope = str(row.get("owner_scope") or "").strip().lower()
@@ -12806,7 +13232,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Training domain not found.")
         return row
 
-    def _assert_training_lineage_access(*, row: dict[str, Any] | None, user_id: str) -> dict[str, Any]:
+    def _assert_training_lineage_access(
+        *, row: dict[str, Any] | None, user_id: str
+    ) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail="Training lineage not found.")
         scope_token = str(row.get("scope") or "").strip().lower()
@@ -12844,7 +13272,7 @@ def create_app() -> FastAPI:
         lineage = lineage_row if isinstance(lineage_row, dict) else {}
         lineage_id = str(lineage.get("lineage_id") or "").strip()
         model_token = str(lineage.get("model_key") or "").strip().lower()
-        if not lineage_id or model_token != _PRAIRIE_MODEL_KEY:
+        if not lineage_id or model_token != prairie_model_key:
             return
         if not replace:
             existing = store.list_training_replay_items(lineage_id=lineage_id, limit=1)
@@ -12877,9 +13305,7 @@ def create_app() -> FastAPI:
             if not sample_id or not image_path:
                 continue
             class_tags = [
-                str(tag).strip()
-                for tag in list(row.get("class_tags") or [])
-                if str(tag).strip()
+                str(tag).strip() for tag in list(row.get("class_tags") or []) if str(tag).strip()
             ]
             small_object_count = max(0, int(row.get("small_object_count") or 0))
             replay_items.append(
@@ -12904,7 +13330,7 @@ def create_app() -> FastAPI:
         user_id: str,
         model_key: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        model_token = str(model_key or "").strip().lower() or _PRAIRIE_MODEL_KEY
+        model_token = str(model_key or "").strip().lower() or prairie_model_key
         domain_id = f"domain-{model_token}-default"
         domain_row = store.get_training_domain(domain_id=domain_id)
         if domain_row is None:
@@ -12923,11 +13349,7 @@ def create_app() -> FastAPI:
             limit=50,
         )
         shared = next(
-            (
-                row
-                for row in lineages
-                if str(row.get("scope") or "").strip().lower() == "shared"
-            ),
+            (row for row in lineages if str(row.get("scope") or "").strip().lower() == "shared"),
             None,
         )
         if shared is None:
@@ -12996,7 +13418,7 @@ def create_app() -> FastAPI:
     ) -> TrainingDatasetRecord:
         split_counts_raw = ((manifest or {}).get("counts") or {}) if manifest else {}
         split_counts = {
-            split: int(((split_counts_raw.get(split) or {}).get("samples") or 0))
+            split: int((split_counts_raw.get(split) or {}).get("samples") or 0)
             for split in ("train", "val", "test")
         }
         return TrainingDatasetRecord(
@@ -13077,7 +13499,9 @@ def create_app() -> FastAPI:
             replay_new_ratio = getattr(settings, "prairie_replay_new_ratio", None)
             replay_old_ratio = getattr(settings, "prairie_replay_old_ratio", None)
             prefer_sahi = getattr(settings, "prairie_inference_prefer_sahi", None)
-            hyp_path_default = Path(__file__).resolve().parent.parent / "training" / "hyp.prairie_finetune.yaml"
+            hyp_path_default = (
+                Path(__file__).resolve().parent.parent / "training" / "hyp.prairie_finetune.yaml"
+            )
             return {
                 "epochs": _safe_int(
                     fixed_epochs if fixed_epochs is not None else default_config.get("epochs"),
@@ -13135,7 +13559,9 @@ def create_app() -> FastAPI:
                     else bool(default_config.get("include_empty_tiles", True))
                 ),
                 "merge_iou": _safe_float(
-                    fixed_merge_iou if fixed_merge_iou is not None else default_config.get("merge_iou"),
+                    fixed_merge_iou
+                    if fixed_merge_iou is not None
+                    else default_config.get("merge_iou"),
                     default=float(default_config.get("merge_iou") or 0.45),
                     minimum=0.05,
                     maximum=0.99,
@@ -13359,10 +13785,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return dataset_row, item_rows, manifest
 
-    _PRAIRIE_SOURCE_TYPE = "prairie_active_learning_dataset"
-    _PRAIRIE_MODEL_KEY = "yolov5_rarespot"
-    _PRAIRIE_SUPPORTED_CLASSES = ("burrow", "prairie_dog")
-    _PRAIRIE_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    prairie_source_type = "prairie_active_learning_dataset"
+    prairie_model_key = "yolov5_rarespot"
+    prairie_supported_classes = ("burrow", "prairie_dog")
+    prairie_image_suffixes = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
     def _prairie_source_id(user_id: str) -> str:
         token = hashlib.sha1(str(user_id or "").encode("utf-8")).hexdigest()[:16]
@@ -13385,11 +13811,13 @@ def create_app() -> FastAPI:
         elif cookie_header:
             headers["Cookie"] = cookie_header
         elif username and password:
-            creds = f"{username}:{password}".encode("utf-8")
+            creds = f"{username}:{password}".encode()
             headers["Authorization"] = f"Basic {b64encode(creds).decode('ascii')}"
         return headers
 
-    def _fetch_xml_url(*, url: str, headers: dict[str, str], timeout: int = 60) -> ElementTree.Element:
+    def _fetch_xml_url(
+        *, url: str, headers: dict[str, str], timeout: int = 60
+    ) -> ElementTree.Element:
         request = Request(url, headers=headers, method="GET")
         with urlopen(request, timeout=timeout) as response:
             payload = response.read() or b""
@@ -13508,9 +13936,9 @@ def create_app() -> FastAPI:
         if not normalized_root:
             raise ValueError("BISQUE_ROOT is not configured.")
         query_candidates = [
-            {"tag_query": f"\"name\":\"{dataset_name}\"", "view": "deep"},
+            {"tag_query": f'"name":"{dataset_name}"', "view": "deep"},
             {"name": dataset_name, "view": "deep"},
-            {"tag_query": f"\"name\":\"{dataset_name}\""},
+            {"tag_query": f'"name":"{dataset_name}"'},
             {"view": "deep"},
         ]
         errors: list[str] = []
@@ -13560,12 +13988,12 @@ def create_app() -> FastAPI:
         if content_type_token.startswith("image/"):
             return True
         suffix = Path(str(original_name or "").strip()).suffix.lower()
-        return bool(suffix and suffix in _PRAIRIE_IMAGE_SUFFIXES)
+        return bool(suffix and suffix in prairie_image_suffixes)
 
     def _parse_prairie_annotation_counts(
         annotation_path: Path,
     ) -> tuple[bool, dict[str, int], dict[str, int], tuple[Any, ...], str | None]:
-        supported_counts = {name: 0 for name in _PRAIRIE_SUPPORTED_CLASSES}
+        supported_counts = {name: 0 for name in prairie_supported_classes}
         unsupported_counts: dict[str, int] = {}
         annotation_signature: list[tuple[str, tuple[tuple[tuple[float, float], ...], ...]]] = []
         try:
@@ -13579,7 +14007,13 @@ def create_app() -> FastAPI:
             if str(node.attrib.get("name") or "").strip() == "gt2"
         ]
         if not layers:
-            return False, supported_counts, unsupported_counts, tuple(), "Missing gt2 annotation layer."
+            return (
+                False,
+                supported_counts,
+                unsupported_counts,
+                tuple(),
+                "Missing gt2 annotation layer.",
+            )
 
         for layer in layers:
             for class_node in layer.findall("./gobject"):
@@ -13602,7 +14036,9 @@ def create_app() -> FastAPI:
                 if class_name in supported_counts:
                     supported_counts[class_name] = supported_counts[class_name] + int(rect_count)
                 else:
-                    unsupported_counts[class_name] = unsupported_counts.get(class_name, 0) + int(rect_count)
+                    unsupported_counts[class_name] = unsupported_counts.get(class_name, 0) + int(
+                        rect_count
+                    )
                 annotation_signature.append(
                     (
                         class_name,
@@ -13614,10 +14050,14 @@ def create_app() -> FastAPI:
     def _prairie_reviewed_sample_fingerprint(sample: dict[str, Any]) -> tuple[Any, ...]:
         image_row = sample.get("image") if isinstance(sample.get("image"), dict) else {}
         supported_counts = (
-            sample.get("supported_counts") if isinstance(sample.get("supported_counts"), dict) else {}
+            sample.get("supported_counts")
+            if isinstance(sample.get("supported_counts"), dict)
+            else {}
         )
         unsupported_counts = (
-            sample.get("unsupported_counts") if isinstance(sample.get("unsupported_counts"), dict) else {}
+            sample.get("unsupported_counts")
+            if isinstance(sample.get("unsupported_counts"), dict)
+            else {}
         )
         annotation_signature = (
             sample.get("annotation_signature")
@@ -13629,7 +14069,7 @@ def create_app() -> FastAPI:
             tuple(annotation_signature),
             tuple(
                 (class_name, int(supported_counts.get(class_name) or 0))
-                for class_name in _PRAIRIE_SUPPORTED_CLASSES
+                for class_name in prairie_supported_classes
             ),
             tuple(
                 sorted(
@@ -13645,7 +14085,9 @@ def create_app() -> FastAPI:
 
     def _prairie_reviewed_sample_identity(sample: dict[str, Any]) -> str:
         image_row = sample.get("image") if isinstance(sample.get("image"), dict) else {}
-        annotation_row = sample.get("annotation") if isinstance(sample.get("annotation"), dict) else {}
+        annotation_row = (
+            sample.get("annotation") if isinstance(sample.get("annotation"), dict) else {}
+        )
         image_sha = str(image_row.get("sha256") or "").strip()
         annotation_sha = str(annotation_row.get("sha256") or "").strip()
         if image_sha:
@@ -13664,7 +14106,7 @@ def create_app() -> FastAPI:
         identity_to_sample_id: dict[str, str] = {}
         conflicted_sample_ids: set[str] = set()
         conflicted_identities: set[str] = set()
-        class_counts = {name: 0 for name in _PRAIRIE_SUPPORTED_CLASSES}
+        class_counts = {name: 0 for name in prairie_supported_classes}
         unsupported_class_counts: dict[str, int] = {}
         messages: list[str] = []
         duplicate_samples_ignored = 0
@@ -13681,7 +14123,9 @@ def create_app() -> FastAPI:
         for sample in reviewed_candidates:
             sample_id = str(sample.get("sample_id") or "").strip()
             if not sample_id:
-                messages.append("Encountered a reviewed prairie sample without a sample_id; skipped.")
+                messages.append(
+                    "Encountered a reviewed prairie sample without a sample_id; skipped."
+                )
                 continue
             if sample_id in conflicted_sample_ids:
                 duplicate_samples_ignored += 1
@@ -13695,11 +14139,9 @@ def create_app() -> FastAPI:
                 matched_sample_id = identity_to_sample_id.get(identity) if identity else None
                 if matched_sample_id:
                     matched = unique_samples.get(matched_sample_id)
-                    if (
-                        matched is not None
-                        and _prairie_reviewed_sample_fingerprint(matched)
-                        == _prairie_reviewed_sample_fingerprint(sample)
-                    ):
+                    if matched is not None and _prairie_reviewed_sample_fingerprint(
+                        matched
+                    ) == _prairie_reviewed_sample_fingerprint(sample):
                         duplicate_samples_ignored += 1
                         messages.append(
                             f"{sample_id}: duplicate reviewed sample content detected; ignored to preserve unique counting."
@@ -13718,7 +14160,9 @@ def create_app() -> FastAPI:
                 if identity:
                     identity_to_sample_id[identity] = sample_id
                 continue
-            if _prairie_reviewed_sample_fingerprint(existing) == _prairie_reviewed_sample_fingerprint(sample):
+            if _prairie_reviewed_sample_fingerprint(
+                existing
+            ) == _prairie_reviewed_sample_fingerprint(sample):
                 duplicate_samples_ignored += 1
                 messages.append(
                     f"{sample_id}: duplicate reviewed sample detected; ignored to preserve unique counting."
@@ -13739,14 +14183,16 @@ def create_app() -> FastAPI:
         ]
         for sample in finalized:
             supported_counts = (
-                sample.get("supported_counts") if isinstance(sample.get("supported_counts"), dict) else {}
+                sample.get("supported_counts")
+                if isinstance(sample.get("supported_counts"), dict)
+                else {}
             )
             unsupported_counts = (
                 sample.get("unsupported_counts")
                 if isinstance(sample.get("unsupported_counts"), dict)
                 else {}
             )
-            for class_name in _PRAIRIE_SUPPORTED_CLASSES:
+            for class_name in prairie_supported_classes:
                 class_counts[class_name] = class_counts.get(class_name, 0) + int(
                     supported_counts.get(class_name) or 0
                 )
@@ -13754,7 +14200,9 @@ def create_app() -> FastAPI:
                 token = str(class_name or "").strip()
                 if not token:
                     continue
-                unsupported_class_counts[token] = unsupported_class_counts.get(token, 0) + int(value or 0)
+                unsupported_class_counts[token] = unsupported_class_counts.get(token, 0) + int(
+                    value or 0
+                )
 
         return (
             finalized,
@@ -13776,7 +14224,7 @@ def create_app() -> FastAPI:
         for image_path in sorted(local_root.iterdir()):
             if not image_path.is_file():
                 continue
-            if image_path.suffix.lower() not in _PRAIRIE_IMAGE_SUFFIXES:
+            if image_path.suffix.lower() not in prairie_image_suffixes:
                 continue
             annotation_candidates = [
                 Path(f"{image_path}.xml"),
@@ -13893,7 +14341,7 @@ def create_app() -> FastAPI:
             source_row = store.upsert_training_managed_source(
                 source_id=source_id,
                 user_id=user_id,
-                source_type=_PRAIRIE_SOURCE_TYPE,
+                source_type=prairie_source_type,
                 name=dataset_name,
                 status="idle",
                 metadata={"trigger": trigger},
@@ -13977,12 +14425,12 @@ def create_app() -> FastAPI:
                                 "annotation_path": annotation_temp.resolve(),
                                 "image_source_uri": resource_uri,
                                 "annotation_source_uri": f"{resource_uri}?view=deep",
-                                "client_view_url": _build_bisque_links(resource_uri, bisque_root).get(
-                                    "client_view_url"
-                                ),
-                                "image_service_url": _build_bisque_links(resource_uri, bisque_root).get(
-                                    "image_service_url"
-                                ),
+                                "client_view_url": _build_bisque_links(
+                                    resource_uri, bisque_root
+                                ).get("client_view_url"),
+                                "image_service_url": _build_bisque_links(
+                                    resource_uri, bisque_root
+                                ).get("image_service_url"),
                                 "image_original_name": original_name,
                                 "image_content_type": image_content_type,
                             }
@@ -14009,7 +14457,11 @@ def create_app() -> FastAPI:
             if not image_path.exists() or not image_path.is_file():
                 sync_errors.append(f"{sample.get('sample_id')}: image path missing ({image_path}).")
                 continue
-            if annotation_path is None or not annotation_path.exists() or not annotation_path.is_file():
+            if (
+                annotation_path is None
+                or not annotation_path.exists()
+                or not annotation_path.is_file()
+            ):
                 sample_id = str(sample.get("sample_id") or image_path.stem).strip()
                 if sample_id:
                     unreviewed_sample_ids.add(sample_id)
@@ -14030,12 +14482,8 @@ def create_app() -> FastAPI:
                     ),
                     resource_kind="image",
                     metadata={"prairie_active_learning": True},
-                    client_view_url=(
-                        str(sample.get("client_view_url") or "").strip() or None
-                    ),
-                    image_service_url=(
-                        str(sample.get("image_service_url") or "").strip() or None
-                    ),
+                    client_view_url=(str(sample.get("client_view_url") or "").strip() or None),
+                    image_service_url=(str(sample.get("image_service_url") or "").strip() or None),
                     consume_source=image_path.name.startswith(".prairie-sync-image-"),
                 )
                 annotation_upload = _store_sync_upload_from_local_path(
@@ -14068,8 +14516,8 @@ def create_app() -> FastAPI:
                     continue
                 annotation_local = Path(annotation_local_value)
                 image_local = Path(image_local_value)
-                reviewed, supported, unsupported, annotation_signature, parse_error = _parse_prairie_annotation_counts(
-                    annotation_local
+                reviewed, supported, unsupported, annotation_signature, parse_error = (
+                    _parse_prairie_annotation_counts(annotation_local)
                 )
                 if parse_error:
                     sync_errors.append(f"{sample.get('sample_id')}: {parse_error}")
@@ -14080,7 +14528,9 @@ def create_app() -> FastAPI:
                             "image": {
                                 "file_id": str(image_upload.get("file_id") or ""),
                                 "path": str(image_local),
-                                "original_name": str(image_upload.get("original_name") or image_local.name),
+                                "original_name": str(
+                                    image_upload.get("original_name") or image_local.name
+                                ),
                                 "sha256": str(image_upload.get("sha256") or "").strip() or None,
                                 "size_bytes": int(image_upload.get("size_bytes") or 0),
                             },
@@ -14090,10 +14540,14 @@ def create_app() -> FastAPI:
                                 "original_name": str(
                                     annotation_upload.get("original_name") or annotation_local.name
                                 ),
-                                "sha256": str(annotation_upload.get("sha256") or "").strip() or None,
+                                "sha256": str(annotation_upload.get("sha256") or "").strip()
+                                or None,
                                 "size_bytes": int(annotation_upload.get("size_bytes") or 0),
                             },
-                            "supported_counts": {name: int(supported.get(name) or 0) for name in _PRAIRIE_SUPPORTED_CLASSES},
+                            "supported_counts": {
+                                name: int(supported.get(name) or 0)
+                                for name in prairie_supported_classes
+                            },
                             "unsupported_counts": {
                                 str(class_name): int(value or 0)
                                 for class_name, value in unsupported.items()
@@ -14128,15 +14582,18 @@ def create_app() -> FastAPI:
         unreviewed_sample_ids -= reviewed_sample_ids
         synced_images = len(reviewed_sample_ids) + len(unreviewed_sample_ids)
 
-        dataset_id = str(source_row.get("training_dataset_id") or "").strip() or f"dataset-{uuid4().hex[:14]}"
+        dataset_id = (
+            str(source_row.get("training_dataset_id") or "").strip()
+            or f"dataset-{uuid4().hex[:14]}"
+        )
         store.create_training_dataset(
             dataset_id=dataset_id,
             user_id=user_id,
             name=dataset_name,
             description="Managed active-learning source for prairie dog YOLO workflow.",
             metadata={
-                "managed_source_type": _PRAIRIE_SOURCE_TYPE,
-                "model_key": _PRAIRIE_MODEL_KEY,
+                "managed_source_type": prairie_source_type,
+                "model_key": prairie_model_key,
             },
         )
 
@@ -14195,7 +14652,7 @@ def create_app() -> FastAPI:
             _, _, manifest = _build_training_dataset_manifest(
                 dataset_id=dataset_id,
                 user_id=user_id,
-                model_key=_PRAIRIE_MODEL_KEY,
+                model_key=prairie_model_key,
             )
         except HTTPException as exc:
             sync_errors.append(str(exc.detail))
@@ -14206,8 +14663,8 @@ def create_app() -> FastAPI:
         unreviewed_images = len(unreviewed_sample_ids)
         manifest_counts = manifest.get("counts") if isinstance(manifest.get("counts"), dict) else {}
         merged_metadata = {
-            "managed_source_type": _PRAIRIE_SOURCE_TYPE,
-            "model_key": _PRAIRIE_MODEL_KEY,
+            "managed_source_type": prairie_source_type,
+            "model_key": prairie_model_key,
             "last_sync_at": synced_at,
             "manifest_counts": manifest_counts,
             "reviewed_images": reviewed_images,
@@ -14244,7 +14701,11 @@ def create_app() -> FastAPI:
             status="idle" if success else "failed",
             stats=stats,
             metadata={
-                **(source_row.get("metadata") if isinstance(source_row.get("metadata"), dict) else {}),
+                **(
+                    source_row.get("metadata")
+                    if isinstance(source_row.get("metadata"), dict)
+                    else {}
+                ),
                 "trigger": trigger,
             },
             error=None if success else "; ".join(sync_errors[:3]) or "No samples were synced.",
@@ -14265,17 +14726,21 @@ def create_app() -> FastAPI:
         )
 
     def _collect_prairie_detection_counts(user_id: str) -> dict[str, int]:
-        counts = {name: 0 for name in _PRAIRIE_SUPPORTED_CLASSES}
+        counts = {name: 0 for name in prairie_supported_classes}
         jobs = store.list_training_jobs(
             user_id=user_id,
             job_type="inference",
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             statuses=["succeeded"],
             limit=500,
         )
         for row in jobs:
             result = row.get("result") if isinstance(row.get("result"), dict) else {}
-            per_class = result.get("counts_by_class") if isinstance(result.get("counts_by_class"), dict) else {}
+            per_class = (
+                result.get("counts_by_class")
+                if isinstance(result.get("counts_by_class"), dict)
+                else {}
+            )
             for class_name, value in per_class.items():
                 token = str(class_name or "").strip()
                 if token not in counts:
@@ -14374,9 +14839,12 @@ def create_app() -> FastAPI:
     def _evaluate_prairie_retrain_gate(stats: dict[str, Any] | None) -> dict[str, Any]:
         payload = stats if isinstance(stats, dict) else {}
         reviewed_images = int(payload.get("reviewed_images") or 0)
-        class_counts = payload.get("class_counts") if isinstance(payload.get("class_counts"), dict) else {}
+        class_counts = (
+            payload.get("class_counts") if isinstance(payload.get("class_counts"), dict) else {}
+        )
         class_object_counts = {
-            class_name: int(class_counts.get(class_name) or 0) for class_name in _PRAIRIE_SUPPORTED_CLASSES
+            class_name: int(class_counts.get(class_name) or 0)
+            for class_name in prairie_supported_classes
         }
         total_objects = sum(int(value) for value in class_object_counts.values())
         min_reviewed = int(getattr(settings, "prairie_retrain_min_reviewed_samples", 30) or 30)
@@ -14391,7 +14859,7 @@ def create_app() -> FastAPI:
             reasons.append(
                 f"Need at least {min_total_objects} reviewed objects (current {total_objects})."
             )
-        for class_name in _PRAIRIE_SUPPORTED_CLASSES:
+        for class_name in prairie_supported_classes:
             count = int(class_object_counts.get(class_name) or 0)
             if count < min_class_objects:
                 reasons.append(
@@ -14403,7 +14871,10 @@ def create_app() -> FastAPI:
             "counts": {
                 "reviewed_images": reviewed_images,
                 "total_objects": total_objects,
-                **{name: int(class_object_counts.get(name) or 0) for name in _PRAIRIE_SUPPORTED_CLASSES},
+                **{
+                    name: int(class_object_counts.get(name) or 0)
+                    for name in prairie_supported_classes
+                },
             },
             "thresholds": {
                 "reviewed_images": min_reviewed,
@@ -14428,7 +14899,9 @@ def create_app() -> FastAPI:
         )
         benchmark = {}
         if (not baseline or not latest_candidate) and isinstance(payload.get("benchmark"), dict):
-            benchmark = payload.get("benchmark") if isinstance(payload.get("benchmark"), dict) else {}
+            benchmark = (
+                payload.get("benchmark") if isinstance(payload.get("benchmark"), dict) else {}
+            )
         if not baseline and isinstance(benchmark.get("baseline_before_train"), dict):
             baseline = benchmark.get("baseline_before_train")
         if not latest_candidate and isinstance(benchmark.get("candidate_after_train"), dict):
@@ -14440,9 +14913,7 @@ def create_app() -> FastAPI:
         )
         last_benchmark_at = str(payload.get("last_benchmark_at") or "").strip() or None
         if not last_benchmark_at:
-            last_benchmark_at = (
-                str(manual_benchmark.get("last_benchmark_at") or "").strip() or None
-            )
+            last_benchmark_at = str(manual_benchmark.get("last_benchmark_at") or "").strip() or None
         canonical_ready = bool(payload.get("canonical_benchmark_ready"))
         promotion_ready = bool(payload.get("promotion_benchmark_ready"))
         benchmark_ready = bool(payload.get("benchmark_ready"))
@@ -14454,12 +14925,23 @@ def create_app() -> FastAPI:
             benchmark_ready = bool((payload.get("benchmark") or {}).get("ready"))
         if not benchmark_ready:
             benchmark_ready = promotion_ready
-        return baseline, latest_candidate, last_benchmark_at, benchmark_ready, canonical_ready, promotion_ready
+        return (
+            baseline,
+            latest_candidate,
+            last_benchmark_at,
+            benchmark_ready,
+            canonical_ready,
+            promotion_ready,
+        )
 
     def _build_prairie_gating_summary(result_payload: dict[str, Any]) -> dict[str, Any]:
-        metrics = result_payload.get("metrics") if isinstance(result_payload.get("metrics"), dict) else {}
+        metrics = (
+            result_payload.get("metrics") if isinstance(result_payload.get("metrics"), dict) else {}
+        )
         benchmark = metrics.get("benchmark") if isinstance(metrics.get("benchmark"), dict) else {}
-        comparison = benchmark.get("comparison") if isinstance(benchmark.get("comparison"), dict) else {}
+        comparison = (
+            benchmark.get("comparison") if isinstance(benchmark.get("comparison"), dict) else {}
+        )
         continuous = (
             result_payload.get("continuous_learning")
             if isinstance(result_payload.get("continuous_learning"), dict)
@@ -14482,14 +14964,16 @@ def create_app() -> FastAPI:
             ),
             "guardrails_passed": bool(guardrails.get("passed")),
             "reasons": list(guardrails.get("reasons") or []),
-            "checks": guardrails.get("checks") if isinstance(guardrails.get("checks"), dict) else {},
+            "checks": guardrails.get("checks")
+            if isinstance(guardrails.get("checks"), dict)
+            else {},
         }
 
     def _list_prairie_retrain_jobs(user_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         rows = store.list_training_jobs(
             user_id=user_id,
             job_type="training",
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             limit=limit,
         )
         output: list[dict[str, Any]] = []
@@ -14580,15 +15064,13 @@ def create_app() -> FastAPI:
                 getattr(settings, "prairie_guardrail_canonical_map50_drop_max", 0.02) or 0.02
             ),
             prairie_dog_map50_drop_max=float(
-                getattr(settings, "prairie_guardrail_prairie_dog_map50_drop_max", 0.03)
-                or 0.03
+                getattr(settings, "prairie_guardrail_prairie_dog_map50_drop_max", 0.03) or 0.03
             ),
             active_map50_drop_max=float(
                 getattr(settings, "prairie_guardrail_active_map50_drop_max", 0.02) or 0.02
             ),
             canonical_fp_image_increase_max=float(
-                getattr(settings, "prairie_guardrail_canonical_fp_image_increase_max", 0.25)
-                or 0.25
+                getattr(settings, "prairie_guardrail_canonical_fp_image_increase_max", 0.25) or 0.25
             ),
         )
 
@@ -14607,7 +15089,11 @@ def create_app() -> FastAPI:
         training_result: dict[str, Any],
         fallback_drift_score: float = 0.30,
     ) -> dict[str, Any]:
-        metrics = training_result.get("metrics") if isinstance(training_result.get("metrics"), dict) else {}
+        metrics = (
+            training_result.get("metrics")
+            if isinstance(training_result.get("metrics"), dict)
+            else {}
+        )
         benchmark = metrics.get("benchmark") if isinstance(metrics.get("benchmark"), dict) else {}
         baseline_packet = (
             benchmark.get("baseline_before_train")
@@ -14620,9 +15106,7 @@ def create_app() -> FastAPI:
             else {}
         )
         comparison_packet = (
-            benchmark.get("comparison")
-            if isinstance(benchmark.get("comparison"), dict)
-            else {}
+            benchmark.get("comparison") if isinstance(benchmark.get("comparison"), dict) else {}
         )
         map50_value = (
             float(metrics.get("map50_candidate_eval"))
@@ -14717,7 +15201,7 @@ def create_app() -> FastAPI:
         finished_at: str,
     ) -> dict[str, Any]:
         updated_result = dict(training_result)
-        model_key = str(job_row.get("model_key") or "").strip().lower() or _PRAIRIE_MODEL_KEY
+        model_key = str(job_row.get("model_key") or "").strip().lower() or prairie_model_key
         user_id = str(job_row.get("user_id") or "").strip()
         continuous = (
             request_payload.get("continuous")
@@ -14731,7 +15215,9 @@ def create_app() -> FastAPI:
         if lineage_id:
             lineage_row = store.get_training_lineage(lineage_id=lineage_id)
         if lineage_row is None:
-            _, lineage_row = _ensure_default_domain_and_lineage(user_id=user_id, model_key=model_key)
+            _, lineage_row = _ensure_default_domain_and_lineage(
+                user_id=user_id, model_key=model_key
+            )
             lineage_id = str(lineage_row.get("lineage_id") or "").strip()
 
         candidate_metrics = _derive_candidate_metrics(training_result=training_result)
@@ -14757,7 +15243,8 @@ def create_app() -> FastAPI:
                 "model_key": model_key,
                 "model_version": model_version,
                 "created_from_job_id": str(job_row.get("job_id") or "").strip(),
-                "model_artifact_path": str(updated_result.get("model_artifact_path") or "").strip() or latest_checkpoint,
+                "model_artifact_path": str(updated_result.get("model_artifact_path") or "").strip()
+                or latest_checkpoint,
                 "checkpoint_path": latest_checkpoint,
                 "continuous": continuous,
             },
@@ -14795,13 +15282,13 @@ def create_app() -> FastAPI:
                     "promotion_state": "rejected_guardrails",
                     "guardrails": {
                         "passed": False,
-                        "reasons": [
-                            "Initial model version is missing complete benchmark packet."
-                        ],
+                        "reasons": ["Initial model version is missing complete benchmark packet."],
                     },
                 }
             if proposal_id:
-                proposal_row = proposal_state_row or store.get_training_update_proposal(proposal_id=proposal_id)
+                proposal_row = proposal_state_row or store.get_training_update_proposal(
+                    proposal_id=proposal_id
+                )
                 if proposal_row is not None:
                     current_status = normalize_proposal_status(proposal_row.get("status"))
                     if benchmark_ready:
@@ -14812,7 +15299,9 @@ def create_app() -> FastAPI:
                                 candidate_version_id=model_version,
                                 finished_at=finished_at,
                             )
-                        current_status = normalize_proposal_status((proposal_row or {}).get("status"))
+                        current_status = normalize_proposal_status(
+                            (proposal_row or {}).get("status")
+                        )
                         if proposal_transition_allowed(current_status, "promoted"):
                             store.update_training_update_proposal(
                                 proposal_id=proposal_id,
@@ -14861,7 +15350,9 @@ def create_app() -> FastAPI:
                 "guardrails": guardrails,
             }
             if proposal_id:
-                proposal_row = proposal_state_row or store.get_training_update_proposal(proposal_id=proposal_id)
+                proposal_row = proposal_state_row or store.get_training_update_proposal(
+                    proposal_id=proposal_id
+                )
                 if proposal_row is not None:
                     current_status = normalize_proposal_status(proposal_row.get("status"))
                     if proposal_transition_allowed(current_status, "ready_to_promote"):
@@ -14893,7 +15384,9 @@ def create_app() -> FastAPI:
                 "guardrails": guardrails,
             }
             if proposal_id:
-                proposal_row = proposal_state_row or store.get_training_update_proposal(proposal_id=proposal_id)
+                proposal_row = proposal_state_row or store.get_training_update_proposal(
+                    proposal_id=proposal_id
+                )
                 if proposal_row is not None:
                     current_status = normalize_proposal_status(proposal_row.get("status"))
                     if proposal_transition_allowed(current_status, "rejected"):
@@ -15049,16 +15542,18 @@ def create_app() -> FastAPI:
                 if row is None:
                     return
                 initial_status = str(row.get("status") or "").strip().lower()
-                initial_control = (
-                    row.get("control") if isinstance(row.get("control"), dict) else {}
-                )
+                initial_control = row.get("control") if isinstance(row.get("control"), dict) else {}
                 initial_action = str(initial_control.get("action") or "").strip().lower()
                 if initial_status in {"canceled", "failed"} or initial_action == "cancel":
                     return
                 job_type = str(row.get("job_type") or "training").strip().lower()
                 model_key = str(row.get("model_key") or "").strip().lower()
                 request_payload = row.get("request") if isinstance(row.get("request"), dict) else {}
-                config = request_payload.get("config") if isinstance(request_payload.get("config"), dict) else {}
+                config = (
+                    request_payload.get("config")
+                    if isinstance(request_payload.get("config"), dict)
+                    else {}
+                )
                 artifact_run_id = str(row.get("artifact_run_id") or "").strip()
                 output_root = _ensure_run_artifact_dir(artifact_run_id) / "model_jobs" / job_id
                 output_root.mkdir(parents=True, exist_ok=True)
@@ -15106,16 +15601,14 @@ def create_app() -> FastAPI:
                         else {}
                     )
                     result_payload["last_progress"] = event_payload
-                    if (
-                        isinstance(event_payload.get("epoch"), int)
-                        and isinstance(event_payload.get("epochs"), int)
+                    if isinstance(event_payload.get("epoch"), int) and isinstance(
+                        event_payload.get("epochs"), int
                     ):
                         result_payload["progress"] = {
                             "epoch": int(event_payload["epoch"]),
                             "epochs": int(event_payload["epochs"]),
-                            "ratio": float(event_payload["epoch"]) / float(
-                                max(1, int(event_payload["epochs"]))
-                            ),
+                            "ratio": float(event_payload["epoch"])
+                            / float(max(1, int(event_payload["epochs"]))),
                         }
                     checkpoint_path = str(event_payload.get("checkpoint_path") or "").strip()
                     if checkpoint_path:
@@ -15147,9 +15640,9 @@ def create_app() -> FastAPI:
                         user_id=user_id,
                         model_key=model_key,
                     )
-                    initial_checkpoint_path = str(
-                        request_payload.get("initial_checkpoint_path") or ""
-                    ).strip() or None
+                    initial_checkpoint_path = (
+                        str(request_payload.get("initial_checkpoint_path") or "").strip() or None
+                    )
                     training_result = training_runner.run_training(
                         model_key=model_key,
                         manifest=manifest,
@@ -15211,9 +15704,9 @@ def create_app() -> FastAPI:
                             + ", ".join(missing[:5])
                         )
                     model_version = str(row.get("model_version") or "").strip() or None
-                    model_artifact_path = str(
-                        request_payload.get("model_artifact_path") or ""
-                    ).strip() or None
+                    model_artifact_path = (
+                        str(request_payload.get("model_artifact_path") or "").strip() or None
+                    )
                     inference_result = training_runner.run_inference(
                         model_key=model_key,
                         model_artifact_path=model_artifact_path,
@@ -15252,7 +15745,9 @@ def create_app() -> FastAPI:
                         job_id=job_id,
                         user_id=user_id,
                         event_type="completed",
-                        payload={"prediction_count": int(inference_result.get("prediction_count") or 0)},
+                        payload={
+                            "prediction_count": int(inference_result.get("prediction_count") or 0)
+                        },
                     )
                     if artifact_run_id:
                         store.update_status(artifact_run_id, RunStatus.SUCCEEDED)
@@ -15346,9 +15841,11 @@ def create_app() -> FastAPI:
             )
             for lineage in lineages:
                 model_key = str(lineage.get("model_key") or "").strip().lower()
-                if model_key != _PRAIRIE_MODEL_KEY:
+                if model_key != prairie_model_key:
                     continue
-                metadata = lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+                metadata = (
+                    lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+                )
                 dataset_id = str(metadata.get("default_dataset_id") or "").strip()
                 if not dataset_id:
                     continue
@@ -15486,7 +15983,7 @@ def create_app() -> FastAPI:
             return
         try:
             managed_sources = store.list_training_managed_sources(
-                source_type=_PRAIRIE_SOURCE_TYPE,
+                source_type=prairie_source_type,
                 limit=5000,
             )
             for source in managed_sources:
@@ -15520,10 +16017,7 @@ def create_app() -> FastAPI:
 
     def _start_prairie_sync_scheduler() -> None:
         nonlocal prairie_sync_scheduler_thread
-        if (
-            prairie_sync_scheduler_thread is not None
-            and prairie_sync_scheduler_thread.is_alive()
-        ):
+        if prairie_sync_scheduler_thread is not None and prairie_sync_scheduler_thread.is_alive():
             return
         prairie_sync_scheduler_stop.clear()
         prairie_sync_scheduler_thread = Thread(
@@ -15588,7 +16082,7 @@ def create_app() -> FastAPI:
             source_row = store.upsert_training_managed_source(
                 source_id=source_id,
                 user_id=user_id,
-                source_type=_PRAIRIE_SOURCE_TYPE,
+                source_type=prairie_source_type,
                 name=dataset_name,
                 status="idle",
                 metadata={},
@@ -15605,13 +16099,13 @@ def create_app() -> FastAPI:
         training_jobs = store.list_training_jobs(
             user_id=user_id,
             job_type="training",
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             limit=500,
         )
         inference_jobs = store.list_training_jobs(
             user_id=user_id,
             job_type="inference",
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             limit=500,
         )
         health_rows = compute_model_health_entries(
@@ -15622,7 +16116,7 @@ def create_app() -> FastAPI:
             (
                 row
                 for row in health_rows
-                if str(row.get("model_key") or "").strip().lower() == _PRAIRIE_MODEL_KEY
+                if str(row.get("model_key") or "").strip().lower() == prairie_model_key
             ),
             None,
         )
@@ -15633,11 +16127,13 @@ def create_app() -> FastAPI:
         try:
             _, lineage_row = _ensure_default_domain_and_lineage(
                 user_id=user_id,
-                model_key=_PRAIRIE_MODEL_KEY,
+                model_key=prairie_model_key,
             )
             active_version_id = str(lineage_row.get("active_version_id") or "").strip() or None
             active_version_row = _lineage_active_version_row(lineage_row)
-            if isinstance(active_version_row, dict) and isinstance(active_version_row.get("metrics"), dict):
+            if isinstance(active_version_row, dict) and isinstance(
+                active_version_row.get("metrics"), dict
+            ):
                 active_version_metrics = active_version_row.get("metrics") or {}
         except Exception:
             active_version_id = None
@@ -15658,9 +16154,23 @@ def create_app() -> FastAPI:
                 else {}
             )
         benchmark_source = active_version_metrics if active_version_metrics else latest_metrics
-        benchmark_baseline, benchmark_latest_candidate, last_benchmark_at, benchmark_ready, canonical_ready, promotion_ready = _extract_benchmark_status(benchmark_source)
+        (
+            benchmark_baseline,
+            benchmark_latest_candidate,
+            last_benchmark_at,
+            benchmark_ready,
+            canonical_ready,
+            promotion_ready,
+        ) = _extract_benchmark_status(benchmark_source)
         if not last_benchmark_at:
-            _, _, last_benchmark_at, inferred_ready, inferred_canonical_ready, inferred_promotion_ready = _extract_benchmark_status(latest_metrics)
+            (
+                _,
+                _,
+                last_benchmark_at,
+                inferred_ready,
+                inferred_canonical_ready,
+                inferred_promotion_ready,
+            ) = _extract_benchmark_status(latest_metrics)
             if inferred_ready:
                 benchmark_ready = True
             if inferred_canonical_ready:
@@ -15711,9 +16221,7 @@ def create_app() -> FastAPI:
             promotion_benchmark_ready=promotion_ready,
             retrain_gate=bool(retrain_gate.get("ready")),
             retrain_gate_reasons=[
-                str(item)
-                for item in list(retrain_gate.get("reasons") or [])
-                if str(item).strip()
+                str(item) for item in list(retrain_gate.get("reasons") or []) if str(item).strip()
             ],
             retrain_gate_counts={
                 str(key): int(value)
@@ -15734,7 +16242,7 @@ def create_app() -> FastAPI:
         benchmark_mode = str(req.mode or "canonical_only").strip().lower() or "canonical_only"
         if benchmark_mode not in {"canonical_only", "promotion_packet"}:
             benchmark_mode = "canonical_only"
-        definition = get_model_definition(_PRAIRIE_MODEL_KEY)
+        definition = get_model_definition(prairie_model_key)
         if definition is None:
             raise HTTPException(
                 status_code=400,
@@ -15742,7 +16250,7 @@ def create_app() -> FastAPI:
             )
         _, lineage_row = _ensure_default_domain_and_lineage(
             user_id=user_id,
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
         )
         lineage_row = _assert_training_lineage_mutation_access(
             row=lineage_row,
@@ -15774,22 +16282,22 @@ def create_app() -> FastAPI:
             user_id=user_id,
             goal=f"prairie-benchmark:{active_version_id or 'builtin'}",
         )
-        output_root = _ensure_run_artifact_dir(run_id) / "model_jobs" / f"benchmark-{uuid4().hex[:14]}"
+        output_root = (
+            _ensure_run_artifact_dir(run_id) / "model_jobs" / f"benchmark-{uuid4().hex[:14]}"
+        )
         output_root.mkdir(parents=True, exist_ok=True)
         store.update_status(run_id, RunStatus.RUNNING)
         config = _normalize_training_config(
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             raw_config={},
             default_config=dict(definition.default_config),
         )
         config["benchmark_mode"] = benchmark_mode
-        config["_active_packet_ready"] = (
-            _promotion_benchmark_packet_complete(
-                active_version_row.get("metrics")
-                if isinstance(active_version_row, dict)
-                and isinstance(active_version_row.get("metrics"), dict)
-                else {}
-            )
+        config["_active_packet_ready"] = _promotion_benchmark_packet_complete(
+            active_version_row.get("metrics")
+            if isinstance(active_version_row, dict)
+            and isinstance(active_version_row.get("metrics"), dict)
+            else {}
         )
         progress_events: list[dict[str, Any]] = []
 
@@ -15800,7 +16308,7 @@ def create_app() -> FastAPI:
 
         try:
             report = training_runner.run_benchmark(
-                model_key=_PRAIRIE_MODEL_KEY,
+                model_key=prairie_model_key,
                 model_artifact_path=model_artifact_path,
                 config=config,
                 output_dir=output_root,
@@ -15819,7 +16327,7 @@ def create_app() -> FastAPI:
                 run_id,
                 "benchmark_completed",
                 {
-                    "model_key": _PRAIRIE_MODEL_KEY,
+                    "model_key": prairie_model_key,
                     "model_version": active_version_id or "builtin",
                     "mode": benchmark_mode,
                     "benchmark_ready": bool(report.get("benchmark_ready")),
@@ -15841,9 +16349,7 @@ def create_app() -> FastAPI:
                 manual_benchmark = {
                     "mode": benchmark_mode,
                     "canonical": (
-                        report.get("canonical")
-                        if isinstance(report.get("canonical"), dict)
-                        else {}
+                        report.get("canonical") if isinstance(report.get("canonical"), dict) else {}
                     ),
                     "canonical_benchmark_ready": canonical_ready,
                     "promotion_benchmark_ready": promotion_ready,
@@ -15854,8 +16360,11 @@ def create_app() -> FastAPI:
                     **current_metrics,
                     "manual_benchmark": manual_benchmark,
                     "last_benchmark_at": str(report.get("last_benchmark_at") or ""),
-                    "benchmark_ready": bool(current_metrics.get("benchmark_ready")) or promotion_ready,
-                    "canonical_benchmark_ready": bool(current_metrics.get("canonical_benchmark_ready"))
+                    "benchmark_ready": bool(current_metrics.get("benchmark_ready"))
+                    or promotion_ready,
+                    "canonical_benchmark_ready": bool(
+                        current_metrics.get("canonical_benchmark_ready")
+                    )
                     or canonical_ready,
                     "promotion_benchmark_ready": bool(
                         current_metrics.get("promotion_benchmark_ready")
@@ -15899,7 +16408,7 @@ def create_app() -> FastAPI:
                 status_code=409,
                 detail="Another training job is active. v1 supports one training job at a time.",
             )
-        definition = get_model_definition(_PRAIRIE_MODEL_KEY)
+        definition = get_model_definition(prairie_model_key)
         if definition is None:
             raise HTTPException(
                 status_code=400,
@@ -15930,17 +16439,17 @@ def create_app() -> FastAPI:
                 },
             )
         config = _normalize_training_config(
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             raw_config={},
             default_config=dict(definition.default_config),
         )
         dataset_row, _, manifest = _build_training_dataset_manifest(
             dataset_id=dataset_id,
             user_id=user_id,
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
         )
         preflight = build_preflight_report(
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             dataset_manifest=manifest,
             config=config,
             artifact_root=artifact_root,
@@ -15960,7 +16469,7 @@ def create_app() -> FastAPI:
             )
         _, lineage_row = _ensure_default_domain_and_lineage(
             user_id=user_id,
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
         )
         lineage_row = _assert_training_lineage_mutation_access(
             row=lineage_row,
@@ -16011,7 +16520,7 @@ def create_app() -> FastAPI:
             user_id=user_id,
             job_type="training",
             dataset_id=dataset_id,
-            model_key=_PRAIRIE_MODEL_KEY,
+            model_key=prairie_model_key,
             model_version=None,
             status="queued",
             request=request_payload,
@@ -16053,7 +16562,14 @@ def create_app() -> FastAPI:
                 else {}
             )
             status_token = str(row.get("status") or "").strip().lower()
-            if status_token not in {"queued", "running", "paused", "succeeded", "failed", "canceled"}:
+            if status_token not in {
+                "queued",
+                "running",
+                "paused",
+                "succeeded",
+                "failed",
+                "canceled",
+            }:
                 status_token = "failed"
             artifact_run_id = str(row.get("artifact_run_id") or "").strip() or None
             gating_summary = _build_prairie_gating_summary(result_payload)
@@ -16172,7 +16688,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Training dataset not found.")
         resolved_items: list[dict[str, Any]] = []
         for assignment in req.items:
-            upload_row = _resolve_training_dataset_upload(user_id=user_id, file_id=assignment.file_id)
+            upload_row = _resolve_training_dataset_upload(
+                user_id=user_id, file_id=assignment.file_id
+            )
             sample_id = str(assignment.sample_id or "").strip()
             if not sample_id:
                 sample_id = Path(upload_row["original_name"]).stem or assignment.file_id
@@ -16441,9 +16959,7 @@ def create_app() -> FastAPI:
         if not _training_control_transition_allowed(current_status, action):
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Action '{action}' is not allowed when job status is '{current_status}'."
-                ),
+                detail=(f"Action '{action}' is not allowed when job status is '{current_status}'."),
             )
         if action == "restart":
             if _active_training_count(str(row.get("job_type") or "training")) >= 1:
@@ -16671,9 +17187,7 @@ def create_app() -> FastAPI:
                     )
                 except Exception:
                     lineage_row = None
-                active_version_id = (
-                    str((lineage_row or {}).get("active_version_id") or "").strip()
-                )
+                active_version_id = str((lineage_row or {}).get("active_version_id") or "").strip()
                 if active_version_id:
                     active_version_row = store.get_training_model_version(
                         version_id=active_version_id
@@ -16684,8 +17198,12 @@ def create_app() -> FastAPI:
                     if source_job_id:
                         active_job = store.get_training_job(job_id=source_job_id)
                         active_status = str((active_job or {}).get("status") or "").strip().lower()
-                        active_job_type = str((active_job or {}).get("job_type") or "").strip().lower()
-                        active_model_key = str((active_job or {}).get("model_key") or "").strip().lower()
+                        active_job_type = (
+                            str((active_job or {}).get("job_type") or "").strip().lower()
+                        )
+                        active_model_key = (
+                            str((active_job or {}).get("model_key") or "").strip().lower()
+                        )
                         if (
                             active_job is not None
                             and active_status == "succeeded"
@@ -16707,7 +17225,7 @@ def create_app() -> FastAPI:
                             selected_job = active_jobs[0]
                             model_version = active_version_id
             if selected_job is None:
-                if model_key == _PRAIRIE_MODEL_KEY:
+                if model_key == prairie_model_key:
                     # Prairie YOLO defaults to builtin baseline unless a specific
                     # model version is selected or currently promoted as active.
                     model_version = None
@@ -16734,7 +17252,9 @@ def create_app() -> FastAPI:
             selected_result = (
                 selected.get("result") if isinstance(selected.get("result"), dict) else {}
             )
-            model_artifact_path = str(selected_result.get("model_artifact_path") or "").strip() or None
+            model_artifact_path = (
+                str(selected_result.get("model_artifact_path") or "").strip() or None
+            )
             model_version = str(selected.get("model_version") or "").strip() or model_version
         if model_key == "dynunet" and not model_artifact_path:
             raise HTTPException(
@@ -16828,7 +17348,7 @@ def create_app() -> FastAPI:
     @v1.get("/admin/model-health", response_model=ModelHealthResponse)
     @legacy.get("/admin/model-health", response_model=ModelHealthResponse)
     def admin_model_health_endpoint(
-        admin_auth: dict[str, Any] = Depends(_require_admin_access),
+        admin_auth: dict[str, Any] = Depends(_require_admin_session),
     ) -> ModelHealthResponse:
         del admin_auth
         training_jobs = store.list_training_jobs(job_type="training", limit=5000)
@@ -16878,7 +17398,9 @@ def create_app() -> FastAPI:
         return TrainingDomainListResponse(count=len(records), domains=records)
 
     @v1.get("/training/domains/{domain_id}/lineages", response_model=TrainingLineageListResponse)
-    @legacy.get("/training/domains/{domain_id}/lineages", response_model=TrainingLineageListResponse)
+    @legacy.get(
+        "/training/domains/{domain_id}/lineages", response_model=TrainingLineageListResponse
+    )
     def list_training_domain_lineages_endpoint(
         domain_id: str,
         limit: int = Query(default=200, ge=1, le=1000),
@@ -16888,7 +17410,9 @@ def create_app() -> FastAPI:
         del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         domain_row = _assert_training_domain_access(
-            row=store.get_training_domain(domain_id=domain_id, owner_user_id=user_id, include_shared=True),
+            row=store.get_training_domain(
+                domain_id=domain_id, owner_user_id=user_id, include_shared=True
+            ),
             user_id=user_id,
         )
         rows = store.list_training_lineages(
@@ -16911,7 +17435,9 @@ def create_app() -> FastAPI:
         del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         source = _assert_training_lineage_access(
-            row=store.get_training_lineage(lineage_id=lineage_id, owner_user_id=user_id, include_shared=True),
+            row=store.get_training_lineage(
+                lineage_id=lineage_id, owner_user_id=user_id, include_shared=True
+            ),
             user_id=user_id,
         )
         fork_id = f"lineage-fork-{uuid4().hex[:16]}"
@@ -16927,15 +17453,19 @@ def create_app() -> FastAPI:
             domain_id=str(source.get("domain_id") or ""),
             scope="fork",
             owner_user_id=user_id,
-            model_key=str(req.model_key or source.get("model_key") or _PRAIRIE_MODEL_KEY),
+            model_key=str(req.model_key or source.get("model_key") or prairie_model_key),
             parent_lineage_id=str(source.get("lineage_id") or ""),
             active_version_id=str(source.get("active_version_id") or "").strip() or None,
             metadata=merged_metadata,
         )
         return _to_training_lineage_record(row)
 
-    @v1.get("/training/lineages/{lineage_id}/versions", response_model=TrainingModelVersionListResponse)
-    @legacy.get("/training/lineages/{lineage_id}/versions", response_model=TrainingModelVersionListResponse)
+    @v1.get(
+        "/training/lineages/{lineage_id}/versions", response_model=TrainingModelVersionListResponse
+    )
+    @legacy.get(
+        "/training/lineages/{lineage_id}/versions", response_model=TrainingModelVersionListResponse
+    )
     def list_training_lineage_versions_endpoint(
         lineage_id: str,
         limit: int = Query(default=200, ge=1, le=1000),
@@ -16945,7 +17475,9 @@ def create_app() -> FastAPI:
         del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         lineage = _assert_training_lineage_access(
-            row=store.get_training_lineage(lineage_id=lineage_id, owner_user_id=user_id, include_shared=True),
+            row=store.get_training_lineage(
+                lineage_id=lineage_id, owner_user_id=user_id, include_shared=True
+            ),
             user_id=user_id,
         )
         rows = store.list_training_model_versions(
@@ -16955,8 +17487,12 @@ def create_app() -> FastAPI:
         records = [_to_training_model_version_record(row) for row in rows]
         return TrainingModelVersionListResponse(count=len(records), versions=records)
 
-    @v1.post("/training/update-proposals/preview", response_model=TrainingUpdateProposalPreviewResponse)
-    @legacy.post("/training/update-proposals/preview", response_model=TrainingUpdateProposalPreviewResponse)
+    @v1.post(
+        "/training/update-proposals/preview", response_model=TrainingUpdateProposalPreviewResponse
+    )
+    @legacy.post(
+        "/training/update-proposals/preview", response_model=TrainingUpdateProposalPreviewResponse
+    )
     def preview_training_update_proposal_endpoint(
         req: TrainingUpdateProposalPreviewRequest,
         bisque_auth: dict[str, Any] | None = Depends(_get_bisque_auth_optional),
@@ -16978,10 +17514,12 @@ def create_app() -> FastAPI:
                 user_id=user_id,
                 action="Persisting update proposals",
             )
-        model_key = str(lineage.get("model_key") or "").strip().lower() or _PRAIRIE_MODEL_KEY
+        model_key = str(lineage.get("model_key") or "").strip().lower() or prairie_model_key
         definition = get_model_definition(model_key)
         if definition is None:
-            raise HTTPException(status_code=400, detail=f"Unknown model_key on lineage: {model_key}")
+            raise HTTPException(
+                status_code=400, detail=f"Unknown model_key on lineage: {model_key}"
+            )
         dataset_row, _, manifest = _build_training_dataset_manifest(
             dataset_id=req.dataset_id,
             user_id=user_id,
@@ -17003,7 +17541,9 @@ def create_app() -> FastAPI:
             ),
         )
         manifest_counts = manifest.get("counts") if isinstance(manifest.get("counts"), dict) else {}
-        train_counts = manifest_counts.get("train") if isinstance(manifest_counts.get("train"), dict) else {}
+        train_counts = (
+            manifest_counts.get("train") if isinstance(manifest_counts.get("train"), dict) else {}
+        )
         approved_new_samples = (
             int(req.approved_new_samples)
             if req.approved_new_samples is not None
@@ -17107,9 +17647,7 @@ def create_app() -> FastAPI:
         del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         statuses = [
-            token.strip().lower()
-            for token in str(status or "").split(",")
-            if token.strip()
+            token.strip().lower() for token in str(status or "").split(",") if token.strip()
         ]
         rows = store.list_training_update_proposals(
             owner_user_id=user_id,
@@ -17165,14 +17703,18 @@ def create_app() -> FastAPI:
                 status_code=409,
                 detail="Another training job is active. v1 supports one training job at a time.",
             )
-        snapshot = proposal.get("dataset_snapshot") if isinstance(proposal.get("dataset_snapshot"), dict) else {}
+        snapshot = (
+            proposal.get("dataset_snapshot")
+            if isinstance(proposal.get("dataset_snapshot"), dict)
+            else {}
+        )
         dataset_id = str(snapshot.get("dataset_id") or "").strip()
         if not dataset_id:
             raise HTTPException(
                 status_code=400,
                 detail="Proposal is missing dataset snapshot dataset_id.",
             )
-        model_key = str(lineage.get("model_key") or "").strip().lower() or _PRAIRIE_MODEL_KEY
+        model_key = str(lineage.get("model_key") or "").strip().lower() or prairie_model_key
         definition = get_model_definition(model_key)
         if definition is None:
             raise HTTPException(status_code=400, detail=f"Unknown model_key: {model_key}")
@@ -17203,7 +17745,8 @@ def create_app() -> FastAPI:
         active_version_row = _lineage_active_version_row(lineage)
         active_meta = (
             active_version_row.get("metadata")
-            if isinstance(active_version_row, dict) and isinstance(active_version_row.get("metadata"), dict)
+            if isinstance(active_version_row, dict)
+            and isinstance(active_version_row.get("metadata"), dict)
             else {}
         )
         initial_checkpoint_path = (
@@ -17354,7 +17897,9 @@ def create_app() -> FastAPI:
                 detail=f"Version cannot be promoted from status '{current_status}'.",
             )
         version_metrics = version.get("metrics") if isinstance(version.get("metrics"), dict) else {}
-        version_metadata = version.get("metadata") if isinstance(version.get("metadata"), dict) else {}
+        version_metadata = (
+            version.get("metadata") if isinstance(version.get("metadata"), dict) else {}
+        )
         guardrails = (
             version_metadata.get("guardrails")
             if isinstance(version_metadata.get("guardrails"), dict)
@@ -17372,7 +17917,9 @@ def create_app() -> FastAPI:
                 ),
             )
         if guardrails and not bool(guardrails.get("passed")):
-            reasons = guardrails.get("reasons") if isinstance(guardrails.get("reasons"), list) else []
+            reasons = (
+                guardrails.get("reasons") if isinstance(guardrails.get("reasons"), list) else []
+            )
             reason_text = "; ".join(str(item) for item in reasons[:3]) if reasons else ""
             detail = "Promotion blocked: guardrails did not pass."
             if reason_text:
@@ -17396,7 +17943,9 @@ def create_app() -> FastAPI:
                 "promoted_at": datetime.utcnow().isoformat(),
             },
         )
-        lineage_metadata = lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+        lineage_metadata = (
+            lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+        )
         store.update_training_lineage(
             lineage_id=str(lineage.get("lineage_id") or ""),
             active_version_id=version_id,
@@ -17465,11 +18014,15 @@ def create_app() -> FastAPI:
         )
         lineage_active_id = str(lineage.get("active_version_id") or "").strip()
         if not lineage_active_id:
-            raise HTTPException(status_code=400, detail="Lineage has no active version to rollback.")
+            raise HTTPException(
+                status_code=400, detail="Lineage has no active version to rollback."
+            )
         target_version_id = str(req.target_version_id or "").strip()
         if not target_version_id:
             current_metadata = (
-                current_version.get("metadata") if isinstance(current_version.get("metadata"), dict) else {}
+                current_version.get("metadata")
+                if isinstance(current_version.get("metadata"), dict)
+                else {}
             )
             lineage_metadata = (
                 lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
@@ -17502,7 +18055,9 @@ def create_app() -> FastAPI:
             version_id=target_version_id,
             status="active",
         )
-        lineage_metadata = lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+        lineage_metadata = (
+            lineage.get("metadata") if isinstance(lineage.get("metadata"), dict) else {}
+        )
         store.update_training_lineage(
             lineage_id=str(lineage.get("lineage_id") or ""),
             active_version_id=target_version_id,
@@ -17550,9 +18105,10 @@ def create_app() -> FastAPI:
             ),
             user_id=user_id,
         )
-        if str(source.get("model_key") or "").strip().lower() != str(
-            target.get("model_key") or ""
-        ).strip().lower():
+        if (
+            str(source.get("model_key") or "").strip().lower()
+            != str(target.get("model_key") or "").strip().lower()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="Source and target lineages must have the same model_key.",
@@ -17560,7 +18116,10 @@ def create_app() -> FastAPI:
         candidate = store.get_training_model_version(version_id=req.candidate_version_id)
         if candidate is None:
             raise HTTPException(status_code=404, detail="Candidate version not found.")
-        if str(candidate.get("lineage_id") or "").strip() != str(source.get("lineage_id") or "").strip():
+        if (
+            str(candidate.get("lineage_id") or "").strip()
+            != str(source.get("lineage_id") or "").strip()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="Candidate version must belong to source lineage.",
@@ -17694,9 +18253,7 @@ def create_app() -> FastAPI:
         del _auth
         user_id = _current_user_id(bisque_auth, allow_anonymous=True)
         statuses = [
-            token.strip().lower()
-            for token in str(status or "").split(",")
-            if token.strip()
+            token.strip().lower() for token in str(status or "").split(",") if token.strip()
         ]
         rows = store.list_training_merge_requests(
             owner_user_id=user_id,
@@ -17835,7 +18392,9 @@ def create_app() -> FastAPI:
 
     app.include_router(v1)
     app.include_router(v2)
-    app.include_router(build_v3_router(_current_user_id, _get_bisque_auth_optional, _require_api_key))
+    app.include_router(
+        build_v3_router(_current_user_id, _get_bisque_auth_optional, _require_api_key)
+    )
     app.include_router(legacy)
     app.state.agentic_v3 = agentic_v3_services
     app.state.run_continuous_scheduler_iteration = _run_continuous_scheduler_iteration

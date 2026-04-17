@@ -11,27 +11,26 @@ from src.tools import execute_tool_call
 
 
 class PlanExecutor:
-    """Execute a WorkflowPlan step-by-step with durable trace events.
-    """
+    """Execute a WorkflowPlan step-by-step with durable trace events."""
 
     def __init__(self, store: RunStore):
         self.store = store
 
     def execute(self, run_id: str, plan: WorkflowPlan) -> None:
         """Execute each plan step with retries and append durable run events.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
         plan : WorkflowPlan
             Input argument.
-        
+
         Returns
         -------
         None
             No return value.
-        
+
         Notes
         -----
         Pass only validated plans to avoid runtime argument-resolution failures.
@@ -85,7 +84,11 @@ class PlanExecutor:
                 if isinstance(result, dict) and result.get("success") is False:
                     failed_result_payload = _shrink_result(result)
                     raise RuntimeError(
-                        str(result.get("error") or result.get("error_message") or "Step reported failure")
+                        str(
+                            result.get("error")
+                            or result.get("error_message")
+                            or "Step reported failure"
+                        )
                     )
 
                 duration = time.time() - start

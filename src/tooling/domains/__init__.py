@@ -1,8 +1,8 @@
 """Domain-organized tool schemas and analysis helpers."""
 
 from src.tooling.domains.bisque import (
-    BISQUE_ADD_TO_DATASET_TOOL,
     BISQUE_ADD_GOBJECTS_TOOL,
+    BISQUE_ADD_TO_DATASET_TOOL,
     BISQUE_ADVANCED_SEARCH_TOOL,
     BISQUE_CREATE_DATASET_TOOL,
     BISQUE_DELETE_TOOL,
@@ -18,30 +18,6 @@ from src.tooling.domains.bisque import (
     BISQUE_TOOL_SCHEMAS,
     BISQUE_UPLOAD_TOOL,
 )
-from src.tooling.domains.quantification import (
-    ANALYZE_CSV_TOOL,
-    ANALYSIS_TOOL_SCHEMAS,
-    COMPARE_CONDITIONS_TOOL,
-    analyze_csv,
-    PLOT_QUANTIFIED_DETECTIONS_TOOL,
-    QUANTIFY_OBJECTS_TOOL,
-    QUANTIFY_SEGMENTATION_MASKS_TOOL,
-    REPRO_REPORT_TOOL,
-    STATS_LIST_CURATED_TOOLS_TOOL,
-    STATS_RUN_CURATED_TOOL,
-    compare_conditions,
-    plot_quantified_detections,
-    quantify_objects,
-    repro_report,
-    stats_list_curated_tools,
-    stats_run_curated_tool,
-)
-from src.tooling.domains.code_execution import (
-    CODEGEN_PYTHON_PLAN_TOOL,
-    CODE_EXECUTION_TOOL_SCHEMAS,
-    EXECUTE_PYTHON_JOB_TOOL,
-    NUMPY_CALCULATOR_TOOL,
-)
 from src.tooling.domains.chemistry import (
     CHEMISTRY_TOOL_SCHEMAS,
     COMPARE_STRUCTURES_TOOL,
@@ -49,17 +25,41 @@ from src.tooling.domains.chemistry import (
     PROPOSE_REACTIVE_SITES_TOOL,
     STRUCTURE_REPORT_TOOL,
 )
+from src.tooling.domains.code_execution import (
+    CODE_EXECUTION_TOOL_SCHEMAS,
+    CODEGEN_PYTHON_PLAN_TOOL,
+    EXECUTE_PYTHON_JOB_TOOL,
+    NUMPY_CALCULATOR_TOOL,
+)
+from src.tooling.domains.quantification import (
+    ANALYSIS_TOOL_SCHEMAS,
+    ANALYZE_CSV_TOOL,
+    COMPARE_CONDITIONS_TOOL,
+    PLOT_QUANTIFIED_DETECTIONS_TOOL,
+    QUANTIFY_OBJECTS_TOOL,
+    QUANTIFY_SEGMENTATION_MASKS_TOOL,
+    REPRO_REPORT_TOOL,
+    STATS_LIST_CURATED_TOOLS_TOOL,
+    STATS_RUN_CURATED_TOOL,
+    analyze_csv,
+    compare_conditions,
+    plot_quantified_detections,
+    quantify_objects,
+    repro_report,
+    stats_list_curated_tools,
+    stats_run_curated_tool,
+)
 from src.tooling.domains.vision import (
     BIOIO_LOAD_IMAGE_TOOL,
     DEPTH_PRO_ESTIMATE_TOOL,
     MEGASEG_SEGMENT_TOOL,
     PREDICTION_STABILITY_TOOL,
-    SAM3_SEGMENT_TOOL,
-    SEGMENT_EVALUATE_BATCH_TOOL,
-    SEGMENTATION_EVAL_TOOL,
     SAM2_PROMPT_TOOL,
     SAM2_SEGMENT_TOOL,
     SAM2_VIDEO_TOOL,
+    SAM3_SEGMENT_TOOL,
+    SEGMENT_EVALUATE_BATCH_TOOL,
+    SEGMENTATION_EVAL_TOOL,
     SPECTRAL_INSTABILITY_TOOL,
     VISION_TOOL_SCHEMAS,
     YOLO_DETECT_TOOL,

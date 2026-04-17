@@ -969,9 +969,6 @@ export class ApiClient {
     if (normalizedRedirect) {
       params.next = normalizedRedirect;
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(
       this.baseUrl,
       "/v1/auth/oidc/start",
@@ -984,9 +981,6 @@ export class ApiClient {
     const normalizedRedirect = String(redirectUrl ?? "").trim();
     if (normalizedRedirect) {
       params.next = normalizedRedirect;
-    }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
     }
     return buildUrl(
       this.baseUrl,
@@ -1531,14 +1525,12 @@ export class ApiClient {
 
   resourceThumbnailUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
-    const params = this.apiKey ? { api_key: this.apiKey } : undefined;
-    return buildUrl(this.baseUrl, `/v1/resources/${safeFileId}/thumbnail`, params);
+    return buildUrl(this.baseUrl, `/v1/resources/${safeFileId}/thumbnail`);
   }
 
   uploadPreviewUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
-    const params = this.apiKey ? { api_key: this.apiKey } : undefined;
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/preview`, params);
+    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/preview`);
   }
 
   uploadDisplayUrl(fileId: string, explicitPath?: string | null): string {
@@ -1547,8 +1539,7 @@ export class ApiClient {
       explicitPath && String(explicitPath).trim()
         ? String(explicitPath)
         : `/v1/uploads/${safeFileId}/display`;
-    const params = this.apiKey ? { api_key: this.apiKey } : undefined;
-    return buildUrl(this.baseUrl, path, params);
+    return buildUrl(this.baseUrl, path);
   }
 
   uploadSliceUrl(
@@ -1612,9 +1603,6 @@ export class ApiClient {
     if (typeof indices?.fullResolution === "boolean") {
       params.full_resolution = indices.fullResolution ? "true" : "false";
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/slice`, params);
   }
 
@@ -1629,9 +1617,6 @@ export class ApiClient {
     }
     if (typeof config?.channel === "number" && Number.isFinite(config.channel)) {
       params.channel = String(Math.max(0, Math.floor(config.channel)));
-    }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
     }
     const response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/scalar-volume`, params), {
       method: "GET",
@@ -1684,9 +1669,6 @@ export class ApiClient {
     if (typeof config.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(
       this.baseUrl,
       `/v1/uploads/${safeFileId}/tiles/${safeAxis}/${safeLevel}/${safeTileX}/${safeTileY}`,
@@ -1731,9 +1713,6 @@ export class ApiClient {
     if (typeof config?.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/atlas`, params);
   }
 
@@ -1755,19 +1734,11 @@ export class ApiClient {
     if (typeof config?.bins === "number" && Number.isFinite(config.bins)) {
       params.bins = String(Math.max(8, Math.floor(config.bins)));
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
-    let response: Response;
-    try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/histogram`, params), {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      });
-    } catch (error) {
-      throw error;
-    }
+    const response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/histogram`, params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
     if (!response.ok) {
       return parseError(response);
     }
@@ -1805,9 +1776,6 @@ export class ApiClient {
     const params: Record<string, string> = {
       dataset_path: datasetPath,
     };
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let response: Response;
@@ -1880,9 +1848,6 @@ export class ApiClient {
     if (typeof config.component === "number" && Number.isFinite(config.component)) {
       params.component = String(Math.max(0, Math.floor(config.component)));
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/slice`, params);
   }
 
@@ -1915,9 +1880,6 @@ export class ApiClient {
         .map((value) => String(Math.max(0, Math.floor(value))))
         .join(",");
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/atlas`, params);
   }
 
@@ -1931,9 +1893,6 @@ export class ApiClient {
     };
     if (typeof config.channel === "number" && Number.isFinite(config.channel)) {
       params.channel = String(Math.max(0, Math.floor(config.channel)));
-    }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
     }
     const response = await fetch(
       buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/scalar-volume`, params),
@@ -1977,9 +1936,6 @@ export class ApiClient {
     if (typeof config?.bins === "number" && Number.isFinite(config.bins)) {
       params.bins = String(Math.max(8, Math.floor(config.bins)));
     }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let response: Response;
@@ -2021,9 +1977,6 @@ export class ApiClient {
     }
     if (typeof config?.limit === "number" && Number.isFinite(config.limit)) {
       params.limit = String(Math.max(1, Math.floor(config.limit)));
-    }
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
     }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
@@ -2265,9 +2218,6 @@ export class ApiClient {
 
   artifactDownloadUrl(runId: string, path: string): string {
     const params: Record<string, string> = { path };
-    if (this.apiKey) {
-      params.api_key = this.apiKey;
-    }
     return buildUrl(this.baseUrl, `/v1/artifacts/${runId}/download`, params);
   }
 

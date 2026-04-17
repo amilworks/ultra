@@ -35,8 +35,7 @@ _MODEL_REGISTRY: dict[str, ModelDefinition] = {
         name="DynUNET (MONAI)",
         framework="monai",
         description=(
-            "Dynamic U-Net style medical segmentation model with configurable "
-            "2D/3D support."
+            "Dynamic U-Net style medical segmentation model with configurable 2D/3D support."
         ),
         task_type="segmentation",
         supports_training=True,

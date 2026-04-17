@@ -119,7 +119,11 @@ def _torch_available() -> bool:
 
 def _sam3_tracker_available() -> bool:
     try:
-        from transformers import Sam3TrackerConfig, Sam3TrackerModel, Sam3TrackerProcessor  # type: ignore
+        from transformers import (  # type: ignore
+            Sam3TrackerConfig,
+            Sam3TrackerModel,
+            Sam3TrackerProcessor,
+        )
 
         return bool(
             Sam3TrackerModel is not None
@@ -195,7 +199,12 @@ def _get_tracker_runtime(
     allow_remote_download: bool,
 ) -> tuple[Any, Any, Any, tuple[str, ...]]:
     import torch  # type: ignore
-    from transformers import AutoConfig, Sam3TrackerConfig, Sam3TrackerModel, Sam3TrackerProcessor  # type: ignore
+    from transformers import (  # type: ignore
+        AutoConfig,
+        Sam3TrackerConfig,
+        Sam3TrackerModel,
+        Sam3TrackerProcessor,
+    )
 
     cache_key = (str(model_ref), str(device), bool(allow_remote_download))
     if cache_key in _SAM3_TRACKER_CACHE:
@@ -371,7 +380,9 @@ def _slice_to_gray_float(slice_data: np.ndarray, order: str) -> np.ndarray:
     return np.transpose(arr, perm).astype(np.float32)
 
 
-def _enhance_channel(channel: np.ndarray, *, profile: _PreprocessProfile, preprocess: bool) -> np.ndarray:
+def _enhance_channel(
+    channel: np.ndarray, *, profile: _PreprocessProfile, preprocess: bool
+) -> np.ndarray:
     if not preprocess:
         return _normalize_uint8(channel)
 
@@ -453,7 +464,11 @@ def _infer_modality_profile(
 ) -> tuple[str, dict[str, Any], list[str]]:
     normalized_hint = _normalize_profile_name(hint)
     warnings: list[str] = []
-    if str(hint or "").strip() and normalized_hint == "auto" and str(hint).strip().lower() != "auto":
+    if (
+        str(hint or "").strip()
+        and normalized_hint == "auto"
+        and str(hint).strip().lower() != "auto"
+    ):
         warnings.append(
             f"Unrecognized modality_hint '{hint}'. Falling back to automatic profile inference."
         )
@@ -683,7 +698,9 @@ def _allocate_source_quotas(
     sources: list[tuple[str, float, int]],
 ) -> dict[str, int]:
     quotas = {name: 0 for name, _, _ in sources}
-    active = [(name, float(weight), int(count)) for name, weight, count in sources if int(count) > 0]
+    active = [
+        (name, float(weight), int(count)) for name, weight, count in sources if int(count) > 0
+    ]
     t = int(max(0, target))
     if t <= 0 or not active:
         return quotas
@@ -701,7 +718,9 @@ def _allocate_source_quotas(
     assigned = int(sum(quotas.values()))
     while assigned < t:
         grown = False
-        for name, _, count in sorted(active, key=lambda row: (row[2] - quotas[row[0]], row[1]), reverse=True):
+        for name, _, count in sorted(
+            active, key=lambda row: (row[2] - quotas[row[0]], row[1]), reverse=True
+        ):
             if quotas[name] < int(count):
                 quotas[name] += 1
                 assigned += 1
@@ -761,9 +780,7 @@ def _logdog_blob_candidates(
             vals = np.asarray(dog).ravel()
         cut = float(np.percentile(vals, 86.0))
         mask = peak_mask & support & (np.asarray(dog) >= cut)
-        candidates.append(
-            _build_candidates(mask, np.asarray(dog), limit=max(3 * int(target), 24))
-        )
+        candidates.append(_build_candidates(mask, np.asarray(dog), limit=max(3 * int(target), 24)))
 
     return _merge_candidates(candidates, limit=max(8 * int(target), 96))
 
@@ -802,7 +819,9 @@ def _distance_skeleton_candidates(
         fallback.append([float(x), float(y), float(dist[y, x])])
     if not fallback:
         return np.zeros((0, 3), dtype=np.float32)
-    return _merge_candidates([np.asarray(fallback, dtype=np.float32)], limit=max(4 * int(target), 32))
+    return _merge_candidates(
+        [np.asarray(fallback, dtype=np.float32)], limit=max(4 * int(target), 32)
+    )
 
 
 def _watershed_basin_candidates(
@@ -826,7 +845,9 @@ def _watershed_basin_candidates(
         return np.zeros((0, 3), dtype=np.float32)
 
     peak_size = int(max(3, round(0.03 * float(min(h, w)))))
-    peaks = _local_maxima_mask(dist, size=peak_size) & (dist >= float(np.percentile(positive, 70.0)))
+    peaks = _local_maxima_mask(dist, size=peak_size) & (
+        dist >= float(np.percentile(positive, 70.0))
+    )
     seed_candidates = _build_candidates(peaks, dist, limit=max(5 * int(target), 64))
     if seed_candidates.size <= 0:
         return np.zeros((0, 3), dtype=np.float32)
@@ -1009,7 +1030,9 @@ def _propose_auto_points(
         fg,
         target=max(1, neg_target),
     )
-    neg_fallback_score = 0.65 * (1.0 - _normalize_01(grad, lo_pct=1.0, hi_pct=99.0)) + 0.35 * (1.0 - smooth)
+    neg_fallback_score = 0.65 * (1.0 - _normalize_01(grad, lo_pct=1.0, hi_pct=99.0)) + 0.35 * (
+        1.0 - smooth
+    )
     neg_support = np.logical_not(fg)
     if not np.any(neg_support):
         neg_support = np.ones_like(fg, dtype=bool)
@@ -1063,7 +1086,9 @@ def _propose_auto_points(
         count=pos_quotas.get("watershed", 0),
         min_dist=float(min_dist),
     )
-    remaining_pos = int(max(0, pos_target - sum(v for k, v in selected_counts.items() if k.startswith("pos_"))))
+    remaining_pos = int(
+        max(0, pos_target - sum(v for k, v in selected_counts.items() if k.startswith("pos_")))
+    )
     selected_counts["pos_fallback"] = _append_labeled_spread_points(
         points,
         labels,
@@ -1158,7 +1183,9 @@ def _propose_auto_points(
     return points, labels, meta
 
 
-def _window_grid(height: int, width: int, window_size: int, overlap: float) -> list[tuple[int, int, int, int]]:
+def _window_grid(
+    height: int, width: int, window_size: int, overlap: float
+) -> list[tuple[int, int, int, int]]:
     if height <= int(window_size) and width <= int(window_size):
         return [(0, height, 0, width)]
 
@@ -1234,7 +1261,9 @@ def _select_best_tracker_mask(
         for i in range(m.shape[0]):
             if m.shape[1] <= 0:
                 continue
-            score_row = None if s is None or s.ndim < 2 or i >= s.shape[0] else np.asarray(s[i]).reshape(-1)
+            score_row = (
+                None if s is None or s.ndim < 2 or i >= s.shape[0] else np.asarray(s[i]).reshape(-1)
+            )
             best_j = _best_candidate_index(
                 np.asarray(m[i]),
                 score_row,
@@ -1242,7 +1271,9 @@ def _select_best_tracker_mask(
             )
             score = (
                 float(score_row[best_j])
-                if score_row is not None and score_row.size > best_j and np.isfinite(score_row[best_j])
+                if score_row is not None
+                and score_row.size > best_j
+                and np.isfinite(score_row[best_j])
                 else 0.0
             )
             obj_masks.append(np.asarray(m[i, best_j]) > th)
@@ -1262,7 +1293,9 @@ def _select_best_tracker_mask(
         )
         score = (
             float(flat_scores[best])
-            if flat_scores is not None and flat_scores.size > best and np.isfinite(flat_scores[best])
+            if flat_scores is not None
+            and flat_scores.size > best
+            and np.isfinite(flat_scores[best])
             else 0.0
         )
         return (np.asarray(m[best]) > th).astype(np.uint8), score
@@ -1325,9 +1358,7 @@ def _select_tracker_object_masks(
             if m.shape[1] <= 0:
                 continue
             score_row = (
-                None
-                if s is None or s.ndim < 2 or i >= s.shape[0]
-                else np.asarray(s[i]).reshape(-1)
+                None if s is None or s.ndim < 2 or i >= s.shape[0] else np.asarray(s[i]).reshape(-1)
             )
             best_j = _best_candidate_index(np.asarray(m[i]), score_row, threshold=th)
             score = (
@@ -1620,7 +1651,10 @@ def segment_array_with_sam3_points(
         height=height,
     )
     if not normalized_points:
-        return {"success": False, "error": "All explicit SAM3 points were invalid after normalization."}
+        return {
+            "success": False,
+            "error": "All explicit SAM3 points were invalid after normalization.",
+        }
 
     if label_groups is None:
         normalized_labels = [[1 for _ in group] for group in normalized_points]
@@ -1701,11 +1735,7 @@ def segment_array_with_sam3_points(
         "input_points": normalized_points,
         "input_point_labels": normalized_labels,
         "mask_threshold": float(mask_threshold),
-        "mean_score": (
-          round(float(np.mean(resolved_scores)), 6)
-          if resolved_scores
-          else 0.0
-        ),
+        "mean_score": (round(float(np.mean(resolved_scores)), 6) if resolved_scores else 0.0),
         "estimated_instances": int(len(instance_sizes)),
         "segmented_voxels": int(nonzero),
         "coverage_percent": round(float(coverage), 4),
@@ -1779,7 +1809,9 @@ def _normalize_boxes_xyxy(boxes_value: Any) -> list[list[float]]:
         if len(values) < 4:
             continue
         try:
-            normalized.append([float(values[0]), float(values[1]), float(values[2]), float(values[3])])
+            normalized.append(
+                [float(values[0]), float(values[1]), float(values[2]), float(values[3])]
+            )
         except Exception:
             continue
     return normalized
@@ -1858,7 +1890,11 @@ def _fallback_sam3_concept_instances_from_raw_outputs(
     query_scores = _extract_sam3_concept_query_scores(outputs)
 
     if pred_np.ndim == 2:
-        if query_scores is not None and query_scores.size > 0 and float(query_scores[0]) <= float(threshold):
+        if (
+            query_scores is not None
+            and query_scores.size > 0
+            and float(query_scores[0]) <= float(threshold)
+        ):
             return None, [], [], "no_confident_queries"
         probs = _sigmoid_np(pred_np)
         mask_bool = probs > float(mask_threshold)
@@ -1886,9 +1922,7 @@ def _fallback_sam3_concept_instances_from_raw_outputs(
             idx for idx in range(keep_count) if float(query_scores[idx]) > float(threshold)
         ]
         keep_scores = [
-            float(query_scores[idx])
-            for idx in keep_indices
-            if np.isfinite(query_scores[idx])
+            float(query_scores[idx]) for idx in keep_indices if np.isfinite(query_scores[idx])
         ]
     else:
         keep_indices = []
@@ -2003,7 +2037,7 @@ def _segment_slice(
     point_counts: list[int] = []
     strategy_totals: dict[str, int] = {}
 
-    for (y0, y1, x0, x1) in windows:
+    for y0, y1, x0, x1 in windows:
         patch = image_rgb[y0:y1, x0:x1]
         patch_mask, patch_score, point_meta = _predict_patch_with_tracker(
             patch,
@@ -2096,7 +2130,11 @@ def _refine_mask_stack_3d(
 
     structure = np.ones((3, 3, 3), dtype=np.uint8)
     labeled_before, components_before = ndi.label(m, structure=structure)
-    counts_before = np.bincount(labeled_before.ravel()) if components_before > 0 else np.zeros((1,), dtype=np.int64)
+    counts_before = (
+        np.bincount(labeled_before.ravel())
+        if components_before > 0
+        else np.zeros((1,), dtype=np.int64)
+    )
     min_component_volume = int(max(8, round(float(min_component_area_ratio) * float(m.size))))
 
     if components_before > 0:
@@ -2117,14 +2155,19 @@ def _refine_mask_stack_3d(
         refined = m
 
     labeled_after, components_after = ndi.label(refined, structure=structure)
-    counts_after = np.bincount(labeled_after.ravel()) if components_after > 0 else np.zeros((1,), dtype=np.int64)
+    counts_after = (
+        np.bincount(labeled_after.ravel())
+        if components_after > 0
+        else np.zeros((1,), dtype=np.int64)
+    )
     after_voxels = int(np.count_nonzero(refined))
 
     removed_voxels = int(max(0, after_bridge_voxels - after_voxels))
     removed_components = int(
         max(
             0,
-            int(np.count_nonzero(counts_before[1:] > 0)) - int(np.count_nonzero(counts_after[1:] > 0)),
+            int(np.count_nonzero(counts_before[1:] > 0))
+            - int(np.count_nonzero(counts_after[1:] > 0)),
         )
     )
 
@@ -2328,8 +2371,10 @@ def segment_array_with_sam3_concept(
                 "SAM3 concept prompt produced no confident masks at the current threshold. "
                 "For geometric regions or simple synthetic shapes, prefer explicit input_boxes or input_points."
             )
-            error_message = guidance if fallback_error == "no_confident_queries" else (
-                fallback_error or "SAM3 concept inference returned no masks."
+            error_message = (
+                guidance
+                if fallback_error == "no_confident_queries"
+                else (fallback_error or "SAM3 concept inference returned no masks.")
             )
             return {
                 "success": False,
@@ -2363,7 +2408,9 @@ def segment_array_with_sam3_concept(
         "threshold": float(threshold),
         "mask_threshold": float(mask_threshold),
         "mean_score": round(float(mean_score), 6),
-        "estimated_instances": int(parsed_instance_count if parsed_instance_count > 0 else component_count),
+        "estimated_instances": int(
+            parsed_instance_count if parsed_instance_count > 0 else component_count
+        ),
         "segmented_voxels": int(nonzero),
         "coverage_percent": round(float(coverage), 4),
         "mask_shape": list(np.asarray(parsed_masks).shape),
@@ -2433,9 +2480,13 @@ def segment_array_with_sam3(
                 fb["backend"] = "sam3-fallback-medsam2"
                 fb["requested_model_id"] = model_id
                 fb["resolved_model_ref"] = model_ref
-                fb["warnings"] = [
-                    "SAM3 tracker classes unavailable in installed transformers runtime; used MedSAM2 fallback."
-                ] + warnings + list(fb.get("warnings") or [])
+                fb["warnings"] = (
+                    [
+                        "SAM3 tracker classes unavailable in installed transformers runtime; used MedSAM2 fallback."
+                    ]
+                    + warnings
+                    + list(fb.get("warnings") or [])
+                )
                 return fb
             return {
                 "success": False,
@@ -2476,10 +2527,16 @@ def segment_array_with_sam3(
                 fb["backend"] = "sam3-fallback-medsam2"
                 fb["requested_model_id"] = model_id
                 fb["resolved_model_ref"] = model_ref
-                fb["warnings"] = [
-                    _sam3_unavailable_message(model_ref, allow_remote_download=bool(allow_remote_download)),
-                    f"SAM3 init error: {exc}",
-                ] + warnings + list(fb.get("warnings") or [])
+                fb["warnings"] = (
+                    [
+                        _sam3_unavailable_message(
+                            model_ref, allow_remote_download=bool(allow_remote_download)
+                        ),
+                        f"SAM3 init error: {exc}",
+                    ]
+                    + warnings
+                    + list(fb.get("warnings") or [])
+                )
                 return fb
             return {
                 "success": False,
@@ -2487,13 +2544,13 @@ def segment_array_with_sam3(
                     f"{_sam3_unavailable_message(model_ref, allow_remote_download=bool(allow_remote_download))} "
                     f"MedSAM2 fallback failed: {fb.get('error') or 'unknown MedSAM2 error'}"
                 ),
-                "warnings": warnings
-                + [f"SAM3 init error: {exc}"]
-                + list(fb.get("warnings") or []),
+                "warnings": warnings + [f"SAM3 init error: {exc}"] + list(fb.get("warnings") or []),
             }
         return {
             "success": False,
-            "error": _sam3_unavailable_message(model_ref, allow_remote_download=bool(allow_remote_download)),
+            "error": _sam3_unavailable_message(
+                model_ref, allow_remote_download=bool(allow_remote_download)
+            ),
             "warnings": warnings + [str(exc)],
         }
 
@@ -2599,9 +2656,13 @@ def segment_array_with_sam3(
             component_sizes = [int(item) for item in counts if int(item) > 0]
 
     if slice_stats:
-        avg_points = float(np.mean([s.get("avg_points_per_window", 0.0) for s in slice_stats.values()]))
+        avg_points = float(
+            np.mean([s.get("avg_points_per_window", 0.0) for s in slice_stats.values()])
+        )
         avg_windows = float(np.mean([s.get("window_count", 1) for s in slice_stats.values()]))
-        total_windows = int(sum(max(1, int(s.get("window_count", 1))) for s in slice_stats.values()))
+        total_windows = int(
+            sum(max(1, int(s.get("window_count", 1))) for s in slice_stats.values())
+        )
         strategy_totals: dict[str, int] = {}
         for s in slice_stats.values():
             strat = s.get("point_strategy_totals") if isinstance(s, dict) else {}
@@ -2613,8 +2674,7 @@ def segment_array_with_sam3(
                 except Exception:
                     continue
         strategy_avg = {
-            k: round(float(v) / float(max(total_windows, 1)), 4)
-            for k, v in strategy_totals.items()
+            k: round(float(v) / float(max(total_windows, 1)), 4) for k, v in strategy_totals.items()
         }
     else:
         avg_points = 0.0
@@ -2624,7 +2684,9 @@ def segment_array_with_sam3(
     return {
         "success": True,
         "backend": runtime.backend,
-        "model_id": Path(runtime.model_ref).name if Path(runtime.model_ref).exists() else runtime.model_ref,
+        "model_id": Path(runtime.model_ref).name
+        if Path(runtime.model_ref).exists()
+        else runtime.model_ref,
         "resolved_model_ref": runtime.model_ref,
         "requested_model_id": model_id,
         "device": runtime.device,

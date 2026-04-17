@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 
 class AgenticDb:
@@ -65,7 +66,9 @@ class AgenticDb:
     def execute(self, conn: Any, query: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
         return conn.execute(self._rewrite_query(query), params)
 
-    def fetchone(self, query: str, params: tuple[Any, ...] | list[Any] = ()) -> dict[str, Any] | None:
+    def fetchone(
+        self, query: str, params: tuple[Any, ...] | list[Any] = ()
+    ) -> dict[str, Any] | None:
         with self.conn() as conn:
             cur = self.execute(conn, query, params)
             row = cur.fetchone()
@@ -74,7 +77,9 @@ class AgenticDb:
             columns = [col[0] for col in cur.description or []]
             return {columns[idx]: row[idx] for idx in range(len(columns))}
 
-    def fetchall(self, query: str, params: tuple[Any, ...] | list[Any] = ()) -> list[dict[str, Any]]:
+    def fetchall(
+        self, query: str, params: tuple[Any, ...] | list[Any] = ()
+    ) -> list[dict[str, Any]]:
         with self.conn() as conn:
             cur = self.execute(conn, query, params)
             rows = cur.fetchall()

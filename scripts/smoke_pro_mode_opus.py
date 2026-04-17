@@ -87,6 +87,7 @@ def _probe_native_bedrock_auth(settings: Settings) -> int:
     _print_header("Native Bedrock Auth Probe")
     region = str(settings.resolved_pro_mode_aws_region or "").strip()
     profile = str(settings.resolved_pro_mode_aws_profile or "").strip()
+    bearer_token = str(settings.resolved_pro_mode_aws_bearer_token or "").strip()
     has_access_key = bool(str(settings.resolved_pro_mode_aws_access_key_id or "").strip())
     has_secret_key = bool(str(settings.resolved_pro_mode_aws_secret_access_key or "").strip())
     has_session_token = bool(str(settings.resolved_pro_mode_aws_session_token or "").strip())
@@ -94,12 +95,44 @@ def _probe_native_bedrock_auth(settings: Settings) -> int:
     print(f"model={settings.resolved_pro_mode_model}")
     print(f"aws_region={region or '(unset)'}")
     print(f"aws_profile={profile or '(unset)'}")
+    print(f"has_bearer_token={bool(bearer_token)}")
     print(f"aws_sso_auth={settings.pro_mode_aws_sso_auth}")
     print(f"has_access_key={has_access_key}")
     print(f"has_secret_key={has_secret_key}")
     print(f"has_session_token={has_session_token}")
     print(f"env_AWS_PROFILE={'set' if os.getenv('AWS_PROFILE') else 'unset'}")
     print(f"env_AWS_REGION={'set' if os.getenv('AWS_REGION') else 'unset'}")
+    print(
+        "env_AWS_BEARER_TOKEN_BEDROCK="
+        f"{'set' if os.getenv('AWS_BEARER_TOKEN_BEDROCK') else 'unset'}"
+    )
+    if bearer_token and not any([profile, settings.pro_mode_aws_sso_auth, has_access_key, has_secret_key, has_session_token]):
+        try:
+            from anthropic.lib.bedrock import AnthropicBedrock
+        except Exception as exc:  # pragma: no cover - smoke script
+            print(f"aws_dependency_error={exc}")
+            return 8
+        try:
+            client_kwargs: dict[str, Any] = {"api_key": bearer_token, "timeout": 30.0}
+            if region:
+                client_kwargs["aws_region"] = region
+            client = AnthropicBedrock(**client_kwargs)
+            response = client.messages.create(
+                model=str(settings.resolved_pro_mode_model or "anthropic.claude-sonnet-4-5-20250929-v1:0"),
+                max_tokens=16,
+                messages=[{"role": "user", "content": "Reply with exactly native-bedrock-ok"}],
+            )
+            text_chunks: list[str] = []
+            for block in list(getattr(response, "content", None) or []):
+                if getattr(block, "type", "") == "text":
+                    text_value = str(getattr(block, "text", "") or "").strip()
+                    if text_value:
+                        text_chunks.append(text_value)
+            print(f"native_reply={' '.join(text_chunks)[:120] or '(no text block)'}")
+            return 0
+        except Exception as exc:  # pragma: no cover - smoke script
+            print(f"aws_auth_error={exc}")
+            return 9
     try:
         import boto3
     except Exception as exc:  # pragma: no cover - smoke script

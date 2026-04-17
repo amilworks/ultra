@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 
-
 _ALLOWED_FUNCTIONS: dict[str, Any] = {
     "abs": np.abs,
     "arange": np.arange,

@@ -3,8 +3,9 @@
 import functools
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from src.logger import logger
 
@@ -12,13 +13,14 @@ from src.logger import logger
 def log_execution_time(func: Callable) -> Callable:
     """
     Decorator to log function execution time.
-    
+
     Args:
         func: Function to decorate.
-        
+
     Returns:
         Wrapped function with timing logging.
     """
+
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         start_time = time.time()
@@ -31,11 +33,13 @@ def log_execution_time(func: Callable) -> Callable:
             execution_time = time.time() - start_time
             logger.error(f"{func.__name__} failed after {execution_time:.4f} seconds: {str(e)}")
             raise
+
     return wrapper
 
 
 def handle_errors(func: Callable) -> Callable:
     """Decorator to log unexpected exceptions before re-raising them."""
+
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
@@ -43,14 +47,13 @@ def handle_errors(func: Callable) -> Callable:
         except Exception as e:
             logger.exception(f"Error in {func.__name__}: {str(e)}")
             raise
+
     return wrapper
 
 
 def init_session_state(key: str, value: Any) -> None:
     """BRUHHH LOOK AT THIS LATER: removed Streamlit release path left this helper orphaned."""
-    raise RuntimeError(
-        f"init_session_state({key!r}) is not available in the production release."
-    )
+    raise RuntimeError(f"init_session_state({key!r}) is not available in the production release.")
 
 
 def ensure_local_bqapi() -> None:

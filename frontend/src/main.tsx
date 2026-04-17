@@ -27,8 +27,11 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
     return { hasError: true, message };
   }
 
-  componentDidCatch(_error: unknown, _errorInfo: ErrorInfo): void {
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo): void {
     // Avoid crashing the whole app on unexpected render errors.
+    if (import.meta.env.DEV) {
+      console.error("App render failure", error, errorInfo);
+    }
   }
 
   render(): ReactNode {

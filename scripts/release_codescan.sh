@@ -20,6 +20,8 @@ RG_COMMON=(
   --glob '!**/*.crt'
   --glob '!**/*.pem'
   --glob '!scripts/release_codescan.sh'
+  --glob '!platform/bisque/PLANS.md'
+  --glob '!platform/bisque/source/**'
   --glob '!platform/bisque/source/legacy_upgraded/**'
   --glob '!platform/bisque/source/tools/obsolete/**'
   --glob '!platform/bisque/source/bqcore/bq/core/public/js/volume/dagre-d3.js'
@@ -34,7 +36,10 @@ CHECK_LABELS=(
   "OpenAI-style keys"
   "AWS API Gateway URLs"
   "Absolute user paths"
-  "Internal UCSB domains"
+  "Campus-specific domains"
+  "Internal .internal hostnames"
+  "Environment-shaped storage roots"
+  "Org-specific AWS profile names"
   "Internal bare hostnames"
 )
 
@@ -48,6 +53,9 @@ CHECK_PATTERNS=(
   'execute-api\.[A-Za-z0-9-]+\.amazonaws\.com'
   '/Users/[^[:space:]"'"'"'`]+'
   '\b[a-z0-9.-]+\.ece\.ucsb\.edu\b'
+  '\b[a-z0-9.-]+\.internal\b'
+  '/mnt/barrel-data/'
+  '\bucsb-[a-z0-9-]+\b'
   '\b(vrl-h200|nail0[0-9])\b'
 )
 

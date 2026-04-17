@@ -1,0 +1,9 @@
+services:
+  bisque:
+    environment:
+      BISQUE_EXTRA_FILE_STORES: legacy_nfs
+      BISQUE_STORE_LEGACY_NFS_MOUNTURL: file:///mnt/bisque_legacy_data/
+      BISQUE_STORE_LEGACY_NFS_TOP: file:///mnt/bisque_legacy_data/
+      BISQUE_STORE_LEGACY_NFS_READONLY: "true"
+    volumes:
+      - ./test_fixtures/bisque_legacy_data:/mnt/bisque_legacy_data:ro

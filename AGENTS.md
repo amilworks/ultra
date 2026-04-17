@@ -1,68 +1,66 @@
 # AGENTS.md
 
 ## Purpose
-This production repo is the operator-facing source of truth for BisQue Ultra deploys. Prefer precise, low-risk runbook steps over generic advice. When production guidance conflicts with development habits, follow the production guidance here.
+This repo may be shared publicly. Keep production guidance precise, low-risk, and reusable, but do not publish private hostnames, usernames, credentials, or environment-specific endpoints here. Store concrete operator values in private runbooks outside the repo.
 
-## Current UCSB Production Topology
+## Public Production Topology Template
 
 Public hostname:
 
-- `https://ultra.ece.ucsb.edu`
+- `https://<public-host>`
 
-Current node responsibilities:
+Example node responsibilities:
 
-- `nail01.ece.ucsb.edu`
+- `<app-node>`
   - public edge via `Caddy`
   - static Ultra frontend
   - `ultra-backend@1`
   - `ultra-backend@2`
-- `nail04.ece.ucsb.edu`
+- `<platform-node>`
   - BisQue platform stack
-  - internal platform `Caddy`
+  - internal platform proxy
   - `bisque-server`
   - `Keycloak`
   - `Postgres`
-- model/inference services
+- model or inference services
   - external to ordinary app deploys
   - do not assume routine app rollouts need model-node changes
 
 ## SSH Entry Points
 
-Use these exact production SSH paths:
+Use your private operator inventory for the exact SSH targets. In a split-node deployment the common shape is:
 
-- app node: `ssh bisque_amil@nail01.ece.ucsb.edu`
-- platform node: `ssh amil@nail04.ece.ucsb.edu`
+- app node: `ssh <app-user>@<app-node>`
+- platform node: `ssh <platform-user>@<platform-node>`
 
-Prefer direct SSH to `nail04`; the older jump-host flow is no longer the default path.
+Prefer direct SSH to the platform node when you need to inspect the platform stack instead of assuming a jump-host flow.
 
 ## Production File And Env Locations
 
-### App node (`nail01`)
+### App node
 
 - backend env: `/etc/ultra/ultra-backend.env`
 - active backend symlink: `/srv/ultra/current`
 - active frontend symlink: `/srv/ultra/frontend-current`
-- release root: `/mnt/barrel-data/ultra/releases/<git-sha>/`
+- release root: `<release-root>/releases/<git-sha>/`
 - local runtime roots:
   - `/srv/ultra/models`
   - `/srv/ultra/runtime`
   - `/srv/ultra/shared`
 
-### Platform node (`nail04`)
+### Platform node
 
 - platform env: `/etc/ultra/platform.env`
-- active platform checkout/symlink: `/srv/ultra/platform-current`
-- platform releases: `/srv/ultra/platform-releases/<git-sha>/`
-- BisQue config on shared storage: `/mnt/barrel-data/ultra/platform/bisque-config/site.cfg`
-- BisQue file storage root: `/mnt/barrel-data/ultra/platform/`
+- active platform checkout or symlink: `/srv/ultra/platform-current`
+- platform releases: `<release-root>/platform-releases/<git-sha>/`
+- BisQue config on shared storage: `<platform-data-root>/bisque-config/site.cfg`
+- BisQue file storage root: `<platform-data-root>/`
 
 ## What Runs Where
 
-### `nail01`
+### App node
 
-Treat `nail01` as the ordinary app deploy target.
-
-It owns:
+Treat the app node as the ordinary target for:
 
 - frontend asset updates
 - FastAPI backend rollouts
@@ -75,11 +73,9 @@ It does not own:
 - Keycloak admin/bootstrap config
 - Postgres lifecycle
 
-### `nail04`
+### Platform node
 
-Treat `nail04` as the platform deploy target.
-
-It owns:
+Treat the platform node as the ordinary target for:
 
 - `docker compose` platform rollouts
 - BisQue auth/platform behavior
@@ -89,29 +85,29 @@ It owns:
 
 ## Production Deploy Workflow
 
-### App rollout (`nail01`)
+### App rollout
 
 Use committed release snapshots for production deploys. Do not deploy a dirty working tree by accident.
 
 Recommended flow:
 
-1. Build/test locally from the exact committed SHA you intend to ship.
+1. Build and test locally from the exact committed SHA you intend to ship.
 2. Stage backend release contents to:
-   - `/mnt/barrel-data/ultra/releases/<git-sha>/backend`
+   - `<release-root>/releases/<git-sha>/backend`
 3. Stage built frontend assets to:
-   - `/mnt/barrel-data/ultra/releases/<git-sha>/frontend`
-4. On `nail01`, deploy backend:
+   - `<release-root>/releases/<git-sha>/frontend`
+4. On the app node, deploy backend:
 
    ```bash
    sudo ULTRA_RELEASE_ROOT=/srv/ultra \
-     /mnt/barrel-data/ultra/releases/<git-sha>/backend/scripts/deploy_ultra_backend.sh <git-sha>
+     <release-root>/releases/<git-sha>/backend/scripts/deploy_ultra_backend.sh <git-sha>
    ```
 
-5. On `nail01`, deploy frontend:
+5. On the app node, deploy frontend:
 
    ```bash
    sudo ULTRA_RELEASE_ROOT=/srv/ultra \
-     /mnt/barrel-data/ultra/releases/<git-sha>/backend/scripts/deploy_ultra_frontend.sh <git-sha>
+     <release-root>/releases/<git-sha>/backend/scripts/deploy_ultra_frontend.sh <git-sha>
    ```
 
 6. Verify:
@@ -119,11 +115,11 @@ Recommended flow:
    - `readlink -f /srv/ultra/frontend-current`
    - `systemctl is-active ultra-backend@1 ultra-backend@2`
    - `systemctl is-active caddy`
-   - `curl -fsS https://ultra.ece.ucsb.edu/v1/health`
+   - `curl -fsS https://<public-host>/v1/health`
 
-### Platform rollout (`nail04`)
+### Platform rollout
 
-Use `nail04` only when the change touches BisQue, Keycloak, Postgres, or platform proxying.
+Use the platform node only when the change touches BisQue, Keycloak, Postgres, or platform proxying.
 
 Typical flow:
 
@@ -142,40 +138,40 @@ Typical flow:
 
 5. Verify:
    - `docker compose ps`
-   - `curl -fsS https://ultra.ece.ucsb.edu/auth/realms/bisque/.well-known/openid-configuration`
-   - `curl -fsS https://ultra.ece.ucsb.edu/image_service/formats`
+   - `curl -fsS https://<public-host>/auth/realms/bisque/.well-known/openid-configuration`
+   - `curl -fsS https://<public-host>/image_service/formats`
 
 ## Deployment Gotchas
 
-- `nail01` uses `Caddy`, not `nginx`. Frontend deploy helpers must validate/reload `Caddy`.
+- The app node may use `Caddy` rather than `nginx`. Frontend deploy helpers must validate and reload the active web server.
 - Do not `source /etc/ultra/ultra-backend.env` blindly for ad hoc checks; values like `BISQUE_AUTH_OIDC_SCOPE=openid profile email` contain spaces.
-- If Opus appears configured but production silently falls back to `gpt-oss-120b`, verify the exact `PRO_MODE_API_KEY` contents, not just that the variable exists.
-- The UCSB Bedrock-published API is healthy on the `/api` path, not the host root.
-- Keep Postgres and Keycloak on local Docker volumes on `nail04`. Do not move them back onto the barrel NFS mount.
-- In split-node routing, BisQue admin UI requires `/admin*` on both the public `nail01` edge and the internal `nail04` platform proxy.
+- If Opus appears configured but production silently falls back to `gpt-oss-120b`, verify the exact Pro Mode API key contents, not just that the variable exists.
+- If a Bedrock-published API is fronted by an API Gateway wrapper, verify whether the health and conversation endpoints live under `/api` instead of the host root.
+- Keep Postgres and Keycloak on local Docker volumes on the platform node. Do not move them onto shared network storage.
+- In split-node routing, BisQue admin UI requires `/admin*` on both the public edge and the internal platform proxy.
 
 ## Fast Verification Matrix
 
 After app deploys:
 
-- `https://ultra.ece.ucsb.edu/`
-- `https://ultra.ece.ucsb.edu/v1/health`
+- `https://<public-host>/`
+- `https://<public-host>/v1/health`
 - one Pro Mode direct-response prompt
 - one Pro Mode tool workflow
 
 After platform deploys:
 
-- `https://ultra.ece.ucsb.edu/auth/realms/bisque/.well-known/openid-configuration`
-- `https://ultra.ece.ucsb.edu/client_service/`
-- `https://ultra.ece.ucsb.edu/auth_service/whoami`
-- `https://ultra.ece.ucsb.edu/image_service/formats`
+- `https://<public-host>/auth/realms/bisque/.well-known/openid-configuration`
+- `https://<public-host>/client_service/`
+- `https://<public-host>/auth_service/whoami`
+- `https://<public-host>/image_service/formats`
 - one browser login
 - one BisQue upload/search flow
 
 ## GitHub Actions
 
-GitHub Actions are verification-first now.
+GitHub Actions are verification-first.
 
-- backend/frontend workflows run CI checks
+- backend and frontend workflows run CI checks
 - production rollout is still a manual operator action
 - do not assume a successful GitHub run means production has been updated

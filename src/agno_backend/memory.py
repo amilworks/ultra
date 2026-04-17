@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from src.agentic.repositories import ScientificNoteRepository, SessionRepository
 
@@ -65,7 +65,9 @@ class ScientificMemoryService:
         self.notes = notes
 
     @staticmethod
-    def normalize_policy(raw: dict[str, Any] | ScientificMemoryPolicy | None) -> ScientificMemoryPolicy:
+    def normalize_policy(
+        raw: dict[str, Any] | ScientificMemoryPolicy | None,
+    ) -> ScientificMemoryPolicy:
         if isinstance(raw, ScientificMemoryPolicy):
             return raw
         if isinstance(raw, dict):
@@ -144,7 +146,9 @@ class ScientificMemoryService:
         resolved_user_id = str(user_id or "").strip()
         sections: list[str] = []
         if resolved_session_id and resolved_user_id and policy.session_summary:
-            session_row = self.sessions.get_session(session_id=resolved_session_id, user_id=resolved_user_id)
+            session_row = self.sessions.get_session(
+                session_id=resolved_session_id, user_id=resolved_user_id
+            )
             session_summary = str((session_row or {}).get("summary") or "").strip()
             if session_summary:
                 sections.append(f"Current session summary:\n{session_summary}")
@@ -170,9 +174,7 @@ class ScientificMemoryService:
                 if rendered:
                     sections.append(rendered)
                 context.hit_count += len(note_rows)
-                context.hits.extend(
-                    self._note_metadata_rows(note_rows)
-                )
+                context.hits.extend(self._note_metadata_rows(note_rows))
 
         if not sections:
             return context
@@ -306,7 +308,11 @@ class ScientificMemoryService:
         recall_prompt = (
             "what" in question
             and ("favorite" in question or "prefer" in question)
-            and ("reply with only" in question or "what did i just say" in question or "what reagent" in question)
+            and (
+                "reply with only" in question
+                or "what did i just say" in question
+                or "what reagent" in question
+            )
         )
         if not recall_prompt:
             return None

@@ -41,7 +41,9 @@ _HDF5_TABLE_FIELD_LIMIT = 24
 _HDF5_PREVIEW_SLICE_TARGET = 8192
 _HDF5_TABLE_PREVIEW_LIMIT = 32
 _HDF5_TABLE_CHART_TARGET = 256
-_HDF5_MATERIALS_STRUCTURE_GROUPS = frozenset({"CellData", "Grain Data", "CellFeatureData", "CellEnsembleData"})
+_HDF5_MATERIALS_STRUCTURE_GROUPS = frozenset(
+    {"CellData", "Grain Data", "CellFeatureData", "CellEnsembleData"}
+)
 _HDF5_MATERIALS_CAPABILITY_ORDER = (
     "maps",
     "orientation",
@@ -95,7 +97,9 @@ def _infer_modality(*, payload: dict[str, Any], original_name: str) -> str:
     reader = str(payload.get("reader") or "").lower()
     metadata_payload = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     microscopy_metadata = (
-        metadata_payload.get("microscopy") if isinstance(metadata_payload.get("microscopy"), dict) else {}
+        metadata_payload.get("microscopy")
+        if isinstance(metadata_payload.get("microscopy"), dict)
+        else {}
     )
     if lower_name.endswith(".nii") or lower_name.endswith(".nii.gz") or "nibabel" in reader:
         return "medical"
@@ -109,7 +113,11 @@ def _infer_modality(*, payload: dict[str, Any], original_name: str) -> str:
         ):
             return "microscopy"
         return "image"
-    if lower_name.endswith(".tif") or lower_name.endswith(".tiff") or lower_name.endswith(".ome.zarr"):
+    if (
+        lower_name.endswith(".tif")
+        or lower_name.endswith(".tiff")
+        or lower_name.endswith(".ome.zarr")
+    ):
         return "microscopy"
     return "image"
 
@@ -171,7 +179,9 @@ def _normalize_orientation_axis_labels(value: Any) -> dict[str, dict[str, str]]:
     return normalized
 
 
-def _axis_positive_label(axis_labels: dict[str, dict[str, str]], axis_name: str, fallback: str) -> str:
+def _axis_positive_label(
+    axis_labels: dict[str, dict[str, str]], axis_name: str, fallback: str
+) -> str:
     key = str(axis_name or "").strip().lower()
     entry = axis_labels.get(key)
     if isinstance(entry, dict) and str(entry.get("positive") or "").strip():
@@ -236,11 +246,15 @@ def _image_render_policy(
         return "analysis"
 
     metadata_payload = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    header_payload = metadata_payload.get("header") if isinstance(metadata_payload.get("header"), dict) else {}
+    header_payload = (
+        metadata_payload.get("header") if isinstance(metadata_payload.get("header"), dict) else {}
+    )
     channel_count = max(1, int(axis_sizes.get("C") or 1))
     is_volume = bool(payload.get("is_volume")) or max(1, int(axis_sizes.get("Z") or 1)) > 1
     dtype_name = str(payload.get("array_dtype") or "uint8")
-    color_mode = str(header_payload.get("Color mode") or header_payload.get("Mode") or "").strip().upper()
+    color_mode = (
+        str(header_payload.get("Color mode") or header_payload.get("Mode") or "").strip().upper()
+    )
     if (
         channel_count in {3, 4}
         and color_mode in {"RGB", "RGBA"}
@@ -248,7 +262,12 @@ def _image_render_policy(
         and _dtype_bits(dtype_name) <= 16
     ):
         return "display"
-    if not is_volume and channel_count in {3, 4} and _dtype_format(dtype_name) == "u" and _dtype_bits(dtype_name) <= 16:
+    if (
+        not is_volume
+        and channel_count in {3, 4}
+        and _dtype_format(dtype_name) == "u"
+        and _dtype_bits(dtype_name) <= 16
+    ):
         return "display"
     if modality == "medical":
         return "scalar"
@@ -278,7 +297,11 @@ def _diagnostic_surface(
     modality: str | None,
     is_volume: bool,
 ) -> str:
-    if bool(is_volume) and str(render_policy) == "scalar" and str(modality or "").strip().lower() == "medical":
+    if (
+        bool(is_volume)
+        and str(render_policy) == "scalar"
+        and str(modality or "").strip().lower() == "medical"
+    ):
         return "mpr"
     return "none"
 
@@ -589,7 +612,9 @@ def _build_plane_descriptor(
     }
 
 
-def build_tile_levels(width: int, height: int, tile_size: int = VIEWER_TILE_SIZE) -> list[dict[str, Any]]:
+def build_tile_levels(
+    width: int, height: int, tile_size: int = VIEWER_TILE_SIZE
+) -> list[dict[str, Any]]:
     full_width = max(1, int(width))
     full_height = max(1, int(height))
     tile = max(64, int(tile_size))
@@ -605,7 +630,9 @@ def build_tile_levels(width: int, height: int, tile_size: int = VIEWER_TILE_SIZE
 
     output: list[dict[str, Any]] = []
     for level_id, (level_width, level_height) in enumerate(levels):
-        downsample = max(float(full_width) / float(level_width), float(full_height) / float(level_height))
+        downsample = max(
+            float(full_width) / float(level_width), float(full_height) / float(level_height)
+        )
         output.append(
             {
                 "level": int(level_id),
@@ -653,7 +680,9 @@ def _build_atlas_scheme(
                 "slice_height": scaled_height,
                 "atlas_width": atlas_width,
                 "atlas_height": atlas_height,
-                "downsample": float(round(max(width / float(scaled_width), height / float(scaled_height)), 4)),
+                "downsample": float(
+                    round(max(width / float(scaled_width), height / float(scaled_height)), 4)
+                ),
                 "format": "png",
             }
     return best or {
@@ -681,8 +710,14 @@ def _build_phys(*, payload: dict[str, Any], file_id: str, original_name: str) ->
     modality = _infer_modality(payload=payload, original_name=original_name)
     channel_count = max(1, int(axis_sizes.get("C") or 1))
     channel_palette = _channel_palette(channel_count)
-    microscopy_metadata = metadata_payload.get("microscopy") if isinstance(metadata_payload.get("microscopy"), dict) else {}
-    metadata_channel_names = microscopy_metadata.get("channel_names") if isinstance(microscopy_metadata, dict) else None
+    microscopy_metadata = (
+        metadata_payload.get("microscopy")
+        if isinstance(metadata_payload.get("microscopy"), dict)
+        else {}
+    )
+    metadata_channel_names = (
+        microscopy_metadata.get("channel_names") if isinstance(microscopy_metadata, dict) else None
+    )
     if isinstance(metadata_channel_names, list):
         channel_names = [str(name) for name in metadata_channel_names[:channel_count]]
     else:
@@ -693,16 +728,22 @@ def _build_phys(*, payload: dict[str, Any], file_id: str, original_name: str) ->
     pixel_units = ["px", "px", "px", "frame"]
     if spacing:
         pixel_units = ["x-unit", "y-unit", "z-unit", "frame"]
-    dicom = metadata_payload.get("dicom") if isinstance(metadata_payload.get("dicom"), dict) else None
+    dicom = (
+        metadata_payload.get("dicom") if isinstance(metadata_payload.get("dicom"), dict) else None
+    )
     window_center = None
     window_width = None
     if dicom:
         try:
-            window_center = float(dicom.get("wnd_center")) if dicom.get("wnd_center") is not None else None
+            window_center = (
+                float(dicom.get("wnd_center")) if dicom.get("wnd_center") is not None else None
+            )
         except Exception:
             window_center = None
         try:
-            window_width = float(dicom.get("wnd_width")) if dicom.get("wnd_width") is not None else None
+            window_width = (
+                float(dicom.get("wnd_width")) if dicom.get("wnd_width") is not None else None
+            )
         except Exception:
             window_width = None
     if modality == "medical" and window_center is None and window_width is None:
@@ -734,18 +775,30 @@ def _build_phys(*, payload: dict[str, Any], file_id: str, original_name: str) ->
         "channel_colors": channel_palette,
         "units": "physical" if spacing else "pixel",
         "dicom": {
-            "modality": str(dicom.get("modality")) if dicom and dicom.get("modality") is not None else None,
+            "modality": str(dicom.get("modality"))
+            if dicom and dicom.get("modality") is not None
+            else None,
             "wnd_center": window_center,
             "wnd_width": window_width,
         },
-        "geo": metadata_payload.get("geo") if isinstance(metadata_payload.get("geo"), dict) else None,
-        "coordinates": metadata_payload.get("coordinates") if isinstance(metadata_payload.get("coordinates"), dict) else None,
+        "geo": metadata_payload.get("geo")
+        if isinstance(metadata_payload.get("geo"), dict)
+        else None,
+        "coordinates": metadata_payload.get("coordinates")
+        if isinstance(metadata_payload.get("coordinates"), dict)
+        else None,
     }
 
 
-def _build_display_defaults(*, payload: dict[str, Any], phys: dict[str, Any], modality: str) -> dict[str, Any]:
+def _build_display_defaults(
+    *, payload: dict[str, Any], phys: dict[str, Any], modality: str
+) -> dict[str, Any]:
     dicom = phys.get("dicom") if isinstance(phys.get("dicom"), dict) else {}
-    if modality == "medical" and dicom.get("wnd_center") is not None and dicom.get("wnd_width") is not None:
+    if (
+        modality == "medical"
+        and dicom.get("wnd_center") is not None
+        and dicom.get("wnd_width") is not None
+    ):
         enhancement = f"hounsfield:{float(dicom['wnd_center']):.3f}:{float(dicom['wnd_width']):.3f}"
     else:
         enhancement = "d"
@@ -783,7 +836,10 @@ def _select_2d_delivery_policy(*, axis_sizes: dict[str, Any], is_volume: bool) -
         }
     width = max(1, int(axis_sizes.get("X") or 1))
     height = max(1, int(axis_sizes.get("Y") or 1))
-    is_large_2d = max(width, height) >= _DIRECT_2D_LARGE_DIMENSION or (width * height) >= _DIRECT_2D_LARGE_PIXELS
+    is_large_2d = (
+        max(width, height) >= _DIRECT_2D_LARGE_DIMENSION
+        or (width * height) >= _DIRECT_2D_LARGE_PIXELS
+    )
     return {
         "backend_mode": "direct",
         "tile_pyramid": "deferred" if is_large_2d else "none",
@@ -879,7 +935,9 @@ def _iter_hdf_data_container_paths(handle: Any) -> list[str]:
     return output
 
 
-def _find_first_hdf_dataset(handle: Any, container_paths: list[str], relatives: list[str]) -> str | None:
+def _find_first_hdf_dataset(
+    handle: Any, container_paths: list[str], relatives: list[str]
+) -> str | None:
     for container_path in container_paths:
         for relative in relatives:
             candidate = f"{container_path}/{relative}"
@@ -961,7 +1019,9 @@ def _read_hdf_row_count(handle: Any, paths: list[str]) -> int | None:
     return None
 
 
-def _sample_hdf_row_indices(row_count: int, *, target_rows: int = 512, drop_first: bool = False) -> np.ndarray:
+def _sample_hdf_row_indices(
+    row_count: int, *, target_rows: int = 512, drop_first: bool = False
+) -> np.ndarray:
     total = max(0, int(row_count))
     if total <= 0:
         return np.asarray([], dtype=np.int64)
@@ -972,7 +1032,9 @@ def _sample_hdf_row_indices(row_count: int, *, target_rows: int = 512, drop_firs
     return np.arange(start, total, step, dtype=np.int64)[:target_rows]
 
 
-def _sample_hdf_rows(dataset: Any, *, target_rows: int = 512, drop_first: bool = False) -> np.ndarray:
+def _sample_hdf_rows(
+    dataset: Any, *, target_rows: int = 512, drop_first: bool = False
+) -> np.ndarray:
     shape = _hdf_shape_list(getattr(dataset, "shape", ()))
     if not shape:
         return np.asarray(dataset[()])
@@ -1027,7 +1089,11 @@ def _materials_semantic_role(dataset_path: str | None) -> str | None:
         return "surface_flag"
     if lower_path.endswith("/neighborlist") or lower_path.endswith("/sharedsurfacearealist"):
         return "grain_topology"
-    if lower_path.endswith("/phasename") or lower_path.endswith("/crystalstructures") or lower_path.endswith("/numfeatures"):
+    if (
+        lower_path.endswith("/phasename")
+        or lower_path.endswith("/crystalstructures")
+        or lower_path.endswith("/numfeatures")
+    ):
         return "ensemble_metadata"
     if lower_path.endswith("/phasefraction"):
         return "target_phase_fraction"
@@ -1096,7 +1162,9 @@ def _build_materials_histogram_chart(
         for index, count in enumerate(hist.tolist()):
             start = float(edges[index])
             end = float(edges[index + 1])
-            data.append({x_key: f"{start:.2f}-{end:.2f}", y_key: int(count), "start": start, "end": end})
+            data.append(
+                {x_key: f"{start:.2f}-{end:.2f}", y_key: int(count), "start": start, "end": end}
+            )
     return {
         "kind": "histogram",
         "title": title,
@@ -1178,7 +1246,9 @@ def _detect_hdf5_materials(handle: Any) -> dict[str, Any]:
     for container_path in container_paths:
         group = handle.get(container_path)
         child_names = set(_safe_hdf_group_keys(group))
-        if "_SIMPL_GEOMETRY" in child_names and bool(child_names & _HDF5_MATERIALS_STRUCTURE_GROUPS):
+        if "_SIMPL_GEOMETRY" in child_names and bool(
+            child_names & _HDF5_MATERIALS_STRUCTURE_GROUPS
+        ):
             primary_containers.append(container_path)
     if not primary_containers:
         return {
@@ -1192,24 +1262,79 @@ def _detect_hdf5_materials(handle: Any) -> dict[str, Any]:
             "recommended_view": "explorer",
         }
 
-    ordered_containers = primary_containers + [path for path in container_paths if path not in primary_containers]
+    ordered_containers = primary_containers + [
+        path for path in container_paths if path not in primary_containers
+    ]
     roles: dict[str, str] = {}
-    roles["grain_id_map"] = _find_first_hdf_dataset(handle, ordered_containers, ["CellData/FeatureIds", "CellFeatureData/FeatureIds"]) or ""
-    roles["phase_id_map"] = _find_first_hdf_dataset(handle, ordered_containers, ["CellData/Phases", "CellFeatureData/Phases"]) or ""
-    roles["ipf_map"] = _find_first_hdf_dataset(handle, ordered_containers, ["CellData/IPFColor"]) or ""
-    roles["orientation_euler"] = _find_first_hdf_dataset(handle, ordered_containers, ["CellData/EulerAngles", "Grain Data/EulerAngles", "Grain Data/FZAvgEuler"]) or ""
-    roles["orientation_quaternion"] = _find_first_hdf_dataset(handle, ordered_containers, ["CellData/Quats", "CellData/FZQuats", "Grain Data/AvgQuats", "Grain Data/FZAvgQuats"]) or ""
-    roles["grain_volume"] = _find_first_hdf_dataset(handle, ordered_containers, ["Grain Data/Volumes", "CellFeatureData/Volumes"]) or ""
-    roles["grain_neighbors"] = _find_first_hdf_dataset(handle, ordered_containers, ["Grain Data/NumNeighbors", "CellFeatureData/NumNeighbors"]) or ""
-    roles["surface_flag"] = _find_first_hdf_dataset(handle, ordered_containers, ["Grain Data/SurfaceFeatures", "CellFeatureData/SurfaceFeatures"]) or ""
-    neighbor_list_path = _find_first_hdf_dataset(handle, ordered_containers, ["Grain Data/NeighborList", "CellFeatureData/NeighborList"])
-    shared_surface_path = _find_first_hdf_dataset(handle, ordered_containers, ["Grain Data/SharedSurfaceAreaList", "CellFeatureData/SharedSurfaceAreaList"])
+    roles["grain_id_map"] = (
+        _find_first_hdf_dataset(
+            handle, ordered_containers, ["CellData/FeatureIds", "CellFeatureData/FeatureIds"]
+        )
+        or ""
+    )
+    roles["phase_id_map"] = (
+        _find_first_hdf_dataset(
+            handle, ordered_containers, ["CellData/Phases", "CellFeatureData/Phases"]
+        )
+        or ""
+    )
+    roles["ipf_map"] = (
+        _find_first_hdf_dataset(handle, ordered_containers, ["CellData/IPFColor"]) or ""
+    )
+    roles["orientation_euler"] = (
+        _find_first_hdf_dataset(
+            handle,
+            ordered_containers,
+            ["CellData/EulerAngles", "Grain Data/EulerAngles", "Grain Data/FZAvgEuler"],
+        )
+        or ""
+    )
+    roles["orientation_quaternion"] = (
+        _find_first_hdf_dataset(
+            handle,
+            ordered_containers,
+            ["CellData/Quats", "CellData/FZQuats", "Grain Data/AvgQuats", "Grain Data/FZAvgQuats"],
+        )
+        or ""
+    )
+    roles["grain_volume"] = (
+        _find_first_hdf_dataset(
+            handle, ordered_containers, ["Grain Data/Volumes", "CellFeatureData/Volumes"]
+        )
+        or ""
+    )
+    roles["grain_neighbors"] = (
+        _find_first_hdf_dataset(
+            handle, ordered_containers, ["Grain Data/NumNeighbors", "CellFeatureData/NumNeighbors"]
+        )
+        or ""
+    )
+    roles["surface_flag"] = (
+        _find_first_hdf_dataset(
+            handle,
+            ordered_containers,
+            ["Grain Data/SurfaceFeatures", "CellFeatureData/SurfaceFeatures"],
+        )
+        or ""
+    )
+    neighbor_list_path = _find_first_hdf_dataset(
+        handle, ordered_containers, ["Grain Data/NeighborList", "CellFeatureData/NeighborList"]
+    )
+    shared_surface_path = _find_first_hdf_dataset(
+        handle,
+        ordered_containers,
+        ["Grain Data/SharedSurfaceAreaList", "CellFeatureData/SharedSurfaceAreaList"],
+    )
     if neighbor_list_path and shared_surface_path:
         roles["grain_topology"] = neighbor_list_path
     ensemble_path = _find_first_hdf_dataset(
         handle,
         ordered_containers,
-        ["CellEnsembleData/PhaseName", "CellEnsembleData/CrystalStructures", "CellEnsembleData/NumFeatures"],
+        [
+            "CellEnsembleData/PhaseName",
+            "CellEnsembleData/CrystalStructures",
+            "CellEnsembleData/NumFeatures",
+        ],
     )
     if ensemble_path:
         roles["ensemble_metadata"] = ensemble_path
@@ -1256,21 +1381,44 @@ def _detect_hdf5_materials(handle: Any) -> dict[str, Any]:
         capabilities.append("grain_metrics")
     if roles.get("grain_topology") and shared_surface_path:
         capabilities.append("topology")
-    if any(roles.get(key) for key in ("target_phase_fraction", "feature_size_distribution", "feature_size_vs_neighbors", "misorientation_bins", "odf")):
+    if any(
+        roles.get(key)
+        for key in (
+            "target_phase_fraction",
+            "feature_size_distribution",
+            "feature_size_vs_neighbors",
+            "misorientation_bins",
+            "odf",
+        )
+    ):
         capabilities.append("synthetic_stats")
-    capabilities = [capability for capability in _HDF5_MATERIALS_CAPABILITY_ORDER if capability in capabilities]
+    capabilities = [
+        capability for capability in _HDF5_MATERIALS_CAPABILITY_ORDER if capability in capabilities
+    ]
 
-    phase_name_paths = [f"{container}/CellEnsembleData/PhaseName" for container in ordered_containers]
-    phase_name_paths.append("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/PhaseName")
+    phase_name_paths = [
+        f"{container}/CellEnsembleData/PhaseName" for container in ordered_containers
+    ]
+    phase_name_paths.append(
+        "/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/PhaseName"
+    )
     phase_names = _read_hdf_string_dataset(handle, phase_name_paths)
 
-    num_feature_paths = [f"{container}/CellEnsembleData/NumFeatures" for container in ordered_containers]
+    num_feature_paths = [
+        f"{container}/CellEnsembleData/NumFeatures" for container in ordered_containers
+    ]
     feature_count = _read_hdf_feature_count(handle, num_feature_paths)
     grain_count = _read_hdf_row_count(
         handle,
-        [path for key, path in roles.items() if key in {"grain_volume", "grain_neighbors", "surface_flag"}],
+        [
+            path
+            for key, path in roles.items()
+            if key in {"grain_volume", "grain_neighbors", "surface_flag"}
+        ],
     )
-    recommended_map_dataset_path = roles.get("ipf_map") or roles.get("grain_id_map") or roles.get("phase_id_map")
+    recommended_map_dataset_path = (
+        roles.get("ipf_map") or roles.get("grain_id_map") or roles.get("phase_id_map")
+    )
 
     return {
         "detected": True,
@@ -1303,12 +1451,16 @@ def _classify_hdf_preview_kind(dataset_path: str, shape: list[int], dtype_name: 
     if rank == 2:
         return "table"
     if rank == 3:
-        if integer_like and any(token in lower_path for token in ("featureid", "feature_ids", "phase")):
+        if integer_like and any(
+            token in lower_path for token in ("featureid", "feature_ids", "phase")
+        ):
             return "label_volume"
         return "scalar_volume"
     if rank == 4:
         if trailing == 1:
-            if integer_like and any(token in lower_path for token in ("featureid", "feature_ids", "phase")):
+            if integer_like and any(
+                token in lower_path for token in ("featureid", "feature_ids", "phase")
+            ):
                 return "label_volume"
             return "scalar_volume"
         if trailing == 3 and (uint8_like or "ipfcolor" in lower_path or "color" in lower_path):
@@ -1395,14 +1547,18 @@ def _sample_hdf_array(dataset: Any, *, target: int = _HDF5_SAMPLE_TARGET) -> np.
         return np.asarray(dataset[()])
     rank = max(1, len(shape))
     target_side = max(1, int(round(float(target) ** (1.0 / float(rank)))))
-    selection = tuple(slice(0, int(dim), max(1, math.ceil(int(dim) / target_side))) for dim in shape)
+    selection = tuple(
+        slice(0, int(dim), max(1, math.ceil(int(dim) / target_side))) for dim in shape
+    )
     sampled = np.asarray(dataset[selection])
     if int(sampled.size) <= int(target):
         return sampled
     return sampled.reshape(-1)[: int(target)]
 
 
-def _summarize_hdf_attributes(attrs: Any, *, limit: int = _HDF5_DATASET_ATTR_LIMIT) -> dict[str, Any]:
+def _summarize_hdf_attributes(
+    attrs: Any, *, limit: int = _HDF5_DATASET_ATTR_LIMIT
+) -> dict[str, Any]:
     output: dict[str, Any] = {}
     try:
         items = list(attrs.items())
@@ -1511,7 +1667,9 @@ def _hdf_component_count(
     return 1
 
 
-def _hdf_axis_sizes_for_preview(shape: list[int], preview_kind: str | None) -> dict[str, int] | None:
+def _hdf_axis_sizes_for_preview(
+    shape: list[int], preview_kind: str | None
+) -> dict[str, int] | None:
     if preview_kind not in {"scalar_volume", "label_volume", "vector_volume", "rgb_volume"}:
         return None
     if len(shape) >= 4:
@@ -1615,7 +1773,11 @@ def _sample_hdf_numeric_values(
     if preview_kind in {"vector_volume", "rgb_volume"} and array.ndim >= 1:
         component_index = max(0, min(int(component or 0), max(0, int(array.shape[-1]) - 1)))
         array = array[..., component_index]
-    elif preview_kind in {"scalar_volume", "label_volume"} and array.ndim >= 4 and int(array.shape[-1]) == 1:
+    elif (
+        preview_kind in {"scalar_volume", "label_volume"}
+        and array.ndim >= 4
+        and int(array.shape[-1]) == 1
+    ):
         array = array[..., 0]
     return np.asarray(array).reshape(-1)
 
@@ -1733,7 +1895,14 @@ def build_hdf5_dataset_histogram(
 
         shape = _hdf_shape_list(node.shape)
         preview_kind = _classify_hdf_preview_kind(normalized_path, shape, str(node.dtype))
-        if preview_kind not in {"scalar_volume", "label_volume", "vector_volume", "rgb_volume", "table", "series"}:
+        if preview_kind not in {
+            "scalar_volume",
+            "label_volume",
+            "vector_volume",
+            "rgb_volume",
+            "table",
+            "series",
+        }:
             raise ValueError("Histogram preview is unavailable for this dataset.")
         field_names = list(node.dtype.names or [])
         component_count = _hdf_component_count(shape, preview_kind, field_names=field_names)
@@ -1751,7 +1920,9 @@ def build_hdf5_dataset_histogram(
             component=component_index,
             target=max(_HDF5_SAMPLE_TARGET, 8192),
         )
-        records, discrete, minimum, maximum, sample_count = _build_histogram_records(sampled, bins=bins)
+        records, discrete, minimum, maximum, sample_count = _build_histogram_records(
+            sampled, bins=bins
+        )
         return {
             "file_id": file_id,
             "dataset_path": normalized_path,
@@ -1834,7 +2005,7 @@ def build_hdf5_dataset_table_preview(
                         "row_index": int(row_index),
                         **{
                             str(field_name): _json_safe_hdf_value(row[field_name])
-                            for field_name in field_names[: _HDF5_TABLE_FIELD_LIMIT]
+                            for field_name in field_names[:_HDF5_TABLE_FIELD_LIMIT]
                         },
                     }
                 )
@@ -1845,10 +2016,14 @@ def build_hdf5_dataset_table_preview(
                 preview_rows = np.asarray(node[start:stop])
                 if preview_rows.ndim == 1:
                     preview_rows = preview_rows.reshape(-1, 1)
-            for index, label in enumerate(column_labels[: preview_rows.shape[1] if preview_rows.ndim > 1 else 1]):
+            for index, label in enumerate(
+                column_labels[: preview_rows.shape[1] if preview_rows.ndim > 1 else 1]
+            ):
                 numeric = bool(np.issubdtype(node.dtype, np.number))
                 key = str(label)
-                columns.append({"key": key, "label": key, "dtype": str(node.dtype), "numeric": numeric})
+                columns.append(
+                    {"key": key, "label": key, "dtype": str(node.dtype), "numeric": numeric}
+                )
                 if numeric:
                     numeric_column_keys.append(key)
             for row_index, row in enumerate(np.asarray(preview_rows), start=start):
@@ -1908,8 +2083,13 @@ def build_hdf5_dataset_table_preview(
                             "data": sampled_rows,
                         }
                     )
-                primary_values = np.asarray([row[primary_key] for row in sampled_rows if primary_key in row], dtype=np.float64)
-                hist_records, _discrete, _min, _max, _sample_count = _build_histogram_records(primary_values, bins=32)
+                primary_values = np.asarray(
+                    [row[primary_key] for row in sampled_rows if primary_key in row],
+                    dtype=np.float64,
+                )
+                hist_records, _discrete, _min, _max, _sample_count = _build_histogram_records(
+                    primary_values, bins=32
+                )
                 if hist_records:
                     charts.append(
                         {
@@ -1969,7 +2149,9 @@ def build_hdf5_dataset_summary(
         if volume_eligible and "volume" not in capabilities:
             capabilities.append("volume")
         render_policy = _hdf_render_policy(preview_kind)
-        measurement_policy = _measurement_policy(orientation_frame="voxel", physical_spacing=physical_spacing)
+        measurement_policy = _measurement_policy(
+            orientation_frame="voxel", physical_spacing=physical_spacing
+        )
         diagnostic_surface = _diagnostic_surface(
             render_policy=render_policy,
             modality="materials" if _materials_semantic_role(normalized_path) else "unknown",
@@ -2014,11 +2196,20 @@ def build_hdf5_dataset_summary(
         for index, field_name in enumerate(field_names):
             if index >= _HDF5_TABLE_FIELD_LIMIT:
                 structured_fields.append(
-                    {"name": "...", "dtype": f"{len(field_names) - _HDF5_TABLE_FIELD_LIMIT} more fields"}
+                    {
+                        "name": "...",
+                        "dtype": f"{len(field_names) - _HDF5_TABLE_FIELD_LIMIT} more fields",
+                    }
                 )
                 break
-            field_dtype = node.dtype.fields[field_name][0] if node.dtype.fields and field_name in node.dtype.fields else None
-            structured_fields.append({"name": str(field_name), "dtype": str(field_dtype or "unknown")})
+            field_dtype = (
+                node.dtype.fields[field_name][0]
+                if node.dtype.fields and field_name in node.dtype.fields
+                else None
+            )
+            structured_fields.append(
+                {"name": str(field_name), "dtype": str(field_dtype or "unknown")}
+            )
 
         sample_statistics: dict[str, Any] | None = None
         sample_values: Any = None
@@ -2133,7 +2324,9 @@ def _build_materials_dataset_links(materials_payload: dict[str, Any]) -> list[di
     return output
 
 
-def _build_materials_map_cards(handle: Any, materials_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_materials_map_cards(
+    handle: Any, materials_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
     role_order = [
         ("ipf_map", "IPF map", "Inverse-pole-figure color map from the materials dataset."),
         ("grain_id_map", "Feature IDs", "Categorical grain identifier map."),
@@ -2148,7 +2341,9 @@ def _build_materials_map_cards(handle: Any, materials_payload: dict[str, Any]) -
         dataset = _safe_hdf_dataset(handle, dataset_path)
         if dataset is None:
             continue
-        preview_kind = _classify_hdf_preview_kind(str(dataset_path), _hdf_shape_list(dataset.shape), str(dataset.dtype))
+        preview_kind = _classify_hdf_preview_kind(
+            str(dataset_path), _hdf_shape_list(dataset.shape), str(dataset.dtype)
+        )
         maps.append(
             {
                 "title": title,
@@ -2167,11 +2362,15 @@ def _materials_phase_label(phase_id: int, phase_names: list[str]) -> str:
     return f"Phase {int(phase_id)}"
 
 
-def _build_materials_phase_fraction_chart(handle: Any, dataset_path: str, phase_names: list[str]) -> dict[str, Any] | None:
+def _build_materials_phase_fraction_chart(
+    handle: Any, dataset_path: str, phase_names: list[str]
+) -> dict[str, Any] | None:
     dataset = _safe_hdf_dataset(handle, dataset_path)
     if dataset is None:
         return None
-    values = _sample_hdf_numeric_values(dataset, preview_kind="label_volume", target=max(_HDF5_SAMPLE_TARGET, 8192))
+    values = _sample_hdf_numeric_values(
+        dataset, preview_kind="label_volume", target=max(_HDF5_SAMPLE_TARGET, 8192)
+    )
     values = values[np.isfinite(values)]
     if values.size == 0:
         return None
@@ -2197,8 +2396,12 @@ def _build_materials_phase_fraction_chart(handle: Any, dataset_path: str, phase_
     )
 
 
-def _build_materials_target_phase_fraction_chart(handle: Any, phase_names: list[str]) -> dict[str, Any] | None:
-    stats_root = handle.get("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics")
+def _build_materials_target_phase_fraction_chart(
+    handle: Any, phase_names: list[str]
+) -> dict[str, Any] | None:
+    stats_root = handle.get(
+        "/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics"
+    )
     if stats_root is None:
         return None
     data: list[dict[str, Any]] = []
@@ -2234,12 +2437,16 @@ def _build_materials_target_phase_fraction_chart(handle: Any, phase_names: list[
     )
 
 
-def _build_materials_grain_charts(handle: Any, materials_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_materials_grain_charts(
+    handle: Any, materials_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
     roles = materials_payload.get("roles") if isinstance(materials_payload, dict) else {}
     if not isinstance(roles, dict):
         return []
     charts: list[dict[str, Any]] = []
-    phase_names = materials_payload.get("phase_names") if isinstance(materials_payload, dict) else []
+    phase_names = (
+        materials_payload.get("phase_names") if isinstance(materials_payload, dict) else []
+    )
     phase_names = [str(item) for item in phase_names] if isinstance(phase_names, list) else []
     phase_map_path = roles.get("phase_id_map")
     volume_path = roles.get("grain_volume")
@@ -2250,7 +2457,9 @@ def _build_materials_grain_charts(handle: Any, materials_payload: dict[str, Any]
     surface_ds = _safe_hdf_dataset(handle, surface_path)
 
     if phase_map_path:
-        phase_chart = _build_materials_phase_fraction_chart(handle, str(phase_map_path), phase_names)
+        phase_chart = _build_materials_phase_fraction_chart(
+            handle, str(phase_map_path), phase_names
+        )
         if phase_chart:
             charts.append(phase_chart)
 
@@ -2267,7 +2476,9 @@ def _build_materials_grain_charts(handle: Any, materials_payload: dict[str, Any]
             charts.append(chart)
 
     if neighbors_ds is not None:
-        neighbor_values = _sample_hdf_numeric_column(neighbors_ds, target_rows=4096, drop_first=True)
+        neighbor_values = _sample_hdf_numeric_column(
+            neighbors_ds, target_rows=4096, drop_first=True
+        )
         chart = _build_materials_histogram_chart(
             title="Neighbor count distribution",
             values=neighbor_values,
@@ -2318,7 +2529,9 @@ def _build_materials_grain_charts(handle: Any, materials_payload: dict[str, Any]
     return charts
 
 
-def _build_materials_orientation_charts(handle: Any, materials_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_materials_orientation_charts(
+    handle: Any, materials_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
     roles = materials_payload.get("roles") if isinstance(materials_payload, dict) else {}
     if not isinstance(roles, dict):
         return []
@@ -2346,7 +2559,9 @@ def _build_materials_orientation_charts(handle: Any, materials_payload: dict[str
         if euler_ds is not None:
             labels = ["phi1", "Phi", "phi2"]
             for component, label in enumerate(labels):
-                values = _sample_hdf_numeric_column(euler_ds, component=component, target_rows=4096, drop_first=True)
+                values = _sample_hdf_numeric_column(
+                    euler_ds, component=component, target_rows=4096, drop_first=True
+                )
                 chart = _build_materials_histogram_chart(
                     title=f"{label} distribution",
                     values=values,
@@ -2379,8 +2594,12 @@ def _build_materials_orientation_charts(handle: Any, materials_payload: dict[str
     return charts
 
 
-def _build_materials_synthetic_stats(handle: Any, materials_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    phase_names = materials_payload.get("phase_names") if isinstance(materials_payload, dict) else []
+def _build_materials_synthetic_stats(
+    handle: Any, materials_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
+    phase_names = (
+        materials_payload.get("phase_names") if isinstance(materials_payload, dict) else []
+    )
     phase_names = phase_names if isinstance(phase_names, list) else []
     charts: list[dict[str, Any]] = []
     roles = materials_payload.get("roles") if isinstance(materials_payload, dict) else {}
@@ -2389,16 +2608,22 @@ def _build_materials_synthetic_stats(handle: Any, materials_payload: dict[str, A
 
     phase_map_path = roles.get("phase_id_map")
     if phase_map_path:
-        realized = _build_materials_phase_fraction_chart(handle, str(phase_map_path), [str(x) for x in phase_names])
+        realized = _build_materials_phase_fraction_chart(
+            handle, str(phase_map_path), [str(x) for x in phase_names]
+        )
         if realized:
             realized["title"] = "Realized phase fraction"
             charts.append(realized)
 
-    target_phase_chart = _build_materials_target_phase_fraction_chart(handle, [str(x) for x in phase_names])
+    target_phase_chart = _build_materials_target_phase_fraction_chart(
+        handle, [str(x) for x in phase_names]
+    )
     if target_phase_chart:
         charts.append(target_phase_chart)
 
-    stats_root = handle.get("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics")
+    stats_root = handle.get(
+        "/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics"
+    )
     if stats_root is None:
         return charts
 
@@ -2423,7 +2648,11 @@ def _build_materials_synthetic_stats(handle: Any, materials_payload: dict[str, A
                 chart = _build_materials_bar_chart(
                     title=f"Feature size summary ({phase_label})",
                     data=data,
-                    source_paths=[path for path in (feature_mean_path, feature_std_path) if _safe_hdf_dataset(handle, path) is not None],
+                    source_paths=[
+                        path
+                        for path in (feature_mean_path, feature_std_path)
+                        if _safe_hdf_dataset(handle, path) is not None
+                    ],
                     description="The DREAM3D stats container exposes summary moments for feature size in this phase.",
                     x_key="metric",
                     y_key="value",
@@ -2498,7 +2727,9 @@ def build_hdf5_materials_dashboard(
     with h5py.File(source, "r") as handle:
         materials_payload = _detect_hdf5_materials(handle)
         if not bool(materials_payload.get("detected")):
-            raise ValueError("Materials dashboard is only available for detected DREAM3D-style HDF5 resources.")
+            raise ValueError(
+                "Materials dashboard is only available for detected DREAM3D-style HDF5 resources."
+            )
         geometry = _extract_hdf_geometry(handle)
         maps = _build_materials_map_cards(handle, materials_payload)
         return {
@@ -2507,11 +2738,17 @@ def build_hdf5_materials_dashboard(
             "overview": {
                 "geometry": geometry,
                 "spacing_note": "Spacing and origin come from linked geometry metadata. Verify calibration before quantitative interpretation.",
-                "phase_names": [str(name) for name in list(materials_payload.get("phase_names") or [])],
+                "phase_names": [
+                    str(name) for name in list(materials_payload.get("phase_names") or [])
+                ],
                 "feature_count": materials_payload.get("feature_count"),
                 "grain_count": materials_payload.get("grain_count"),
-                "capabilities": [str(item) for item in list(materials_payload.get("capabilities") or [])],
-                "recommended_map_dataset_path": materials_payload.get("recommended_map_dataset_path")
+                "capabilities": [
+                    str(item) for item in list(materials_payload.get("capabilities") or [])
+                ],
+                "recommended_map_dataset_path": materials_payload.get(
+                    "recommended_map_dataset_path"
+                )
                 or (maps[0]["dataset_path"] if maps else None),
             },
             "maps": maps,
@@ -2547,7 +2784,11 @@ def _build_hdf_tree_node(
         if preview_kind:
             dataset_kinds = state.setdefault("dataset_kinds", {})
             dataset_kinds[preview_kind] = int(dataset_kinds.get(preview_kind, 0)) + 1
-            if not state.get("default_dataset_path") and preview_kind not in {"array", "series", "scalar"}:
+            if not state.get("default_dataset_path") and preview_kind not in {
+                "array",
+                "series",
+                "scalar",
+            }:
                 state["default_dataset_path"] = path
         return {
             "path": path,
@@ -2610,7 +2851,9 @@ def build_hdf5_viewer_manifest(
         physical_spacing=None,
     )
     default_axis_labels = _default_orientation_axis_labels()
-    default_orientation_labels = _build_orientation_labels(row_axis="Y", col_axis="X", slice_axis=None)
+    default_orientation_labels = _build_orientation_labels(
+        row_axis="Y", col_axis="X", slice_axis=None
+    )
     base_manifest: dict[str, Any] = {
         "kind": "hdf5",
         "file_id": file_id,
@@ -2769,7 +3012,9 @@ def build_hdf5_viewer_manifest(
             root_attrs: dict[str, Any] = {}
             for index, (key, value) in enumerate(handle.attrs.items()):
                 if index >= _HDF5_ROOT_ATTR_LIMIT:
-                    root_attrs["..."] = f"{len(handle.attrs) - _HDF5_ROOT_ATTR_LIMIT} more attributes"
+                    root_attrs["..."] = (
+                        f"{len(handle.attrs) - _HDF5_ROOT_ATTR_LIMIT} more attributes"
+                    )
                     break
                 root_attrs[str(key)] = _json_safe_hdf_value(value)
             state: dict[str, Any] = {
@@ -2784,7 +3029,7 @@ def build_hdf5_viewer_manifest(
                 "default_dataset_path": None,
             }
             tree: list[dict[str, Any]] = []
-            for key in root_keys[: _HDF5_TREE_MAX_CHILDREN]:
+            for key in root_keys[:_HDF5_TREE_MAX_CHILDREN]:
                 obj = handle.get(key)
                 if obj is None:
                     continue
@@ -2804,11 +3049,13 @@ def build_hdf5_viewer_manifest(
                     str(value) for value in geometry["dimensions"]
                 )
             base_manifest["metadata"]["warnings"] = (
-                ["Tree traversal truncated for performance." ] if state["truncated"] else []
+                ["Tree traversal truncated for performance."] if state["truncated"] else []
             )
             materials_payload = _detect_hdf5_materials(handle)
             default_dataset_path = state.get("default_dataset_path")
-            if materials_payload.get("detected") and materials_payload.get("recommended_map_dataset_path"):
+            if materials_payload.get("detected") and materials_payload.get(
+                "recommended_map_dataset_path"
+            ):
                 default_dataset_path = str(materials_payload.get("recommended_map_dataset_path"))
             public_materials_payload = {
                 key: value
@@ -2829,7 +3076,9 @@ def build_hdf5_viewer_manifest(
                 texture_policy="nearest",
                 display_capabilities=display_capabilities,
             )
-            base_manifest["modality"] = "materials" if materials_payload.get("detected") else "unknown"
+            base_manifest["modality"] = (
+                "materials" if materials_payload.get("detected") else "unknown"
+            )
             base_manifest["viewer"].update(
                 {
                     "measurement_policy": measurement_policy,
@@ -2881,7 +3130,9 @@ def build_viewer_manifest(
     is_volume = bool(payload.get("is_volume"))
     slice_axes = ["z", "y", "x"] if is_volume else ["z"]
     plane_descriptors = {
-        axis: _build_plane_descriptor(axis=axis, axis_sizes=axis_sizes, physical_spacing=physical_spacing)
+        axis: _build_plane_descriptor(
+            axis=axis, axis_sizes=axis_sizes, physical_spacing=physical_spacing
+        )
         for axis in slice_axes
     }
     default_plane = plane_descriptors["z"]
@@ -2892,11 +3143,21 @@ def build_viewer_manifest(
     )
     metadata_payload = _extract_metadata_payload(payload)
     modality = _infer_modality(payload=payload, original_name=original_name)
-    orientation_payload = metadata_payload.get("orientation") if isinstance(metadata_payload.get("orientation"), dict) else {}
-    orientation_frame = str(orientation_payload.get("frame") or ("voxel" if is_volume else "pixel")).strip().lower() or ("voxel" if is_volume else "pixel")
+    orientation_payload = (
+        metadata_payload.get("orientation")
+        if isinstance(metadata_payload.get("orientation"), dict)
+        else {}
+    )
+    orientation_frame = str(
+        orientation_payload.get("frame") or ("voxel" if is_volume else "pixel")
+    ).strip().lower() or ("voxel" if is_volume else "pixel")
     axis_labels = _normalize_orientation_axis_labels(orientation_payload.get("axis_labels"))
-    row_axis = _axis_positive_label(axis_labels, default_plane["axes"][0] if default_plane["axes"] else "Y", "Y")
-    col_axis = _axis_positive_label(axis_labels, default_plane["axes"][1] if len(default_plane["axes"]) > 1 else "X", "X")
+    row_axis = _axis_positive_label(
+        axis_labels, default_plane["axes"][0] if default_plane["axes"] else "Y", "Y"
+    )
+    col_axis = _axis_positive_label(
+        axis_labels, default_plane["axes"][1] if len(default_plane["axes"]) > 1 else "X", "X"
+    )
     slice_axis = _axis_positive_label(axis_labels, "Z", "Z") if is_volume else None
     render_policy = _image_render_policy(payload=payload, modality=modality, axis_sizes=axis_sizes)
     measurement_policy = _measurement_policy(
@@ -2910,9 +3171,7 @@ def build_viewer_manifest(
     )
     channel_count = max(1, int(axis_sizes.get("C") or 1))
     scalar_volume_supported = bool(
-        is_volume
-        and render_policy == "scalar"
-        and (channel_count == 1 or modality == "microscopy")
+        is_volume and render_policy == "scalar" and (channel_count == 1 or modality == "microscopy")
     )
     atlas_volume_supported = bool(is_volume and render_policy == "categorical")
     native_volume_supported = bool(scalar_volume_supported or atlas_volume_supported)
@@ -2948,9 +3207,15 @@ def build_viewer_manifest(
     backend_mode = (
         "scalar"
         if scalar_volume_supported
-        else ("atlas" if atlas_volume_supported else ("direct" if is_volume else str(delivery_policy["backend_mode"])))
+        else (
+            "atlas"
+            if atlas_volume_supported
+            else ("direct" if is_volume else str(delivery_policy["backend_mode"]))
+        )
     )
-    volume_mode = "scalar" if scalar_volume_supported else ("atlas" if atlas_volume_supported else "none")
+    volume_mode = (
+        "scalar" if scalar_volume_supported else ("atlas" if atlas_volume_supported else "none")
+    )
     delivery_mode = _image_delivery_mode(
         backend_mode=backend_mode,
         tile_pyramid=str(delivery_policy.get("tile_pyramid") or ""),
@@ -2972,13 +3237,17 @@ def build_viewer_manifest(
         "preview": f"/v1/uploads/{file_id}/preview",
         "display": (
             f"/v1/uploads/{file_id}/display"
-            if render_policy == "display" and not is_volume and is_ordinary_display_image_path(original_name)
+            if render_policy == "display"
+            and not is_volume
+            and is_ordinary_display_image_path(original_name)
             else None
         ),
         "slice": f"/v1/uploads/{file_id}/slice",
         "tile": f"/v1/uploads/{file_id}/tiles",
         "atlas": f"/v1/uploads/{file_id}/atlas" if atlas_volume_supported else None,
-        "scalar_volume": f"/v1/uploads/{file_id}/scalar-volume" if scalar_volume_supported else None,
+        "scalar_volume": f"/v1/uploads/{file_id}/scalar-volume"
+        if scalar_volume_supported
+        else None,
         "histogram": f"/v1/uploads/{file_id}/histogram",
     }
 
@@ -3017,9 +3286,13 @@ def build_viewer_manifest(
             "filename_hints": metadata_payload.get("filename_hints") or {},
             "exif": metadata_payload.get("exif") or {},
             "warnings": metadata_warnings,
-            "geo": metadata_payload.get("geo") if isinstance(metadata_payload.get("geo"), dict) else None,
+            "geo": metadata_payload.get("geo")
+            if isinstance(metadata_payload.get("geo"), dict)
+            else None,
             "dicom": phys.get("dicom"),
-            "microscopy": metadata_payload.get("microscopy") if isinstance(metadata_payload.get("microscopy"), dict) else None,
+            "microscopy": metadata_payload.get("microscopy")
+            if isinstance(metadata_payload.get("microscopy"), dict)
+            else None,
         },
         "viewer": {
             "status": "ready",
@@ -3128,7 +3401,9 @@ def _coerce_volume_to_czyx(volume: np.ndarray, *, array_order: str) -> np.ndarra
     raise ValueError(f"Unsupported volume array order for atlas rendering: {order or 'unknown'}")
 
 
-def _normalize_hdf_volume_array(array: np.ndarray, *, preview_kind: str | None) -> tuple[np.ndarray, str, dict[str, int], str]:
+def _normalize_hdf_volume_array(
+    array: np.ndarray, *, preview_kind: str | None
+) -> tuple[np.ndarray, str, dict[str, int], str]:
     arr = np.asarray(array)
     safe_kind = str(preview_kind or "").strip().lower()
     if safe_kind in {"scalar_volume", "label_volume"}:
@@ -3209,7 +3484,10 @@ def _load_view_volume_source_uncached(
             preview_kind = _classify_hdf_preview_kind(normalized_path, shape, str(node.dtype))
             volume_eligible, volume_reason = _hdf_volume_eligibility(preview_kind)
             if not volume_eligible:
-                raise ValueError(volume_reason or "Selected HDF5 dataset is not eligible for shared volume loading.")
+                raise ValueError(
+                    volume_reason
+                    or "Selected HDF5 dataset is not eligible for shared volume loading."
+                )
 
             geometry = _extract_hdf_dataset_geometry(handle, normalized_path)
             physical_spacing = _hdf_spacing_from_geometry(geometry)
@@ -3408,7 +3686,11 @@ def _resolve_channel_colors(
     output: list[list[int]] = []
     max_count = max(len(colors), len(override_colors))
     for index in range(max_count):
-        parsed = _parse_channel_color_hex(override_colors[index]) if index < len(override_colors) else None
+        parsed = (
+            _parse_channel_color_hex(override_colors[index])
+            if index < len(override_colors)
+            else None
+        )
         if parsed is not None:
             output.append(parsed)
         elif index < len(colors):
@@ -3590,7 +3872,9 @@ def render_view_plane_image(
     )
 
 
-def _normalize_window(array: np.ndarray, *, enhancement: str, window_center: float | None, window_width: float | None) -> tuple[float, float]:
+def _normalize_window(
+    array: np.ndarray, *, enhancement: str, window_center: float | None, window_width: float | None
+) -> tuple[float, float]:
     finite = np.asarray(array, dtype=np.float32)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
@@ -3623,8 +3907,16 @@ def _normalize_window(array: np.ndarray, *, enhancement: str, window_center: flo
     return low, high
 
 
-def _normalize_to_u8(array: np.ndarray, *, enhancement: str, window_center: float | None = None, window_width: float | None = None) -> np.ndarray:
-    low, high = _normalize_window(array, enhancement=enhancement, window_center=window_center, window_width=window_width)
+def _normalize_to_u8(
+    array: np.ndarray,
+    *,
+    enhancement: str,
+    window_center: float | None = None,
+    window_width: float | None = None,
+) -> np.ndarray:
+    low, high = _normalize_window(
+        array, enhancement=enhancement, window_center=window_center, window_width=window_width
+    )
     scaled = (np.asarray(array, dtype=np.float32) - low) / max(1e-9, high - low)
     scaled = np.clip(scaled, 0.0, 1.0)
     return (scaled * 255.0).astype(np.uint8)
@@ -3670,16 +3962,27 @@ def _fuse_volume_to_rgb(
     czyx = np.asarray(volume)
     channel_count = int(czyx.shape[0])
     selected = _select_channels(channel_indices, channel_count)
-    fused = np.zeros((int(czyx.shape[1]), int(czyx.shape[2]), int(czyx.shape[3]), 3), dtype=np.float32)
+    fused = np.zeros(
+        (int(czyx.shape[1]), int(czyx.shape[2]), int(czyx.shape[3]), 3), dtype=np.float32
+    )
     blend_count = 0
     for channel in selected:
-        channel_volume = _normalize_to_u8(
-            czyx[channel],
-            enhancement=enhancement,
-            window_center=window_center,
-            window_width=window_width,
-        ).astype(np.float32) / 255.0
-        color = np.asarray(channel_colors[channel] if channel < len(channel_colors) else [255, 255, 255], dtype=np.float32) / 255.0
+        channel_volume = (
+            _normalize_to_u8(
+                czyx[channel],
+                enhancement=enhancement,
+                window_center=window_center,
+                window_width=window_width,
+            ).astype(np.float32)
+            / 255.0
+        )
+        color = (
+            np.asarray(
+                channel_colors[channel] if channel < len(channel_colors) else [255, 255, 255],
+                dtype=np.float32,
+            )
+            / 255.0
+        )
         tinted = channel_volume[..., None] * color[None, None, None, :]
         if fusion_method == "a":
             fused += tinted
@@ -3711,19 +4014,25 @@ def _volume_rgb(
         arr = np.asarray(volume)
         if order == "CZYX":
             if int(arr.shape[0]) != 1:
-                raise ValueError("Label volumes must not expose more than one channel in atlas rendering.")
+                raise ValueError(
+                    "Label volumes must not expose more than one channel in atlas rendering."
+                )
             zyx = arr[0]
         elif order == "ZYX":
             zyx = arr
         else:
-            raise ValueError(f"Unsupported label volume array order for atlas rendering: {order or 'unknown'}")
+            raise ValueError(
+                f"Unsupported label volume array order for atlas rendering: {order or 'unknown'}"
+            )
         output = np.stack([_render_hdf_label_plane(plane) for plane in np.asarray(zyx)], axis=0)
         if negative:
             output = 255 - output
         return output
     czyx = _coerce_volume_to_czyx(volume, array_order=str(payload.get("array_order") or ""))
     phys = _build_phys(payload=payload, file_id="internal", original_name="internal")
-    resolved_channel_colors = _resolve_channel_colors(payload=payload, override_colors=channel_colors)
+    resolved_channel_colors = _resolve_channel_colors(
+        payload=payload, override_colors=channel_colors
+    )
     dicom = phys.get("dicom") if isinstance(phys.get("dicom"), dict) else {}
     window_center = dicom.get("wnd_center") if dicom else None
     window_width = dicom.get("wnd_width") if dicom else None
@@ -3777,7 +4086,9 @@ def render_volume_source_atlas_png(
     resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else Image.BILINEAR
     for slice_index in range(slice_count):
         slice_image = Image.fromarray(volume_rgb[slice_index], mode="RGB")
-        if slice_image.width != int(atlas_scheme["slice_width"]) or slice_image.height != int(atlas_scheme["slice_height"]):
+        if slice_image.width != int(atlas_scheme["slice_width"]) or slice_image.height != int(
+            atlas_scheme["slice_height"]
+        ):
             slice_image = slice_image.resize(
                 (int(atlas_scheme["slice_width"]), int(atlas_scheme["slice_height"])),
                 resample,
@@ -3813,9 +4124,7 @@ def plan_volume_source_atlas(
         slice_count=slice_count,
         max_dimension=atlas_max_dimension,
     )
-    decoded_texture_bytes = (
-        int(atlas_scheme["atlas_width"]) * int(atlas_scheme["atlas_height"]) * 4
-    )
+    decoded_texture_bytes = int(atlas_scheme["atlas_width"]) * int(atlas_scheme["atlas_height"]) * 4
     voxel_count = channel_count * slice_count * slice_height * slice_width
     return {
         "atlas_scheme": atlas_scheme,

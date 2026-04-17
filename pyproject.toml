@@ -15,6 +15,7 @@ dependencies = [
     "httpx>=0.26.0",
     "boto3>=1.40.0",
     "fastapi>=0.110.0",
+    "prometheus-client>=0.20.0",
     "python-multipart>=0.0.9",
     "uvicorn>=0.27.0",
     "psycopg[binary]>=3.2.0",
@@ -45,7 +46,6 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
-    "black>=23.12.0",
     "ruff>=0.1.9",
     "mypy>=1.8.0",
 ]
@@ -71,17 +71,21 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
-[tool.black]
-line-length = 100
-target-version = ["py39"]
-
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
+src = ["src", "tests"]
+show-fixes = true
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

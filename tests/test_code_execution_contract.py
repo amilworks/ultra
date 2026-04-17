@@ -3,7 +3,6 @@ from __future__ import annotations
 from src.tooling.code_execution_contract import (
     CodeExecutionArtifact,
     CodeExecutionAttemptResult,
-    CodeExecutionInput,
     CodeExecutionJobRecord,
     CodeExecutionJobRequest,
 )

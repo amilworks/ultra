@@ -42,7 +42,8 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             record.updated_at = _utc_now()
             work_dir = resolved_settings.artifact_root / job_id / "workdir"
             try:
-                result_payload = run_codeexec_attempt(
+                result_payload = await asyncio.to_thread(
+                    run_codeexec_attempt,
                     job_id=job_id,
                     work_dir=work_dir,
                     request=record.request.model_dump(mode="json"),

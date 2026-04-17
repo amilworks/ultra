@@ -13622,6 +13622,15 @@ class AgnoChatRuntime:
                 "Treat the reader as a strong student: smart and technical, but not already in possession of the entire conceptual map.",
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
+        scientific_result_surface_active = bool(
+            execution_regime == "tool_workflow"
+            and isinstance(session_state, dict)
+            and (
+                str(session_state.get("active_result_group_id") or "").strip()
+                or str(session_state.get("active_report_handle") or "").strip()
+                or str(session_state.get("active_summary_csv_handle") or "").strip()
+            )
+        )
         compression_stats: dict[str, Any] = {}
 
         def _build_final_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
@@ -13671,6 +13680,15 @@ class AgnoChatRuntime:
                     "Do not mention internal workflows, routes, councils, tools, blockers, or hidden reasoning.",
                     "Do not imitate any named living writer; aim instead for clear, elegant, idea-first prose.",
                     "Use disciplined explanatory nonfiction techniques rather than generic assistant prose.",
+                    *(
+                        [
+                            "A structured scientific result surface with figures and tables will be shown separately in the UI for this turn.",
+                            "Do not restate figure captions, metric tables, or methods sections in prose unless the user explicitly asked for a full written report.",
+                            "For tool-backed scientific analysis, prefer one short takeaway paragraph and, if needed, one short caveat or next-step paragraph.",
+                        ]
+                        if scientific_result_surface_active
+                        else []
+                    ),
                     *[f"Technique: {item}" for item in PROSE_STYLE_GUIDELINES],
                     *[f"Student technique: {item}" for item in STUDENT_EXPLANATION_GUIDELINES],
                     *report_writer_instructions,
@@ -13717,6 +13735,15 @@ class AgnoChatRuntime:
                         "For this report-style turn, use these prose techniques: lead with the governing idea, move from intuition to mechanism to implication, use contrast to sharpen distinctions, and bring in concrete examples only when they illuminate the point."
                     ]
                     if self._is_report_like_request(latest_user_text)
+                    else []
+                ),
+                *(
+                    [
+                        "A structured scientific result surface with figures and tables will already be rendered in the UI for this turn.",
+                        "Do not duplicate the figure captions, metric table, methods section, or evidence appendix in the answer text.",
+                        "Write a compact scientist-facing synthesis in at most two short paragraphs unless the user explicitly asked for a full prose report.",
+                    ]
+                    if scientific_result_surface_active
                     else []
                 ),
                 *(

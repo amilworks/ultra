@@ -394,6 +394,7 @@ def test_segment_image_megaseg_uses_remote_service_and_downloads_artifacts(monke
                                 "coverage_percent": 2.5,
                                 "object_count": 4,
                                 "active_slice_count": 3,
+                                "z_slice_count": 7,
                                 "largest_component_voxels": 84,
                             },
                             "intensity_context": {},
@@ -450,6 +451,7 @@ def test_segment_image_megaseg_uses_remote_service_and_downloads_artifacts(monke
     assert result["checkpoint_path"] == "/srv/ultra/models/megaseg/epoch_650.ckpt"
     assert str(result["report_path"]).startswith(str(tmp_path / "science" / "megaseg_results"))
     assert result["latest_result_refs"]["latest_segmentation_result_group_id"] == result["result_group_id"]
+    assert result["scientific_summary"]["files"][0]["z_slice_count"] == 7
 
 
 def test_infer_scientific_image_inputs_prefers_remote_prompt_source():
@@ -557,6 +559,44 @@ def test_execute_tool_call_replaces_bisque_resource_uri_with_selection_context_i
     assert result["success"] is True
     assert captured["file_paths"] == [str(input_file.resolve())]
     assert captured["save_visualizations"] is True
+
+
+def test_execute_tool_call_infers_latest_mask_paths_for_quantify_without_uploaded_files(
+    monkeypatch, tmp_path
+):
+    captured: dict[str, object] = {}
+    mask_path = tmp_path / "NPM1_13054_IM__megaseg_mask.tiff"
+    mask_path.write_text("mask", encoding="utf-8")
+
+    def fake_quantify(mask_paths, ground_truth_paths=None, result_group_id=None, **_kwargs):
+        captured["mask_paths"] = list(mask_paths)
+        captured["ground_truth_paths"] = list(ground_truth_paths or [])
+        captured["result_group_id"] = result_group_id
+        return {
+            "success": True,
+            "mask_paths": list(mask_paths),
+            "result_group_id": result_group_id,
+        }
+
+    monkeypatch.setitem(tools.AVAILABLE_TOOLS, "quantify_segmentation_masks", fake_quantify)
+
+    result = json.loads(
+        tools.execute_tool_call(
+            "quantify_segmentation_masks",
+            {},
+            uploaded_files=[],
+            user_text="Quantify the latest Megaseg mask.",
+            latest_result_refs={
+                "segment_image_megaseg.mask_paths": [str(mask_path)],
+                "latest_segmentation_result_group_id": "megaseg_group_1",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["mask_paths"] == [str(mask_path.resolve())]
+    assert captured["ground_truth_paths"] == []
+    assert captured["result_group_id"] == "megaseg_group_1"
 
 
 def test_load_scientific_image_accepts_remote_sources(monkeypatch, tmp_path):

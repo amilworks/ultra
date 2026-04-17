@@ -3277,6 +3277,7 @@ def _build_megaseg_tool_response(
                     "coverage_percent": segmentation.get("coverage_percent"),
                     "object_count": segmentation.get("object_count"),
                     "active_slice_count": segmentation.get("active_slice_count"),
+                    "z_slice_count": segmentation.get("z_slice_count"),
                     "largest_component_voxels": segmentation.get("largest_component_voxels"),
                     "preferred_upload_path": preferred_path,
                     "probability_path": probability_path,
@@ -3290,6 +3291,7 @@ def _build_megaseg_tool_response(
                     "coverage_percent": segmentation.get("coverage_percent"),
                     "object_count": segmentation.get("object_count"),
                     "active_slice_count": segmentation.get("active_slice_count"),
+                    "z_slice_count": segmentation.get("z_slice_count"),
                     "largest_component_voxels": segmentation.get("largest_component_voxels"),
                     "structure_inside_outside_ratio": intensity_context.get(
                         "structure_inside_outside_ratio"
@@ -15184,6 +15186,112 @@ def execute_tool_call(
                     args["file_path"],
                 )
 
+        def _apply_quantify_segmentation_defaults() -> str | None:
+            provided_mask_paths = _list_arg("mask_paths")
+            provided_gt_paths = _list_arg("ground_truth_paths")
+            latest_mask_paths = _collect_latest_mask_paths_from_refs(latest_result_refs)
+            latest_gt_paths = _collect_latest_ground_truth_paths_from_refs(latest_result_refs)
+            uploaded_mask_files = [
+                str(p)
+                for p in uploaded_files
+                if _looks_like_uploaded_mask_artifact(Path(str(p)))
+            ]
+            uploaded_gt_files = [
+                str(p)
+                for p in uploaded_files
+                if _looks_like_uploaded_ground_truth_artifact(Path(str(p)))
+            ]
+            explicit_mask_locals = _existing_local_paths(provided_mask_paths)
+            explicit_gt_locals = _existing_local_paths(provided_gt_paths)
+            explicit_mask_is_plausible = any(
+                _looks_like_explicit_mask_path(path) for path in explicit_mask_locals
+            )
+            explicit_gt_is_plausible = any(
+                _looks_like_explicit_ground_truth_path(path) for path in explicit_gt_locals
+            )
+            replacement_mask_paths = latest_mask_paths or uploaded_mask_files
+            replacement_gt_paths = latest_gt_paths or uploaded_gt_files
+            latest_result_group_id = str(
+                (latest_result_refs or {}).get("latest_segmentation_result_group_id") or ""
+            ).strip()
+
+            if not provided_mask_paths:
+                if replacement_mask_paths:
+                    args["mask_paths"] = replacement_mask_paths[:8]
+                    logger.info(
+                        "Injected %s mask artifact path(s) into quantify_segmentation_masks tool call",
+                        len(args["mask_paths"]),
+                    )
+                else:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                "No segmentation mask artifacts are available for quantify_segmentation_masks. "
+                                "Pass mask_paths explicitly or run segment_image_sam2 first."
+                            ),
+                            "next_step": "Run segment_image_sam2 or provide mask_paths.",
+                        },
+                        ensure_ascii=False,
+                    )
+            elif replacement_mask_paths and (
+                not explicit_mask_locals or not explicit_mask_is_plausible
+            ):
+                args["mask_paths"] = replacement_mask_paths[:8]
+                logger.info(
+                    "Replaced ambiguous/non-mask inputs in quantify_segmentation_masks with %s inferred mask artifact(s)",
+                    len(args["mask_paths"]),
+                )
+            elif provided_mask_paths and not explicit_mask_locals:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "quantify_segmentation_masks mask_paths must reference local mask artifacts for this turn. "
+                            "The provided mask paths were not available locally."
+                        ),
+                        "next_step": "Use local mask artifact paths or run segment_image_sam2 first.",
+                    },
+                    ensure_ascii=False,
+                )
+            elif explicit_mask_locals:
+                args["mask_paths"] = explicit_mask_locals
+
+            if not provided_gt_paths and replacement_gt_paths:
+                args["ground_truth_paths"] = replacement_gt_paths[:8]
+                logger.info(
+                    "Injected %s ground-truth mask path(s) into quantify_segmentation_masks tool call",
+                    len(args["ground_truth_paths"]),
+                )
+            elif (
+                provided_gt_paths
+                and replacement_gt_paths
+                and (not explicit_gt_locals or not explicit_gt_is_plausible)
+            ):
+                args["ground_truth_paths"] = replacement_gt_paths[:8]
+                logger.info(
+                    "Replaced ambiguous/non-ground-truth inputs in quantify_segmentation_masks with %s inferred label artifact(s)",
+                    len(args["ground_truth_paths"]),
+                )
+            elif provided_gt_paths and not explicit_gt_locals:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "quantify_segmentation_masks ground_truth_paths must reference local label masks for this turn. "
+                            "The provided ground-truth paths were not available locally."
+                        ),
+                        "next_step": "Use local label-mask paths or re-upload the ground-truth masks.",
+                    },
+                    ensure_ascii=False,
+                )
+            elif explicit_gt_locals:
+                args["ground_truth_paths"] = explicit_gt_locals
+
+            if latest_result_group_id and not str(args.get("result_group_id") or "").strip():
+                args["result_group_id"] = latest_result_group_id
+            return None
+
         if uploaded_files:
             if tool_name == "upload_to_bisque":
                 if not args.get("file_paths") or args.get("file_paths") == []:
@@ -15487,109 +15595,9 @@ def execute_tool_call(
                         ensure_ascii=False,
                     )
             elif tool_name == "quantify_segmentation_masks":
-                provided_mask_paths = _list_arg("mask_paths")
-                provided_gt_paths = _list_arg("ground_truth_paths")
-                latest_mask_paths = _collect_latest_mask_paths_from_refs(latest_result_refs)
-                latest_gt_paths = _collect_latest_ground_truth_paths_from_refs(latest_result_refs)
-                uploaded_mask_files = [
-                    str(p)
-                    for p in uploaded_files
-                    if _looks_like_uploaded_mask_artifact(Path(str(p)))
-                ]
-                uploaded_gt_files = [
-                    str(p)
-                    for p in uploaded_files
-                    if _looks_like_uploaded_ground_truth_artifact(Path(str(p)))
-                ]
-                explicit_mask_locals = _existing_local_paths(provided_mask_paths)
-                explicit_gt_locals = _existing_local_paths(provided_gt_paths)
-                explicit_mask_is_plausible = any(
-                    _looks_like_explicit_mask_path(path) for path in explicit_mask_locals
-                )
-                explicit_gt_is_plausible = any(
-                    _looks_like_explicit_ground_truth_path(path) for path in explicit_gt_locals
-                )
-                replacement_mask_paths = latest_mask_paths or uploaded_mask_files
-                replacement_gt_paths = latest_gt_paths or uploaded_gt_files
-                latest_result_group_id = str(
-                    (latest_result_refs or {}).get("latest_segmentation_result_group_id") or ""
-                ).strip()
-
-                if not provided_mask_paths:
-                    if replacement_mask_paths:
-                        args["mask_paths"] = replacement_mask_paths[:8]
-                        logger.info(
-                            "Injected %s mask artifact path(s) into quantify_segmentation_masks tool call",
-                            len(args["mask_paths"]),
-                        )
-                    else:
-                        return json.dumps(
-                            {
-                                "success": False,
-                                "error": (
-                                    "No segmentation mask artifacts are available for quantify_segmentation_masks. "
-                                    "Pass mask_paths explicitly or run segment_image_sam2 first."
-                                ),
-                                "next_step": "Run segment_image_sam2 or provide mask_paths.",
-                            },
-                            ensure_ascii=False,
-                        )
-                elif replacement_mask_paths and (
-                    not explicit_mask_locals or not explicit_mask_is_plausible
-                ):
-                    args["mask_paths"] = replacement_mask_paths[:8]
-                    logger.info(
-                        "Replaced ambiguous/non-mask inputs in quantify_segmentation_masks with %s inferred mask artifact(s)",
-                        len(args["mask_paths"]),
-                    )
-                elif provided_mask_paths and not explicit_mask_locals:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "quantify_segmentation_masks mask_paths must reference local mask artifacts for this turn. "
-                                "The provided mask paths were not available locally."
-                            ),
-                            "next_step": "Use local mask artifact paths or run segment_image_sam2 first.",
-                        },
-                        ensure_ascii=False,
-                    )
-                elif explicit_mask_locals:
-                    args["mask_paths"] = explicit_mask_locals
-
-                if not provided_gt_paths and replacement_gt_paths:
-                    args["ground_truth_paths"] = replacement_gt_paths[:8]
-                    logger.info(
-                        "Injected %s ground-truth mask path(s) into quantify_segmentation_masks tool call",
-                        len(args["ground_truth_paths"]),
-                    )
-                elif (
-                    provided_gt_paths
-                    and replacement_gt_paths
-                    and (not explicit_gt_locals or not explicit_gt_is_plausible)
-                ):
-                    args["ground_truth_paths"] = replacement_gt_paths[:8]
-                    logger.info(
-                        "Replaced ambiguous/non-ground-truth inputs in quantify_segmentation_masks with %s inferred label artifact(s)",
-                        len(args["ground_truth_paths"]),
-                    )
-                elif provided_gt_paths and not explicit_gt_locals:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "quantify_segmentation_masks ground_truth_paths must reference local label masks for this turn. "
-                                "The provided ground-truth paths were not available locally."
-                            ),
-                            "next_step": "Use local label-mask paths or re-upload the ground-truth masks.",
-                        },
-                        ensure_ascii=False,
-                    )
-                elif explicit_gt_locals:
-                    args["ground_truth_paths"] = explicit_gt_locals
-
-                if latest_result_group_id and not str(args.get("result_group_id") or "").strip():
-                    args["result_group_id"] = latest_result_group_id
+                quantify_error = _apply_quantify_segmentation_defaults()
+                if quantify_error:
+                    return quantify_error
 
         if (not uploaded_files) and tool_name in {
             "segment_image_megaseg",
@@ -15634,6 +15642,10 @@ def execute_tool_call(
                     tool_name,
                     len(prompt_image_files),
                 )
+        if (not uploaded_files) and tool_name == "quantify_segmentation_masks":
+            quantify_error = _apply_quantify_segmentation_defaults()
+            if quantify_error:
+                return quantify_error
 
         signature = inspect.signature(func)
         accepts_var_kwargs = any(

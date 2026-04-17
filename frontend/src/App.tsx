@@ -3464,13 +3464,7 @@ const buildResearchDigestData = ({
   if (!hasToolBackedContext || !hasQuantitativeEvidence) {
     return null;
   }
-  if (
-    hasScientificPrimary &&
-    statisticalAnalysis.length === 0 &&
-    qcWarnings.length === 0 &&
-    limitations.length === 0 &&
-    nextSteps.length === 0
-  ) {
+  if (hasScientificPrimary) {
     return null;
   }
   if (!hasToolCards && populatedSections < 2 && result.length < 120) {

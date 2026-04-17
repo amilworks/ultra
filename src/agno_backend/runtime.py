@@ -13631,6 +13631,41 @@ class AgnoChatRuntime:
                 or str(session_state.get("active_summary_csv_handle") or "").strip()
             )
         )
+        explicit_full_chat_report = bool(
+            re.search(
+                r"\b(full|detailed|complete|manuscript[- ]style)\b.{0,24}\b(report|write-up|writeup)\b",
+                str(latest_user_text or ""),
+                re.IGNORECASE | re.DOTALL,
+            )
+        )
+
+        def _compact_scientific_surface_response(text: str) -> str:
+            normalized = str(text or "").strip()
+            if not normalized:
+                return ""
+            blocks = [
+                block.strip()
+                for block in re.split(r"\n\s*\n+", normalized)
+                if str(block or "").strip()
+            ]
+            preferred_blocks: list[str] = []
+            for block in blocks:
+                stripped = block.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("```"):
+                    continue
+                if re.match(r"^#{1,6}\s+", stripped):
+                    continue
+                if re.match(r"^\s*(?:[-*+]\s|\d+\.\s)", stripped):
+                    continue
+                if "|" in stripped and "\n" in stripped:
+                    continue
+                preferred_blocks.append(stripped)
+                if len(preferred_blocks) >= 2:
+                    break
+            selected_blocks = preferred_blocks or blocks[:2]
+            return "\n\n".join(selected_blocks[:2]).strip()
         compression_stats: dict[str, Any] = {}
 
         def _build_final_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
@@ -13839,6 +13874,8 @@ class AgnoChatRuntime:
                 **dict(compression_stats),
                 "model_route": dict(model_route),
             }
+        if scientific_result_surface_active and not explicit_full_chat_report:
+            normalized_response = _compact_scientific_surface_response(normalized_response)
         return normalized_response, {
             **dict(compression_stats),
             "model_route": dict(model_route),

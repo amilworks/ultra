@@ -6,7 +6,7 @@ from pathlib import Path
 import src.agno_backend.codeexec_reasoning as codeexec_reasoning_module
 from src.agno_backend.codeexec_reasoning import build_codeexec_reasoning_agent
 from src.agno_backend.pro_mode import ProModeIntakeDecision
-from src.agno_backend.runtime import AgnoChatRuntime
+from src.agno_backend.runtime import AgnoChatRuntime, ToolProgramAction
 from src.config import Settings
 from src.tooling.domains.code_execution import CODEGEN_PYTHON_PLAN_TOOL, EXECUTE_PYTHON_JOB_TOOL
 
@@ -160,3 +160,61 @@ def test_codeexec_reasoning_solver_runs_required_tools_when_agent_skips_executio
         ]
         == ["codegen_python_plan", "execute_python_job"]
     )
+
+
+def test_execute_tool_program_actions_hydrates_codeexec_args_from_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path, code_execution_enabled=True)
+    input_csv = tmp_path / "input.csv"
+    input_csv.write_text("x,y\n1,2\n", encoding="utf-8")
+    observed_args: list[tuple[str, dict[str, object]]] = []
+
+    def fake_execute_tool_call(tool_name, args, **_kwargs):
+        normalized_args = dict(args or {})
+        observed_args.append((str(tool_name), normalized_args))
+        if tool_name == "codegen_python_plan":
+            assert normalized_args["task_summary"] == "Write and run Python to analyze the CSV."
+            assert normalized_args["inputs"] == [
+                {
+                    "path": str(input_csv),
+                    "kind": "file",
+                    "description": (
+                        "Selected input carried into deterministic code-execution fallback."
+                    ),
+                }
+            ]
+            return {"success": True, "job_id": "job-456"}
+        assert tool_name == "execute_python_job"
+        assert normalized_args["job_id"] == "job-456"
+        return {"success": True, "status": "completed"}
+
+    monkeypatch.setattr("src.agno_backend.runtime.execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._execute_tool_program_actions(
+            phase="reasoning_solver",
+            phase_label="code execution reasoning solver",
+            actions=[
+                ToolProgramAction(
+                    tool_name="codegen_python_plan",
+                    purpose="Prepare the Python job.",
+                    args={},
+                ),
+                ToolProgramAction(
+                    tool_name="execute_python_job",
+                    purpose="Run the Python job.",
+                    args={},
+                ),
+            ],
+            uploaded_files=[str(input_csv)],
+            latest_user_text="Write and run Python to analyze the CSV.",
+            selection_context=None,
+            event_callback=None,
+        )
+    )
+
+    assert [item["tool"] for item in result] == ["codegen_python_plan", "execute_python_job"]
+    assert observed_args[0][0] == "codegen_python_plan"
+    assert observed_args[1][0] == "execute_python_job"

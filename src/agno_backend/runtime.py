@@ -14209,7 +14209,14 @@ class AgnoChatRuntime:
         }
         for action in normalized_actions:
             tool_name = str(action.tool_name or "").strip()
-            args = dict(action.args or {})
+            args = self._hydrate_tool_program_action_args(
+                tool_name=tool_name,
+                args=dict(action.args or {}),
+                latest_user_text=latest_user_text,
+                uploaded_files=uploaded_files,
+                selection_context=selection_context,
+                latest_result_refs=latest_result_refs,
+            )
             self._emit_event(
                 event_callback,
                 {
@@ -14242,6 +14249,11 @@ class AgnoChatRuntime:
                             if value is None:
                                 continue
                             latest_result_refs[str(key)] = value
+                    if tool_name == "codegen_python_plan":
+                        job_id = str(parsed_output.get("job_id") or "").strip()
+                        if job_id:
+                            latest_result_refs["latest_code_execution_job_id"] = job_id
+                            latest_result_refs["codegen_python_plan.job_id"] = job_id
                 invocation = {
                     "tool": tool_name,
                     "status": "completed",
@@ -14291,6 +14303,75 @@ class AgnoChatRuntime:
                 },
             )
         return results
+
+    @staticmethod
+    def _codeexec_fallback_inputs(
+        *,
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        candidates: list[str] = []
+        candidates.extend(str(path or "").strip() for path in list(uploaded_files or []))
+        if isinstance(selection_context, dict):
+            for key in (
+                "selected_files",
+                "selected_file_paths",
+                "file_paths",
+                "local_file_paths",
+                "uploaded_files",
+            ):
+                value = selection_context.get(key)
+                if isinstance(value, list):
+                    candidates.extend(str(path or "").strip() for path in value)
+        inputs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_path in candidates:
+            path_value = str(raw_path or "").strip()
+            if not path_value or path_value in seen:
+                continue
+            source_path = Path(path_value).expanduser()
+            if not source_path.exists():
+                continue
+            seen.add(path_value)
+            inputs.append(
+                {
+                    "path": str(source_path),
+                    "kind": ("directory" if source_path.is_dir() else "file"),
+                    "description": "Selected input carried into deterministic code-execution fallback.",
+                }
+            )
+        return inputs
+
+    def _hydrate_tool_program_action_args(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        latest_user_text: str,
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+        latest_result_refs: dict[str, Any],
+    ) -> dict[str, Any]:
+        hydrated = dict(args or {})
+        if tool_name == "codegen_python_plan":
+            if not str(hydrated.get("task_summary") or "").strip():
+                hydrated["task_summary"] = str(latest_user_text or "").strip()
+            if not isinstance(hydrated.get("inputs"), list):
+                inputs = self._codeexec_fallback_inputs(
+                    uploaded_files=uploaded_files,
+                    selection_context=selection_context,
+                )
+                if inputs:
+                    hydrated["inputs"] = inputs
+        elif tool_name == "execute_python_job":
+            if not str(hydrated.get("job_id") or "").strip():
+                job_id = (
+                    str(latest_result_refs.get("latest_code_execution_job_id") or "").strip()
+                    or str(latest_result_refs.get("codegen_python_plan.job_id") or "").strip()
+                )
+                if job_id:
+                    hydrated["job_id"] = job_id
+        return hydrated
 
     async def _execute_research_program_actions(
         self,

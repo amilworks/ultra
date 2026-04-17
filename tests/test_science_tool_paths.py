@@ -497,6 +497,66 @@ def test_execute_tool_call_infers_prompt_image_paths_for_megaseg(monkeypatch):
     assert captured["save_visualizations"] is True
 
 
+def test_execute_tool_call_replaces_bisque_resource_uri_with_uploaded_megaseg_input(
+    monkeypatch, tmp_path
+):
+    captured: dict[str, object] = {}
+    input_file = tmp_path / "NPM1_13054_IM.tiff"
+    input_file.write_text("tiff", encoding="utf-8")
+
+    def fake_megaseg_tool(file_paths, save_visualizations=True, **_kwargs):
+        captured["file_paths"] = list(file_paths)
+        captured["save_visualizations"] = bool(save_visualizations)
+        return {"success": True, "file_paths": list(file_paths)}
+
+    monkeypatch.setitem(tools.AVAILABLE_TOOLS, "segment_image_megaseg", fake_megaseg_tool)
+
+    result = json.loads(
+        tools.execute_tool_call(
+            "segment_image_megaseg",
+            {"file_paths": ["http://localhost:8080/data_service/00-staleMegasegImage"]},
+            uploaded_files=[str(input_file)],
+            user_text="Run megaseg on this image and write a report.",
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["file_paths"] == [str(input_file)]
+    assert captured["save_visualizations"] is True
+
+
+def test_execute_tool_call_replaces_bisque_resource_uri_with_selection_context_image(
+    monkeypatch, tmp_path
+):
+    captured: dict[str, object] = {}
+    input_file = tmp_path / "NPM1_13054_IM.tiff"
+    input_file.write_text("tiff", encoding="utf-8")
+
+    def fake_megaseg_tool(file_paths, save_visualizations=True, **_kwargs):
+        captured["file_paths"] = list(file_paths)
+        captured["save_visualizations"] = bool(save_visualizations)
+        return {"success": True, "file_paths": list(file_paths)}
+
+    monkeypatch.setitem(tools.AVAILABLE_TOOLS, "segment_image_megaseg", fake_megaseg_tool)
+
+    result = json.loads(
+        tools.execute_tool_call(
+            "segment_image_megaseg",
+            {"file_paths": ["http://localhost:8080/data_service/00-staleMegasegImage"]},
+            uploaded_files=[],
+            user_text="Run megaseg on the selected image.",
+            selection_context={
+                "resource_uris": ["http://localhost:8080/data_service/00-currentSelection"],
+                "artifact_handles": {"image_files": [str(input_file)]},
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["file_paths"] == [str(input_file.resolve())]
+    assert captured["save_visualizations"] is True
+
+
 def test_load_scientific_image_accepts_remote_sources(monkeypatch, tmp_path):
     monkeypatch.setattr(
         imaging,

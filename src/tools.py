@@ -14839,6 +14839,31 @@ def execute_tool_call(
             )
             return has_local_missing and not has_local_existing
 
+        def _image_paths_need_current_local_replacement(paths: list[str]) -> bool:
+            if _paths_need_current_local_replacement(paths):
+                return True
+            if not paths:
+                return False
+            has_local_existing = any(
+                Path(path).expanduser().exists()
+                for path in paths
+                if not _looks_like_remote_path(path)
+            )
+            has_supported_remote = any(
+                _looks_like_remote_path(path) and _looks_like_segmentation_remote_path(path)
+                for path in paths
+            )
+            has_unsupported_remote = any(
+                _looks_like_remote_path(path) and not _looks_like_segmentation_remote_path(path)
+                for path in paths
+            )
+            # BisQue data_service/image_service URLs and other non-file remote placeholders
+            # are not directly loadable scientific inputs for the segmentation stack. When the
+            # current turn already has concrete uploaded/selection-local image files, prefer
+            # those over stale conversational placeholders. Keep valid remote microscopy paths
+            # like s3://...ome.zarr intact.
+            return has_unsupported_remote and not has_supported_remote and not has_local_existing
+
         def _safe_download_token(value: Any, *, default: str) -> str:
             token = str(value or "").strip().rstrip("/").split("/")[-1]
             token = re.sub(r"[^A-Za-z0-9._-]+", "_", token)
@@ -15311,7 +15336,9 @@ def execute_tool_call(
                     image_files = [
                         p for p in uploaded_files if _is_segmentation_image(Path(str(p)))
                     ]
-                    if image_files and _paths_need_current_local_replacement(provided_paths):
+                    if image_files and _image_paths_need_current_local_replacement(
+                        provided_paths
+                    ):
                         args["file_paths"] = image_files
                         logger.info(
                             "Replaced unavailable %s inputs with %s uploaded image(s)",
@@ -15518,14 +15545,18 @@ def execute_tool_call(
                     len(prompt_image_files),
                     tool_name,
                 )
-            elif selection_image_files and _paths_need_current_local_replacement(provided_paths):
+            elif selection_image_files and _image_paths_need_current_local_replacement(
+                provided_paths
+            ):
                 args["file_paths"] = selection_image_files
                 logger.info(
                     "Replaced unavailable %s inputs with %s selection-context image(s)",
                     tool_name,
                     len(selection_image_files),
                 )
-            elif prompt_image_files and _paths_need_current_local_replacement(provided_paths):
+            elif prompt_image_files and _image_paths_need_current_local_replacement(
+                provided_paths
+            ):
                 args["file_paths"] = prompt_image_files
                 logger.info(
                     "Replaced unavailable %s inputs with %s prompt-scoped image(s)",

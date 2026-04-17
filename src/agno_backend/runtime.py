@@ -13622,15 +13622,7 @@ class AgnoChatRuntime:
                 "Treat the reader as a strong student: smart and technical, but not already in possession of the entire conceptual map.",
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
-        scientific_result_surface_active = bool(
-            execution_regime == "tool_workflow"
-            and isinstance(session_state, dict)
-            and (
-                str(session_state.get("active_result_group_id") or "").strip()
-                or str(session_state.get("active_report_handle") or "").strip()
-                or str(session_state.get("active_summary_csv_handle") or "").strip()
-            )
-        )
+        scientific_result_surface_active = execution_regime == "tool_workflow"
         explicit_full_chat_report = bool(
             re.search(
                 r"\b(full|detailed|complete|manuscript[- ]style)\b.{0,24}\b(report|write-up|writeup)\b",

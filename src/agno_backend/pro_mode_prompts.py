@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 CARTESIAN_METHOD_OVERLAY = """
 Cartesian method overlay:
 - Do not accept load-bearing claims prematurely.
@@ -426,3 +428,109 @@ Behavioral constraints:
 """,
     ),
 }
+
+
+def build_pro_mode_final_writer_prompt(
+    *,
+    latest_user_text: str,
+    execution_regime: str,
+    task_regime: str | None,
+    normalized_draft: str,
+    supporting_points: list[str] | None,
+    reservations: list[str] | None,
+    scientific_result_surface_active: bool,
+    explicit_full_chat_report: bool,
+    report_like_request: bool,
+    math_explainer_request: bool,
+    code_execution_turn: bool,
+    code_execution_failed: bool,
+) -> str:
+    lines: list[str] = [
+        "Rewrite the grounded draft below into the final user-facing Pro Mode answer.",
+        "If the draft is already strong, improve it lightly rather than rewriting for its own sake.",
+        "Keep the answer faithful to the draft and supporting points.",
+    ]
+    if execution_regime == "proof_workflow" or str(task_regime or "").strip().lower() == "rigorous_proof":
+        lines.append(
+            "For proof answers, make the structure teachable: identify the main reduction, the crucial intermediate obligations, and the closing bridge."
+        )
+    if report_like_request:
+        lines.extend(
+            [
+                "For report-style answers, strengthen structure and synthesis: give the reader a real report with explicit takeaways, major distinctions, limitations, and a clean bottom line.",
+                "For this report-style turn, use these prose techniques: lead with the governing idea, move from intuition to mechanism to implication, use contrast to sharpen distinctions, and bring in concrete examples only when they illuminate the point.",
+            ]
+        )
+    if scientific_result_surface_active:
+        lines.extend(
+            [
+                "A structured scientific result surface with figures and tables will already be rendered in the UI for this turn.",
+                "Do not duplicate the figure captions, metric table, methods section, or evidence appendix in the answer text.",
+                (
+                    "Write a compact scientist-facing synthesis in at most two short paragraphs unless the user explicitly asked for a full prose report."
+                    if not explicit_full_chat_report
+                    else "The user explicitly asked for a full prose report, so preserve more narrative detail while still avoiding duplication of UI scaffolding."
+                ),
+            ]
+        )
+    if code_execution_turn:
+        lines.extend(
+            [
+                "For code-execution answers, separate: methods used, key quantitative findings, interpretation, and limitations.",
+                "Write for a technically fluent scientist or engineer.",
+                "State the model, estimator, statistic, or transform actually used.",
+                "Report the strongest quantitative findings before interpretation.",
+                "Name the artifact classes produced when they exist, such as CSV, PNG, JSON, or report outputs.",
+                "If a caveat materially changes the conclusion, place it in the same paragraph as the claim.",
+            ]
+        )
+    if code_execution_failed:
+        lines.extend(
+            [
+                "A requested code execution step failed in this turn.",
+                "Do not report expected, estimated, approximate, or visually inferred numeric outputs as if they were measured.",
+                "If the user requested metrics or fitted parameters, state that the computation failed and omit those values unless a trusted tool actually returned them.",
+            ]
+        )
+    if math_explainer_request:
+        lines.extend(
+            [
+                "Because this is a mathematical explanation, use this cadence wherever it helps: intuition, formal statement or equation, interpretation, consequence.",
+                "Keep equations that clarify the concept, and trim equations that merely display formalism without explanatory payoff.",
+                "Review any practical recommendations and make them robust, conditional, and audience-appropriate for student readers.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"User request: {latest_user_text}",
+            f"Execution regime: {execution_regime}",
+            f"Task regime: {str(task_regime or '').strip() or 'unknown'}",
+            "",
+            "Grounded draft:",
+            normalized_draft,
+            "",
+            "Supporting points:",
+            json.dumps(
+                [
+                    str(item or "").strip()
+                    for item in list(supporting_points or [])
+                    if str(item or "").strip()
+                ][:16],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "",
+            "Reservations to preserve if material:",
+            json.dumps(
+                [
+                    str(item or "").strip()
+                    for item in list(reservations or [])
+                    if str(item or "").strip()
+                ][:8],
+                ensure_ascii=False,
+                indent=2,
+            ),
+        ]
+    )
+    return "\n".join(lines)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import src.llm as llm_module
 import src.agno_backend.pro_mode as pro_mode_module
+import src.agno_backend.pro_mode_prompts as prompts_module
 import src.agno_backend.runtime as runtime_module
 from src.agno_backend.pro_mode import (
     ProModeIntakeDecision,
@@ -1726,3 +1727,25 @@ def test_tool_guide_includes_code_execution_usage_rubric_when_enabled() -> None:
 
     assert "Use execute_python_job for reproducible, multi-step computation" in rules
     assert "Use numpy_calculator for a single deterministic expression" in rules
+
+
+def test_code_execution_writer_guidance_requires_methods_results_limitations() -> None:
+    prompt = prompts_module.build_pro_mode_final_writer_prompt(
+        latest_user_text="Fit multiple models to this CSV and explain the result.",
+        execution_regime="tool_workflow",
+        task_regime="programmatic_experiment",
+        normalized_draft="Random forest outperformed linear regression.",
+        supporting_points=["Cross-validated accuracy improved by 0.08."],
+        reservations=[],
+        scientific_result_surface_active=False,
+        explicit_full_chat_report=False,
+        report_like_request=False,
+        math_explainer_request=False,
+        code_execution_turn=True,
+        code_execution_failed=False,
+    )
+
+    lowered = prompt.lower()
+    assert "methods used" in lowered
+    assert "quantitative findings" in lowered
+    assert "limitations" in lowered

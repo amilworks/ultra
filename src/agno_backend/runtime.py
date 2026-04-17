@@ -71,6 +71,7 @@ from .pro_mode import (
     ProModeWorkflowResult,
     ProModeWorkflowRunner,
 )
+from .pro_mode_prompts import build_pro_mode_final_writer_prompt
 
 ALL_TOOL_SCHEMAS = [
     *BISQUE_TOOL_SCHEMAS,
@@ -13880,10 +13881,14 @@ class AgnoChatRuntime:
             "Code execution failed in this turn." in str(item or "")
             for item in list(reservations or [])
         )
+        code_execution_turn = self._is_code_execution_request(latest_user_text) or any(
+            "code execution" in str(item or "").strip().lower() for item in list(reservations or [])
+        )
         math_explainer_request = self._is_math_explanation_request(latest_user_text)
         proof_writer_instructions: list[str] = []
         report_writer_instructions: list[str] = []
         math_writer_instructions: list[str] = []
+        codeexec_writer_instructions: list[str] = []
         if (
             execution_regime == "proof_workflow"
             or str(task_regime or "").strip().lower() == "rigorous_proof"
@@ -13908,6 +13913,13 @@ class AgnoChatRuntime:
                 "Prefer a smaller set of load-bearing equations over a long catalog of formulas.",
                 "Treat the reader as a strong student: smart and technical, but not already in possession of the entire conceptual map.",
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
+            ]
+        if code_execution_turn:
+            codeexec_writer_instructions = [
+                "For code-execution answers, separate: methods used, key quantitative findings, interpretation, and limitations.",
+                "Name the exact artifact classes produced, such as CSV, PNG, JSON, or report outputs, when they exist.",
+                "Prefer technically literate prose for PhD-level readers: concise, explicit, and evidence-led.",
+                "If a caveat materially changes the conclusion, place it in the same paragraph as the claim.",
             ]
         scientific_result_surface_active = execution_regime == "tool_workflow"
         explicit_full_chat_report = bool(
@@ -14007,6 +14019,7 @@ class AgnoChatRuntime:
                     *[f"Student technique: {item}" for item in STUDENT_EXPLANATION_GUIDELINES],
                     *report_writer_instructions,
                     *math_writer_instructions,
+                    *codeexec_writer_instructions,
                     *proof_writer_instructions,
                 ],
                 markdown=True,
@@ -14024,90 +14037,19 @@ class AgnoChatRuntime:
                 debug_mode=bool(debug),
             )
 
-        prompt = "\n".join(
-            [
-                "Rewrite the grounded draft below into the final user-facing Pro Mode answer.",
-                "If the draft is already strong, improve it lightly rather than rewriting for its own sake.",
-                "Keep the answer faithful to the draft and supporting points.",
-                *(
-                    [
-                        "For proof answers, make the structure teachable: identify the main reduction, the crucial intermediate obligations, and the closing bridge."
-                    ]
-                    if execution_regime == "proof_workflow"
-                    or str(task_regime or "").strip().lower() == "rigorous_proof"
-                    else []
-                ),
-                *(
-                    [
-                        "For report-style answers, strengthen structure and synthesis: give the reader a real report with explicit takeaways, major distinctions, limitations, and a clean bottom line."
-                    ]
-                    if self._is_report_like_request(latest_user_text)
-                    else []
-                ),
-                *(
-                    [
-                        "For this report-style turn, use these prose techniques: lead with the governing idea, move from intuition to mechanism to implication, use contrast to sharpen distinctions, and bring in concrete examples only when they illuminate the point."
-                    ]
-                    if self._is_report_like_request(latest_user_text)
-                    else []
-                ),
-                *(
-                    [
-                        "A structured scientific result surface with figures and tables will already be rendered in the UI for this turn.",
-                        "Do not duplicate the figure captions, metric table, methods section, or evidence appendix in the answer text.",
-                        "Write a compact scientist-facing synthesis in at most two short paragraphs unless the user explicitly asked for a full prose report.",
-                    ]
-                    if scientific_result_surface_active
-                    else []
-                ),
-                *(
-                    [
-                        "A requested code execution step failed in this turn.",
-                        "Do not report expected, estimated, approximate, or visually inferred numeric outputs as if they were measured.",
-                        "If the user requested metrics or fitted parameters, state that the computation failed and omit those values unless a trusted tool actually returned them.",
-                    ]
-                    if code_execution_failed
-                    else []
-                ),
-                *(
-                    [
-                        "Because this is a mathematical explanation, use this cadence wherever it helps: intuition, formal statement or equation, interpretation, consequence.",
-                        "Keep equations that clarify the concept, and trim equations that merely display formalism without explanatory payoff.",
-                        "Review any practical recommendations and make them robust, conditional, and audience-appropriate for student readers.",
-                    ]
-                    if math_explainer_request
-                    else []
-                ),
-                "",
-                f"User request: {latest_user_text}",
-                f"Execution regime: {execution_regime}",
-                f"Task regime: {str(task_regime or '').strip() or 'unknown'}",
-                "",
-                "Grounded draft:",
-                normalized_draft,
-                "",
-                "Supporting points:",
-                json.dumps(
-                    [
-                        str(item or "").strip()
-                        for item in list(supporting_points or [])
-                        if str(item or "").strip()
-                    ][:16],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                "",
-                "Reservations to preserve if material:",
-                json.dumps(
-                    [
-                        str(item or "").strip()
-                        for item in list(reservations or [])
-                        if str(item or "").strip()
-                    ][:8],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            ]
+        prompt = build_pro_mode_final_writer_prompt(
+            latest_user_text=latest_user_text,
+            execution_regime=execution_regime,
+            task_regime=task_regime,
+            normalized_draft=normalized_draft,
+            supporting_points=supporting_points,
+            reservations=reservations,
+            scientific_result_surface_active=scientific_result_surface_active,
+            explicit_full_chat_report=explicit_full_chat_report,
+            report_like_request=self._is_report_like_request(latest_user_text),
+            math_explainer_request=math_explainer_request,
+            code_execution_turn=code_execution_turn,
+            code_execution_failed=code_execution_failed,
         )
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,

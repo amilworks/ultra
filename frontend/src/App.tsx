@@ -3762,6 +3762,8 @@ const buildToolResultCards = (
       previewable: artifact.previewable,
       resultGroupId: artifact.resultGroupId ?? null,
     })),
+    runId: options?.runId,
+    buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
   });
   scientificResultGroups.forEach((group, groupIndex) => {
     const singleFile = group.fileRows.length <= 1;

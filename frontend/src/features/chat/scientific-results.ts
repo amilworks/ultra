@@ -140,14 +140,20 @@ const scientificFigureSortWeight = (kind: string): number => {
   return 5;
 };
 
+const isBrowserUrl = (value: string): boolean => /^(?:[a-z]+:)?\/\//i.test(value);
+
 export const buildScientificResultGroups = ({
   progressEvents,
   toolInvocations,
   runArtifacts,
+  runId,
+  buildArtifactDownloadUrl,
 }: {
   progressEvents: ScientificResultProgressEvent[];
   toolInvocations: ScientificToolInvocation[];
   runArtifacts: ScientificResultArtifact[];
+  runId?: string;
+  buildArtifactDownloadUrl?: (runId: string, path: string) => string;
 }): ScientificResultGroup[] => {
   const artifactByKey = new Map<string, ScientificResultArtifact[]>();
   runArtifacts.forEach((artifact) => {
@@ -289,6 +295,10 @@ export const buildScientificResultGroups = ({
         if (!figureKey || group.seenFigureKeys.has(figureKey)) {
           continue;
         }
+        const fallbackFigureUrl =
+          runId && buildArtifactDownloadUrl && !isBrowserUrl(path)
+            ? buildArtifactDownloadUrl(runId, path)
+            : path;
         group.seenFigureKeys.add(figureKey);
         group.figures.push({
           key: figureKey,
@@ -296,8 +306,9 @@ export const buildScientificResultGroups = ({
           title: firstString(figure.title, "Megaseg figure"),
           file: firstString(figure.file) || undefined,
           summary: undefined,
-          url: matchingArtifact?.url ?? path,
-          downloadUrl: matchingArtifact?.downloadUrl ?? matchingArtifact?.url ?? path,
+          url: matchingArtifact?.url ?? fallbackFigureUrl,
+          downloadUrl:
+            matchingArtifact?.downloadUrl ?? matchingArtifact?.url ?? fallbackFigureUrl,
           previewable: matchingArtifact?.previewable ?? true,
         });
       }

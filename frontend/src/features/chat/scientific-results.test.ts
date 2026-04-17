@@ -156,4 +156,40 @@ describe("buildScientificResultGroups", () => {
       "mask_preview",
     ]);
   });
+
+  it("routes local megaseg figure paths through the artifact download endpoint when run artifacts are missing", () => {
+    const groups = buildScientificResultGroups({
+      progressEvents: [],
+      toolInvocations: [
+        {
+          tool: "segment_image_megaseg",
+          status: "completed",
+          output_envelope: {
+            success: true,
+            result_group_id: "megaseg-group-2",
+            visualization_paths: [
+              {
+                kind: "overlay_mip",
+                title: "Megaseg overlay (MIP)",
+                path: "/srv/ultra/shared/science/megaseg_results/example_overlay_mip.png",
+                file: "example.ome.tiff",
+              },
+            ],
+          },
+        },
+      ],
+      runArtifacts: [],
+      runId: "run_456",
+      buildArtifactDownloadUrl: (runId, path) =>
+        `/v1/artifacts/${runId}/download?path=${encodeURIComponent(path)}`,
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].heroFigure?.url).toBe(
+      "/v1/artifacts/run_456/download?path=%2Fsrv%2Fultra%2Fshared%2Fscience%2Fmegaseg_results%2Fexample_overlay_mip.png"
+    );
+    expect(groups[0].heroFigure?.downloadUrl).toBe(
+      "/v1/artifacts/run_456/download?path=%2Fsrv%2Fultra%2Fshared%2Fscience%2Fmegaseg_results%2Fexample_overlay_mip.png"
+    );
+  });
 });

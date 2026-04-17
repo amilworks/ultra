@@ -4484,7 +4484,7 @@ class AgnoChatRuntime:
         explicit = self._normalize_selected_tool_names(selected_tool_names)
         if explicit:
             return [tool_name for tool_name in explicit if tool_name in TOOL_SCHEMA_MAP]
-        from src.llm import _select_tool_subset
+        from src.tooling.tool_selection import _select_tool_subset
 
         selected_schemas = _select_tool_subset(
             messages=[
@@ -13679,6 +13679,7 @@ class AgnoChatRuntime:
             return []
 
         results: list[dict[str, Any]] = []
+        latest_result_refs: dict[str, Any] = {}
         for action in normalized_actions:
             tool_name = str(action.tool_name or "").strip()
             args = dict(action.args or {})
@@ -13703,9 +13704,17 @@ class AgnoChatRuntime:
                     args,
                     uploaded_files=list(uploaded_files or []),
                     user_text=latest_user_text,
+                    latest_result_refs=dict(latest_result_refs),
                     selection_context=dict(selection_context or {}),
                 )
                 parsed_output, raw_text = self._json_result(raw_output)
+                if isinstance(parsed_output, dict):
+                    refs = parsed_output.get("latest_result_refs")
+                    if isinstance(refs, dict):
+                        for key, value in refs.items():
+                            if value is None:
+                                continue
+                            latest_result_refs[str(key)] = value
                 invocation = {
                     "tool": tool_name,
                     "status": "completed",

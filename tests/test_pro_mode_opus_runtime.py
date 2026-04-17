@@ -1112,6 +1112,92 @@ def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them
     assert result["response_text"] != "I can write some Python if you want."
 
 
+def test_deterministic_required_tool_fallback_threads_latest_result_refs_between_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    mask_path = "/tmp/NPM1_13054_IM__megaseg_mask.tiff"
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "I can analyze that image for you.",
+                "metadata": {"tool_invocations": []},
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **kwargs):
+        assert args == {}
+        if tool_name == "segment_image_megaseg":
+            assert kwargs["uploaded_files"] == ["/tmp/NPM1_13054_IM.tiff"]
+            assert kwargs["latest_result_refs"] == {}
+            return {
+                "success": True,
+                "preferred_upload_paths": [mask_path],
+                "files_processed": [
+                    {
+                        "file": "NPM1_13054_IM.tiff",
+                        "preferred_upload_path": mask_path,
+                        "success": True,
+                    }
+                ],
+                "latest_result_refs": {
+                    "latest_segmentation_mask_path": mask_path,
+                    "latest_segmentation_mask_paths": [mask_path],
+                    "segment_image_megaseg.mask_paths": [mask_path],
+                    "segment_image_megaseg.latest_mask_path": mask_path,
+                },
+            }
+        assert tool_name == "quantify_segmentation_masks"
+        assert kwargs["latest_result_refs"]["latest_segmentation_mask_path"] == mask_path
+        assert kwargs["latest_result_refs"]["segment_image_megaseg.mask_paths"] == [mask_path]
+        return {
+            "success": True,
+            "summary": {"mask_count": 1, "successful_masks": 1},
+            "rows": [{"mask_path": mask_path, "success": True}],
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run MegaSeg on the selected image and quantify the mask.",
+                }
+            ],
+            latest_user_text="Run MegaSeg on the selected image and quantify the mask.",
+            uploaded_files=["/tmp/NPM1_13054_IM.tiff"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            tool_plan_category="segmentation",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert [item["tool"] for item in result["tool_invocations"]] == [
+        "segment_image_megaseg",
+        "quantify_segmentation_masks",
+    ]
+    assert result["tool_invocations"][1]["status"] == "completed"
+
+
 def test_tool_program_phase_records_native_bedrock_model_route_in_compression_stats(
     tmp_path: Path,
     monkeypatch,

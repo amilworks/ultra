@@ -26,7 +26,10 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_app(settings: ServiceSettings) -> FastAPI:
+def create_app(settings: ServiceSettings | None = None) -> FastAPI:
+    resolved_settings = settings or ServiceSettings.from_env()
+    if not str(resolved_settings.api_key or "").strip():
+        raise ValueError("CODEEXEC_API_KEY must be configured for the code execution service.")
     queue: asyncio.Queue[str] = asyncio.Queue()
     records: dict[str, CodeExecutionJobRecord] = {}
 
@@ -37,14 +40,14 @@ def create_app(settings: ServiceSettings) -> FastAPI:
             record.status = "running"
             record.started_at = _utc_now()
             record.updated_at = _utc_now()
-            work_dir = settings.artifact_root / job_id / "workdir"
+            work_dir = resolved_settings.artifact_root / job_id / "workdir"
             try:
                 result_payload = run_codeexec_attempt(
                     job_id=job_id,
                     work_dir=work_dir,
                     request=record.request.model_dump(mode="json"),
-                    worker_image=settings.worker_image,
-                    docker_network=settings.docker_network,
+                    worker_image=resolved_settings.worker_image,
+                    docker_network=resolved_settings.docker_network,
                 )
                 result = CodeExecutionAttemptResult.model_validate(result_payload)
                 record.result = result
@@ -68,25 +71,35 @@ def create_app(settings: ServiceSettings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        worker_task = asyncio.create_task(_worker())
+        worker_tasks = [
+            asyncio.create_task(_worker())
+            for _ in range(max(1, int(resolved_settings.max_concurrent_jobs or 1)))
+        ]
         try:
             yield
         finally:
-            worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_task
+            for task in worker_tasks:
+                task.cancel()
+            for task in worker_tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
 
     app = FastAPI(lifespan=lifespan)
 
     def _require_auth(request: Request) -> None:
         auth = str(request.headers.get("Authorization") or "").strip()
-        if auth != f"Bearer {settings.api_key}":
+        if auth != f"Bearer {resolved_settings.api_key}":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, object]:
         _require_auth(request)
-        return {"ok": True, "queue_depth": queue.qsize(), "worker_image": settings.worker_image}
+        return {
+            "ok": True,
+            "queue_depth": queue.qsize(),
+            "worker_image": resolved_settings.worker_image,
+            "max_concurrent_jobs": max(1, int(resolved_settings.max_concurrent_jobs or 1)),
+        }
 
     @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED)
     async def submit_job(
@@ -98,7 +111,7 @@ def create_app(settings: ServiceSettings) -> FastAPI:
         _require_auth(request)
         request_payload = CodeExecutionJobRequest.model_validate_json(request_json)
         requested_job_id = str(request_payload.job_id or "").strip() or f"job_{uuid4().hex[:12]}"
-        job_root = settings.artifact_root / requested_job_id
+        job_root = resolved_settings.artifact_root / requested_job_id
         work_dir = job_root / "workdir"
         bundle_path = job_root / "job.tar.gz"
 
@@ -162,9 +175,20 @@ def create_app(settings: ServiceSettings) -> FastAPI:
     @app.get("/v1/jobs/{job_id}/artifacts/{artifact_path:path}")
     async def get_artifact(job_id: str, artifact_path: str, request: Request):
         _require_auth(request)
-        path = settings.artifact_root / job_id / "workdir" / artifact_path
+        path = resolved_settings.artifact_root / job_id / "workdir" / artifact_path
         if not path.exists():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
         return FileResponse(path)
 
     return app
+
+
+try:
+    app = create_app()
+except Exception as exc:  # noqa: BLE001
+    init_error = str(exc)
+    app = FastAPI(title="Code Execution Service", version="0.1.0")
+
+    @app.get("/health")
+    async def health_fallback() -> dict[str, object]:
+        return {"ok": False, "error": init_error}

@@ -6,6 +6,7 @@ import tarfile
 import time
 from pathlib import Path
 
+import scripts.eval_codeexec_reasoning_suite as eval_suite
 from fastapi.testclient import TestClient
 from services.codeexec_service import app as codeexec_service_app
 
@@ -219,3 +220,25 @@ def test_codeexec_service_health_stays_responsive_during_running_job(
 
         assert terminal is not None
         assert terminal["status"] == "succeeded"
+
+
+def test_codeexec_reasoning_fixture_loader_reads_expected_problem_ids() -> None:
+    problems = eval_suite.load_problems()
+
+    problem_ids = {str(item.get("id") or "") for item in problems}
+    assert "nonlinear_model_selection" in problem_ids
+    assert "microscopy_feature_qc" in problem_ids
+
+
+def test_codeexec_reasoning_score_run_rewards_fail_closed_responses() -> None:
+    score = eval_suite.score_run(
+        {
+            "success": False,
+            "response_text": "The requested code execution did not complete successfully, so no measured outputs are reported.",
+            "missing_expected_outputs": ["result.json"],
+            "measurement_count": 0,
+        }
+    )
+
+    assert score["artifact_completion"] == 0.0
+    assert score["failure_honesty"] == 1.0

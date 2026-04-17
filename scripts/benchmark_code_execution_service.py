@@ -67,6 +67,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=1024)
     parser.add_argument("--cpu-limit", type=float, default=2.0)
     parser.add_argument("--memory-mb", type=int, default=4096)
+    parser.add_argument("--json-output")
     return parser.parse_args()
 
 
@@ -517,6 +518,8 @@ def main() -> int:
         "health_failures": health_failures[:10],
         "job_results": [asdict(item) for item in sorted(results, key=lambda item: item.job_id)],
     }
+    if args.json_output:
+        Path(args.json_output).write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0 if not failed else 1
 

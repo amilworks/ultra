@@ -20,7 +20,6 @@ from src.training.adapters import _resolve_yolov5_repo_path
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
 SPECTRAL_DEFAULT_CONF_THRES = 0.10
 SPECTRAL_DEFAULT_IOU_THRES = 0.60
 SPECTRAL_DEFAULT_MATCH_IOU = 0.50
@@ -155,7 +154,9 @@ class SpectralInstabilityScorer:
         return (dist / max_radius <= ratio).float()
 
     @torch.no_grad()
-    def apply_adaptive_spectral_filter(self, feature_map: torch.Tensor) -> tuple[torch.Tensor, list[dict[str, float | int]]]:
+    def apply_adaptive_spectral_filter(
+        self, feature_map: torch.Tensor
+    ) -> tuple[torch.Tensor, list[dict[str, float | int]]]:
         if feature_map.dtype == torch.float16:
             feature_map = feature_map.float()
 
@@ -250,7 +251,9 @@ class SpectralInstabilityScorer:
         return objectness * torch.sigmoid(winning_logits)
 
     @torch.no_grad()
-    def discrepancy_breakdown(self, pred_orig: torch.Tensor, pred_filt: torch.Tensor) -> dict[str, float]:
+    def discrepancy_breakdown(
+        self, pred_orig: torch.Tensor, pred_filt: torch.Tensor
+    ) -> dict[str, float]:
         if len(pred_orig) == 0 and len(pred_filt) == 0:
             return {
                 "lost": 0.0,
@@ -293,7 +296,9 @@ class SpectralInstabilityScorer:
                 "spatial_jitter": 0.0,
                 "confidence_jitter": 0.0,
                 "matched": 0.0,
-                "normalized_score": float((self.config.lost_weight * lost) / max(float(len(pred_orig)), 1.0)),
+                "normalized_score": float(
+                    (self.config.lost_weight * lost) / max(float(len(pred_orig)), 1.0)
+                ),
                 "matched_iou_mean": 0.0,
                 "matched_iou_median": 0.0,
                 "class_consistency_rate": 0.0,
@@ -377,7 +382,9 @@ def _safe_slug(value: str) -> str:
     return token or "artifact"
 
 
-def _render_ranking_plot(results: list[dict[str, Any]], *, output_dir: Path) -> dict[str, Any] | None:
+def _render_ranking_plot(
+    results: list[dict[str, Any]], *, output_dir: Path
+) -> dict[str, Any] | None:
     ranked = [item for item in list(results or []) if isinstance(item, dict)]
     if not ranked:
         return None
@@ -427,11 +434,26 @@ def _render_breakdown_plot(
         return None
     top_rows = ranked[: min(10, len(ranked))]
     labels = [str(item.get("file_name") or "image") for item in reversed(top_rows)]
-    lost = [float(item.get("lost_detection_count") or 0.0) * float(config.lost_weight) for item in reversed(top_rows)]
-    new = [float(item.get("new_detection_count") or 0.0) * float(config.new_weight) for item in reversed(top_rows)]
-    class_jitter = [float(item.get("class_jitter") or 0.0) * float(config.jitter_weight) for item in reversed(top_rows)]
-    spatial_jitter = [float(item.get("spatial_jitter") or 0.0) * float(config.jitter_weight) for item in reversed(top_rows)]
-    confidence_jitter = [float(item.get("confidence_jitter") or 0.0) * float(config.confidence_weight) for item in reversed(top_rows)]
+    lost = [
+        float(item.get("lost_detection_count") or 0.0) * float(config.lost_weight)
+        for item in reversed(top_rows)
+    ]
+    new = [
+        float(item.get("new_detection_count") or 0.0) * float(config.new_weight)
+        for item in reversed(top_rows)
+    ]
+    class_jitter = [
+        float(item.get("class_jitter") or 0.0) * float(config.jitter_weight)
+        for item in reversed(top_rows)
+    ]
+    spatial_jitter = [
+        float(item.get("spatial_jitter") or 0.0) * float(config.jitter_weight)
+        for item in reversed(top_rows)
+    ]
+    confidence_jitter = [
+        float(item.get("confidence_jitter") or 0.0) * float(config.confidence_weight)
+        for item in reversed(top_rows)
+    ]
 
     fig_height = max(3.5, 0.5 * len(top_rows) + 1.8)
     fig, ax = plt.subplots(figsize=(11.5, fig_height))
@@ -476,22 +498,28 @@ def score_spectral_instability(
     output_dir: str | Path | None = None,
     config: SpectralInstabilityConfig | None = None,
 ) -> dict[str, Any]:
-    resolved_paths = [str(Path(path).expanduser().resolve()) for path in image_paths if str(path).strip()]
+    resolved_paths = [
+        str(Path(path).expanduser().resolve()) for path in image_paths if str(path).strip()
+    ]
     if not resolved_paths:
         return {"success": False, "error": "No image paths were provided."}
 
     config = config or SpectralInstabilityConfig()
-    output_root = Path(output_dir).expanduser().resolve() if output_dir else (
-        Path("data") / "spectral_instability" / f"run-{uuid4().hex[:8]}"
-    ).resolve()
+    output_root = (
+        Path(output_dir).expanduser().resolve()
+        if output_dir
+        else (Path("data") / "spectral_instability" / f"run-{uuid4().hex[:8]}").resolve()
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     output_json_path = output_root / "spectral_scores.json"
 
     os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-    DetectMultiBackend = _load_yolov5_backend()
+    detect_multi_backend = _load_yolov5_backend()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_fp16 = device.type == "cuda"
-    model = DetectMultiBackend(str(Path(weights_path).expanduser().resolve()), device=device, fp16=use_fp16)
+    model = detect_multi_backend(
+        str(Path(weights_path).expanduser().resolve()), device=device, fp16=use_fp16
+    )
     model.eval()
     inner_model = model.model
     detect_layer = inner_model.model[-1]
@@ -504,7 +532,9 @@ def score_spectral_instability(
     for layer_index in detect_sources:
         hooks.append(
             inner_model.model[int(layer_index)].register_forward_hook(
-                lambda _module, _inputs, output, idx=int(layer_index): feature_maps.__setitem__(idx, output)
+                lambda _module, _inputs, output, idx=int(layer_index): feature_maps.__setitem__(
+                    idx, output
+                )
             )
         )
 
@@ -523,10 +553,16 @@ def score_spectral_instability(
             outputs = inner_model(imgs)
             preds = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
             detect_inputs = [feature_maps[int(index)] for index in detect_sources]
-            primary_feature, filter_diagnostics = scorer.apply_adaptive_spectral_filter(detect_inputs[0])
+            primary_feature, filter_diagnostics = scorer.apply_adaptive_spectral_filter(
+                detect_inputs[0]
+            )
             filtered_inputs = [primary_feature, *detect_inputs[1:]]
             filtered_outputs = detect_layer(filtered_inputs)
-            preds_filt = filtered_outputs[0] if isinstance(filtered_outputs, (tuple, list)) else filtered_outputs
+            preds_filt = (
+                filtered_outputs[0]
+                if isinstance(filtered_outputs, (tuple, list))
+                else filtered_outputs
+            )
 
             class_names = getattr(inner_model, "names", {}) or {}
             for batch_index, raw_path in enumerate(paths):
@@ -542,9 +578,7 @@ def score_spectral_instability(
                 )
                 breakdown = scorer.discrepancy_breakdown(original, filtered)
                 filter_diag = (
-                    filter_diagnostics[batch_index]
-                    if batch_index < len(filter_diagnostics)
-                    else {}
+                    filter_diagnostics[batch_index] if batch_index < len(filter_diagnostics) else {}
                 )
                 image_results.append(
                     {
@@ -565,8 +599,12 @@ def score_spectral_instability(
                         "matched_iou_mean": float(breakdown["matched_iou_mean"]),
                         "matched_iou_median": float(breakdown["matched_iou_median"]),
                         "class_consistency_rate": float(breakdown["class_consistency_rate"]),
-                        "retained_energy_fraction": float(filter_diag.get("retained_energy_fraction") or 0.0),
-                        "dominant_channel_index": int(filter_diag.get("dominant_channel_index") or 0),
+                        "retained_energy_fraction": float(
+                            filter_diag.get("retained_energy_fraction") or 0.0
+                        ),
+                        "dominant_channel_index": int(
+                            filter_diag.get("dominant_channel_index") or 0
+                        ),
                         "original_class_counts": _class_counts(original, class_names),
                         "filtered_class_counts": _class_counts(filtered, class_names),
                     }

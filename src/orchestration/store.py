@@ -5,16 +5,17 @@ import os
 import re
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Iterator
+from typing import Any
 from uuid import uuid4
 
 from src.orchestration.models import RunStatus, WorkflowPlan, WorkflowRun
 
 
 class _NoopLock:
-    def __enter__(self) -> "_NoopLock":
+    def __enter__(self) -> _NoopLock:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -23,7 +24,7 @@ class _NoopLock:
 
 class RunStore:
     """Persistent store for runs, events, uploads, and user conversation state.
-    
+
     Notes
     -----
     Supports SQLite path targets and Postgres URLs.
@@ -1171,12 +1172,12 @@ class RunStore:
 
     def create_run(self, run: WorkflowRun) -> WorkflowRun:
         """Persist a new workflow run row and return the stored run object.
-        
+
         Parameters
         ----------
         run : WorkflowRun
             Input argument.
-        
+
         Returns
         -------
         WorkflowRun
@@ -1184,10 +1185,14 @@ class RunStore:
         """
         plan_json = json.dumps(_plan_to_dict(run.plan)) if run.plan else None
         checkpoint_state_json = (
-            json.dumps(run.checkpoint_state, default=str) if isinstance(run.checkpoint_state, dict) else None
+            json.dumps(run.checkpoint_state, default=str)
+            if isinstance(run.checkpoint_state, dict)
+            else None
         )
         budget_state_json = (
-            json.dumps(run.budget_state, default=str) if isinstance(run.budget_state, dict) else None
+            json.dumps(run.budget_state, default=str)
+            if isinstance(run.budget_state, dict)
+            else None
         )
         with self._lock, self._conn() as conn:
             self._execute(
@@ -1222,12 +1227,12 @@ class RunStore:
 
     def get_run(self, run_id: str) -> WorkflowRun | None:
         """Fetch a run by ID, including deserialized plan payload when present.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
-        
+
         Returns
         -------
         WorkflowRun | None
@@ -1267,14 +1272,14 @@ class RunStore:
 
     def list_runs_for_user(self, *, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """List recent runs for one user, ordered by most recently updated.
-        
+
         Parameters
         ----------
         user_id : str
             User identifier.
         limit : int, optional
             Maximum number of records to return.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -1312,7 +1317,7 @@ class RunStore:
 
     def update_status(self, run_id: str, status: RunStatus, error: str | None = None) -> None:
         """Update run lifecycle status and optional terminal error text.
-        
+
         Parameters
         ----------
         run_id : str
@@ -1321,7 +1326,7 @@ class RunStore:
             Status filter or update value.
         error : str | None, optional
             Error message text.
-        
+
         Returns
         -------
         None
@@ -1354,7 +1359,7 @@ class RunStore:
         pedagogy_level: str | None = None,
     ) -> None:
         """Upsert run-to-user/conversation metadata and mirror it into `runs`.
-        
+
         Parameters
         ----------
         run_id : str
@@ -1363,7 +1368,7 @@ class RunStore:
             User identifier.
         conversation_id : str | None
             Conversation identifier.
-        
+
         Returns
         -------
         None
@@ -1371,7 +1376,9 @@ class RunStore:
         """
         now = datetime.utcnow().isoformat()
         checkpoint_state_json = (
-            json.dumps(checkpoint_state, default=str) if isinstance(checkpoint_state, dict) else None
+            json.dumps(checkpoint_state, default=str)
+            if isinstance(checkpoint_state, dict)
+            else None
         )
         budget_state_json = (
             json.dumps(budget_state, default=str) if isinstance(budget_state, dict) else None
@@ -1426,12 +1433,12 @@ class RunStore:
 
     def get_run_metadata(self, run_id: str) -> dict[str, Any] | None:
         """Return persisted metadata linkage for a run, if available.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -1645,7 +1652,9 @@ class RunStore:
                 content = str(payload.get("content") or "")
                 created_at = str(payload.get("created_at") or payload.get("createdAt") or now)
                 run_id = str(payload.get("run_id") or payload.get("runId") or "").strip() or None
-                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                metadata = (
+                    payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                )
                 self._execute(
                     conn,
                     """
@@ -1743,7 +1752,7 @@ class RunStore:
         level: str = "info",
     ) -> None:
         """Append a durable run event for streaming, audit, and replay.
-        
+
         Parameters
         ----------
         run_id : str
@@ -1754,7 +1763,7 @@ class RunStore:
             Input payload for the operation.
         level : str, optional
             Input argument.
-        
+
         Returns
         -------
         None
@@ -1772,14 +1781,14 @@ class RunStore:
 
     def list_events(self, run_id: str, limit: int = 200) -> list[dict[str, Any]]:
         """Return run events in chronological order up to `limit`.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
         limit : int, optional
             Maximum number of records to return.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -1806,14 +1815,14 @@ class RunStore:
 
     def get_latest_event(self, run_id: str, event_type: str) -> dict[str, Any] | None:
         """Fetch the latest event of a given type for a run.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
         event_type : str
             Input argument.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -1837,14 +1846,14 @@ class RunStore:
 
     def get_idempotency(self, endpoint: str, idempotency_key: str) -> dict[str, Any] | None:
         """Lookup previously stored idempotency mapping for an endpoint/request key.
-        
+
         Parameters
         ----------
         endpoint : str
             Input argument.
         idempotency_key : str
             Input argument.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -1878,7 +1887,7 @@ class RunStore:
         run_id: str,
     ) -> None:
         """Store an idempotency key record if it does not already exist.
-        
+
         Parameters
         ----------
         endpoint : str
@@ -1889,7 +1898,7 @@ class RunStore:
             Input argument.
         run_id : str
             Workflow run identifier.
-        
+
         Returns
         -------
         None
@@ -1939,7 +1948,7 @@ class RunStore:
         sync_run_id: str | None = None,
     ) -> None:
         """Upsert upload metadata, preserving provenance and soft-delete state.
-        
+
         Parameters
         ----------
         file_id : str
@@ -1974,12 +1983,12 @@ class RunStore:
             Input argument.
         deleted_at : str | None, optional
             Timestamp value.
-        
+
         Returns
         -------
         None
             No return value.
-        
+
         Notes
         -----
         Keep `sha256` and `size_bytes` accurate for downstream reproducibility checks.
@@ -2090,7 +2099,7 @@ class RunStore:
         include_deleted: bool = False,
     ) -> dict[str, Any] | None:
         """Fetch one upload record with optional user scoping and soft-delete visibility.
-        
+
         Parameters
         ----------
         file_id : str
@@ -2099,14 +2108,16 @@ class RunStore:
             User identifier.
         include_deleted : bool, optional
             Whether to include optional values in the result.
-        
+
         Returns
         -------
         dict[str, Any] | None
             Result payload.
         """
         identifier = str(file_id or "").strip()
-        clauses = ["(file_id=? OR canonical_resource_uniq=? OR canonical_resource_uri=? OR source_uri=?)"]
+        clauses = [
+            "(file_id=? OR canonical_resource_uniq=? OR canonical_resource_uri=? OR source_uri=?)"
+        ]
         params: list[Any] = [identifier, identifier, identifier, identifier]
         if user_id is not None:
             clauses.append("(user_id=? OR user_id IS NULL)")
@@ -2315,7 +2326,7 @@ class RunStore:
         include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
         """List uploads for a user with optional text/source/kind filters.
-        
+
         Parameters
         ----------
         user_id : str
@@ -2332,7 +2343,7 @@ class RunStore:
             Input argument.
         include_deleted : bool, optional
             Whether to include optional values in the result.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -2452,7 +2463,7 @@ class RunStore:
         thumbnail_path: str | None,
     ) -> bool:
         """Update thumbnail path for a visible upload and return whether a row changed.
-        
+
         Parameters
         ----------
         file_id : str
@@ -2461,7 +2472,7 @@ class RunStore:
             User identifier.
         thumbnail_path : str | None
             Input argument.
-        
+
         Returns
         -------
         bool
@@ -2492,7 +2503,7 @@ class RunStore:
         deleted_at: str | None = None,
     ) -> bool:
         """Soft-delete an upload by setting `deleted_at` and `updated_at` timestamps.
-        
+
         Parameters
         ----------
         file_id : str
@@ -2501,7 +2512,7 @@ class RunStore:
             User identifier.
         deleted_at : str | None, optional
             Timestamp value.
-        
+
         Returns
         -------
         bool
@@ -2536,7 +2547,7 @@ class RunStore:
         state: dict[str, Any],
     ) -> None:
         """Create or update a conversation envelope with user-scoped conversation IDs.
-        
+
         Parameters
         ----------
         conversation_id : str
@@ -2551,12 +2562,12 @@ class RunStore:
             Timestamp value.
         state : dict[str, Any]
             Input argument.
-        
+
         Returns
         -------
         None
             No return value.
-        
+
         Notes
         -----
         Persist only sanitized serializable state payloads.
@@ -2603,7 +2614,7 @@ class RunStore:
         messages: list[dict[str, Any]],
     ) -> None:
         """Replace all stored messages for a conversation with a new ordered snapshot.
-        
+
         Parameters
         ----------
         conversation_id : str
@@ -2612,7 +2623,7 @@ class RunStore:
             User identifier.
         messages : list[dict[str, Any]]
             Input argument.
-        
+
         Returns
         -------
         None
@@ -2678,14 +2689,14 @@ class RunStore:
 
     def get_conversation(self, *, conversation_id: str, user_id: str) -> dict[str, Any] | None:
         """Fetch one conversation envelope for a user and return externalized ID form.
-        
+
         Parameters
         ----------
         conversation_id : str
             Conversation identifier.
         user_id : str
             User identifier.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -2738,7 +2749,7 @@ class RunStore:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List conversation envelopes for a user, newest first.
-        
+
         Parameters
         ----------
         user_id : str
@@ -2747,7 +2758,7 @@ class RunStore:
             Maximum number of records to return.
         offset : int, optional
             Number of records to skip before applying the page limit.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -2785,14 +2796,14 @@ class RunStore:
 
     def delete_conversation(self, *, conversation_id: str, user_id: str) -> None:
         """Delete conversation envelope, messages, and context-memory rows for a user.
-        
+
         Parameters
         ----------
         conversation_id : str
             Conversation identifier.
         user_id : str
             User identifier.
-        
+
         Returns
         -------
         None
@@ -2826,14 +2837,14 @@ class RunStore:
         user_id: str,
     ) -> dict[str, Any] | None:
         """Return stored context-compaction memory for a conversation if present.
-        
+
         Parameters
         ----------
         conversation_id : str
             Conversation identifier.
         user_id : str
             User identifier.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -2895,7 +2906,7 @@ class RunStore:
         updated_at: str | None = None,
     ) -> None:
         """Upsert compacted conversation memory used for context compression.
-        
+
         Parameters
         ----------
         conversation_id : str
@@ -2914,7 +2925,7 @@ class RunStore:
             Timestamp value.
         updated_at : str | None, optional
             Timestamp value.
-        
+
         Returns
         -------
         None
@@ -2970,7 +2981,7 @@ class RunStore:
         exclude_conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search a user's conversation messages using FTS when available.
-        
+
         Parameters
         ----------
         user_id : str
@@ -2983,12 +2994,12 @@ class RunStore:
             Collection of identifier values.
         exclude_conversation_id : str | None, optional
             Identifier value.
-        
+
         Returns
         -------
         list[dict[str, Any]]
             Computed result.
-        
+
         Notes
         -----
         Prefer scoped include/exclude conversation IDs to reduce noisy matches.
@@ -3139,12 +3150,12 @@ class RunStore:
 
     def upsert_resource_computations(self, rows: list[dict[str, Any]]) -> None:
         """Upsert tool-to-resource computation records for provenance lookups.
-        
+
         Parameters
         ----------
         rows : list[dict[str, Any]]
             Input argument.
-        
+
         Returns
         -------
         None
@@ -3245,7 +3256,7 @@ class RunStore:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """List resource computation rows filtered by tool and file identifiers.
-        
+
         Parameters
         ----------
         user_id : str
@@ -3258,7 +3269,7 @@ class RunStore:
             Input argument.
         limit : int, optional
             Maximum number of records to return.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -3365,7 +3376,7 @@ class RunStore:
         max_tools_per_run: int = 8,
     ) -> dict[str, dict[str, list[str]]]:
         """Summarize distinct tools/file names linked to each run ID.
-        
+
         Parameters
         ----------
         user_id : str
@@ -3376,7 +3387,7 @@ class RunStore:
             Maximum allowed value.
         max_tools_per_run : int, optional
             Maximum allowed value.
-        
+
         Returns
         -------
         dict[str, dict[str, list[str]]]
@@ -3616,9 +3627,9 @@ class RunStore:
                 UPDATE training_managed_sources
                 SET {assignments}
                 WHERE {where_clause}
-                """
-                .replace("{assignments}", ", ".join(assignments))
-                .replace("{where_clause}", where_clause),
+                """.replace("{assignments}", ", ".join(assignments)).replace(
+                    "{where_clause}", where_clause
+                ),
                 tuple(params),
             )
             conn.commit()
@@ -3871,7 +3882,9 @@ class RunStore:
                 if not (split and role and sample_id and file_id and path):
                     continue
                 metadata = raw.get("metadata")
-                metadata_json = json.dumps(metadata, default=str) if isinstance(metadata, dict) else None
+                metadata_json = (
+                    json.dumps(metadata, default=str) if isinstance(metadata, dict) else None
+                )
                 size_bytes = int(raw.get("size_bytes") or 0)
                 item_id = (
                     str(raw.get("item_id") or "").strip()
@@ -4142,9 +4155,9 @@ class RunStore:
                 UPDATE training_jobs
                 SET {assignments}
                 WHERE {where_clause}
-                """
-                .replace("{assignments}", ", ".join(assignments))
-                .replace("{where_clause}", where_clause),
+                """.replace("{assignments}", ", ".join(assignments)).replace(
+                    "{where_clause}", where_clause
+                ),
                 tuple(params),
             )
             conn.commit()
@@ -4637,9 +4650,9 @@ class RunStore:
                 UPDATE training_lineages
                 SET {assignments}
                 WHERE {where_clause}
-                """
-                .replace("{assignments}", ", ".join(assignments))
-                .replace("{where_clause}", where_clause),
+                """.replace("{assignments}", ", ".join(assignments)).replace(
+                    "{where_clause}", where_clause
+                ),
                 tuple(params),
             )
             conn.commit()
@@ -4859,8 +4872,7 @@ class RunStore:
                 UPDATE training_model_versions
                 SET {assignments}
                 WHERE version_id=?
-                """
-                .replace("{assignments}", ", ".join(assignments)),
+                """.replace("{assignments}", ", ".join(assignments)),
                 tuple(params),
             )
             conn.commit()
@@ -5142,8 +5154,7 @@ class RunStore:
                 UPDATE training_update_proposals
                 SET {assignments}
                 WHERE proposal_id=?
-                """
-                .replace("{assignments}", ", ".join(assignments)),
+                """.replace("{assignments}", ", ".join(assignments)),
                 tuple(params),
             )
             conn.commit()
@@ -5303,8 +5314,12 @@ class RunStore:
                     "proposal_id": row[0],
                     "lineage_id": row[1],
                     "trigger_reason": row[2],
-                    "trigger_snapshot": trigger_snapshot if isinstance(trigger_snapshot, dict) else {},
-                    "dataset_snapshot": dataset_snapshot if isinstance(dataset_snapshot, dict) else {},
+                    "trigger_snapshot": trigger_snapshot
+                    if isinstance(trigger_snapshot, dict)
+                    else {},
+                    "dataset_snapshot": dataset_snapshot
+                    if isinstance(dataset_snapshot, dict)
+                    else {},
                     "config": config if isinstance(config, dict) else {},
                     "status": row[6],
                     "idempotency_key": row[7],
@@ -5575,8 +5590,7 @@ class RunStore:
                 UPDATE training_merge_requests
                 SET {assignments}
                 WHERE merge_id=?
-                """
-                .replace("{assignments}", ", ".join(assignments)),
+                """.replace("{assignments}", ", ".join(assignments)),
                 tuple(params),
             )
             conn.commit()
@@ -5809,7 +5823,7 @@ class RunStore:
         chunk_size_bytes: int,
     ) -> dict[str, Any]:
         """Create resumable upload session or return latest matching active/completed one.
-        
+
         Parameters
         ----------
         session_id : str
@@ -5828,7 +5842,7 @@ class RunStore:
             Input argument.
         chunk_size_bytes : int
             Input argument.
-        
+
         Returns
         -------
         dict[str, Any]
@@ -5913,14 +5927,14 @@ class RunStore:
 
     def get_upload_session(self, *, session_id: str, user_id: str) -> dict[str, Any] | None:
         """Fetch resumable upload session state for one user session ID.
-        
+
         Parameters
         ----------
         session_id : str
             Upload session identifier.
         user_id : str
             User identifier.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -5967,7 +5981,7 @@ class RunStore:
         error: str | None = None,
     ) -> None:
         """Update bytes received and status for an in-progress upload session.
-        
+
         Parameters
         ----------
         session_id : str
@@ -5980,7 +5994,7 @@ class RunStore:
             Status filter or update value.
         error : str | None, optional
             Error message text.
-        
+
         Returns
         -------
         None
@@ -6015,7 +6029,7 @@ class RunStore:
         sha256: str,
     ) -> None:
         """Mark resumable upload session complete and attach canonical file identifiers.
-        
+
         Parameters
         ----------
         session_id : str
@@ -6026,7 +6040,7 @@ class RunStore:
             Upload file identifier.
         sha256 : str
             Input argument.
-        
+
         Returns
         -------
         None
@@ -6047,7 +6061,7 @@ class RunStore:
 
     def fail_upload_session(self, *, session_id: str, user_id: str, error: str) -> None:
         """Mark resumable upload session as failed with an error message.
-        
+
         Parameters
         ----------
         session_id : str
@@ -6056,7 +6070,7 @@ class RunStore:
             User identifier.
         error : str
             Error message text.
-        
+
         Returns
         -------
         None
@@ -6088,12 +6102,12 @@ class RunStore:
 
     def list_admin_run_tools(self, *, run_ids: list[str]) -> dict[str, list[str]]:
         """Return unique tool names observed for each run ID in admin views.
-        
+
         Parameters
         ----------
         run_ids : list[str]
             Collection of identifier values.
-        
+
         Returns
         -------
         dict[str, list[str]]
@@ -6138,7 +6152,7 @@ class RunStore:
         query: str | None = None,
     ) -> list[dict[str, Any]]:
         """List runs for admin dashboards with filters and derived duration/tool metadata.
-        
+
         Parameters
         ----------
         limit : int, optional
@@ -6151,7 +6165,7 @@ class RunStore:
             User identifier.
         query : str | None, optional
             Free-text query string.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -6231,14 +6245,14 @@ class RunStore:
         query: str | None = None,
     ) -> list[dict[str, Any]]:
         """Aggregate per-user counts and activity timestamps for admin analytics.
-        
+
         Parameters
         ----------
         limit : int, optional
             Maximum number of records to return.
         query : str | None, optional
             Free-text query string.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -6389,14 +6403,14 @@ class RunStore:
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         """Summarize recent tool usage counts and success/failure splits for admins.
-        
+
         Parameters
         ----------
         since_hours : int, optional
             Input argument.
         limit : int, optional
             Maximum number of records to return.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -6432,12 +6446,12 @@ class RunStore:
 
     def list_admin_issues(self, *, limit: int = 25) -> list[dict[str, Any]]:
         """Collect recent operational issues (failed/stalled runs and failed uploads).
-        
+
         Parameters
         ----------
         limit : int, optional
             Maximum number of records to return.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -6564,7 +6578,7 @@ class RunStore:
 
     def admin_usage_timeseries_24h(self) -> list[dict[str, Any]]:
         """Build hourly platform usage buckets for the trailing 24 hours.
-        
+
         Returns
         -------
         list[dict[str, Any]]
@@ -6660,14 +6674,14 @@ class RunStore:
 
     def admin_overview(self, *, top_user_limit: int = 8, issue_limit: int = 12) -> dict[str, Any]:
         """Return top-level admin KPI snapshot with usage, users, tools, and issues.
-        
+
         Parameters
         ----------
         top_user_limit : int, optional
             Input argument.
         issue_limit : int, optional
             Input argument.
-        
+
         Returns
         -------
         dict[str, Any]
@@ -6746,10 +6760,9 @@ class RunStore:
                 )[0]
                 or 0
             )
-            message_volume_row = (
-                self._execute(
-                    conn,
-                    """
+            message_volume_row = self._execute(
+                conn,
+                """
                     SELECT
                         COUNT(*) AS total_count,
                         SUM(CASE WHEN LOWER(COALESCE(role, ''))='user' THEN 1 ELSE 0 END) AS user_count,
@@ -6757,10 +6770,8 @@ class RunStore:
                     FROM conversation_messages
                     WHERE COALESCE(created_at_ms, 0) >= ?
                     """,
-                    (threshold_24h_ms,),
-                ).fetchone()
-                or [0, 0, 0]
-            )
+                (threshold_24h_ms,),
+            ).fetchone() or [0, 0, 0]
             messages_last_24h = int(message_volume_row[0] or 0)
             user_messages_last_24h = int(message_volume_row[1] or 0)
             assistant_messages_last_24h = int(message_volume_row[2] or 0)
@@ -6870,14 +6881,14 @@ class RunStore:
 
     def admin_cancel_run(self, *, run_id: str, reason: str | None = None) -> dict[str, Any] | None:
         """Cancel a pending/running run and return transition metadata.
-        
+
         Parameters
         ----------
         run_id : str
             Workflow run identifier.
         reason : str | None, optional
             Input argument.
-        
+
         Returns
         -------
         dict[str, Any] | None
@@ -6923,14 +6934,14 @@ class RunStore:
 
     def admin_delete_conversation_for_user(self, *, conversation_id: str, user_id: str) -> bool:
         """Delete a specific user's conversation and return whether deletion occurred.
-        
+
         Parameters
         ----------
         conversation_id : str
             Conversation identifier.
         user_id : str
             User identifier.
-        
+
         Returns
         -------
         bool

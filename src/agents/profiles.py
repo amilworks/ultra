@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 DomainId = str
 
 
@@ -107,8 +106,8 @@ TOOL_INSIGHT_INSTRUCTIONS = (
     "You analyze scientific computer-vision tool outputs.\n"
     "Focus on segmentation and object-detection results and convert them into actionable insights.\n"
     "Return strict JSON with shape: "
-    "{\"insights\":[{\"tool\":str,\"headline\":str,\"details\":str,"
-    "\"confidence\":float|null,\"metrics\":object}]}\n"
+    '{"insights":[{"tool":str,"headline":str,"details":str,'
+    '"confidence":float|null,"metrics":object}]}\n'
     "Interpret scope correctly: `coverage_percent_*` is image-level union coverage, while "
     "`instance_coverage_percent_*` and `instance_area_*` describe per-mask connected-component statistics.\n"
     "Only include insights that are directly supported by the provided tool outputs.\n"

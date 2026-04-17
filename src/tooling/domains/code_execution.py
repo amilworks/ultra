@@ -21,9 +21,7 @@ NUMPY_CALCULATOR_TOOL = {
                 },
                 "variables": {
                     "type": "object",
-                    "description": (
-                        "Optional scalar or array variables used by the expression."
-                    ),
+                    "description": ("Optional scalar or array variables used by the expression."),
                     "additionalProperties": True,
                 },
             },
@@ -176,8 +174,8 @@ CODE_EXECUTION_TOOL_SCHEMAS = [
 
 
 __all__ = [
-    "NUMPY_CALCULATOR_TOOL",
     "CODEGEN_PYTHON_PLAN_TOOL",
-    "EXECUTE_PYTHON_JOB_TOOL",
     "CODE_EXECUTION_TOOL_SCHEMAS",
+    "EXECUTE_PYTHON_JOB_TOOL",
+    "NUMPY_CALCULATOR_TOOL",
 ]

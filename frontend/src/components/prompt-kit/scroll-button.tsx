@@ -1,15 +1,16 @@
 "use client"
 
-import { Button, buttonVariants } from "@/components/ui/button"
+import type { ComponentProps } from "react"
+
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { type VariantProps } from "class-variance-authority"
 import { ChevronDown } from "lucide-react"
 import { useStickToBottomContext } from "use-stick-to-bottom"
 
 export type ScrollButtonProps = {
   className?: string
-  variant?: VariantProps<typeof buttonVariants>["variant"]
-  size?: VariantProps<typeof buttonVariants>["size"]
+  variant?: ComponentProps<typeof Button>["variant"]
+  size?: ComponentProps<typeof Button>["size"]
 } & React.ButtonHTMLAttributes<HTMLButtonElement>
 
 function ScrollButton({

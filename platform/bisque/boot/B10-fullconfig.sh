@@ -18,6 +18,7 @@ python - <<'PY'
 import configparser
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlparse
 
 
@@ -129,6 +130,60 @@ def _set_option(name, value):
         cfg.set("app:main", name, value)
 
 
+def _csv_items(value):
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _store_env_prefix(store_name):
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", store_name.strip()).upper()
+    return f"BISQUE_STORE_{normalized}_"
+
+
+def _main_option(name, default=""):
+    if cfg.has_option("main", name):
+        return cfg.get("main", name)
+    if cfg.has_option("app:main", name):
+        return cfg.get("app:main", name)
+    return default
+
+
+def _store_env_prefix(store_name):
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in store_name.upper()).strip("_")
+    return f"BISQUE_STORE_{normalized}_"
+
+
+def _apply_extra_file_stores():
+    extras = [x.strip() for x in os.environ.get("BISQUE_EXTRA_FILE_STORES", "").split(",") if x.strip()]
+    if not extras:
+        return
+
+    existing = [x.strip() for x in cfg.get("main", "bisque.blob_service.stores", fallback="").split(",") if x.strip()]
+    configured = list(existing)
+
+    for store_name in extras:
+        env_prefix = _store_env_prefix(store_name)
+        mounturl = os.environ.get(f"{env_prefix}MOUNTURL", "").strip()
+        top = os.environ.get(f"{env_prefix}TOP", "").strip()
+        readonly = os.environ.get(f"{env_prefix}READONLY", "").strip()
+
+        if not mounturl:
+            print(f"skipping extra file store {store_name}: missing {env_prefix}MOUNTURL")
+            continue
+
+        _set_option(f"bisque.stores.{store_name}.mounturl", mounturl)
+        if top:
+            _set_option(f"bisque.stores.{store_name}.top", top)
+        if readonly:
+            _set_option(f"bisque.stores.{store_name}.readonly", readonly)
+
+        if store_name not in configured:
+            configured.append(store_name)
+        print(f"configured extra file store {store_name} -> {mounturl}")
+
+    if configured:
+        _set_option("bisque.blob_service.stores", ",".join(configured))
+
+
 server_url = os.environ.get("BISQUE_SERVER", "http://localhost:8080")
 engine_url = os.environ.get("BISQUE_ENGINE", "http://localhost:27000")
 bind_host = os.environ.get("BISQUE_BIND_HOST", "0.0.0.0")
@@ -214,6 +269,26 @@ _set_option("sqlalchemy.pool_pre_ping", os.environ.get("BISQUE_SQLALCHEMY_POOL_P
 _set_option("sqlalchemy.pool_size", os.environ.get("BISQUE_SQLALCHEMY_POOL_SIZE", "25"))
 _set_option("sqlalchemy.max_overflow", os.environ.get("BISQUE_SQLALCHEMY_MAX_OVERFLOW", "25"))
 _set_option("sqlalchemy.pool_timeout", os.environ.get("BISQUE_SQLALCHEMY_POOL_TIMEOUT", "60"))
+
+configured_stores = _csv_items(_main_option("bisque.blob_service.stores", ""))
+for store_name in _csv_items(os.environ.get("BISQUE_EXTRA_FILE_STORES", "")):
+    env_prefix = _store_env_prefix(store_name)
+    mounturl = os.environ.get(f"{env_prefix}MOUNTURL", "").strip()
+    if not mounturl:
+        raise SystemExit(
+            f"{env_prefix}MOUNTURL is required when BISQUE_EXTRA_FILE_STORES includes {store_name!r}"
+        )
+    top = os.environ.get(f"{env_prefix}TOP", "").strip() or mounturl
+    readonly = os.environ.get(f"{env_prefix}READONLY", "").strip().lower() or "true"
+    if store_name not in configured_stores:
+        configured_stores.append(store_name)
+    _set_option(f"bisque.stores.{store_name}.mounturl", mounturl)
+    _set_option(f"bisque.stores.{store_name}.top", top)
+    _set_option(f"bisque.stores.{store_name}.readonly", readonly)
+
+if configured_stores:
+    _set_option("bisque.blob_service.stores", ",".join(configured_stores))
+_apply_extra_file_stores()
 
 if not cfg.has_section("servers"):
     cfg.add_section("servers")

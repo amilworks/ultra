@@ -25,14 +25,14 @@ class ToolStep:
     retries: int = 0
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> "ToolStep":
+    def from_dict(data: dict[str, Any]) -> ToolStep:
         """Create a normalized `ToolStep` from loosely typed input data.
-        
+
         Parameters
         ----------
         data : dict[str, Any]
             Input argument.
-        
+
         Returns
         -------
         'ToolStep'
@@ -54,14 +54,14 @@ class WorkflowPlan:
     steps: list[ToolStep]
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> "WorkflowPlan":
+    def from_dict(data: dict[str, Any]) -> WorkflowPlan:
         """Build a `WorkflowPlan` and recursively coerce each step payload.
-        
+
         Parameters
         ----------
         data : dict[str, Any]
             Input argument.
-        
+
         Returns
         -------
         'WorkflowPlan'
@@ -109,16 +109,16 @@ class WorkflowRun:
         trace_group_id: str | None = None,
         workflow_profile: str | None = None,
         pedagogy_level: str | None = None,
-    ) -> "WorkflowRun":
+    ) -> WorkflowRun:
         """Create a new pending run with generated ID and synchronized timestamps.
-        
+
         Parameters
         ----------
         goal : str
             Input argument.
         plan : WorkflowPlan | None, optional
             Input argument.
-        
+
         Returns
         -------
         'WorkflowRun'

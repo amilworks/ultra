@@ -4,6 +4,7 @@ import {
   memo,
   type CSSProperties,
   type ComponentType,
+  type MutableRefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -73,6 +74,7 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
+  SidebarInput,
   SidebarMenuAction,
   SidebarMenu,
   SidebarMenuButton,
@@ -81,6 +83,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { ApiClient, ApiError } from "./lib/api";
 import {
@@ -93,12 +96,38 @@ import {
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { formatBytes } from "./lib/format";
+import {
+  buildBisqueNavLinks,
+  inferBisqueRootFromUrl,
+  type BisqueNavLinks,
+} from "./features/auth/bisqueNavigation";
+import {
+  loadAdminIssues,
+  loadAdminOverview,
+  loadAdminRuns,
+  loadAdminUsers,
+} from "./features/admin/client";
+import {
+  listRunArtifacts,
+  listRunEvents,
+  listSessionConversations,
+} from "./features/chat/client";
+import {
+  loadComposerResources,
+  loadLibraryResources,
+} from "./features/resources/client";
+import {
+  DEFAULT_THINKING_TEXT,
+  getPhaseThinkingText,
+  getToolStatusThinkingText,
+} from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
 import type {
   AdminIssueRecord,
   AdminOverviewResponse,
   AdminRunRecord,
   AdminUserSummary,
+  AssistantContract,
   ArtifactRecord,
   ChatMessage,
   ConversationRecord,
@@ -182,6 +211,16 @@ type RunImageArtifact = {
 type ToolCardMetric = {
   label: string;
   value: string;
+};
+
+type ScientificFigureCard = {
+  key: string;
+  title: string;
+  subtitle?: string;
+  summary?: string;
+  previewUrl: string;
+  downloadUrl?: string;
+  previewable: boolean;
 };
 
 const lazyNamed = <TModule extends Record<string, unknown>>(
@@ -306,6 +345,25 @@ type YoloFigureAvailability = {
   missingAnnotatedFigure: boolean;
 };
 
+type MegasegFileInsight = {
+  file: string;
+  coveragePercent?: number | null;
+  objectCount?: number | null;
+  activeSliceCount?: number | null;
+  zSliceCount?: number | null;
+  largestComponentVoxels?: number | null;
+  technicalSummary?: string | null;
+};
+
+type MegasegInsights = {
+  figureCards: ScientificFigureCard[];
+  fileRows: MegasegFileInsight[];
+  collectionLabel?: string;
+  device?: string | null;
+  structureChannel?: number | null;
+  nucleusChannel?: number | null;
+};
+
 type ToolResourceRow = {
   name: string;
   owner?: string;
@@ -329,6 +387,7 @@ type ToolDownloadRow = {
 type ToolResultCard = {
   id: string;
   tool:
+    | "segment_image_megaseg"
     | "segment_image_sam2"
     | "segment_image_sam3"
     | "yolo_detect"
@@ -361,6 +420,38 @@ type ToolResultCard = {
   prairieInsights?: PrairieDetectionInsights | null;
   yoloFigures?: YoloFigureCard[];
   yoloFigureAvailability?: YoloFigureAvailability | null;
+  placement?: "before_text" | "after_text";
+  scientificFigures?: ScientificFigureCard[];
+  megasegInsights?: MegasegInsights | null;
+};
+
+type ResearchDigestEvidenceRow = {
+  source: string;
+  summary?: string;
+  artifact?: string;
+  runId?: string | null;
+};
+
+type ResearchDigestMeasurementRow = {
+  name: string;
+  valueLabel: string;
+};
+
+type ResearchDigestStatisticRow = {
+  label: string;
+  summary: string;
+};
+
+type ResearchDigestData = {
+  result: string;
+  confidenceLevel?: "low" | "medium" | "high";
+  confidenceWhy: string[];
+  evidence: ResearchDigestEvidenceRow[];
+  measurements: ResearchDigestMeasurementRow[];
+  statisticalAnalysis: ResearchDigestStatisticRow[];
+  qcWarnings: string[];
+  limitations: string[];
+  nextSteps: string[];
 };
 
 const RESOURCE_BACKED_BISQUE_CARD_TOOLS = new Set<ToolResultCard["tool"]>([
@@ -421,13 +512,6 @@ type BisqueViewerLink = {
   inputUrl?: string;
 };
 
-type BisqueNavLinks = {
-  home: string;
-  datasets: string;
-  images: string;
-  tables: string;
-};
-
 type ConversationState = {
   id: string;
   title: string;
@@ -453,6 +537,11 @@ type ConversationState = {
   streamingMessageId: string | null;
 };
 
+type ConversationScrollMemory = {
+  scrollTop: number;
+  wasNearBottom: boolean;
+};
+
 const mobileSidebarCloseProps = {
   "data-sidebar-close-mobile": "true",
 } as const;
@@ -463,6 +552,18 @@ const mobileSidebarKeepOpenProps = {
 
 const CONVERSATION_QUERY_PARAM = "conversation";
 const CONVERSATION_PAGE_SIZE = 25;
+const SCROLL_RESTORE_BOTTOM_THRESHOLD_PX = 280;
+
+const captureConversationScrollMemory = (
+  scrollElement: HTMLElement
+): ConversationScrollMemory => {
+  const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
+  const scrollTop = Math.min(Math.max(scrollElement.scrollTop, 0), maxScrollTop);
+  return {
+    scrollTop,
+    wasNearBottom: maxScrollTop - scrollTop <= SCROLL_RESTORE_BOTTOM_THRESHOLD_PX,
+  };
+};
 
 const readConversationIdFromLocation = (): string | null => {
   if (typeof window === "undefined") {
@@ -618,7 +719,7 @@ const ConversationHistoryActions = ({
             size="icon"
             aria-label={`Conversation actions for ${conversationTitle}`}
             disabled={deleting}
-            className="size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+            className="app-history-action-button size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
           >
             <MoreHorizontal />
             <span className="sr-only">Conversation actions</span>
@@ -1670,29 +1771,78 @@ function ChatAutoScroll({
   conversationId,
   conversationHydrated,
   scrollRequestKey,
+  scrollMemoryRef,
+  scrollElementRef,
+  scrollWriteBlockRef,
 }: {
   conversationId: string | null;
   conversationHydrated: boolean;
   scrollRequestKey: number;
+  scrollMemoryRef: MutableRefObject<Record<string, ConversationScrollMemory>>;
+  scrollElementRef: MutableRefObject<HTMLElement | null>;
+  scrollWriteBlockRef: MutableRefObject<string | null>;
 }) {
-  const { scrollToBottom } = useStickToBottomContext();
-  const previousConversationIdRef = useRef<string | null>(null);
+  const { scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
+  const restoredConversationIdRef = useRef<string | null>(null);
+  const liveConversationIdRef = useRef<string | null>(conversationId);
   const previousScrollRequestKeyRef = useRef(scrollRequestKey);
 
-  useEffect(() => {
+  const rememberScrollPosition = useCallback(
+    (targetConversationId: string | null) => {
+      const scrollElement = scrollRef.current;
+      if (!targetConversationId || !scrollElement) {
+        return;
+      }
+      scrollMemoryRef.current[targetConversationId] = captureConversationScrollMemory(scrollElement);
+    },
+    [scrollMemoryRef, scrollRef]
+  );
+
+  useLayoutEffect(() => {
+    liveConversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  useLayoutEffect(() => {
+    scrollElementRef.current = scrollRef.current;
+    return () => {
+      if (scrollElementRef.current === scrollRef.current) {
+        scrollElementRef.current = null;
+      }
+    };
+  }, [scrollElementRef, scrollRef]);
+
+  useLayoutEffect(() => {
     if (!conversationId) {
-      previousConversationIdRef.current = null;
+      restoredConversationIdRef.current = null;
       return;
     }
-    if (!conversationHydrated || previousConversationIdRef.current === conversationId) {
+    if (!conversationHydrated || restoredConversationIdRef.current === conversationId) {
       return;
     }
-    previousConversationIdRef.current = conversationId;
+    restoredConversationIdRef.current = conversationId;
     let rafIdOne = 0;
     let rafIdTwo = 0;
     rafIdOne = requestAnimationFrame(() => {
       rafIdTwo = requestAnimationFrame(() => {
+        const remembered = scrollMemoryRef.current[conversationId];
+        if (remembered && !remembered.wasNearBottom) {
+          const scrollElement = scrollRef.current;
+          if (!scrollElement) {
+            return;
+          }
+          stopScroll();
+          const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
+          scrollElement.scrollTop = Math.min(remembered.scrollTop, maxScrollTop);
+          rememberScrollPosition(conversationId);
+          if (scrollWriteBlockRef.current === conversationId) {
+            scrollWriteBlockRef.current = null;
+          }
+          return;
+        }
         scrollToBottom({ animation: "instant", ignoreEscapes: true });
+        if (scrollWriteBlockRef.current === conversationId) {
+          scrollWriteBlockRef.current = null;
+        }
       });
     });
     return () => {
@@ -1703,7 +1853,38 @@ function ChatAutoScroll({
         cancelAnimationFrame(rafIdTwo);
       }
     };
-  }, [conversationHydrated, conversationId, scrollToBottom]);
+  }, [
+    conversationHydrated,
+    conversationId,
+    rememberScrollPosition,
+    scrollMemoryRef,
+    scrollRef,
+    scrollToBottom,
+    stopScroll,
+  ]);
+
+  useEffect(() => {
+    if (!conversationId || !conversationHydrated) {
+      return;
+    }
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) {
+      return;
+    }
+    const handleScroll = () => {
+      if (
+        liveConversationIdRef.current !== conversationId ||
+        scrollWriteBlockRef.current === conversationId
+      ) {
+        return;
+      }
+      rememberScrollPosition(conversationId);
+    };
+    scrollElement.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      scrollElement.removeEventListener("scroll", handleScroll);
+    };
+  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef]);
 
   useEffect(() => {
     if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
@@ -1777,14 +1958,49 @@ const ConversationMessageRow = memo(
           progressEvents,
           runArtifacts,
           uploadedFiles,
-          uploadPreviewUrlForFile
+          uploadPreviewUrlForFile,
+          {
+            runId: message.runId,
+            buildArtifactDownloadUrl: (runId, path) =>
+              apiClient.artifactDownloadUrl(runId, path),
+            responseMetadata: message.responseMetadata ?? null,
+          }
         ),
-      [progressEvents, runArtifacts, uploadedFiles, uploadPreviewUrlForFile]
+      [
+        apiClient,
+        message.responseMetadata,
+        message.runId,
+        progressEvents,
+        runArtifacts,
+        uploadedFiles,
+        uploadPreviewUrlForFile,
+      ]
+    );
+    const leadingToolResultCards = useMemo(
+      () => toolResultCards.filter((card) => card.placement === "before_text"),
+      [toolResultCards]
+    );
+    const trailingToolResultCards = useMemo(
+      () => toolResultCards.filter((card) => card.placement !== "before_text"),
+      [toolResultCards]
+    );
+    const researchDigest = useMemo(
+      () =>
+        isAssistant
+          ? buildResearchDigestData({
+              message,
+              hasToolCards: toolResultCards.length > 0,
+            })
+          : null,
+      [isAssistant, message, toolResultCards.length]
     );
     const hasPrimaryToolCard = toolResultCards.length > 0;
-    const showToolResultCards =
-      toolResultCards.length > 0 &&
-      (!isStreamingAssistant || !message.liveStream);
+    const showResearchDigest =
+      Boolean(researchDigest) && (!isStreamingAssistant || !message.liveStream);
+    const showLeadingToolResultCards =
+      leadingToolResultCards.length > 0 && (!isStreamingAssistant || !message.liveStream);
+    const showTrailingToolResultCards =
+      trailingToolResultCards.length > 0 && (!isStreamingAssistant || !message.liveStream);
     const bisqueAuthGate = useMemo(
       () => extractBisqueAuthGate(progressEvents),
       [progressEvents]
@@ -1805,11 +2021,244 @@ const ConversationMessageRow = memo(
       () => summaryModeLabelForMessage(message),
       [message]
     );
+    const renderToolCardSection = useCallback(
+      (cardsToRender: ToolResultCard[]) => (
+        <div className="chat-tool-cards">
+          {cardsToRender.map((card) => {
+            const usesResourceQuickPreview =
+              card.images.length > 0 &&
+              RESOURCE_BACKED_BISQUE_CARD_TOOLS.has(card.tool);
+            const bisqueResourceHeader =
+              usesResourceQuickPreview && card.tool !== "run_bisque_module"
+                ? buildBisqueResourceHeader(card)
+                : null;
+            const showResourceTable =
+              card.resourceRows.length > 0 &&
+              !(usesResourceQuickPreview && card.resourceRows.length === 1);
+            const isPrairieCard =
+              card.variant === "prairie_detection" &&
+              Boolean(card.prairieInsights);
+            const isMegasegCard =
+              card.tool === "segment_image_megaseg" &&
+              Boolean(card.megasegInsights);
+
+            return (
+              <Card
+                key={card.id}
+                className={cn(
+                  "chat-tool-card",
+                  isPrairieCard && "chat-tool-card--prairie",
+                  isMegasegCard && "chat-tool-card--scientific"
+                )}
+              >
+                <CardHeader className="chat-tool-card-header">
+                  {isPrairieCard ? (
+                    <p className="chat-tool-card-eyebrow">Wildlife Detection</p>
+                  ) : isMegasegCard ? (
+                    <p className="chat-tool-card-eyebrow">Microscopy Segmentation</p>
+                  ) : bisqueResourceHeader?.eyebrow ? (
+                    <p className="chat-tool-card-eyebrow">
+                      {bisqueResourceHeader.eyebrow}
+                    </p>
+                  ) : null}
+                  <CardTitle className="chat-tool-card-title">
+                    {bisqueResourceHeader?.title ?? card.title}
+                  </CardTitle>
+                  {(bisqueResourceHeader?.subtitle ?? card.subtitle) ? (
+                    <p className="chat-tool-card-subtitle">
+                      {bisqueResourceHeader?.subtitle ?? card.subtitle}
+                    </p>
+                  ) : null}
+                  {bisqueResourceHeader?.summary ? (
+                    <p className="chat-tool-card-summary">
+                      {bisqueResourceHeader.summary}
+                    </p>
+                  ) : null}
+                  {!isPrairieCard && !bisqueResourceHeader?.hideMetricBadges ? (
+                    <div className="chat-tool-metrics">
+                      {card.metrics.map((metric) => (
+                        <Badge key={`${card.id}-${metric.label}`} variant="secondary">
+                          {metric.label}: {metric.value}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                </CardHeader>
+                <CardContent className="chat-tool-card-content">
+                  {isMegasegCard ? <MegasegCardBody card={card} /> : null}
+                  {isPrairieCard ? (
+                    <PrairieDetectionCardBody card={card} />
+                  ) : null}
+                  {!isMegasegCard && !isPrairieCard && card.classes.length > 0 ? (
+                    <div className="chat-tool-classes">
+                      {card.classes.map((cls) => (
+                        <Badge key={`${card.id}-${cls.name}`} variant="outline">
+                          {cls.name} ({cls.count})
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                  {!isMegasegCard && !isPrairieCard && showResourceTable ? (
+                    <div className="chat-tool-resource-table-wrap">
+                      <table className="chat-tool-resource-table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {card.resourceRows.map((row, rowIndex) => (
+                            <tr key={`${card.id}-resource-${rowIndex}`}>
+                              <td className="chat-tool-resource-name-cell">
+                                <div
+                                  className="chat-tool-resource-name"
+                                  title={row.name}
+                                >
+                                  {row.name}
+                                </div>
+                              </td>
+                              <td>
+                                <span className="chat-tool-resource-date">
+                                  {row.created ?? "—"}
+                                </span>
+                              </td>
+                              <td className="chat-tool-resource-actions-cell">
+                                <div className="chat-tool-resource-actions">
+                                  {row.clientViewUrl || row.uri ? (
+                                    <a
+                                      href={row.clientViewUrl || row.uri}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="chat-tool-resource-link"
+                                    >
+                                      Open in BisQue
+                                    </a>
+                                  ) : null}
+                                  {row.resourceUri ? (
+                                    <button
+                                      type="button"
+                                      className="chat-tool-resource-link"
+                                      onClick={() => {
+                                        void actions.onImportBisqueResourcesIntoConversation(
+                                          [row.resourceUri as string],
+                                          {
+                                            persistSelectionContext: true,
+                                            source: "tool_result_use_in_chat",
+                                            originatingMessageId: message.id,
+                                          }
+                                        );
+                                      }}
+                                    >
+                                      Use in chat
+                                    </button>
+                                  ) : null}
+                                  {row.resourceUri ? (
+                                    <button
+                                      type="button"
+                                      className="chat-tool-resource-link"
+                                      onClick={() => {
+                                        void actions.onCopyBisqueResourceUri(
+                                          (row.clientViewUrl || row.resourceUri) as string
+                                        );
+                                      }}
+                                    >
+                                      Copy link
+                                    </button>
+                                  ) : null}
+                                  {!row.clientViewUrl &&
+                                  !row.uri &&
+                                  !row.resourceUri
+                                    ? "—"
+                                    : null}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                  {!isMegasegCard && !isPrairieCard && card.downloadRows.length > 0 ? (
+                    <div className="chat-tool-resource-table-wrap">
+                      <p className="chat-tool-card-subtitle">Download activity</p>
+                      <table className="chat-tool-resource-table">
+                        <thead>
+                          <tr>
+                            <th>Status</th>
+                            <th>Saved to</th>
+                            <th>Resource</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {card.downloadRows.map((row, rowIndex) => (
+                            <tr key={`${card.id}-download-${rowIndex}`}>
+                              <td>{row.status}</td>
+                              <td>{row.outputPath ?? "—"}</td>
+                              <td>
+                                {row.clientViewUrl ? (
+                                  <a
+                                    href={row.clientViewUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-tool-resource-link"
+                                  >
+                                    {row.clientViewUrl}
+                                  </a>
+                                ) : (
+                                  row.resourceUri ?? "—"
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                  {!isMegasegCard && !isPrairieCard && card.tool === "yolo_detect" && card.yoloFigures?.length ? (
+                    <YoloFigureStack
+                      figures={card.yoloFigures}
+                      variant="default"
+                    />
+                  ) : !isMegasegCard &&
+                    !isPrairieCard &&
+                    card.tool === "yolo_detect" &&
+                    card.yoloFigureAvailability?.missingAnnotatedFigure ? (
+                    <YoloFigureUnavailable variant="default" />
+                  ) : !isMegasegCard && !isPrairieCard && card.images.length > 0 ? (
+                    usesResourceQuickPreview ? (
+                      <ToolResultQuickPreview
+                        images={card.images}
+                        resourceRows={card.resourceRows}
+                        onUseInChat={(resourceUri) => {
+                          void actions.onImportBisqueResourcesIntoConversation(
+                            [resourceUri],
+                            {
+                              persistSelectionContext: true,
+                              source: "tool_result_use_in_chat",
+                              originatingMessageId: message.id,
+                            }
+                          );
+                        }}
+                      />
+                    ) : (
+                      <ToolImageCarousel images={card.images} />
+                    )
+                  ) : null}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      ),
+      [actions, message.id]
+    );
 
     if (!isAssistant) {
       return (
         <Message
-          className="chat-width-frame mx-auto w-full px-6 justify-end"
+          className="chat-width-frame mx-auto w-full justify-end px-4 sm:px-6"
         >
           <div className="group flex w-full flex-col items-end gap-1">
             <MessageContent className="max-w-full bg-muted text-primary rounded-3xl px-5 py-2.5">
@@ -1874,7 +2323,7 @@ const ConversationMessageRow = memo(
 
     return (
       <Message
-        className="chat-width-frame mx-auto w-full px-6 justify-start"
+        className="chat-width-frame mx-auto w-full justify-start px-4 sm:px-6"
       >
         <div className="group flex w-full flex-1 flex-col gap-2">
           {thinkingBarText ? (
@@ -1905,6 +2354,9 @@ const ConversationMessageRow = memo(
               ) : null}
             </div>
           ) : null}
+          {showLeadingToolResultCards
+            ? renderToolCardSection(leadingToolResultCards)
+            : null}
           {isStreamingAssistant && message.liveStream ? (
             <div
               id={message.id}
@@ -1976,227 +2428,14 @@ const ConversationMessageRow = memo(
               onOpenInViewer={actions.onOpenConversationFilesInViewer}
             />
           ) : null}
-          {showToolResultCards ? (
-            <div className="chat-tool-cards">
-              {toolResultCards.map((card) => {
-                const usesResourceQuickPreview =
-                  card.images.length > 0 &&
-                  RESOURCE_BACKED_BISQUE_CARD_TOOLS.has(card.tool);
-                const bisqueResourceHeader =
-                  usesResourceQuickPreview && card.tool !== "run_bisque_module"
-                    ? buildBisqueResourceHeader(card)
-                    : null;
-                const showResourceTable =
-                  card.resourceRows.length > 0 &&
-                  !(usesResourceQuickPreview && card.resourceRows.length === 1);
-                const isPrairieCard =
-                  card.variant === "prairie_detection" &&
-                  Boolean(card.prairieInsights);
-
-                return (
-                  <Card
-                    key={card.id}
-                    className={cn(
-                      "chat-tool-card",
-                      isPrairieCard && "chat-tool-card--prairie"
-                    )}
-                  >
-                    <CardHeader className="chat-tool-card-header">
-                      {isPrairieCard ? (
-                        <p className="chat-tool-card-eyebrow">Wildlife Detection</p>
-                      ) : bisqueResourceHeader?.eyebrow ? (
-                        <p className="chat-tool-card-eyebrow">
-                          {bisqueResourceHeader.eyebrow}
-                        </p>
-                      ) : null}
-                      <CardTitle className="chat-tool-card-title">
-                        {bisqueResourceHeader?.title ?? card.title}
-                      </CardTitle>
-                      {(bisqueResourceHeader?.subtitle ?? card.subtitle) ? (
-                        <p className="chat-tool-card-subtitle">
-                          {bisqueResourceHeader?.subtitle ?? card.subtitle}
-                        </p>
-                      ) : null}
-                      {bisqueResourceHeader?.summary ? (
-                        <p className="chat-tool-card-summary">
-                          {bisqueResourceHeader.summary}
-                        </p>
-                      ) : null}
-                      {!isPrairieCard && !bisqueResourceHeader?.hideMetricBadges ? (
-                        <div className="chat-tool-metrics">
-                          {card.metrics.map((metric) => (
-                            <Badge key={`${card.id}-${metric.label}`} variant="secondary">
-                              {metric.label}: {metric.value}
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : null}
-                    </CardHeader>
-                    <CardContent className="chat-tool-card-content">
-                      {isPrairieCard ? (
-                        <PrairieDetectionCardBody card={card} />
-                      ) : null}
-                      {!isPrairieCard && card.classes.length > 0 ? (
-                        <div className="chat-tool-classes">
-                          {card.classes.map((cls) => (
-                            <Badge key={`${card.id}-${cls.name}`} variant="outline">
-                              {cls.name} ({cls.count})
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : null}
-                      {!isPrairieCard && showResourceTable ? (
-                        <div className="chat-tool-resource-table-wrap">
-                          <table className="chat-tool-resource-table">
-                            <thead>
-                              <tr>
-                                <th>Name</th>
-                                <th>Created</th>
-                                <th>Actions</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {card.resourceRows.map((row, rowIndex) => (
-                                <tr key={`${card.id}-resource-${rowIndex}`}>
-                                  <td className="chat-tool-resource-name-cell">
-                                    <div
-                                      className="chat-tool-resource-name"
-                                      title={row.name}
-                                    >
-                                      {row.name}
-                                    </div>
-                                  </td>
-                                  <td>
-                                    <span className="chat-tool-resource-date">
-                                      {row.created ?? "—"}
-                                    </span>
-                                  </td>
-                                  <td className="chat-tool-resource-actions-cell">
-                                    <div className="chat-tool-resource-actions">
-                                      {row.clientViewUrl || row.uri ? (
-                                        <a
-                                          href={row.clientViewUrl || row.uri}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="chat-tool-resource-link"
-                                        >
-                                          Open in BisQue
-                                        </a>
-                                      ) : null}
-                                      {row.resourceUri ? (
-                                        <button
-                                          type="button"
-                                          className="chat-tool-resource-link"
-                                          onClick={() => {
-                                            void actions.onImportBisqueResourcesIntoConversation(
-                                              [row.resourceUri as string],
-                                              {
-                                                persistSelectionContext: true,
-                                                source: "tool_result_use_in_chat",
-                                                originatingMessageId: message.id,
-                                              }
-                                            );
-                                          }}
-                                        >
-                                          Use in chat
-                                        </button>
-                                      ) : null}
-                                      {row.resourceUri ? (
-                                        <button
-                                          type="button"
-                                          className="chat-tool-resource-link"
-                                          onClick={() => {
-                                            void actions.onCopyBisqueResourceUri(
-                                              (row.clientViewUrl || row.resourceUri) as string
-                                            );
-                                          }}
-                                        >
-                                          Copy link
-                                        </button>
-                                      ) : null}
-                                      {!row.clientViewUrl &&
-                                      !row.uri &&
-                                      !row.resourceUri
-                                        ? "—"
-                                        : null}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : null}
-                      {!isPrairieCard && card.downloadRows.length > 0 ? (
-                        <div className="chat-tool-resource-table-wrap">
-                          <p className="chat-tool-card-subtitle">Download activity</p>
-                          <table className="chat-tool-resource-table">
-                            <thead>
-                              <tr>
-                                <th>Status</th>
-                                <th>Saved to</th>
-                                <th>Resource</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {card.downloadRows.map((row, rowIndex) => (
-                                <tr key={`${card.id}-download-${rowIndex}`}>
-                                  <td>{row.status}</td>
-                                  <td>{row.outputPath ?? "—"}</td>
-                                  <td>
-                                    {row.clientViewUrl ? (
-                                      <a
-                                        href={row.clientViewUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="chat-tool-resource-link"
-                                      >
-                                        {row.clientViewUrl}
-                                      </a>
-                                    ) : (
-                                      row.resourceUri ?? "—"
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : null}
-                      {!isPrairieCard && card.tool === "yolo_detect" && card.yoloFigures?.length ? (
-                        <YoloFigureStack
-                          figures={card.yoloFigures}
-                          variant="default"
-                        />
-                      ) : !isPrairieCard &&
-                        card.tool === "yolo_detect" &&
-                        card.yoloFigureAvailability?.missingAnnotatedFigure ? (
-                        <YoloFigureUnavailable variant="default" />
-                      ) : !isPrairieCard && card.images.length > 0 ? (
-                        usesResourceQuickPreview ? (
-                          <ToolResultQuickPreview
-                            images={card.images}
-                            resourceRows={card.resourceRows}
-                            onUseInChat={(resourceUri) => {
-                              void actions.onImportBisqueResourcesIntoConversation(
-                                [resourceUri],
-                                {
-                                  persistSelectionContext: true,
-                                  source: "tool_result_use_in_chat",
-                                  originatingMessageId: message.id,
-                                }
-                              );
-                            }}
-                          />
-                        ) : (
-                          <ToolImageCarousel images={card.images} />
-                        )
-                      ) : null}
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
+          {showTrailingToolResultCards
+            ? renderToolCardSection(trailingToolResultCards)
+            : null}
+          {showResearchDigest && researchDigest ? (
+            <ResearchDigestCard
+              digest={researchDigest}
+              followsVisuals={showLeadingToolResultCards}
+            />
           ) : null}
           {runArtifacts.length > 0 && toolResultCards.length === 0 ? (
             <div className="chat-artifact-grid">
@@ -2314,7 +2553,7 @@ const ConversationTranscript = memo(
   }: ConversationTranscriptProps) {
     return (
       <ChatContainerContent
-        className="space-y-0 px-6 py-14"
+        className="space-y-0 px-4 py-8 sm:px-6 sm:py-14"
         scrollClassName="h-full min-h-0 overscroll-y-contain"
       >
         {!conversationHydrated ? (
@@ -2490,32 +2729,6 @@ const partitionBisqueUris = (
     }
   });
   return { resourceUris, datasetUris };
-};
-
-const buildBisqueNavLinks = (root: string): BisqueNavLinks => {
-  const trimmedRoot = String(root || "").trim().replace(/\/+$/, "");
-  return {
-    home: `${trimmedRoot}/client_service/`,
-    datasets: `${trimmedRoot}/client_service/browser?resource=/data_service/dataset`,
-    images: `${trimmedRoot}/client_service/browser?resource=/data_service/image`,
-    tables: `${trimmedRoot}/client_service/browser?resource=/data_service/table`,
-  };
-};
-
-const inferBisqueRootFromUrl = (urlValue: string): string | null => {
-  const candidate = String(urlValue || "").trim();
-  if (!candidate) {
-    return null;
-  }
-  try {
-    const parsed =
-      typeof window !== "undefined" && window.location?.origin
-        ? new URL(candidate, window.location.origin)
-        : new URL(candidate);
-    return `${parsed.protocol}//${parsed.host}`;
-  } catch {
-    return null;
-  }
 };
 
 const toBisqueClientViewUrl = (urlValue: string | null | undefined): string | null => {
@@ -2796,6 +3009,99 @@ const isPlotArtifact = (
   );
 };
 
+const formatPercentMetric = (value: number | null | undefined, digits = 2): string => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "n/a";
+  }
+  return `${Number(value).toFixed(digits)}%`;
+};
+
+const formatIntegerMetric = (value: number | null | undefined): string => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "n/a";
+  }
+  return Math.round(Number(value)).toLocaleString();
+};
+
+const scientificFigureSortKey = (
+  value: Pick<ScientificFigureCard, "title" | "subtitle" | "summary">
+): [number, string] => {
+  const normalized = [value.title, value.subtitle, value.summary]
+    .filter((item): item is string => Boolean(item))
+    .join(" ")
+    .toLowerCase();
+  if (/\bmip\b|maximum/i.test(normalized)) {
+    return [0, normalized];
+  }
+  if (/mid[-\s]?z|midplane|representative/i.test(normalized)) {
+    return [1, normalized];
+  }
+  return [2, normalized];
+};
+
+const eventArtifactToToolImage = ({
+  artifact,
+  runId,
+  buildArtifactDownloadUrl,
+}: {
+  artifact: Record<string, unknown>;
+  runId?: string;
+  buildArtifactDownloadUrl?: (runId: string, path: string) => string;
+}): ToolCardImage | null => {
+  const path = String(artifact.path ?? "").trim();
+  if (!path || !isImageArtifactPath(path) || !runId || !buildArtifactDownloadUrl) {
+    return null;
+  }
+  const mimeType = String(artifact.mime_type ?? "").trim() || undefined;
+  const downloadUrl = buildArtifactDownloadUrl(runId, path);
+  const title =
+    String(artifact.title ?? artifactDisplayName({ path, title: "", source_path: String(artifact.source_path ?? "") }))
+      .trim() || artifactTitleFromPath(path);
+  return {
+    path,
+    url: downloadUrl,
+    downloadUrl,
+    title,
+    sourceName: title,
+    sourcePath: String(artifact.source_path ?? "").trim() || undefined,
+    previewable: isInlineImageArtifact(path, mimeType),
+  } satisfies ToolCardImage;
+};
+
+const buildMegasegNarrative = ({
+  fileRows,
+  processed,
+  meanCoverage,
+  meanObjectCount,
+}: {
+  fileRows: MegasegFileInsight[];
+  processed: number | null;
+  meanCoverage: number | null;
+  meanObjectCount: number | null;
+}): string | undefined => {
+  const firstRow = fileRows[0];
+  const technicalSummary = String(firstRow?.technicalSummary ?? "").trim();
+  if (technicalSummary) {
+    return technicalSummary;
+  }
+
+  const processedCount = Math.max(
+    fileRows.length,
+    Math.round(processed ?? fileRows.length)
+  );
+  if (processedCount <= 0) {
+    return undefined;
+  }
+
+  const coverageClause =
+    meanCoverage !== null
+      ? `${formatPercentMetric(meanCoverage)} mean segmented coverage`
+      : "a completed segmentation pass";
+  const objectClause =
+    meanObjectCount !== null ? ` with ${meanObjectCount.toFixed(1)} mean objects per image` : "";
+  return `${coverageClause}${objectClause} across ${pluralizeCount(processedCount, "image")}. Review the overlays first to confirm boundary fidelity, then use the table to compare coverage and object counts across inputs.`;
+};
+
 const artifactLookupKeys = (value: string): string[] => {
   const rawName = extractFilename(value).toLowerCase().trim();
   if (!rawName) {
@@ -2902,6 +3208,260 @@ const toRecord = (value: unknown): Record<string, unknown> | null => {
     return null;
   }
   return value as Record<string, unknown>;
+};
+
+const humanizeScientificLabel = (value: string): string => {
+  const normalized = String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return "Value";
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+};
+
+const formatScientificScalar = (value: unknown): string => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (Number.isInteger(value)) {
+      return value.toLocaleString();
+    }
+    return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
+  const numeric = toNumber(value);
+  if (numeric !== null) {
+    return formatScientificScalar(numeric);
+  }
+  const text = String(value ?? "").trim();
+  return text || "n/a";
+};
+
+const formatContractMeasurement = (record: Record<string, unknown>): ResearchDigestMeasurementRow | null => {
+  const rawName = String(record.name ?? record.metric ?? record.label ?? "").trim();
+  const name = humanizeScientificLabel(rawName || "measurement");
+  const value = record.value ?? record.result ?? record.measurement;
+  const unit = String(record.unit ?? "").trim();
+  const ci95 = Array.isArray(record.ci95) ? record.ci95 : null;
+  const ciLabel =
+    ci95 &&
+    ci95.length === 2 &&
+    ci95.every((item) => toNumber(item) !== null)
+      ? ` (95% CI ${formatScientificScalar(ci95[0])} to ${formatScientificScalar(ci95[1])}${unit ? ` ${unit}` : ""})`
+      : "";
+  const baseValue = `${formatScientificScalar(value)}${unit ? ` ${unit}` : ""}`.trim();
+  if (!name || !baseValue) {
+    return null;
+  }
+  return {
+    name,
+    valueLabel: `${baseValue}${ciLabel}`.trim(),
+  };
+};
+
+const summarizeStatisticalRecord = (record: Record<string, unknown>): ResearchDigestStatisticRow | null => {
+  const preferredLabel =
+    String(record.summary ?? record.test ?? record.method ?? record.name ?? record.metric ?? "")
+      .trim();
+  const label = humanizeScientificLabel(preferredLabel || "analysis");
+  const pieces: string[] = [];
+  [
+    ["comparison", record.comparison],
+    ["finding", record.finding],
+    ["p", record.p_value],
+    ["effect", record.effect_size],
+    ["n", record.n],
+    ["statistic", record.statistic],
+    ["notes", record.notes],
+  ].forEach(([key, value]) => {
+    if (value === null || value === undefined || value === "") {
+      return;
+    }
+    pieces.push(`${humanizeScientificLabel(String(key))} ${formatScientificScalar(value)}`);
+  });
+  const summary = pieces.join(" · ").trim() || String(record.summary ?? "").trim();
+  if (!summary) {
+    return null;
+  }
+  return { label, summary };
+};
+
+const coerceAssistantContract = (value: unknown): AssistantContract | null => {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+  const result = String(record.result ?? "").trim();
+  const evidence = Array.isArray(record.evidence)
+    ? record.evidence.map((item) => toRecord(item)).filter((item): item is Record<string, unknown> => item !== null)
+    : [];
+  const measurements = Array.isArray(record.measurements)
+    ? record.measurements
+        .map((item) => toRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== null)
+    : [];
+  const statisticalAnalysisRaw = record.statistical_analysis;
+  const statisticalAnalysis = Array.isArray(statisticalAnalysisRaw)
+    ? statisticalAnalysisRaw
+        .map((item) => toRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== null)
+    : [];
+  const confidenceRecord = toRecord(record.confidence);
+  const qcWarnings = Array.isArray(record.qc_warnings)
+    ? record.qc_warnings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const limitations = Array.isArray(record.limitations)
+    ? record.limitations.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const nextSteps = Array.isArray(record.next_steps)
+    ? record.next_steps
+        .map((item) => {
+          if (typeof item === "string") {
+            return { action: item };
+          }
+          const step = toRecord(item);
+          return step ? { action: String(step.action ?? "").trim() } : null;
+        })
+        .filter((item): item is { action: string } => Boolean(item?.action))
+    : [];
+  if (
+    !result &&
+    evidence.length === 0 &&
+    measurements.length === 0 &&
+    statisticalAnalysis.length === 0 &&
+    qcWarnings.length === 0 &&
+    limitations.length === 0 &&
+    nextSteps.length === 0
+  ) {
+    return null;
+  }
+  return {
+    result,
+    evidence: evidence as AssistantContract["evidence"],
+    measurements: measurements as AssistantContract["measurements"],
+    statistical_analysis: statisticalAnalysis,
+    confidence: {
+      level:
+        String(confidenceRecord?.level ?? "").trim().toLowerCase() === "high"
+          ? "high"
+          : String(confidenceRecord?.level ?? "").trim().toLowerCase() === "low"
+            ? "low"
+            : "medium",
+      why: Array.isArray(confidenceRecord?.why)
+        ? confidenceRecord.why.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+    },
+    qc_warnings: qcWarnings,
+    limitations,
+    next_steps: nextSteps,
+  };
+};
+
+const extractAssistantContractFromMessage = (message: UiMessage): AssistantContract | null => {
+  const metadata = toRecord(message.responseMetadata);
+  const contractCandidates: unknown[] = [
+    metadata?.contract,
+    toRecord(metadata?.pro_mode)?.contract,
+    toRecord(toRecord(metadata?.ui_hydrated)?.contract),
+  ];
+  for (const candidate of contractCandidates) {
+    const contract = coerceAssistantContract(candidate);
+    if (contract) {
+      return contract;
+    }
+  }
+  for (const event of [...(message.progressEvents ?? [])].reverse()) {
+    if (String(event.event || "").trim().toLowerCase() !== "workpad_contract") {
+      continue;
+    }
+    const contract = coerceAssistantContract(event.contract);
+    if (contract) {
+      return contract;
+    }
+  }
+  return null;
+};
+
+const buildResearchDigestData = ({
+  message,
+  hasToolCards,
+}: {
+  message: UiMessage;
+  hasToolCards: boolean;
+}): ResearchDigestData | null => {
+  const contract = extractAssistantContractFromMessage(message);
+  if (!contract) {
+    return null;
+  }
+  const metadata = toRecord(message.responseMetadata);
+  const proMode = toRecord(metadata?.pro_mode);
+  const executionPath = String(proMode?.execution_path ?? "").trim().toLowerCase();
+  const toolInvocations = Array.isArray(metadata?.tool_invocations)
+    ? metadata.tool_invocations
+        .map((item) => toRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== null)
+    : [];
+  const hasToolBackedContext =
+    hasToolCards ||
+    toolInvocations.length > 0 ||
+    executionPath === "tool_workflow" ||
+    executionPath === "research_program";
+  const evidence = contract.evidence
+    .map((item) => toRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .map((item) => ({
+      source: humanizeScientificLabel(String(item.source ?? "evidence").trim() || "evidence"),
+      summary: String(item.summary ?? "").trim() || undefined,
+      artifact: String(item.artifact ?? "").trim() || undefined,
+      runId: String(item.run_id ?? "").trim() || null,
+    }))
+    .filter((item) => item.source || item.summary)
+    .slice(0, 4);
+  const measurements = contract.measurements
+    .map((item) => toRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .map((item) => formatContractMeasurement(item))
+    .filter((item): item is ResearchDigestMeasurementRow => item !== null)
+    .slice(0, 6);
+  const statisticalAnalysis = contract.statistical_analysis
+    .map((item) => summarizeStatisticalRecord(item))
+    .filter((item): item is ResearchDigestStatisticRow => item !== null)
+    .slice(0, 4);
+  const qcWarnings = contract.qc_warnings.slice(0, 4);
+  const limitations = contract.limitations.slice(0, 4);
+  const nextSteps = contract.next_steps
+    .map((item) => String(item.action ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  const result = String(contract.result || "").trim() || String(message.content || "").trim();
+  const hasQuantitativeEvidence = measurements.length > 0 || statisticalAnalysis.length > 0;
+  const populatedSections = [
+    evidence.length > 0,
+    measurements.length > 0,
+    statisticalAnalysis.length > 0,
+    qcWarnings.length > 0,
+    limitations.length > 0,
+    nextSteps.length > 0,
+  ].filter(Boolean).length;
+  if (!result) {
+    return null;
+  }
+  if (!hasToolBackedContext || !hasQuantitativeEvidence) {
+    return null;
+  }
+  if (!hasToolCards && populatedSections < 2 && result.length < 120) {
+    return null;
+  }
+  return {
+    result,
+    confidenceLevel: contract.confidence?.level,
+    confidenceWhy: Array.isArray(contract.confidence?.why) ? contract.confidence.why.slice(0, 2) : [],
+    evidence,
+    measurements,
+    statisticalAnalysis,
+    qcWarnings,
+    limitations,
+    nextSteps,
+  };
 };
 
 const runEventIdentity = (event: RunEvent): string =>
@@ -3064,7 +3624,12 @@ const buildToolResultCards = (
   runArtifacts: RunImageArtifact[],
   uploadedFiles: UploadedFileRecord[] = [],
   buildUploadPreviewUrl: (fileId: string) => string = (fileId) =>
-    `/v1/uploads/${encodeURIComponent(fileId)}/preview`
+    `/v1/uploads/${encodeURIComponent(fileId)}/preview`,
+  options?: {
+    runId?: string;
+    buildArtifactDownloadUrl?: (runId: string, path: string) => string;
+    responseMetadata?: Record<string, unknown> | null;
+  }
 ): ToolResultCard[] => {
   if (!progressEvents.length) {
     return [];
@@ -3078,7 +3643,23 @@ const buildToolResultCards = (
   };
 
   const artifactBySource = new Map<string, RunImageArtifact[]>();
+  const toolInvocationSummaryByTool = new Map<string, Record<string, unknown>>();
   const uploadedPreviewLookup = buildUploadedArtifactPreviewLookup(uploadedFiles);
+  const responseMetadataRecord = toRecord(options?.responseMetadata);
+  const toolInvocations = Array.isArray(responseMetadataRecord?.tool_invocations)
+    ? responseMetadataRecord.tool_invocations
+    : [];
+  toolInvocations
+    .map((entry) => toRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => entry !== null)
+    .forEach((entry) => {
+      const tool = normalizeToolName(entry.tool);
+      const outputSummary = toRecord(entry.output_summary);
+      if (!tool || !outputSummary) {
+        return;
+      }
+      toolInvocationSummaryByTool.set(tool, outputSummary);
+    });
   runArtifacts.forEach((artifact) => {
     const lookupValues = new Set<string>([
       artifact.sourceName,
@@ -3135,6 +3716,7 @@ const buildToolResultCards = (
     }
     const toolName = normalizeToolName(event.tool);
     if (
+      toolName !== "segment_image_megaseg" &&
       toolName !== "segment_image_sam2" &&
       toolName !== "segment_image_sam3" &&
       toolName !== "yolo_detect" &&
@@ -3904,6 +4486,360 @@ const buildToolResultCards = (
         images: [],
         resourceRows: [],
         downloadRows: rows.slice(0, 12),
+      });
+      return;
+    }
+
+    if (toolName === "segment_image_megaseg") {
+      const toolInvocationSummary =
+        toolInvocationSummaryByTool.get(toolName) ?? null;
+      const hydratedUi = toRecord(toRecord(options?.responseMetadata)?.ui_hydrated);
+      const megasegSummary: Record<string, unknown> = {
+        ...(toolInvocationSummary ?? {}),
+        ...summary,
+        scientific_summary:
+          summary?.scientific_summary ?? toolInvocationSummary?.scientific_summary,
+        visualization_paths:
+          summary?.visualization_paths ?? toolInvocationSummary?.visualization_paths,
+        files_processed:
+          summary?.files_processed ?? toolInvocationSummary?.files_processed,
+        aggregate: summary?.aggregate ?? toolInvocationSummary?.aggregate,
+      };
+      const scientificSummary = toRecord(megasegSummary.scientific_summary);
+      const aggregate =
+        toRecord(scientificSummary?.aggregate) ??
+        toRecord(megasegSummary.aggregate) ??
+        {};
+      const scientificSummaryFiles = Array.isArray(scientificSummary?.files)
+        ? scientificSummary.files
+        : [];
+      const scientificRows = (
+        scientificSummaryFiles.length > 0
+          ? scientificSummaryFiles
+          : Array.isArray(megasegSummary.files_processed)
+            ? megasegSummary.files_processed
+            : []
+      )
+        .map((row) => toRecord(row))
+        .filter((row): row is Record<string, unknown> => row !== null);
+      const summaryFileRows: MegasegFileInsight[] = scientificRows.map((row) => ({
+        file:
+          String(row.file ?? "").trim() ||
+          String(row.path ?? "").trim() ||
+          "image",
+        coveragePercent: toNumber(row.coverage_percent),
+        objectCount: toNumber(row.object_count),
+        activeSliceCount: toNumber(row.active_slice_count),
+        zSliceCount: toNumber(row.z_slice_count),
+        largestComponentVoxels: toNumber(row.largest_component_voxels),
+        technicalSummary: String(row.technical_summary ?? "").trim() || undefined,
+      }));
+      const hydratedRows = (
+        Array.isArray(hydratedUi?.megaseg_file_summaries)
+          ? hydratedUi.megaseg_file_summaries
+          : []
+      )
+        .map((row) => toRecord(row))
+        .filter((row): row is Record<string, unknown> => row !== null)
+        .map((row) => {
+          const segmentation = toRecord(row.segmentation);
+          return {
+            file:
+              String(row.file ?? "").trim() ||
+              String(row.path ?? "").trim() ||
+              "image",
+            coveragePercent: toNumber(segmentation?.coverage_percent),
+            objectCount: toNumber(segmentation?.object_count),
+            activeSliceCount: toNumber(segmentation?.active_slice_count),
+            zSliceCount: toNumber(segmentation?.z_slice_count),
+            largestComponentVoxels: toNumber(segmentation?.largest_component_voxels),
+            technicalSummary: String(row.technical_summary ?? "").trim() || undefined,
+          } satisfies MegasegFileInsight;
+        });
+      const fileRows = Array.from(
+        [...summaryFileRows, ...hydratedRows].reduce((map, row) => {
+          const key =
+            artifactLookupKeys(row.file)[0] || String(row.file || "").toLowerCase();
+          const existing = map.get(key);
+          map.set(key, {
+            ...(existing ?? {}),
+            ...row,
+          });
+          return map;
+        }, new Map<string, MegasegFileInsight>())
+      ).map(([, row]) => row);
+
+      const computedMeanCoverage =
+        fileRows.length > 0
+          ? fileRows
+              .map((row) => row.coveragePercent)
+              .filter((value): value is number => value !== null && value !== undefined)
+          : [];
+      const computedMeanObjects =
+        fileRows.length > 0
+          ? fileRows
+              .map((row) => row.objectCount)
+              .filter((value): value is number => value !== null && value !== undefined)
+          : [];
+      const meanCoverage =
+        toNumber(megasegSummary.mean_coverage_percent) ??
+        toNumber(aggregate?.mean_coverage_percent) ??
+        (computedMeanCoverage.length > 0
+          ? computedMeanCoverage.reduce((sum, value) => sum + value, 0) /
+            computedMeanCoverage.length
+          : null);
+      const meanObjectCount =
+        toNumber(megasegSummary.mean_object_count) ??
+        toNumber(aggregate?.mean_object_count) ??
+        (computedMeanObjects.length > 0
+          ? computedMeanObjects.reduce((sum, value) => sum + value, 0) /
+            computedMeanObjects.length
+          : null);
+      const processed =
+        toNumber(megasegSummary.processed) ??
+        toNumber(aggregate?.processed_files);
+      const totalFiles =
+        toNumber(megasegSummary.total_files) ??
+        toNumber(aggregate?.total_files);
+
+      const visualizationRows = (Array.isArray(megasegSummary.visualization_paths)
+        ? megasegSummary.visualization_paths
+        : [])
+        .map((row) => toRecord(row))
+        .filter((row): row is Record<string, unknown> => row !== null);
+
+      const fallbackMegasegImages = artifacts
+        .map((artifact) =>
+          eventArtifactToToolImage({
+            artifact,
+            runId: options?.runId,
+            buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
+          })
+        )
+        .filter((artifact): artifact is ToolCardImage => artifact !== null)
+        .filter((artifact) => /(megaseg|overlay|midz|mip)/i.test(`${artifact.path} ${artifact.title}`));
+
+      const rowForValue = (value: string): MegasegFileInsight | undefined => {
+        const keys = new Set(artifactLookupKeys(value));
+        return fileRows.find((row) =>
+          artifactLookupKeys(row.file).some((key) => keys.has(key))
+        );
+      };
+
+      const figureCards = visualizationRows
+        .map((row, vizIndex): ScientificFigureCard | null => {
+          const path = String(row.path ?? "").trim();
+          if (!path) {
+            return null;
+          }
+          const sourceFile = String(row.file ?? "").trim();
+          let displayedArtifact =
+            artifactLookupKeys(path)
+              .flatMap((key) => artifactBySource.get(key) ?? [])
+              .find(Boolean) ?? null;
+          if (!displayedArtifact && sourceFile) {
+            displayedArtifact =
+              artifactLookupKeys(sourceFile)
+                .flatMap((key) => artifactBySource.get(key) ?? [])
+                .find(Boolean) ?? null;
+          }
+          const fallbackArtifact =
+            displayedArtifact ??
+            eventArtifactToToolImage({
+              artifact: {
+                path,
+                title: row.title,
+                source_path: sourceFile,
+              },
+              runId: options?.runId,
+              buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
+            });
+          if (!fallbackArtifact) {
+            return null;
+          }
+          const fileInsight = rowForValue(sourceFile || path);
+          const figureKind = String(row.kind ?? "").trim().toLowerCase();
+          const figureSummaryParts = [
+            figureKind === "overlay_mip"
+              ? "Maximum-intensity projection overlay"
+              : figureKind === "overlay_mid_z"
+                ? "Representative mid-Z overlay"
+                : null,
+            fileInsight?.coveragePercent !== null &&
+            fileInsight?.coveragePercent !== undefined
+              ? `coverage ${formatPercentMetric(fileInsight.coveragePercent)}`
+              : toNumber(row.coverage_percent) !== null
+                ? `coverage ${formatPercentMetric(toNumber(row.coverage_percent))}`
+                : null,
+            fileInsight?.objectCount !== null &&
+            fileInsight?.objectCount !== undefined
+              ? `${formatIntegerMetric(fileInsight.objectCount)} objects`
+              : null,
+            fileInsight?.activeSliceCount !== null &&
+            fileInsight?.activeSliceCount !== undefined &&
+            fileInsight?.zSliceCount !== null &&
+            fileInsight?.zSliceCount !== undefined
+              ? `${formatIntegerMetric(fileInsight.activeSliceCount)}/${formatIntegerMetric(fileInsight.zSliceCount)} active z-slices`
+              : null,
+          ].filter((value): value is string => value !== null);
+          return {
+            key: `${path}-${vizIndex}`,
+            title: String(row.title ?? "Megaseg overlay").trim() || "Megaseg overlay",
+            subtitle: sourceFile ? toDisplayFileLabel(sourceFile) : undefined,
+            summary: figureSummaryParts.join(" · ") || undefined,
+            previewUrl: fallbackArtifact.url,
+            downloadUrl: fallbackArtifact.downloadUrl ?? fallbackArtifact.url,
+            previewable: fallbackArtifact.previewable,
+          } satisfies ScientificFigureCard;
+        })
+        .filter((row): row is ScientificFigureCard => row !== null)
+        .sort((left, right) => {
+          const leftKey = scientificFigureSortKey(left);
+          const rightKey = scientificFigureSortKey(right);
+          return leftKey[0] - rightKey[0] || leftKey[1].localeCompare(rightKey[1]);
+        });
+
+      const figureCardsFromHydratedArtifacts =
+        figureCards.length > 0
+          ? figureCards
+          : runArtifacts
+              .filter((artifact) =>
+                /(megaseg.*overlay|overlay.*megaseg|overlay_mip|overlay_midz|mask_preview)/i.test(
+                  `${artifact.path} ${artifact.title} ${artifact.sourceName}`
+                )
+              )
+              .map((artifact, artifactIndex) => ({
+                key: `${artifact.path}-${artifactIndex}`,
+                title: artifact.title || "Megaseg figure",
+                subtitle:
+                  artifact.sourcePath || artifact.sourceName
+                    ? toDisplayFileLabel(artifact.sourcePath || artifact.sourceName)
+                    : undefined,
+                summary: /overlay_mip|mip/i.test(`${artifact.path} ${artifact.title}`)
+                  ? "Maximum-intensity projection overlay"
+                  : /overlay_midz|mid[-\s]?z/i.test(`${artifact.path} ${artifact.title}`)
+                    ? "Representative mid-Z overlay"
+                    : /mask_preview/i.test(`${artifact.path} ${artifact.title}`)
+                      ? "Binary mask preview"
+                      : undefined,
+                previewUrl: artifact.url,
+                downloadUrl: artifact.downloadUrl ?? artifact.url,
+                previewable: artifact.previewable,
+              }))
+              .sort((left, right) => {
+                const leftKey = scientificFigureSortKey(left);
+                const rightKey = scientificFigureSortKey(right);
+                return leftKey[0] - rightKey[0] || leftKey[1].localeCompare(rightKey[1]);
+              });
+
+      const megasegImages: ToolCardImage[] =
+        figureCardsFromHydratedArtifacts.length > 0
+          ? figureCardsFromHydratedArtifacts.map((figure) => ({
+              path: figure.key,
+              url: figure.previewUrl,
+              downloadUrl: figure.downloadUrl ?? figure.previewUrl,
+              title: figure.title,
+              sourceName: figure.subtitle ?? figure.title,
+              previewable: figure.previewable,
+            }))
+          : fallbackMegasegImages.slice(0, 6);
+
+      const hasMeaningfulMegasegResult =
+        megasegSummary.success !== false &&
+        (fileRows.length > 0 ||
+          figureCardsFromHydratedArtifacts.length > 0 ||
+          fallbackMegasegImages.length > 0 ||
+          processed !== null);
+
+      if (!hasMeaningfulMegasegResult) {
+        return;
+      }
+
+      const firstRow = fileRows[0];
+      const singleFile = fileRows.length <= 1;
+      const metrics: ToolCardMetric[] = singleFile
+        ? [
+            {
+              label: "Coverage",
+              value: formatPercentMetric(firstRow?.coveragePercent ?? meanCoverage),
+            },
+            {
+              label: "Objects",
+              value: formatIntegerMetric(firstRow?.objectCount ?? meanObjectCount),
+            },
+            {
+              label: "Active z-slices",
+              value:
+                firstRow?.activeSliceCount !== null &&
+                firstRow?.activeSliceCount !== undefined &&
+                firstRow?.zSliceCount !== null &&
+                firstRow?.zSliceCount !== undefined
+                  ? `${formatIntegerMetric(firstRow.activeSliceCount)}/${formatIntegerMetric(firstRow.zSliceCount)}`
+                  : "n/a",
+            },
+            {
+              label: "Largest component",
+              value: formatIntegerMetric(firstRow?.largestComponentVoxels),
+            },
+          ]
+        : [
+            {
+              label: "Processed",
+              value:
+                processed !== null && totalFiles !== null
+                  ? `${formatIntegerMetric(processed)}/${formatIntegerMetric(totalFiles)}`
+                  : formatIntegerMetric(processed),
+            },
+            {
+              label: "Mean coverage",
+              value: formatPercentMetric(meanCoverage),
+            },
+            {
+              label: "Mean objects",
+              value:
+                meanObjectCount !== null ? meanObjectCount.toFixed(1) : "n/a",
+            },
+            {
+              label: "Overlays",
+              value: formatIntegerMetric(figureCards.length || fallbackMegasegImages.length),
+            },
+          ];
+
+      cards.push({
+        id: `${toolName}-${index}`,
+        tool: "segment_image_megaseg",
+        title: "Megaseg segmentation",
+        subtitle:
+          typeof megasegSummary.model === "string" && megasegSummary.model.trim()
+            ? megasegSummary.model.trim()
+            : undefined,
+        metrics,
+        classes: [],
+        images: megasegImages,
+        resourceRows: [],
+        downloadRows: [],
+        narrative: buildMegasegNarrative({
+          fileRows,
+          processed,
+          meanCoverage,
+          meanObjectCount,
+        }),
+        placement: "before_text",
+        scientificFigures: figureCardsFromHydratedArtifacts,
+        megasegInsights: {
+          figureCards: figureCardsFromHydratedArtifacts,
+          fileRows,
+          collectionLabel:
+            processed !== null && totalFiles !== null
+              ? `${formatIntegerMetric(processed)} of ${formatIntegerMetric(totalFiles)} images processed`
+              : undefined,
+          device:
+            typeof megasegSummary.device === "string" && megasegSummary.device.trim()
+              ? megasegSummary.device.trim()
+              : null,
+          structureChannel: toNumber(megasegSummary.structure_channel),
+          nucleusChannel: toNumber(megasegSummary.nucleus_channel),
+        },
       });
       return;
     }
@@ -5503,26 +6439,6 @@ const inferBisqueReferenceSelection = (
   };
 };
 
-const buildBisqueReferencePrompt = (
-  promptText: string,
-  selection: BisqueReferenceSelection
-): string => {
-  const header =
-    selection.intent === "preview"
-      ? "Resolved BisQue preview target(s) from recent chat context:"
-      : "Resolved BisQue resource selection from recent chat context:";
-  const detailLines = selection.selectedRows.map((row, index) => {
-    const parts = [
-      `${index + 1}. ${row.name}`,
-      row.resourceUri ? `resource_uri=${row.resourceUri}` : null,
-      row.clientViewUrl ? `client_view_url=${row.clientViewUrl}` : null,
-      row.imageServiceUrl ? `image_service_url=${row.imageServiceUrl}` : null,
-    ].filter(Boolean);
-    return parts.join(" | ");
-  });
-  return `${promptText}\n\n${header}\n${detailLines.join("\n")}`;
-};
-
 const thinkingBarTextForRunEvents = (
   runEvents: RunEvent[],
   isStreaming: boolean
@@ -5540,72 +6456,43 @@ const thinkingBarTextForRunEvents = (
     const phase = String(payload.phase || "").trim().toLowerCase();
     const status = String(payload.status || "").trim().toLowerCase();
     if (eventType === "memory.retrieved" || phase === "memory") {
-      return "Loading scientific memory";
+      return getPhaseThinkingText("memory") ?? DEFAULT_THINKING_TEXT;
     }
     if (eventType === "knowledge.retrieved" || phase === "knowledge") {
-      return "Loading scientific context";
+      return getPhaseThinkingText("knowledge") ?? DEFAULT_THINKING_TEXT;
     }
     if (eventType === "learning.promoted" || eventType === "learning.skipped" || phase === "learning") {
-      return "Updating reusable notes";
+      return getPhaseThinkingText("learning") ?? DEFAULT_THINKING_TEXT;
     }
-    if (eventType === "tool_event") {
-      if (status === "started") {
-        return "Running tools";
-      }
-      if (status === "failed") {
-        return "Recovering from a tool failure";
-      }
-      if (status === "completed") {
-        return "Integrating tool results";
-      }
+    if (
+      eventType === "tool_event" ||
+      eventType === "pro_mode.tool_requested" ||
+      eventType === "pro_mode.tool_completed"
+    ) {
+      const toolStatus =
+        status ||
+        (eventType === "pro_mode.tool_requested"
+          ? "started"
+          : eventType === "pro_mode.tool_completed"
+            ? "completed"
+            : "");
+      return getToolStatusThinkingText(toolStatus) ?? DEFAULT_THINKING_TEXT;
     }
-    if (eventType !== "graph_event") {
+    if (
+      eventType !== "graph_event" &&
+      eventType !== "pro_mode.phase_started" &&
+      eventType !== "pro_mode.phase_completed" &&
+      eventType !== "pro_mode.convergence_updated" &&
+      eventType !== "pro_mode.verifier_result"
+    ) {
       continue;
     }
-    if (phase === "preflight") {
-      return "Preparing request";
-    }
-    if (phase === "private_memos") {
-      return "Developing private council views";
-    }
-    if (phase === "targeted_critiques") {
-      return "Cross-examining council views";
-    }
-    if (phase === "calculator_evidence") {
-      return "Running calculator checks";
-    }
-    if (phase === "reconciliation") {
-      return "Reconciling council views";
-    }
-    if (phase === "route" || phase === "deliberation" || phase === "triage") {
-      return "Choosing execution path";
-    }
-    if (phase === "solve") {
-      return "Generating answer";
-    }
-    if (phase === "model_request") {
-      return "Requesting model response";
-    }
-    if (phase === "reasoning") {
-      return "Reasoning through the problem";
-    }
-    if (phase === "verify") {
-      return "Checking result";
-    }
-    if (phase === "verifier" || phase === "verifier_retry") {
-      return "Verifying synthesis";
-    }
-    if (phase === "code_verify") {
-      return "Verifying with code";
-    }
-    if (phase === "approval") {
-      return "Waiting for approval";
-    }
-    if (phase === "synthesize" || phase === "finalize") {
-      return "Finalizing response";
+    const phaseThinkingText = getPhaseThinkingText(phase);
+    if (phaseThinkingText) {
+      return phaseThinkingText;
     }
   }
-  return isStreaming ? "Thinking" : null;
+  return isStreaming ? DEFAULT_THINKING_TEXT : null;
 };
 
 const summaryModeLabelForMessage = (message: UiMessage): string | null => {
@@ -5704,7 +6591,7 @@ const proModeDevConversationCopyText = (
         "Calculator evidence",
         ...calculatorResults.map((item) => {
           const purpose = String(item.purpose || "Calculator check").trim();
-          const status = Boolean(item.success) ? "Passed" : "Failed";
+          const status = item.success ? "Passed" : "Failed";
           const detail = String(
             item.formatted_result || item.error || item.expression || "No calculator result."
           ).trim();
@@ -5727,7 +6614,7 @@ const proModeDevConversationCopyText = (
       ? verifier.issues.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
     sections.push(
-      ["Verifier", Boolean(verifier.passed) ? "Passed" : "Flagged issues", ...issues.map((item) => `- ${item}`)].join(
+      ["Verifier", verifier.passed ? "Passed" : "Flagged issues", ...issues.map((item) => `- ${item}`)].join(
         "\n"
       )
     );
@@ -5887,7 +6774,7 @@ const renderProModeDevConversation = (
               >
                 <div className="pro-mode-dev-message-header">
                   <strong>{String(item.purpose || "Calculator check").trim()}</strong>
-                  <span>{Boolean(item.success) ? "Passed" : "Failed"}</span>
+                  <span>{item.success ? "Passed" : "Failed"}</span>
                 </div>
                 <p className="pro-mode-dev-message-body">
                   {String(
@@ -5915,7 +6802,7 @@ const renderProModeDevConversation = (
             <header className="pro-mode-dev-round-header">
               <h4>Verifier</h4>
               <span className="pro-mode-dev-round-status">
-                {Boolean(verifier.passed) ? "Passed" : "Flagged issues"}
+                {verifier.passed ? "Passed" : "Flagged issues"}
               </span>
             </header>
             {Array.isArray(verifier.issues) && verifier.issues.length > 0 ? (
@@ -6945,6 +7832,302 @@ function YoloFigureUnavailable({
   );
 }
 
+function ScientificFigureStack({
+  figures,
+}: {
+  figures: ScientificFigureCard[];
+}) {
+  if (figures.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="chat-tool-figure-stack" data-testid="scientific-figure-stack">
+      {figures.map((figure, index) => (
+        <figure
+          key={figure.key}
+          className="chat-tool-figure-card"
+          data-testid="scientific-figure-card"
+        >
+          <div className="chat-tool-figure-media-wrap">
+            {figure.previewable ? (
+              <img
+                src={figure.previewUrl}
+                alt={figure.title}
+                loading={index === 0 ? "eager" : "lazy"}
+                className="chat-tool-figure-image"
+                data-testid="scientific-figure-image"
+              />
+            ) : (
+              <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
+                <ImageIcon className="size-5" />
+                <span>Preview unavailable</span>
+              </div>
+            )}
+          </div>
+          <figcaption className="chat-tool-figure-caption">
+            <div className="chat-tool-figure-meta">
+              <div>
+                <p className="chat-tool-figure-title">{figure.title}</p>
+                {figure.subtitle ? (
+                  <p className="chat-tool-figure-subtitle">{figure.subtitle}</p>
+                ) : null}
+              </div>
+              {figure.summary ? (
+                <p className="chat-tool-figure-summary">{figure.summary}</p>
+              ) : null}
+            </div>
+            <div className="chat-tool-figure-actions">
+              <Button asChild variant="outline" size="sm">
+                <a href={figure.previewUrl} target="_blank" rel="noreferrer">
+                  Open figure
+                </a>
+              </Button>
+              <Button asChild variant="ghost" size="sm">
+                <a
+                  href={figure.downloadUrl ?? figure.previewUrl}
+                  download
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <Download className="size-4" />
+                  Download
+                </a>
+              </Button>
+            </div>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
+function MegasegCardBody({
+  card,
+}: {
+  card: ToolResultCard;
+}) {
+  const insights = card.megasegInsights;
+  if (!insights) {
+    return null;
+  }
+
+  return (
+    <div className="chat-tool-megaseg-shell" data-testid="megaseg-card">
+      {insights.figureCards.length > 0 ? (
+        <ScientificFigureStack figures={insights.figureCards} />
+      ) : card.images.length > 0 ? (
+        <ToolImageCarousel images={card.images} />
+      ) : null}
+      {card.narrative ? (
+        <div className="chat-tool-insight-panel">
+          <p className="chat-tool-insight-title">Scientific takeaway</p>
+          <p className="chat-tool-insight-body">{card.narrative}</p>
+        </div>
+      ) : null}
+      {insights.fileRows.length > 0 ? (
+        <div className="chat-tool-resource-table-wrap">
+          <div className="chat-tool-megaseg-table-head">
+            <div>
+              <p className="chat-tool-card-subtitle">Quantitative summary</p>
+              {insights.collectionLabel ? (
+                <p className="chat-tool-card-summary">{insights.collectionLabel}</p>
+              ) : null}
+            </div>
+            {(insights.device ||
+              insights.structureChannel !== null ||
+              insights.structureChannel !== undefined) ? (
+              <div className="chat-tool-megaseg-meta">
+                {insights.device ? <span>Device {insights.device}</span> : null}
+                {insights.structureChannel !== null &&
+                insights.structureChannel !== undefined ? (
+                  <span>Structure ch {Math.round(insights.structureChannel)}</span>
+                ) : null}
+                {insights.nucleusChannel !== null &&
+                insights.nucleusChannel !== undefined ? (
+                  <span>Nucleus ch {Math.round(insights.nucleusChannel)}</span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <table className="chat-tool-resource-table">
+            <thead>
+              <tr>
+                <th>Image</th>
+                <th>Coverage</th>
+                <th>Objects</th>
+                <th>Active z-slices</th>
+                <th>Largest component</th>
+              </tr>
+            </thead>
+            <tbody>
+              {insights.fileRows.map((row, rowIndex) => (
+                <tr key={`${card.id}-megaseg-row-${rowIndex}`}>
+                  <td className="chat-tool-resource-name-cell">
+                    <div className="chat-tool-resource-name" title={row.file}>
+                      {toDisplayFileLabel(row.file)}
+                    </div>
+                  </td>
+                  <td>{formatPercentMetric(row.coveragePercent)}</td>
+                  <td>{formatIntegerMetric(row.objectCount)}</td>
+                  <td>
+                    {row.activeSliceCount !== null &&
+                    row.activeSliceCount !== undefined &&
+                    row.zSliceCount !== null &&
+                    row.zSliceCount !== undefined
+                      ? `${formatIntegerMetric(row.activeSliceCount)}/${formatIntegerMetric(row.zSliceCount)}`
+                      : "n/a"}
+                  </td>
+                  <td>{formatIntegerMetric(row.largestComponentVoxels)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ResearchDigestCard({
+  digest,
+  followsVisuals = false,
+}: {
+  digest: ResearchDigestData;
+  followsVisuals?: boolean;
+}) {
+  const summaryBits = [
+    digest.measurements.length > 0
+      ? `${digest.measurements.length} measurement${digest.measurements.length === 1 ? "" : "s"}`
+      : null,
+    digest.statisticalAnalysis.length > 0
+      ? `${digest.statisticalAnalysis.length} statistical check${digest.statisticalAnalysis.length === 1 ? "" : "s"}`
+      : null,
+    digest.evidence.length > 0
+      ? `${digest.evidence.length} supporting artifact${digest.evidence.length === 1 ? "" : "s"}`
+      : null,
+  ].filter((item): item is string => item !== null);
+  const showCautionNote =
+    String(digest.confidenceLevel || "").trim().toLowerCase() === "low" &&
+    digest.confidenceWhy.length > 0;
+  const showNextSteps =
+    digest.nextSteps.length > 0 &&
+    (showCautionNote || digest.qcWarnings.length > 0 || digest.limitations.length > 0);
+
+  return (
+    <section className="chat-research-digest" data-testid="research-digest-card">
+      <div className="chat-research-digest-header">
+        <p className="chat-research-digest-label">
+          {followsVisuals ? "Evidence from this run" : "Measured evidence"}
+        </p>
+        {summaryBits.length > 0 ? (
+          <p className="chat-research-digest-meta">{summaryBits.join(" · ")}</p>
+        ) : null}
+      </div>
+      {showCautionNote ? (
+        <p className="chat-research-digest-note">{digest.confidenceWhy.join(" ")}</p>
+      ) : null}
+      <div className="chat-research-digest-body">
+        {digest.measurements.length > 0 ? (
+          <section className="chat-research-digest-section">
+            <div className="chat-research-digest-section-header">
+              <p className="chat-tool-card-subtitle">Key measurements</p>
+            </div>
+            <div className="chat-tool-resource-table-wrap">
+              <table className="chat-tool-resource-table">
+                <thead>
+                  <tr>
+                    <th>Measurement</th>
+                    <th>Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {digest.measurements.map((row) => (
+                    <tr key={`measurement-${row.name}`}>
+                      <td>{row.name}</td>
+                      <td>{row.valueLabel}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
+        {digest.evidence.length > 0 ? (
+          <section className="chat-research-digest-section">
+            <div className="chat-research-digest-section-header">
+              <p className="chat-tool-card-subtitle">Evidence</p>
+            </div>
+            <ul className="chat-research-list">
+              {digest.evidence.map((item, index) => (
+                <li key={`evidence-${index}`}>
+                  <strong>{item.source}</strong>
+                  {item.summary ? `: ${item.summary}` : ""}
+                  {item.artifact ? ` (${toDisplayFileLabel(item.artifact)})` : ""}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+        {digest.statisticalAnalysis.length > 0 ? (
+          <section className="chat-research-digest-section">
+            <div className="chat-research-digest-section-header">
+              <p className="chat-tool-card-subtitle">Statistical analysis</p>
+            </div>
+            <ul className="chat-research-list">
+              {digest.statisticalAnalysis.map((item, index) => (
+                <li key={`stat-${index}`}>
+                  <strong>{item.label}</strong>: {item.summary}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+        {digest.qcWarnings.length > 0 || digest.limitations.length > 0 ? (
+          <div className="chat-research-digest-grid">
+            {digest.qcWarnings.length > 0 ? (
+              <section className="chat-research-digest-section">
+                <div className="chat-research-digest-section-header">
+                  <p className="chat-tool-card-subtitle">QC notes</p>
+                </div>
+                <ul className="chat-research-list">
+                  {digest.qcWarnings.map((item, index) => (
+                    <li key={`qc-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            {digest.limitations.length > 0 ? (
+              <section className="chat-research-digest-section">
+                <div className="chat-research-digest-section-header">
+                  <p className="chat-tool-card-subtitle">Limits</p>
+                </div>
+                <ul className="chat-research-list">
+                  {digest.limitations.map((item, index) => (
+                    <li key={`limit-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </div>
+        ) : null}
+        {showNextSteps ? (
+          <section className="chat-research-digest-section">
+            <div className="chat-research-digest-section-header">
+              <p className="chat-tool-card-subtitle">Recommended next steps</p>
+            </div>
+            <ol className="chat-research-list chat-research-list--ordered">
+              {digest.nextSteps.map((item, index) => (
+                <li key={`step-${index}`}>{item}</li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function PrairieDetectionCardBody({
   card,
 }: {
@@ -6996,10 +8179,7 @@ export function App() {
     "bisque.frontend.apiBaseUrl",
     DEFAULT_API_BASE_URL
   );
-  const [apiKey] = useLocalStorageState<string>(
-    "bisque.frontend.apiKey",
-    DEFAULT_API_KEY
-  );
+  const [apiKey] = useState<string>(() => DEFAULT_API_KEY);
   const [maxToolCalls] = useLocalStorageState<number>(
     "bisque.frontend.maxToolCalls",
     DEFAULT_MAX_TOOL_CALLS
@@ -7025,6 +8205,7 @@ export function App() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authOidcEnabled, setAuthOidcEnabled] = useState(true);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
+  const isPhoneView = useBreakpoint(641);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
   const [conversationListOffset, setConversationListOffset] = useState(0);
@@ -7050,6 +8231,7 @@ export function App() {
   const [resources, setResources] = useState<ResourceRecord[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
   const [composerResources, setComposerResources] = useState<ResourceRecord[]>([]);
@@ -7079,6 +8261,12 @@ export function App() {
   const [adminRunQuery, setAdminRunQuery] = useState("");
   const [adminUserQuery, setAdminUserQuery] = useState("");
   const [adminRefreshToken, setAdminRefreshToken] = useState(0);
+
+  useEffect(() => {
+    if (!isPhoneView) {
+      setMobileConversationQuery("");
+    }
+  }, [isPhoneView]);
   const [adminRunCancellingById, setAdminRunCancellingById] = useState<Record<string, boolean>>(
     {}
   );
@@ -7099,6 +8287,9 @@ export function App() {
 
   const sidebarInsetRef = useRef<HTMLElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const activeChatScrollElementRef = useRef<HTMLElement | null>(null);
+  const conversationScrollMemoryRef = useRef<Record<string, ConversationScrollMemory>>({});
+  const conversationScrollWriteBlockRef = useRef<string | null>(null);
   const persistedConversationHashesRef = useRef<Record<string, string>>({});
   const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
   const hydratingConversationIdsRef = useRef<Set<string>>(new Set());
@@ -7185,7 +8376,10 @@ export function App() {
     }
     setConversationListLoadingMore(true);
     try {
-      const payload = await apiClient.listConversations(CONVERSATION_PAGE_SIZE, conversationListOffset);
+      const payload = await listSessionConversations(apiClient, {
+        limit: CONVERSATION_PAGE_SIZE,
+        offset: conversationListOffset,
+      });
       const nextConversations = payload.conversations.map(conversationFromRecord);
       setConversations((previous) => mergeConversationPage(previous, nextConversations));
       setConversationListOffset(payload.offset + payload.count);
@@ -7310,7 +8504,9 @@ export function App() {
     void (async () => {
       const targetConversationId = readConversationIdFromLocation();
       try {
-        const payload = await apiClient.listConversations(CONVERSATION_PAGE_SIZE);
+        const payload = await listSessionConversations(apiClient, {
+          limit: CONVERSATION_PAGE_SIZE,
+        });
         if (isCancelled) {
           return;
         }
@@ -7513,13 +8709,12 @@ export function App() {
     let cancelled = false;
     setResourcesLoading(true);
     setResourcesError(null);
-    void apiClient
-      .listResources({
-        limit: 500,
-        query: resourceQuery.trim() || undefined,
-        kind: resourceKindFilter === "all" ? undefined : resourceKindFilter,
-        source: resourceSourceFilter === "all" ? undefined : resourceSourceFilter,
-      })
+    void loadLibraryResources(apiClient, {
+      limit: 500,
+      query: resourceQuery.trim() || undefined,
+      kind: resourceKindFilter,
+      source: resourceSourceFilter,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7561,11 +8756,10 @@ export function App() {
     let cancelled = false;
     setComposerResourcesLoading(true);
     setComposerResourcesError(null);
-    void apiClient
-      .listResources({
-        limit: 200,
-        query: composerResourceQuery.trim() || undefined,
-      })
+    void loadComposerResources(apiClient, {
+      limit: 200,
+      query: composerResourceQuery.trim() || undefined,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7613,8 +8807,7 @@ export function App() {
     let cancelled = false;
     setAdminLoadingOverview(true);
     setAdminError(null);
-    void apiClient
-      .getAdminOverview({ topUsers: 8, issueLimit: 12 })
+    void loadAdminOverview(apiClient, { topUsers: 8, issueLimit: 12 })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7646,8 +8839,10 @@ export function App() {
     }
     let cancelled = false;
     setAdminLoadingUsers(true);
-    void apiClient
-      .listAdminUsers({ limit: 250, query: adminUserQuery.trim() || undefined })
+    void loadAdminUsers(apiClient, {
+      limit: 250,
+      query: adminUserQuery.trim() || undefined,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7679,12 +8874,11 @@ export function App() {
     }
     let cancelled = false;
     setAdminLoadingRuns(true);
-    void apiClient
-      .listAdminRuns({
-        limit: 250,
-        status: adminRunStatusFilter || undefined,
-        query: adminRunQuery.trim() || undefined,
-      })
+    void loadAdminRuns(apiClient, {
+      limit: 250,
+      status: adminRunStatusFilter || undefined,
+      query: adminRunQuery.trim() || undefined,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7724,8 +8918,7 @@ export function App() {
     }
     let cancelled = false;
     setAdminLoadingIssues(true);
-    void apiClient
-      .listAdminIssues(25)
+    void loadAdminIssues(apiClient, 25)
       .then((payload) => {
         if (cancelled) {
           return;
@@ -7885,6 +9078,17 @@ export function App() {
     });
   }, []);
 
+  const rememberActiveConversationScrollPosition = useCallback((): void => {
+    const conversationId = activeConversation?.id ?? null;
+    const scrollElement = activeChatScrollElementRef.current;
+    if (!conversationId || !scrollElement) {
+      return;
+    }
+    conversationScrollMemoryRef.current[conversationId] =
+      captureConversationScrollMemory(scrollElement);
+    conversationScrollWriteBlockRef.current = conversationId;
+  }, [activeConversation?.id]);
+
   const clearActiveComposerWorkflowPreset = useCallback((): void => {
     if (!activeConversation) {
       return;
@@ -7918,6 +9122,7 @@ export function App() {
   const createNewConversation = useCallback((): void => {
     const nextConversation = createConversationState();
     optimisticConversationIdsRef.current.add(nextConversation.id);
+    rememberActiveConversationScrollPosition();
     flushSync(() => {
       setConversations((previous) => [nextConversation, ...previous]);
       setActiveConversationId(nextConversation.id);
@@ -7931,21 +9136,23 @@ export function App() {
       setDismissedSlashPrompt(null);
       setUiErrorBanner(null);
     });
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openResourcesPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
     setActivePanel("resources");
     setViewerOpen(false);
     setResourceViewerContext(null);
     setResourceRefreshToken((value) => value + 1);
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openTrainingPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
     setActivePanel("training");
     setViewerOpen(false);
     setResourceViewerContext(null);
     setResourceRefreshToken((value) => value + 1);
-  }, []);
+  }, [rememberActiveConversationScrollPosition]);
 
   const openBisqueHome = useCallback((): void => {
     const homeUrl = String(bisqueNavLinks?.home ?? "").trim();
@@ -8752,7 +9959,7 @@ export function App() {
 
     const pollRunEvents = async (): Promise<void> => {
       try {
-        const response = await apiClient.getRunEvents(runId, 120);
+        const response = await listRunEvents(apiClient, runId, 120);
         if (cancelled) {
           return;
         }
@@ -8901,8 +10108,6 @@ export function App() {
     // is already active so the menu still works as a workflow switcher.
     activePrompt.startsWith("/") &&
     activePrompt !== dismissedSlashPrompt;
-  const hasComposerContextPreview =
-    pendingPreviewFiles.length > 0 || uploadedPreviewFiles.length > 0;
 
   useEffect(() => {
     if (!slashMenuOpen) {
@@ -9749,7 +10954,32 @@ export function App() {
     runId: string
   ): Promise<void> => {
     try {
-      const artifactResponse = await apiClient.listArtifacts(runId, 2000);
+      const artifactResponse = await listRunArtifacts(apiClient, runId, 2000);
+      const megasegSummaryArtifacts = artifactResponse.artifacts.filter((artifact) =>
+        /megaseg_summary\.json$/i.test(String(artifact.path ?? ""))
+      );
+      const megasegFileSummaries = (
+        await Promise.all(
+          megasegSummaryArtifacts.slice(0, 12).map(async (artifact) => {
+            try {
+              const response = await fetch(
+                apiClient.artifactDownloadUrl(runId, artifact.path),
+                {
+                  method: "GET",
+                  credentials: "include",
+                }
+              );
+              if (!response.ok) {
+                return null;
+              }
+              const payload = await response.json();
+              return toRecord(payload);
+            } catch {
+              return null;
+            }
+          })
+        )
+      ).filter((row): row is Record<string, unknown> => row !== null);
       const imageArtifacts = artifactResponse.artifacts.filter((artifact) => {
         const mimeType = artifact.mime_type?.toLowerCase() ?? "";
         if (!(mimeType.startsWith("image/") || isImageArtifactPath(artifact.path))) {
@@ -9773,6 +11003,16 @@ export function App() {
             item.id === assistantMessageId
               ? {
                   ...item,
+                  responseMetadata:
+                    megasegFileSummaries.length > 0
+                      ? {
+                          ...(toRecord(item.responseMetadata) ?? {}),
+                          ui_hydrated: {
+                            ...(toRecord(toRecord(item.responseMetadata)?.ui_hydrated) ?? {}),
+                            megaseg_file_summaries: megasegFileSummaries,
+                          },
+                        }
+                      : item.responseMetadata,
                   runArtifacts: selected.map((artifact) => {
                     const canInlinePreview = isInlineImageArtifact(
                       artifact.path,
@@ -9801,7 +11041,8 @@ export function App() {
           ),
         };
       });
-    } catch {
+    } catch (error) {
+      console.warn("Artifact hydration failed", { runId, error });
       // non-blocking: keep chat response usable without artifact previews
     }
   };
@@ -9812,7 +11053,7 @@ export function App() {
     runId: string
   ): Promise<void> => {
     try {
-      const response = await apiClient.getRunEvents(runId, 200);
+      const response = await listRunEvents(apiClient, runId, 200);
       if (!Array.isArray(response.events) || response.events.length === 0) {
         return;
       }
@@ -9875,7 +11116,13 @@ export function App() {
           message.progressEvents ?? [],
           message.runArtifacts ?? [],
           conversation.uploadedFiles,
-          (fileId) => apiClient.uploadPreviewUrl(fileId)
+          (fileId) => apiClient.uploadPreviewUrl(fileId),
+          {
+            runId: message.runId,
+            buildArtifactDownloadUrl: (runId, path) =>
+              apiClient.artifactDownloadUrl(runId, path),
+            responseMetadata: message.responseMetadata ?? null,
+          }
         );
         const needsAnnotatedFigureRefresh = cards.some(
           (card) =>
@@ -10193,7 +11440,6 @@ export function App() {
     );
 
     let importedUploadedFiles = conversation.uploadedFiles;
-    let importedBisqueCount = 0;
     let importErrorMessage: string | null = null;
     let importedUploadFileIdsForTurn: string[] = [];
     let quickPreviewFileIdsForTurn: string[] = [];
@@ -10236,7 +11482,7 @@ export function App() {
     } else if (bisqueUrls.length > 0) {
       try {
         const importResponse = await apiClient.importBisqueResources(bisqueUrls);
-        importedBisqueCount = importResponse.uploaded.length;
+        const importedBisqueCount = importResponse.uploaded.length;
         importedUploadFileIdsForTurn = importResponse.uploaded.map((file) => file.file_id);
         importedUploadedFiles = uniqueByFileId([
           ...conversation.uploadedFiles,
@@ -10743,7 +11989,13 @@ export function App() {
         response.progress_events ?? [],
         [],
         allUploadsForTurn,
-        (fileId) => apiClient.uploadPreviewUrl(fileId)
+        (fileId) => apiClient.uploadPreviewUrl(fileId),
+        {
+          runId: response.run_id,
+          buildArtifactDownloadUrl: (runId, path) =>
+            apiClient.artifactDownloadUrl(runId, path),
+          responseMetadata: response.metadata ?? null,
+        }
       );
       const responseBisqueSelection = deriveBisqueSelectionContextFromToolCards({
         toolResultCards: responseToolResultCards,
@@ -10831,7 +12083,13 @@ export function App() {
             fallbackResponse.progress_events ?? [],
             [],
             allUploadsForTurn,
-            (fileId) => apiClient.uploadPreviewUrl(fileId)
+            (fileId) => apiClient.uploadPreviewUrl(fileId),
+            {
+              runId: fallbackResponse.run_id,
+              buildArtifactDownloadUrl: (runId, path) =>
+                apiClient.artifactDownloadUrl(runId, path),
+              responseMetadata: fallbackResponse.metadata ?? null,
+            }
           );
           const fallbackBisqueSelection = deriveBisqueSelectionContextFromToolCards({
             toolResultCards: fallbackToolResultCards,
@@ -10904,7 +12162,6 @@ export function App() {
       streamController = null;
       const message = normalizeApiError(finalError);
       if (assistantMessageId) {
-        const messageId = assistantMessageId;
         const partial = streamedText.trim();
         const fallbackContent = partial || `Error: ${message}`;
         updateConversation(conversationId, (current) => ({
@@ -11004,6 +12261,16 @@ export function App() {
         };
       });
   }, [conversations]);
+  const normalizedMobileConversationQuery = mobileConversationQuery.trim().toLowerCase();
+  const filteredHistoryItems = useMemo(() => {
+    if (!normalizedMobileConversationQuery) {
+      return historyItems;
+    }
+    return historyItems.filter((item) => {
+      const haystack = `${item.title} ${item.preview}`.toLowerCase();
+      return haystack.includes(normalizedMobileConversationQuery);
+    });
+  }, [historyItems, normalizedMobileConversationQuery]);
 
   const periodOrder: HistoryPeriod[] = [
     "Today",
@@ -11014,9 +12281,10 @@ export function App() {
   const historyGroups = periodOrder
     .map((period) => ({
       period,
-      conversations: historyItems.filter((item) => item.period === period),
+      conversations: filteredHistoryItems.filter((item) => item.period === period),
     }))
     .filter((group) => group.conversations.length > 0);
+  const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
   const activeConversationTitle = activeConversation?.title ?? "New conversation";
   const pendingReuseCandidate = pendingReusePrompt?.candidate ?? null;
   const pendingReuseToolLabels = pendingReuseCandidate
@@ -11068,7 +12336,10 @@ export function App() {
   }
 
   return (
-    <SidebarProvider style={{ "--sidebar-width": "260px" } as CSSProperties}>
+    <SidebarProvider
+      className="app-shell h-dvh overflow-hidden"
+      style={{ "--sidebar-width": "260px" } as CSSProperties}
+    >
       <Sidebar className="app-sidebar">
         <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
           <div className="flex min-w-0 flex-row items-center gap-2 px-1">
@@ -11082,7 +12353,7 @@ export function App() {
           <div className="flex items-center gap-1">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="size-8">
+                <Button variant="ghost" className="app-theme-menu-button size-11 md:size-8">
                   {resolvedTheme === "dark" ? (
                     <Moon className="size-4" />
                   ) : (
@@ -11130,7 +12401,7 @@ export function App() {
                   <PlusIcon className="size-4" />
                   <span>New Chat</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/new-chat:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/new-chat:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11154,7 +12425,7 @@ export function App() {
                   <FolderOpen className="size-4" />
                   <span>Resources</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/resources:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/resources:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11178,7 +12449,7 @@ export function App() {
                   <Database className="size-4" />
                   <span>Training</span>
                 </span>
-                <span className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/training:opacity-100">
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/training:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     ⌘
                   </kbd>
@@ -11195,6 +12466,7 @@ export function App() {
                   variant={activePanel === "admin" ? "secondary" : "ghost"}
                   className="app-resource-browser-button mb-1 flex w-full items-center gap-2"
                   onClick={() => {
+                    rememberActiveConversationScrollPosition();
                     setActivePanel("admin");
                     setViewerOpen(false);
                     setResourceViewerContext(null);
@@ -11206,6 +12478,14 @@ export function App() {
                   <span>Admin</span>
                 </Button>
               ) : null}
+            </div>
+            <div className="app-sidebar-history-search md:hidden">
+              <SidebarInput
+                value={mobileConversationQuery}
+                onChange={(event) => setMobileConversationQuery(event.target.value)}
+                placeholder="Search chats"
+                aria-label="Search chats"
+              />
             </div>
             <SidebarGroup className="app-bisque-group">
               <SidebarGroupLabel>BisQue</SidebarGroupLabel>
@@ -11225,9 +12505,11 @@ export function App() {
                           aria-keyshortcuts="Control+Shift+O Meta+Shift+O"
                           {...mobileSidebarCloseProps}
                         >
-                          <BisqueMarkIcon className="size-4 shrink-0" />
-                          <span>Go to BisQue</span>
-                          <div className="text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/bisque-shortcut:opacity-100">
+                          <span className="app-bisque-link-main flex min-w-0 items-center gap-2">
+                            <BisqueMarkIcon className="size-4 shrink-0" />
+                            <span className="truncate">Go to BisQue</span>
+                          </span>
+                          <div className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/bisque-shortcut:opacity-100">
                             <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                               ⌘
                             </kbd>
@@ -11296,11 +12578,15 @@ export function App() {
           <div className="app-sidebar-history-scroll">
             {historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
-                <SidebarGroupLabel>Today</SidebarGroupLabel>
+                <SidebarGroupLabel>
+                  {isMobileConversationSearchActive ? "Search results" : "Today"}
+                </SidebarGroupLabel>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton className="app-history-button" disabled>
-                      <span>No history yet</span>
+                      <span>
+                        {isMobileConversationSearchActive ? "No chats match" : "No history yet"}
+                      </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 </SidebarMenu>
@@ -11379,6 +12665,7 @@ export function App() {
 	                              }
 	                              className="app-history-button group/history h-auto py-2"
 	                              onClick={() => {
+	                                rememberActiveConversationScrollPosition();
 	                                setActivePanel(conversation.panel);
 	                                setActiveConversationId(conversation.id);
 	                                setViewerOpen(false);
@@ -11434,19 +12721,21 @@ export function App() {
       </Sidebar>
 
       <SidebarInset ref={sidebarInsetRef}>
-        <main className="flex h-screen flex-col overflow-hidden">
-          <header className="bg-background z-10 flex h-16 w-full shrink-0 items-center gap-2 border-b px-4">
-            <SidebarTrigger className="-ml-1" />
-            <div className="app-header-title text-foreground flex items-center gap-2">
-              <span>{headerTitle}</span>
-              {activePanel === "chat" && authMode === "guest" ? (
-                <Badge variant="secondary">Guest</Badge>
-              ) : null}
-              {activePanel === "chat" && activeSending ? (
-                <RunningStatusPill />
-              ) : null}
+        <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
+          <header className="app-shell-header bg-background z-10 flex w-full shrink-0 items-center gap-2 border-b px-3 sm:px-4">
+            <SidebarTrigger className="app-sidebar-trigger -ml-1 shrink-0" />
+            <div className="app-header-title text-foreground flex min-w-0 flex-1 items-center gap-2">
+              <span className="app-header-title-text">{headerTitle}</span>
+              <div className="app-header-meta">
+                {activePanel === "chat" && authMode === "guest" ? (
+                  <Badge variant="secondary">Guest</Badge>
+                ) : null}
+                {activePanel === "chat" && activeSending ? (
+                  <RunningStatusPill className="app-header-running" />
+                ) : null}
+              </div>
             </div>
-            <div className="ml-auto">
+            <div className="ml-auto shrink-0">
               <AboutBisqueHoverCard />
             </div>
           </header>
@@ -11549,13 +12838,15 @@ export function App() {
             <>
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <ChatContainerRoot
-                key={activeConversation?.id ?? "chat"}
                 className="relative h-full min-h-0 flex-col"
               >
                 <ChatAutoScroll
                   conversationId={activeConversation?.id ?? null}
                   conversationHydrated={activeConversationHydrated}
                   scrollRequestKey={chatScrollRequestKey}
+                  scrollMemoryRef={conversationScrollMemoryRef}
+                  scrollElementRef={activeChatScrollElementRef}
+                  scrollWriteBlockRef={conversationScrollWriteBlockRef}
                 />
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
@@ -11570,7 +12861,7 @@ export function App() {
                   actions={transcriptActions}
                 />
                 <ChatContainerScrollAnchor />
-                <div className="absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-5">
+                <div className="app-scroll-button-shell absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-3 sm:px-5">
                   <div className="chat-width-frame flex justify-end">
                     <ScrollButton
                       aria-label="Jump to latest"
@@ -11583,7 +12874,7 @@ export function App() {
               </ChatContainerRoot>
             </div>
 
-          <div className="bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
+          <div className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
                 <SystemMessage variant="error" fill className="mb-3">
@@ -11606,7 +12897,7 @@ export function App() {
                   onSubmit={() => {
                     void handleSubmit();
                   }}
-                  className="border-input bg-popover relative z-10 w-full rounded-3xl border p-0 pt-1 shadow-xs"
+                  className="app-composer-card relative z-10 w-full"
                 >
                   {slashMenuOpen ? (
                     <ComposerSlashMenu
@@ -11633,7 +12924,7 @@ export function App() {
                       onCancelResourcePicker={cancelComposerResourcePicker}
                     />
                   ) : null}
-                  <div className="flex flex-col">
+                  <div className="app-composer-card-body">
                     {activeSending ? (
                       <div className="composer-running">
                         <Loader size="sm" text="BisQue Ultra is processing" />
@@ -11642,7 +12933,7 @@ export function App() {
                     <PromptInputTextarea
                       ref={composerTextareaRef}
                       placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
-                      className="min-h-[40px] px-4 pt-2.5 text-base leading-[1.32] sm:text-base md:text-base"
+                      className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
                       onKeyDown={(event) => {
                         if (
@@ -11902,12 +13193,9 @@ export function App() {
                     ) : null}
 
                     <PromptInputActions
-                      className={cn(
-                        "flex w-full items-center justify-between gap-2 px-3 pb-2.5",
-                        hasComposerContextPreview || activeComposerWorkflowPreset ? "mt-2.5" : "mt-4"
-                      )}
+                      className="app-composer-actions"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="app-composer-actions-start">
                         <PromptInputAction tooltip="Attach files">
                           <FileUploadTrigger asChild>
                             <Button
@@ -11915,7 +13203,7 @@ export function App() {
                               variant="ghost"
                               size="icon"
                               aria-label="Attach files"
-                              className="composer-attach-button size-9 rounded-full"
+                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
                               disabled={!activeConversationHydrated}
                             >
                               <Plus size={18} />
@@ -11930,7 +13218,7 @@ export function App() {
                           data-active={isProModeComposerActive ? "true" : "false"}
                           aria-pressed={isProModeComposerActive}
                           aria-label={isProModeComposerActive ? "Disable Pro Mode" : "Enable Pro Mode"}
-                          className="composer-pro-button"
+                          className="app-composer-mode-button composer-pro-button"
                           disabled={!activeConversationHydrated}
                           onClick={handleToggleComposerProMode}
                         >
@@ -11942,7 +13230,7 @@ export function App() {
                           <span>Pro</span>
                         </Button>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="app-composer-actions-end">
                         {activeSending ? (
                           <Button
                             size="icon"
@@ -11951,7 +13239,7 @@ export function App() {
                             onClick={stopActiveConversation}
                             aria-label="Stop response"
                             title="Stop response"
-                            className="size-9 rounded-full"
+                            className="app-composer-stop-button size-11 rounded-full sm:size-10"
                           >
                             <Square className="size-3.5 fill-current" />
                           </Button>
@@ -11962,7 +13250,7 @@ export function App() {
                             disabled={!activeConversationHydrated || !activePrompt.trim() || slashMenuOpen}
                             aria-label="Send message"
                             title="Send message"
-                            className="size-9 rounded-full"
+                            className="app-composer-submit-button size-11 rounded-full sm:size-10"
                           >
                             <ArrowUp size={18} />
                           </Button>

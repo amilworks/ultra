@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
 import re
+from collections import Counter, defaultdict
 from typing import Any, Literal
 
 try:
@@ -13,10 +13,12 @@ except Exception as exc:  # pragma: no cover - import guard for runtime use
     Chem = None  # type: ignore[assignment]
     Descriptors = None  # type: ignore[assignment]
     Lipinski = None  # type: ignore[assignment]
-    rdFMCS = None  # type: ignore[assignment]
-    rdMolDescriptors = None  # type: ignore[assignment]
+    RD_FMCS = None  # type: ignore[assignment]
+    RD_MOL_DESCRIPTORS = None  # type: ignore[assignment]
     _IMPORT_ERROR = str(exc)
 else:  # pragma: no cover - import exercised indirectly by tool tests
+    RD_FMCS = rdFMCS
+    RD_MOL_DESCRIPTORS = rdMolDescriptors
     _IMPORT_ERROR = None
 
 
@@ -46,10 +48,7 @@ _FUNCTIONAL_GROUP_SMARTS: dict[str, str] = {
 def _build_patterns() -> dict[str, Any]:
     if Chem is None:
         return {}
-    return {
-        name: Chem.MolFromSmarts(smarts)
-        for name, smarts in _FUNCTIONAL_GROUP_SMARTS.items()
-    }
+    return {name: Chem.MolFromSmarts(smarts) for name, smarts in _FUNCTIONAL_GROUP_SMARTS.items()}
 
 
 _PATTERNS: dict[str, Any] = _build_patterns()
@@ -114,7 +113,7 @@ def _ring_size_counter(mol: Any) -> Counter[int]:
 
 
 def _formula_and_counts(mol: Any) -> tuple[str, Counter[str]]:
-    formula = str(rdMolDescriptors.CalcMolFormula(mol))
+    formula = str(RD_MOL_DESCRIPTORS.CalcMolFormula(mol))
     return formula, _parse_formula(formula)
 
 
@@ -141,10 +140,12 @@ def _strain_flags(mol: Any) -> list[str]:
     if any(size == 3 for size in ring_sizes):
         flags.append("contains three-membered ring (high ring strain)")
     if any(size == 4 for size in ring_sizes):
-        flags.append("contains four-membered ring (ring strain; rearrangements/ring expansion may be favored)")
-    if rdMolDescriptors.CalcNumBridgeheadAtoms(mol) > 0:
+        flags.append(
+            "contains four-membered ring (ring strain; rearrangements/ring expansion may be favored)"
+        )
+    if RD_MOL_DESCRIPTORS.CalcNumBridgeheadAtoms(mol) > 0:
         flags.append("contains bridgehead atom(s)")
-    if rdMolDescriptors.CalcNumSpiroAtoms(mol) > 0:
+    if RD_MOL_DESCRIPTORS.CalcNumSpiroAtoms(mol) > 0:
         flags.append("contains spiro atom(s)")
     return flags
 
@@ -152,7 +153,10 @@ def _strain_flags(mol: Any) -> list[str]:
 def _conditions_to_classes(conditions_text: str) -> list[str]:
     text = str(conditions_text or "").lower()
     classes: set[str] = set()
-    if any(token in text for token in ["pcc", "pdc", "dess-martin", "dmp", "swern", "jones", "cro3", "oxid"]):
+    if any(
+        token in text
+        for token in ["pcc", "pdc", "dess-martin", "dmp", "swern", "jones", "cro3", "oxid"]
+    ):
         classes.add("oxidation")
     if any(token in text for token in ["nah", "lda", "dbu", "tbuok", "base", "alkoxide"]):
         classes.add("base")
@@ -160,7 +164,9 @@ def _conditions_to_classes(conditions_text: str) -> list[str]:
         classes.add("acid")
     if any(token in text for token in ["h2o", "water", "aq", "hydrolysis"]):
         classes.add("water")
-    if any(token in text for token in ["nabh4", "lah", "lialh4", "dibal", "h2", "pd/c", "pt", "raney"]):
+    if any(
+        token in text for token in ["nabh4", "lah", "lialh4", "dibal", "h2", "pd/c", "pt", "raney"]
+    ):
         classes.add("reduction")
     if any(token in text for token in ["wittig", "ylide", "ph3p=ch2", "h2cpph3", "phosphorane"]):
         classes.add("wittig")
@@ -171,7 +177,9 @@ def _conditions_to_classes(conditions_text: str) -> list[str]:
     return sorted(classes)
 
 
-def _top_sites(site_scores: dict[int, dict[str, Any]], mol: Any, top_k: int) -> list[dict[str, Any]]:
+def _top_sites(
+    site_scores: dict[int, dict[str, Any]], mol: Any, top_k: int
+) -> list[dict[str, Any]]:
     ranked = sorted(site_scores.items(), key=lambda item: (-item[1]["score"], item[0]))[:top_k]
     output: list[dict[str, Any]] = []
     for atom_index, payload in ranked:
@@ -212,19 +220,28 @@ def _infer_transformation_labels(
         and delta.get("O", 0) == 0
     ):
         labels.append("alcohol oxidation")
-    if (
-        substrate_functional_groups.get("alkyl_halide", 0) > product_functional_groups.get("alkyl_halide", 0)
-        and product_functional_groups.get("alcohol", 0) > substrate_functional_groups.get("alcohol", 0)
+    if substrate_functional_groups.get("alkyl_halide", 0) > product_functional_groups.get(
+        "alkyl_halide", 0
+    ) and product_functional_groups.get("alcohol", 0) > substrate_functional_groups.get(
+        "alcohol", 0
     ):
         labels.append("halide-to-alcohol substitution or hydrolysis")
-    if (
-        substrate_functional_groups.get("carbonyl", 0) > product_functional_groups.get("carbonyl", 0)
-        and product_functional_groups.get("alkene", 0) > substrate_functional_groups.get("alkene", 0)
-    ):
-        labels.append("carbonyl-to-alkene conversion (olefination / methylenation / deoxygenation class)")
-    if substrate_rings.get(4, 0) > product_rings.get(4, 0) and product_rings.get(5, 0) >= substrate_rings.get(5, 0):
+    if substrate_functional_groups.get("carbonyl", 0) > product_functional_groups.get(
+        "carbonyl", 0
+    ) and product_functional_groups.get("alkene", 0) > substrate_functional_groups.get("alkene", 0):
+        labels.append(
+            "carbonyl-to-alkene conversion (olefination / methylenation / deoxygenation class)"
+        )
+    if substrate_rings.get(4, 0) > product_rings.get(4, 0) and product_rings.get(
+        5, 0
+    ) >= substrate_rings.get(5, 0):
         labels.append("strain-relieving ring expansion or rearrangement")
-    if delta.get("H", 0) < 0 and delta.get("O", 0) < 0 and product_functional_groups.get("alkene", 0) > substrate_functional_groups.get("alkene", 0):
+    if (
+        delta.get("H", 0) < 0
+        and delta.get("O", 0) < 0
+        and product_functional_groups.get("alkene", 0)
+        > substrate_functional_groups.get("alkene", 0)
+    ):
         labels.append("elimination / dehydration")
     return labels
 
@@ -244,21 +261,21 @@ def structure_report(
         "success": True,
         "canonical_smiles": _canonical_smiles(mol),
         "formula": formula,
-        "exact_mass": round(float(rdMolDescriptors.CalcExactMolWt(mol)), 6),
+        "exact_mass": round(float(RD_MOL_DESCRIPTORS.CalcExactMolWt(mol)), 6),
         "molecular_weight": round(float(Descriptors.MolWt(mol)), 6),
         "formal_charge": int(Chem.GetFormalCharge(mol)),
         "heavy_atom_count": int(mol.GetNumHeavyAtoms()),
-        "rotatable_bonds": int(rdMolDescriptors.CalcNumRotatableBonds(mol)),
+        "rotatable_bonds": int(RD_MOL_DESCRIPTORS.CalcNumRotatableBonds(mol)),
         "hbond_donors": int(Lipinski.NumHDonors(mol)),
         "hbond_acceptors": int(Lipinski.NumHAcceptors(mol)),
-        "topological_polar_surface_area": round(float(rdMolDescriptors.CalcTPSA(mol)), 6),
+        "topological_polar_surface_area": round(float(RD_MOL_DESCRIPTORS.CalcTPSA(mol)), 6),
         "rings": {
             "count": len(ring_sizes),
             "sizes": ring_sizes,
-            "aromatic_ring_count": int(rdMolDescriptors.CalcNumAromaticRings(mol)),
-            "aliphatic_ring_count": int(rdMolDescriptors.CalcNumAliphaticRings(mol)),
-            "bridgehead_atom_count": int(rdMolDescriptors.CalcNumBridgeheadAtoms(mol)),
-            "spiro_atom_count": int(rdMolDescriptors.CalcNumSpiroAtoms(mol)),
+            "aromatic_ring_count": int(RD_MOL_DESCRIPTORS.CalcNumAromaticRings(mol)),
+            "aliphatic_ring_count": int(RD_MOL_DESCRIPTORS.CalcNumAliphaticRings(mol)),
+            "bridgehead_atom_count": int(RD_MOL_DESCRIPTORS.CalcNumBridgeheadAtoms(mol)),
+            "spiro_atom_count": int(RD_MOL_DESCRIPTORS.CalcNumSpiroAtoms(mol)),
         },
         "degree_of_unsaturation": _dbe_from_formula_counts(counts),
         "stereochemistry": {
@@ -305,11 +322,11 @@ def compare_structures(
     }
     ring_size_delta = {key: value for key, value in ring_size_delta.items() if value != 0}
 
-    mcs = rdFMCS.FindMCS(
+    mcs = RD_FMCS.FindMCS(
         [substrate_mol, product_mol],
         ringMatchesRingOnly=True,
         completeRingsOnly=True,
-        bondCompare=rdFMCS.BondCompare.CompareOrderExact,
+        bondCompare=RD_FMCS.BondCompare.CompareOrderExact,
         timeout=5,
     )
 
@@ -353,9 +370,7 @@ def propose_reactive_sites(
 
     mol = _parse_mol(structure, input_format)
     conditions = _conditions_to_classes(conditions_text)
-    site_scores: dict[int, dict[str, Any]] = defaultdict(
-        lambda: {"score": 0.0, "reasons": set()}
-    )
+    site_scores: dict[int, dict[str, Any]] = defaultdict(lambda: {"score": 0.0, "reasons": set()})
     global_motifs: list[str] = []
 
     def add(atom_index: int, score: float, reason: str) -> None:
@@ -383,7 +398,11 @@ def propose_reactive_sites(
         elif name in {"alcohol", "phenol"}:
             for match in matches:
                 oxygen_index, carbon_index = match[0], match[1]
-                add(oxygen_index, 1.75, "heteroatom that can be protonated/deprotonated or activated")
+                add(
+                    oxygen_index,
+                    1.75,
+                    "heteroatom that can be protonated/deprotonated or activated",
+                )
                 add(carbon_index, 1.25, "carbon attached to oxygen")
         elif name == "carbonyl":
             for match in matches:
@@ -395,7 +414,11 @@ def propose_reactive_sites(
                     if neighbor.GetIdx() == oxygen_index or neighbor.GetAtomicNum() != 6:
                         continue
                     if neighbor.GetTotalNumHs() > 0:
-                        add(neighbor.GetIdx(), 1.5, "alpha carbon to carbonyl (enolization / deprotonation site)")
+                        add(
+                            neighbor.GetIdx(),
+                            1.5,
+                            "alpha carbon to carbonyl (enolization / deprotonation site)",
+                        )
         elif name == "alkene":
             for match in matches:
                 add(match[0], 1.5, "alkene carbon: electrophilic addition / protonation site")
@@ -415,7 +438,11 @@ def propose_reactive_sites(
                 "attached to oxygen" in reason or "protonated/deprotonated" in reason
                 for reason in payload["reasons"]
             ):
-                add(atom_index, 1.5, "oxidation conditions increase relevance of alcohol/adjacent carbon")
+                add(
+                    atom_index,
+                    1.5,
+                    "oxidation conditions increase relevance of alcohol/adjacent carbon",
+                )
 
     if "reduction" in conditions or "wittig" in conditions:
         for atom_index, payload in list(site_scores.items()):
@@ -425,19 +452,27 @@ def propose_reactive_sites(
 
     if "acid" in conditions:
         for atom_index, payload in list(site_scores.items()):
-            if any("oxygen" in reason or "alkene carbon" in reason for reason in payload["reasons"]):
+            if any(
+                "oxygen" in reason or "alkene carbon" in reason for reason in payload["reasons"]
+            ):
                 add(atom_index, 1.5, "acidic conditions enhance protonation/cation formation")
             if any("strained" in reason for reason in payload["reasons"]):
                 add(atom_index, 1.75, "acid plus strain can favor rearrangement or ring expansion")
 
     if "base" in conditions or "elimination" in conditions:
         for atom_index, payload in list(site_scores.items()):
-            if any("alpha carbon" in reason or "bearing halide" in reason for reason in payload["reasons"]):
+            if any(
+                "alpha carbon" in reason or "bearing halide" in reason
+                for reason in payload["reasons"]
+            ):
                 add(atom_index, 1.5, "base/elimination conditions increase relevance")
 
     if "water" in conditions or "substitution" in conditions:
         for atom_index, payload in list(site_scores.items()):
-            if any("bearing halide" in reason or "electrophilic carbonyl carbon" in reason for reason in payload["reasons"]):
+            if any(
+                "bearing halide" in reason or "electrophilic carbonyl carbon" in reason
+                for reason in payload["reasons"]
+            ):
                 add(atom_index, 1.0, "water/substitution conditions increase relevance")
 
     return {

@@ -123,7 +123,6 @@ export function DeepZoomCanvas({
     const worldWidth = Math.max(1, Number(descriptor.world_size.width) || 1);
     const worldHeight = Math.max(1, Number(descriptor.world_size.height) || 1);
     const fullWidth = Math.max(1, Number(descriptor.pixel_size.width) || 1);
-    const fullHeight = Math.max(1, Number(descriptor.pixel_size.height) || 1);
 
     const render = () => {
       renderer.render(scene, camera);

@@ -156,7 +156,9 @@ class SessionRepository:
             )
         except Exception:
             existing = self.get_session_any(session_id=session_id)
-            if existing is not None and self._session_user_matches(existing.get("user_id"), user_id):
+            if existing is not None and self._session_user_matches(
+                existing.get("user_id"), user_id
+            ):
                 self._claim_session_user(session_id=session_id, user_id=user_id)
                 return self.get_session_any(session_id=session_id) or existing
             raise
@@ -268,8 +270,14 @@ class SessionRepository:
                 title if title is not None else existing.get("title"),
                 status if status is not None else existing.get("status"),
                 summary if summary is not None else existing.get("summary"),
-                _json(memory_policy if memory_policy is not None else existing.get("memory_policy")),
-                _json(knowledge_scope if knowledge_scope is not None else existing.get("knowledge_scope")),
+                _json(
+                    memory_policy if memory_policy is not None else existing.get("memory_policy")
+                ),
+                _json(
+                    knowledge_scope
+                    if knowledge_scope is not None
+                    else existing.get("knowledge_scope")
+                ),
                 _json(metadata if metadata is not None else existing.get("metadata")),
                 now,
                 session_id,
@@ -326,7 +334,9 @@ class SessionRepository:
             "created_at": payload_created_at,
         }
 
-    def list_messages(self, *, session_id: str, user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    def list_messages(
+        self, *, session_id: str, user_id: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
             """
             SELECT message_id, session_id, user_id, role, content,
@@ -441,7 +451,11 @@ class RunRepository:
             (
                 status if status is not None else existing.get("status"),
                 current_step if current_step is not None else existing.get("current_step"),
-                _json(checkpoint_state if checkpoint_state is not None else existing.get("checkpoint_state")),
+                _json(
+                    checkpoint_state
+                    if checkpoint_state is not None
+                    else existing.get("checkpoint_state")
+                ),
                 _json(budget_state if budget_state is not None else existing.get("budget_state")),
                 response_text if response_text is not None else existing.get("response_text"),
                 _json(metrics if metrics is not None else existing.get("metrics")),
@@ -549,7 +563,9 @@ class ScientificNoteRepository:
             WHERE user_id=?
         """
         params: list[Any] = [user_id]
-        normalized_scopes = [str(item or "").strip() for item in list(scopes or []) if str(item or "").strip()]
+        normalized_scopes = [
+            str(item or "").strip() for item in list(scopes or []) if str(item or "").strip()
+        ]
         if normalized_scopes:
             query += " AND scope IN (" + ",".join("?" for _ in normalized_scopes) + ")"
             params.extend(normalized_scopes)
@@ -586,7 +602,9 @@ class ScientificNoteRepository:
         )
         if not rows:
             return []
-        vector_scores = self._vector_scores(query=query, note_ids=[str(row.get("note_id") or "") for row in rows])
+        vector_scores = self._vector_scores(
+            query=query, note_ids=[str(row.get("note_id") or "") for row in rows]
+        )
         ranked: list[dict[str, Any]] = []
         for row in rows:
             lexical_score = _note_search_score(query, row)
@@ -639,7 +657,9 @@ class ScientificNoteRepository:
     def _vector_scores(self, *, query: str, note_ids: list[str]) -> dict[str, float]:
         if self.db.backend != "postgres":
             return {}
-        filtered_note_ids = [str(item or "").strip() for item in note_ids if str(item or "").strip()]
+        filtered_note_ids = [
+            str(item or "").strip() for item in note_ids if str(item or "").strip()
+        ]
         if not filtered_note_ids:
             return {}
         embedding = _vector_literal(_hashed_embedding(query))
@@ -802,7 +822,9 @@ class ArtifactRepository:
             "updated_at": now,
         }
 
-    def list_artifacts(self, *, run_id: str, user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    def list_artifacts(
+        self, *, run_id: str, user_id: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
             """
             SELECT artifact_id, run_id, session_id, user_id, kind, title,
@@ -876,7 +898,9 @@ class ApprovalRepository:
         row["resolution"] = _decode(row.pop("resolution_json", None))
         return row
 
-    def list_run_approvals(self, *, run_id: str, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_run_approvals(
+        self, *, run_id: str, user_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
             """
             SELECT approval_id, run_id, session_id, user_id, action_type, tool_name,

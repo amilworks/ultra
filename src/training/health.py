@@ -93,13 +93,9 @@ def compute_model_health_entries(
             reviewed_samples += int(result_dict.get("reviewed_samples") or 0)
             reviewed_failures += int(result_dict.get("reviewed_failures") or 0)
 
-        drift_score_mean = (
-            sum(drift_scores) / float(len(drift_scores)) if drift_scores else 0.0
-        )
+        drift_score_mean = sum(drift_scores) / float(len(drift_scores)) if drift_scores else 0.0
         reviewed_failure_rate = (
-            float(reviewed_failures) / float(reviewed_samples)
-            if reviewed_samples > 0
-            else 0.0
+            float(reviewed_failures) / float(reviewed_samples) if reviewed_samples > 0 else 0.0
         )
 
         state = "Healthy"
@@ -123,7 +119,10 @@ def compute_model_health_entries(
                 f"and drift mean is {drift_score_mean:.3f}."
             )
             recommendation = "Launch retraining or finetune with refreshed data."
-        elif validation_drop_ratio >= validation_drop_watch or drift_score_mean >= drift_retrain_threshold:
+        elif (
+            validation_drop_ratio >= validation_drop_watch
+            or drift_score_mean >= drift_retrain_threshold
+        ):
             state = "Watch"
             rationale.append(
                 f"Validation drop={validation_drop_ratio * 100:.1f}%, "

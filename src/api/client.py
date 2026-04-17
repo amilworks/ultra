@@ -410,14 +410,14 @@ class OrchestratorClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.post(f"{self.base_url}{path}", json=payload, headers=all_headers)
             response.raise_for_status()
-            return response.json()
+            return dict(response.json())
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         headers = self._headers()
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(f"{self.base_url}{path}", params=params, headers=headers)
             response.raise_for_status()
-            return response.json()
+            return dict(response.json())
 
     def _post_multipart(
         self,
@@ -436,4 +436,4 @@ class OrchestratorClient:
                 headers=all_headers,
             )
             response.raise_for_status()
-            return response.json()
+            return dict(response.json())

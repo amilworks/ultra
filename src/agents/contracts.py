@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 IssueSeverity = Literal["low", "medium", "high"]
 ReasoningMode = Literal["auto", "fast", "deep"]
 BenchmarkAnswerFormat = Literal["mcq_letter"]
@@ -185,7 +184,7 @@ class RouteDecision(BaseModel):
     used_model_classifier: bool = False
 
     @model_validator(mode="after")
-    def _sync_domains(self) -> "RouteDecision":
+    def _sync_domains(self) -> RouteDecision:
         if self.primary_domain:
             ordered = [str(self.primary_domain).strip()]
             ordered.extend(

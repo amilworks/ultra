@@ -527,22 +527,6 @@ const inferImageRenderPolicy = (
   return options.axisSizes.C <= 4 ? "display" : "analysis";
 };
 
-const inferHdf5RenderPolicy = (
-  previewKind: string | null | undefined
-): "scalar" | "categorical" | "display" | "analysis" => {
-  const safeKind = String(previewKind ?? "").trim().toLowerCase();
-  if (safeKind === "scalar_volume") {
-    return "scalar";
-  }
-  if (safeKind === "label_volume") {
-    return "categorical";
-  }
-  if (safeKind === "rgb_volume") {
-    return "display";
-  }
-  return "analysis";
-};
-
 const normalizeRenderPolicy = (
   value: unknown,
   fallback: "scalar" | "categorical" | "display" | "analysis"
@@ -621,6 +605,8 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   const metadataSource = toRecord(source.metadata);
   const viewerSource = toRecord(source.viewer);
   const hdf5Source = toRecord(source.hdf5);
+  const hdf5Supported = hdf5Source.supported !== false;
+  const hdf5Enabled = hdf5Source.enabled !== false;
   const fileId = String(source.file_id ?? "");
   const originalName = String(source.original_name ?? "resource");
   const modality = String(source.modality ?? "unknown");
@@ -785,7 +771,7 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
     },
     viewer: {
       status: String(
-        viewerSource.status ?? (Boolean(hdf5Source.supported ?? true) ? "ready" : "degraded-fallback")
+        viewerSource.status ?? (hdf5Supported ? "ready" : "degraded-fallback")
       ),
       warmup_mode: String(viewerSource.warmup_mode ?? "lazy"),
       backend_mode: String(viewerSource.backend_mode ?? source.backend_mode ?? "hdf5"),
@@ -834,11 +820,11 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
       asset_preparation: {
         status: String(
           toRecord(viewerSource.asset_preparation).status ??
-            (Boolean(hdf5Source.supported ?? true) ? "ready" : "degraded-fallback")
+            (hdf5Supported ? "ready" : "degraded-fallback")
         ),
-        native_supported: Boolean(
-          toRecord(viewerSource.asset_preparation).native_supported ?? Boolean(hdf5Source.supported ?? true)
-        ),
+        native_supported:
+          toRecord(viewerSource.asset_preparation).native_supported !== false &&
+          hdf5Supported,
         tile_pyramid: String(toRecord(viewerSource.asset_preparation).tile_pyramid ?? "none"),
         volume_representation: String(
           toRecord(viewerSource.asset_preparation).volume_representation ?? "none"
@@ -863,9 +849,9 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
       },
     },
     hdf5: {
-      enabled: Boolean(hdf5Source.enabled ?? true),
-      supported: Boolean(hdf5Source.supported ?? true),
-      status: String(hdf5Source.status ?? (Boolean(hdf5Source.supported ?? true) ? "ready" : "unsupported")),
+      enabled: hdf5Enabled,
+      supported: hdf5Supported,
+      status: String(hdf5Source.status ?? (hdf5Supported ? "ready" : "unsupported")),
       error: hdf5Source.error == null ? null : String(hdf5Source.error),
       root_keys: Array.isArray(hdf5Source.root_keys) ? hdf5Source.root_keys.map((item) => String(item)) : [],
       root_attributes: toRecord(hdf5Source.root_attributes),

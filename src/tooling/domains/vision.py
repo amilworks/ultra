@@ -122,7 +122,12 @@ SAM2_PROMPT_TOOL = {
                     "description": "List of [x, y] points (single object) or list of list of points (multi-object).",
                     "items": {
                         "oneOf": [
-                            {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                            {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 2,
+                                "maxItems": 2,
+                            },
                             {"type": "array", "items": {"type": "array"}},
                         ]
                     },
@@ -135,7 +140,12 @@ SAM2_PROMPT_TOOL = {
                 "input_boxes": {
                     "type": "array",
                     "description": "List of [x_min, y_min, x_max, y_max] boxes.",
-                    "items": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
                 },
                 "model_id": {
                     "type": "string",
@@ -451,13 +461,20 @@ MEGASEG_SEGMENT_TOOL = {
                 },
                 "structure_channel": {
                     "type": "integer",
-                    "description": "Structure channel number supplied to Megaseg. Defaults to channel 4.",
+                    "description": (
+                        "Structure channel number supplied to Megaseg. Defaults to channel 4 for "
+                        "multichannel microscopy, but the tool auto-normalizes single-channel volumes."
+                    ),
                     "default": 4,
                     "minimum": 0,
                 },
                 "nucleus_channel": {
-                    "type": "integer",
-                    "description": "Optional nucleus channel number used for overlays and intensity context. Defaults to channel 6.",
+                    "type": ["integer", "null"],
+                    "description": (
+                        "Optional nucleus channel number used for overlays and intensity context. "
+                        "Defaults to channel 6 for multichannel microscopy; single-channel volumes "
+                        "automatically omit the nucleus channel."
+                    ),
                     "default": 6,
                     "minimum": 0,
                 },
@@ -892,7 +909,10 @@ YOLO_FINETUNE_DETECT_TOOL = {
                 "batch": {"type": "integer", "default": 4, "minimum": 1, "maximum": 256},
                 "val_split": {"type": "number", "default": 0.2, "minimum": 0.05, "maximum": 0.5},
                 "seed": {"type": "integer", "default": 42},
-                "device": {"type": "string", "description": "Optional device (e.g., 'cpu' or '0')."},
+                "device": {
+                    "type": "string",
+                    "description": "Optional device (e.g., 'cpu' or '0').",
+                },
                 "prepare_only": {"type": "boolean", "default": False},
             },
             "required": [],
@@ -921,18 +941,18 @@ VISION_TOOL_SCHEMAS = [
 
 __all__ = [
     "BIOIO_LOAD_IMAGE_TOOL",
-    "SAM2_SEGMENT_TOOL",
+    "DEPTH_PRO_ESTIMATE_TOOL",
+    "MEGASEG_SEGMENT_TOOL",
+    "PREDICTION_STABILITY_TOOL",
     "SAM2_PROMPT_TOOL",
+    "SAM2_SEGMENT_TOOL",
     "SAM2_VIDEO_TOOL",
     "SAM3_SEGMENT_TOOL",
-    "MEGASEG_SEGMENT_TOOL",
-    "DEPTH_PRO_ESTIMATE_TOOL",
     "SEGMENTATION_EVAL_TOOL",
     "SEGMENT_EVALUATE_BATCH_TOOL",
-    "YOLO_DETECT_TOOL",
-    "PREDICTION_STABILITY_TOOL",
     "SPECTRAL_INSTABILITY_TOOL",
-    "YOLO_LIST_MODELS_TOOL",
-    "YOLO_FINETUNE_DETECT_TOOL",
     "VISION_TOOL_SCHEMAS",
+    "YOLO_DETECT_TOOL",
+    "YOLO_FINETUNE_DETECT_TOOL",
+    "YOLO_LIST_MODELS_TOOL",
 ]

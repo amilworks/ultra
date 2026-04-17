@@ -113,21 +113,22 @@ const resolveBisqueLinkMeta = (href: string): BisqueLinkMeta | null => {
 
   const path = parsed.pathname;
   const origin = configuredBisqueOrigin || `${parsed.protocol}//${parsed.host}`;
-  let resourceUri: string | null = null;
-
-  if (/\/client_service\/view$/i.test(path)) {
-    const resourceRaw = parsed.searchParams.get("resource");
-    if (!resourceRaw) {
-      return null;
+  const resourceUri = (() => {
+    if (/\/client_service\/view$/i.test(path)) {
+      const resourceRaw = parsed.searchParams.get("resource");
+      if (!resourceRaw) {
+        return null;
+      }
+      return decodeSafe(resourceRaw);
     }
-    resourceUri = decodeSafe(resourceRaw);
-  } else if (/\/data_service\//i.test(path)) {
-    resourceUri = parsed.toString();
-  } else if (/\/image_service\//i.test(path)) {
-    resourceUri = parsed.toString().replace("/image_service/", "/data_service/");
-  } else {
+    if (/\/data_service\//i.test(path)) {
+      return parsed.toString();
+    }
+    if (/\/image_service\//i.test(path)) {
+      return parsed.toString().replace("/image_service/", "/data_service/");
+    }
     return null;
-  }
+  })();
 
   if (!resourceUri) {
     return null;
@@ -309,7 +310,6 @@ const MemoizedMarkdownBlock = memo(
     components = BASE_COMPONENTS,
     remarkPlugins,
     rehypePlugins,
-    pluginKey,
   }: {
     content: string;
     components?: Partial<Components>;

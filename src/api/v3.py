@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Request as FastAPIRequest
 
-from src.agentic.models import AgenticAttachment, AgenticMessageInput, AgenticRunRequest
+from src.agentic.models import (
+    AgenticAttachment,
+    AgenticMessageInput,
+    AgenticRunBudget,
+    AgenticRunRequest,
+)
 from src.agno_backend.knowledge import ScientificKnowledgeScope
 from src.agno_backend.memory import ScientificMemoryPolicy
 from src.api.schemas import (
@@ -14,6 +21,7 @@ from src.api.schemas import (
     V3ApprovalResolveResponse,
     V3ArtifactListResponse,
     V3ArtifactRecord,
+    V3AttachmentRecord,
     V3MessageRecord,
     V3RunCreateRequest,
     V3RunEventListResponse,
@@ -41,7 +49,9 @@ def _session_record(row: dict[str, Any]) -> V3SessionRecord:
         status=str(row.get("status") or "active"),
         summary=str(row.get("summary") or "").strip() or None,
         memory_policy=ScientificMemoryPolicy.model_validate(dict(row.get("memory_policy") or {})),
-        knowledge_scope=ScientificKnowledgeScope.model_validate(dict(row.get("knowledge_scope") or {})),
+        knowledge_scope=ScientificKnowledgeScope.model_validate(
+            dict(row.get("knowledge_scope") or {})
+        ),
         metadata=dict(row.get("metadata") or {}),
         created_at=_dt(row.get("created_at")),
         updated_at=_dt(row.get("updated_at")),
@@ -55,9 +65,8 @@ def _message_record(row: dict[str, Any]) -> V3MessageRecord:
         role=str(row.get("role") or "user"),  # type: ignore[arg-type]
         content=str(row.get("content") or ""),
         attachments=[
-            AgenticAttachment.model_validate(item).model_dump(mode="json")
-            for item in list(row.get("attachments") or [])
-        ],  # type: ignore[arg-type]
+            V3AttachmentRecord.model_validate(item) for item in list(row.get("attachments") or [])
+        ],
         run_id=str(row.get("run_id") or "").strip() or None,
         metadata=dict(row.get("metadata") or {}),
         created_at=_dt(row.get("created_at")),
@@ -210,9 +219,13 @@ def build_v3_router(
         services = _services(request)
         if services.sessions.get_session(session_id=session_id, user_id=user_id) is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        rows = services.sessions.list_messages(session_id=session_id, user_id=user_id, limit=max(1, min(int(limit), 5000)))
+        rows = services.sessions.list_messages(
+            session_id=session_id, user_id=user_id, limit=max(1, min(int(limit), 5000))
+        )
         messages = [_message_record(row) for row in rows]
-        return V3SessionMessageListResponse(session_id=session_id, count=len(messages), messages=messages)
+        return V3SessionMessageListResponse(
+            session_id=session_id, count=len(messages), messages=messages
+        )
 
     @router.post("/sessions/{session_id}/runs", response_model=V3RunRecord)
     def create_run_v3(
@@ -251,7 +264,9 @@ def build_v3_router(
                 )
             ]
         if not messages:
-            raise HTTPException(status_code=400, detail="At least one message or a goal is required")
+            raise HTTPException(
+                status_code=400, detail="At least one message or a goal is required"
+            )
         run_request = AgenticRunRequest(
             goal=req.goal,
             messages=messages,
@@ -260,22 +275,28 @@ def build_v3_router(
             dataset_uris=list(req.dataset_uris or []),
             selected_tool_names=list(req.selected_tool_names or []),
             knowledge_context=(
-                req.knowledge_context.model_dump(mode="json") if req.knowledge_context is not None else {}
+                req.knowledge_context.model_dump(mode="json")
+                if req.knowledge_context is not None
+                else {}
             ),
             selection_context=(
-                req.selection_context.model_dump(mode="json") if req.selection_context is not None else {}
+                req.selection_context.model_dump(mode="json")
+                if req.selection_context is not None
+                else {}
             ),
             workflow_hint=(
                 req.workflow_hint.model_dump(mode="json") if req.workflow_hint is not None else {}
             ),
             reasoning_mode=req.reasoning_mode,
-            budgets=req.budgets.model_dump(mode="json"),
+            budgets=AgenticRunBudget.model_validate(req.budgets.model_dump(mode="json")),
             metadata={
                 **dict(req.metadata or {}),
                 "debug": bool(req.debug),
             },
         )
-        row = services.orchestrator.start_run(session_id=session_id, user_id=user_id, request=run_request)
+        row = services.orchestrator.start_run(
+            session_id=session_id, user_id=user_id, request=run_request
+        )
         return _run_record(row)
 
     @router.get("/runs/{run_id}", response_model=V3RunRecord)
@@ -306,7 +327,9 @@ def build_v3_router(
         services = _services(request)
         if services.runs.get_run(run_id=run_id, user_id=user_id) is None:
             raise HTTPException(status_code=404, detail="Run not found")
-        rows = services.events.list_events(run_id=run_id, user_id=user_id, limit=max(1, min(int(limit), 5000)))
+        rows = services.events.list_events(
+            run_id=run_id, user_id=user_id, limit=max(1, min(int(limit), 5000))
+        )
         events = [_event_record(row) for row in rows]
         return V3RunEventListResponse(run_id=run_id, count=len(events), events=events)
 
@@ -323,7 +346,9 @@ def build_v3_router(
         services = _services(request)
         if services.runs.get_run(run_id=run_id, user_id=user_id) is None:
             raise HTTPException(status_code=404, detail="Run not found")
-        rows = services.artifacts.list_artifacts(run_id=run_id, user_id=user_id, limit=max(1, min(int(limit), 5000)))
+        rows = services.artifacts.list_artifacts(
+            run_id=run_id, user_id=user_id, limit=max(1, min(int(limit), 5000))
+        )
         artifacts = [_artifact_record(row) for row in rows]
         return V3ArtifactListResponse(run_id=run_id, count=len(artifacts), artifacts=artifacts)
 

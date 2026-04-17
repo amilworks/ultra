@@ -1,0 +1,20 @@
+[Unit]
+Description=Ultra Megaseg GPU inference service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ultra/megaseg-service.env
+ExecStartPre=/bin/mkdir -p /srv/ultra/megaseg-service/jobs /srv/ultra/megaseg-service/artifacts /srv/ultra/megaseg-service/models
+ExecStartPre=-/usr/bin/docker rm -f ultra-megaseg
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-megaseg --gpus all --env-file /etc/ultra/megaseg-service.env -p ${MEGASEG_SERVICE_BIND_ADDRESS:-0.0.0.0}:${MEGASEG_SERVICE_PORT:-8010}:8010 -v /srv/ultra/megaseg-service/jobs:/srv/ultra/megaseg-service/jobs -v /srv/ultra/megaseg-service/artifacts:/srv/ultra/megaseg-service/artifacts -v /srv/ultra/megaseg-service/models:/srv/ultra/megaseg-service/models:ro ultra-megaseg:current'
+ExecStop=/usr/bin/docker stop ultra-megaseg
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

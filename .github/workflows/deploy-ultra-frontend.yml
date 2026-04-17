@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  lint:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,5 +41,100 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
+      - name: Lint frontend
+        run: pnpm --dir frontend lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Typecheck frontend
+        run: pnpm --dir frontend typecheck
+
+  unit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Run frontend unit tests
+        run: pnpm --dir frontend test:unit
+
+  build-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir frontend exec playwright install --with-deps chromium
+
+      - name: Ensure runtime artifacts are not tracked
+        run: |
+          if git ls-files --error-unmatch frontend/dist frontend/node_modules >/dev/null 2>&1; then
+            echo "Tracked frontend runtime artifacts detected."
+            exit 1
+          fi
+
       - name: Build frontend
         run: pnpm --dir frontend build
+
+      - name: Enforce bundle budgets
+        run: pnpm --dir frontend bundle:check
+
+      - name: Create bundle-size report
+        run: |
+          find frontend/dist/assets -maxdepth 1 -type f -exec ls -lh {} \; | sort -k 5 -h > frontend-bundle-report.txt
+          cat frontend-bundle-report.txt
+
+      - name: Run mobile smoke
+        run: pnpm --dir frontend test:smoke
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-bundle-report
+          path: frontend-bundle-report.txt

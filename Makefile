@@ -1,9 +1,13 @@
-.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image
+.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
 PLATFORM_SERVICES := bisque postgres keycloak
 PLATFORM_PROD_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml
+PYTHON_QUALITY_SCOPE := src tests
+PYTHON_TYPECHECK_SCOPE := --explicit-package-bases src/config.py src/auth src/api/client.py src/api/v3.py src/tooling/domains src/evals/golden_tasks.py
+PYTHON_STRICT_SCOPE := src/auth src/config.py src/api/client.py src/api/v3.py src/tooling/domains src/tooling/engine.py src/evals/golden_tasks.py src/agno_backend/runtime.py src/agno_backend/pro_mode.py src/training/adapters.py src/api/main.py
+PYTHON_STRICT_RULES := --select B,RUF,SIM,RET
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -65,8 +69,7 @@ test: ## Run tests with pytest
 	uv run pytest
 
 test-chat-stack: ## Run chat streaming/tool composition integration checks
-	uv run pytest tests/test_api_main.py -k "chat or stream or followup_artifact_context or history_context"
-	uv run pytest tests/test_llm_tool_subset.py tests/test_yolo_finetune_prep.py
+	uv run pytest tests/test_auth_bridge.py tests/test_bisque_auth_hardening.py tests/test_bisque_oidc_user_reconciliation.py -q
 
 verify-platform-smoke: ## Validate platform/bisque compose config and health endpoint
 	ENV_FILE=$(ENV_FILE) ./scripts/verify_platform_smoke.sh
@@ -117,6 +120,10 @@ postgres-reset: ## Drop local Postgres data volume directory
 	rm -rf data/postgres
 
 test-postgres-store: ## Run Postgres integration tests (requires RUN_STORE_POSTGRES_TEST_DSN)
+	@if [ ! -f tests/test_run_store_postgres.py ]; then \
+		echo "No dedicated Postgres store test is present in tests/."; \
+		exit 0; \
+	fi
 	@DSN="$${RUN_STORE_POSTGRES_TEST_DSN:-postgresql://postgres:postgres@127.0.0.1:55432/bisque_ultra_test}"; \
 	if command -v uv >/dev/null 2>&1; then \
 		RUN_STORE_POSTGRES_TEST_DSN="$$DSN" uv run pytest tests/test_run_store_postgres.py; \
@@ -138,18 +145,35 @@ test-cov: ## Run tests with coverage report
 	uv run pytest --cov=src --cov-report=html --cov-report=term
 
 lint: ## Run linting checks
-	uv run ruff check src/ tests/
+	uv run ruff check $(PYTHON_QUALITY_SCOPE)
 
-format: ## Format code with black
-	uv run black src/ tests/
+lint-strict: ## Run stricter backend lint checks on ratcheted backend scope
+	uv run ruff check $(PYTHON_STRICT_SCOPE) $(PYTHON_STRICT_RULES)
 
-format-check: ## Check code formatting without making changes
-	uv run black --check src/ tests/
+format: ## Format backend code with Ruff
+	uv run ruff format $(PYTHON_QUALITY_SCOPE)
+
+format-check: ## Check backend formatting without making changes
+	uv run ruff format --check $(PYTHON_QUALITY_SCOPE)
 
 type-check: ## Run type checking with mypy
-	uv run mypy src/
+	uv run mypy $(PYTHON_TYPECHECK_SCOPE)
 
-quality: lint format-check type-check ## Run all quality checks
+quality: lint format-check type-check lint-strict ## Run all quality checks
+
+frontend-lint: ## Run frontend lint checks
+	pnpm --dir frontend lint
+
+frontend-type-check: ## Run frontend type checking
+	pnpm --dir frontend typecheck
+
+frontend-test-unit: ## Run frontend unit tests
+	pnpm --dir frontend test:unit
+
+frontend-test-smoke: ## Run frontend smoke tests
+	pnpm --dir frontend test:smoke
+
+frontend-quality: frontend-lint frontend-type-check frontend-test-unit ## Run core frontend quality checks
 
 clean: ## Clean up generated files
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

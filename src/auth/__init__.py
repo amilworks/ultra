@@ -1,11 +1,5 @@
 """Authentication helpers for request-scoped BisQue credentials."""
 
-from .context import (
-    BisqueAuthContext,
-    get_request_bisque_auth,
-    reset_request_bisque_auth,
-    set_request_bisque_auth,
-)
 from .bisque_sessions import (
     cleanup_expired_bisque_sessions,
     create_bisque_session,
@@ -13,15 +7,21 @@ from .bisque_sessions import (
     get_bisque_session,
     touch_bisque_session,
 )
+from .context import (
+    BisqueAuthContext,
+    get_request_bisque_auth,
+    reset_request_bisque_auth,
+    set_request_bisque_auth,
+)
 
 __all__ = [
     "BisqueAuthContext",
-    "get_request_bisque_auth",
-    "set_request_bisque_auth",
-    "reset_request_bisque_auth",
     "cleanup_expired_bisque_sessions",
     "create_bisque_session",
     "delete_bisque_session",
     "get_bisque_session",
+    "get_request_bisque_auth",
+    "reset_request_bisque_auth",
+    "set_request_bisque_auth",
     "touch_bisque_session",
 ]

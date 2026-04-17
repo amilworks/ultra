@@ -1,59 +1,60 @@
 """OpenAI/vLLM client management and utilities."""
 
-from datetime import datetime
-from functools import lru_cache
 import json
-from pathlib import Path
 import re
 import time
-from typing import Any, Iterator
+from collections.abc import Iterator
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from openai import OpenAI, OpenAIError
 
 from src.config import get_settings
 from src.logger import logger
-from src.tooling.progress import decode_progress_chunk, encode_progress_chunk
-from src.tooling.engine import ToolEngine
-from src.tooling.workpad_orchestrator import upsert_markdown_section
-from src.tools import (
+from src.tooling.domains import (
     ANALYZE_CSV_TOOL,
     BIOIO_LOAD_IMAGE_TOOL,
-    BISQUE_ADD_TO_DATASET_TOOL,
-    BISQUE_UPLOAD_TOOL,
-    BISQUE_PING_TOOL,
-    BISQUE_DOWNLOAD_TOOL,
-    BISQUE_SEARCH_TOOL,
-    BISQUE_LOAD_TOOL,
-    BISQUE_DELETE_TOOL,
-    BISQUE_TAG_TOOL,
-    BISQUE_FETCH_XML_TOOL,
-    BISQUE_DOWNLOAD_DATASET_TOOL,
-    BISQUE_CREATE_DATASET_TOOL,
     BISQUE_ADD_GOBJECTS_TOOL,
+    BISQUE_ADD_TO_DATASET_TOOL,
     BISQUE_ADVANCED_SEARCH_TOOL,
+    BISQUE_CREATE_DATASET_TOOL,
+    BISQUE_DELETE_TOOL,
+    BISQUE_DOWNLOAD_DATASET_TOOL,
+    BISQUE_DOWNLOAD_TOOL,
+    BISQUE_FETCH_XML_TOOL,
+    BISQUE_FIND_ASSETS_TOOL,
+    BISQUE_LOAD_TOOL,
+    BISQUE_PING_TOOL,
     BISQUE_RUN_MODULE_TOOL,
+    BISQUE_SEARCH_TOOL,
+    BISQUE_TAG_TOOL,
+    BISQUE_UPLOAD_TOOL,
+    CODEGEN_PYTHON_PLAN_TOOL,
+    COMPARE_CONDITIONS_TOOL,
     DEPTH_PRO_ESTIMATE_TOOL,
+    EXECUTE_PYTHON_JOB_TOOL,
     MEGASEG_SEGMENT_TOOL,
+    QUANTIFY_OBJECTS_TOOL,
+    QUANTIFY_SEGMENTATION_MASKS_TOOL,
+    REPRO_REPORT_TOOL,
+    SAM2_PROMPT_TOOL,
+    SAM2_SEGMENT_TOOL,
+    SAM2_VIDEO_TOOL,
     SAM3_SEGMENT_TOOL,
     SEGMENT_EVALUATE_BATCH_TOOL,
     SEGMENTATION_EVAL_TOOL,
-    SAM2_SEGMENT_TOOL,
-    SAM2_PROMPT_TOOL,
-    SAM2_VIDEO_TOOL,
-    YOLO_LIST_MODELS_TOOL,
-    YOLO_DETECT_TOOL,
-    YOLO_FINETUNE_DETECT_TOOL,
-    QUANTIFY_OBJECTS_TOOL,
-    QUANTIFY_SEGMENTATION_MASKS_TOOL,
-    COMPARE_CONDITIONS_TOOL,
     STATS_LIST_CURATED_TOOLS_TOOL,
     STATS_RUN_CURATED_TOOL,
-    REPRO_REPORT_TOOL,
-    CODEGEN_PYTHON_PLAN_TOOL,
-    EXECUTE_PYTHON_JOB_TOOL,
-    BISQUE_FIND_ASSETS_TOOL,
-    execute_tool_call,
+    YOLO_DETECT_TOOL,
+    YOLO_FINETUNE_DETECT_TOOL,
+    YOLO_LIST_MODELS_TOOL,
 )
+from src.tooling.engine import ToolEngine
+from src.tooling.progress import decode_progress_chunk, encode_progress_chunk
+from src.tooling.workpad_orchestrator import upsert_markdown_section
+from src.tools import execute_tool_call
 
 
 def _resolved_provider(settings: object) -> str:
@@ -100,7 +101,7 @@ def _resolved_api_key(settings: object) -> str | None:
 def get_openai_client() -> OpenAI:
     """
     Get a cached OpenAI client configured for vLLM or OpenAI.
-    
+
     Returns:
         Configured OpenAI client instance.
     """
@@ -115,7 +116,7 @@ def get_openai_client() -> OpenAI:
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
     )
-    
+
     logger.info(
         "OpenAI-compatible client initialized: provider=%s base_url=%s model=%s",
         provider,
@@ -128,30 +129,30 @@ def get_openai_client() -> OpenAI:
 def test_connection() -> tuple[bool, str]:
     """
     Test the connection to the vLLM/OpenAI API.
-    
+
     Returns:
         Tuple of (success: bool, message: str)
     """
     try:
         settings = get_settings()
         client = get_openai_client()
-        
+
         logger.info("Testing API connection...")
-        
+
         response = client.chat.completions.create(
             model=_resolved_model(settings),
             messages=[{"role": "user", "content": "Hi"}],
             max_tokens=5,
             stream=False,
         )
-        
+
         if response.choices:
             logger.info("API connection test successful")
             return True, "✅ Connection successful!"
         else:
             logger.warning("API returned empty response")
             return False, "⚠️ API returned empty response"
-            
+
     except OpenAIError as e:
         error_msg = f"API Error: {str(e)}"
         logger.error(f"Connection test failed: {error_msg}")
@@ -430,7 +431,9 @@ def _numeric_detail_density(text: str) -> float:
     word_count = len(re.findall(r"\b[\w'-]+\b", normalized))
     if word_count <= 0:
         return 0.0
-    numeric_hits = len(re.findall(r"\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b", normalized, flags=re.IGNORECASE))
+    numeric_hits = len(
+        re.findall(r"\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b", normalized, flags=re.IGNORECASE)
+    )
     return round((float(numeric_hits) * 100.0) / float(max(word_count, 1)), 3)
 
 
@@ -530,7 +533,9 @@ def _answer_completeness_score(
             contract_next_steps = len(next_steps)
 
     checks: dict[str, bool] = {
-        "direct_answer": bool(normalized) and word_count >= 32 and _meta_narration_rate(normalized) < 0.5,
+        "direct_answer": bool(normalized)
+        and word_count >= 32
+        and _meta_narration_rate(normalized) < 0.5,
         "structured_detail": sentence_count >= 3 or ("\n-" in normalized) or ("\n1." in normalized),
         "limitations_covered": (
             ("limitation" in lower)
@@ -546,7 +551,9 @@ def _answer_completeness_score(
         ),
         "tool_status_covered": (
             (not tool_turn)
-            or any(token in lower for token in ("completed", "partial", "failed", "succeeded", "error"))
+            or any(
+                token in lower for token in ("completed", "partial", "failed", "succeeded", "error")
+            )
         ),
         "numeric_detail_present": (
             (not expected_numeric)
@@ -604,9 +611,13 @@ def _estimate_phase_h_output_budget(
     prompt_word_count = len(re.findall(r"\b[\w'-]+\b", str(user_text or "")))
     scratchpad_word_count = len(re.findall(r"\b[\w'-]+\b", str(scratchpad_text or "")))
     fallback_word_count = len(re.findall(r"\b[\w'-]+\b", str(fallback_response or "")))
-    tool_section_count = len(re.findall(r"^##\s+Tool:\s+", str(scratchpad_text or ""), flags=re.MULTILINE))
+    tool_section_count = len(
+        re.findall(r"^##\s+Tool:\s+", str(scratchpad_text or ""), flags=re.MULTILINE)
+    )
     numeric_tokens = len(
-        re.findall(r"\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b", str(scratchpad_text or ""), flags=re.IGNORECASE)
+        re.findall(
+            r"\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b", str(scratchpad_text or ""), flags=re.IGNORECASE
+        )
     )
 
     complexity_score = (
@@ -710,7 +721,9 @@ def _rewrite_low_quality_phase_h_response(
                     "- Do not use meta narration prefixes like 'Provided...', 'Listed...', 'Outlined...'.\n"
                     "- Keep factual consistency with tool evidence and contract payload.\n"
                     "- Include quantitative details when available.\n"
-                    "- Include limitations and actionable next steps.\n"
+                    "- Include limitations and next steps only when they materially help the user act on the answer.\n"
+                    "- For simple conceptual or conversational turns, prefer plain paragraphs over faux-report framing.\n"
+                    "- If the UI already shows figures, tables, or tool cards, keep the prose complementary instead of repeating them.\n"
                     "- Never mention scratchpad, internal IDs, or private local paths.\n"
                     "- Use markdown structure only when it improves readability.\n"
                     f"- {depth_rule}\n"
@@ -892,9 +905,7 @@ def _format_prompt_reframe_markdown(payload: dict[str, Any]) -> str:
         else []
     )
     success_criteria = (
-        payload.get("success_criteria")
-        if isinstance(payload.get("success_criteria"), list)
-        else []
+        payload.get("success_criteria") if isinstance(payload.get("success_criteria"), list) else []
     )
     lines: list[str] = [
         "### Reframed Prompt",
@@ -1046,7 +1057,9 @@ def _coerce_workpad_plan_payload(
     uploaded_file_count: int,
 ) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
-    available_set = {str(name or "").strip().lower() for name in available_tool_names if str(name or "").strip()}
+    available_set = {
+        str(name or "").strip().lower() for name in available_tool_names if str(name or "").strip()
+    }
     no_tool_requested = _is_no_tool_request(user_text)
 
     tool_plan = _normalize_plan_steps(
@@ -1129,9 +1142,7 @@ def _format_workpad_plan_markdown(payload: dict[str, Any]) -> str:
         else []
     )
     answer_blueprint = (
-        payload.get("answer_blueprint")
-        if isinstance(payload.get("answer_blueprint"), list)
-        else []
+        payload.get("answer_blueprint") if isinstance(payload.get("answer_blueprint"), list) else []
     )
     fallback_behavior = (
         payload.get("fallback_behavior")
@@ -1175,9 +1186,7 @@ def _planner_system_directive(payload: dict[str, Any]) -> str:
         else []
     )
     answer_blueprint = (
-        payload.get("answer_blueprint")
-        if isinstance(payload.get("answer_blueprint"), list)
-        else []
+        payload.get("answer_blueprint") if isinstance(payload.get("answer_blueprint"), list) else []
     )
     lines = [
         "Planner directive (medium effort):",
@@ -1189,7 +1198,9 @@ def _planner_system_directive(payload: dict[str, Any]) -> str:
     if fallback_behavior:
         lines.append("- Fallback policy: " + "; ".join(str(item) for item in fallback_behavior[:3]))
     if answer_blueprint:
-        lines.append("- Target response structure: " + "; ".join(str(item) for item in answer_blueprint[:5]))
+        lines.append(
+            "- Target response structure: " + "; ".join(str(item) for item in answer_blueprint[:5])
+        )
     return "\n".join(lines)
 
 
@@ -1206,7 +1217,9 @@ def _generate_workpad_plan_payload(
     reframe_prompt = ""
     if isinstance(reframe_payload, dict):
         reframe_prompt = str(reframe_payload.get("reframed_prompt") or "").strip()
-    rules_block = "\n".join(f"- {rule}" for rule in dynamic_rules[:12]) if dynamic_rules else "- none"
+    rules_block = (
+        "\n".join(f"- {rule}" for rule in dynamic_rules[:12]) if dynamic_rules else "- none"
+    )
     available_tools_block = ", ".join(available_tool_names) if available_tool_names else "none"
     planner_messages = [
         {
@@ -1214,7 +1227,7 @@ def _generate_workpad_plan_payload(
             "content": (
                 "Create a medium-effort execution plan for this scientific prompt.\n"
                 "Return exactly one strict JSON object with keys:\n"
-                '{\n'
+                "{\n"
                 '  "tool_plan": [{"tool": string, "rationale": string, "stopping_criteria": string}],\n'
                 '  "context_bolstering_plan": [string,...],\n'
                 '  "answer_blueprint": [string,...],\n'
@@ -1292,7 +1305,9 @@ def _coerce_phase_h_contract_payload(
             if len(next_steps) >= 8:
                 break
     if not next_steps:
-        next_steps = [{"action": "Continue with the next highest-impact scientific validation step."}]
+        next_steps = [
+            {"action": "Continue with the next highest-impact scientific validation step."}
+        ]
 
     confidence_raw = source.get("confidence")
     confidence_level = "medium"
@@ -1378,6 +1393,8 @@ def _generate_phase_h_payload(
                 "}\n"
                 "Rules:\n"
                 "- final_response must directly answer the user with substantive scientific detail.\n"
+                "- Write final_response like a polished research brief: start with a 1-2 sentence bottom line, then use short paragraphs for interpretation, comparison, and implications.\n"
+                "- Use final_response for synthesis and meaning. Do not simply restate contract headings, measurement bullet lists, or next-step lists verbatim.\n"
                 "- Do not start final_response with meta narration such as 'Provided', 'Listed', 'Outlined', 'Summarized', or 'Reported'.\n"
                 "- Do not mention scratchpad, internal IDs, or private local paths.\n"
                 "- Keep contract aligned with final_response and observed evidence.\n"
@@ -1453,7 +1470,9 @@ def _uploaded_path_looks_like_ground_truth(path: str) -> bool:
         suffix = ".nii.gz"
     else:
         suffixes = Path(lowered).suffixes
-        suffix = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else Path(lowered).suffix.lower()
+        suffix = (
+            "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else Path(lowered).suffix.lower()
+        )
     if suffix not in {
         ".npy",
         ".npz",
@@ -1470,12 +1489,16 @@ def _uploaded_path_looks_like_ground_truth(path: str) -> bool:
         return False
     normalized = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
     words = set(normalized.split())
-    if words.intersection({"gt", "label", "labels", "annotation", "annotations", "annot", "manual", "target", "truth"}):
+    if words.intersection(
+        {"gt", "label", "labels", "annotation", "annotations", "annot", "manual", "target", "truth"}
+    ):
         return True
     return "ground truth" in normalized or "groundtruth" in normalized
 
 
-def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | None, all_tools: list[dict]) -> list[dict]:
+def _select_tool_subset(
+    messages: list[dict[str, str]], uploaded_files: list | None, all_tools: list[dict]
+) -> list[dict]:
     text = _latest_user_message(messages).lower()
     has_uploads = bool(uploaded_files)
     image_suffixes = {
@@ -1505,7 +1528,7 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
     video_suffixes = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
     tabular_suffixes = {".csv", ".tsv", ".tab", ".txt", ".csv.gz", ".tsv.gz"}
     normalized_suffixes: set[str] = set()
-    for path in (uploaded_files or []):
+    for path in uploaded_files or []:
         if not isinstance(path, str):
             continue
         lower = str(path).strip().lower()
@@ -1610,7 +1633,16 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
     )
     mentions_evaluation = _contains_any(
         text,
-        ("evaluate", "evaluation", "ground truth", "ground_truth", "label", "dice", "iou", "benchmark"),
+        (
+            "evaluate",
+            "evaluation",
+            "ground truth",
+            "ground_truth",
+            "label",
+            "dice",
+            "iou",
+            "benchmark",
+        ),
     )
     mentions_detection = _contains_any(
         text,
@@ -1754,8 +1786,19 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
         selected_names.update(depth_tools)
     if mentions_chemistry:
         selected_names.update(chemistry_tools)
-    if any(k in text for k in ("quantify mask", "mask quantification", "segmentation quantification", "regionprops", "mask-based")):
-        selected_names.update({"quantify_segmentation_masks", "evaluate_segmentation_masks", "repro_report"})
+    if any(
+        k in text
+        for k in (
+            "quantify mask",
+            "mask quantification",
+            "segmentation quantification",
+            "regionprops",
+            "mask-based",
+        )
+    ):
+        selected_names.update(
+            {"quantify_segmentation_masks", "evaluate_segmentation_masks", "repro_report"}
+        )
     if mentions_stats:
         selected_names.update(stats_tools)
     if mentions_tabular:
@@ -1765,19 +1808,35 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
         selected_names.update(code_execution_tools)
     if mentions_image_measurements:
         selected_names.update(
-            {"bioio_load_image", "segment_image_megaseg", "segment_image_sam3", "quantify_segmentation_masks"}
+            {
+                "bioio_load_image",
+                "segment_image_megaseg",
+                "segment_image_sam3",
+                "quantify_segmentation_masks",
+            }
         )
 
     if mentions_segmentation and mentions_evaluation:
         selected_names.update({"evaluate_segmentation_masks", "quantify_segmentation_masks"})
         if not has_uploads or has_ground_truth_upload:
             selected_names.add("segment_evaluate_batch")
-        if "segment_evaluate_batch" in by_name and mentions_one_step and not (
-            {"segment_image_sam3", "evaluate_segmentation_masks", "segment_evaluate_batch"} & explicit_mentions
-        ) and (not has_uploads or has_ground_truth_upload):
+        if (
+            "segment_evaluate_batch" in by_name
+            and mentions_one_step
+            and not (
+                {"segment_image_sam3", "evaluate_segmentation_masks", "segment_evaluate_batch"}
+                & explicit_mentions
+            )
+            and (not has_uploads or has_ground_truth_upload)
+        ):
             selected_names.discard("segment_image_sam3")
             selected_names.discard("evaluate_segmentation_masks")
-            selected_names = {"segment_evaluate_batch", "quantify_segmentation_masks", "repro_report", "bioio_load_image"}
+            selected_names = {
+                "segment_evaluate_batch",
+                "quantify_segmentation_masks",
+                "repro_report",
+                "bioio_load_image",
+            }
 
     if mentions_segmentation and not mentions_detection:
         selected_names.add("quantify_segmentation_masks")
@@ -1820,7 +1879,9 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
 
     if mentions_simple_bisque_catalog:
         selected_names.add("search_bisque_resources")
-        if not _contains_any(text, ("metadata", "dimensions", "header", "uri", "resource uri", "client view")):
+        if not _contains_any(
+            text, ("metadata", "dimensions", "header", "uri", "resource uri", "client view")
+        ):
             selected_names.discard("load_bisque_resource")
         for tool_name in (
             "upload_to_bisque",
@@ -1839,10 +1900,15 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
                 selected_names.discard(tool_name)
 
     if has_uploads and not selected_names.intersection(
-        detection_core_tools | segmentation_core_tools | segmentation_interactive_tools | depth_tools
+        detection_core_tools
+        | segmentation_core_tools
+        | segmentation_interactive_tools
+        | depth_tools
     ):
         if has_table_upload and not has_image_upload and not has_video_upload:
-            selected_names.update({"analyze_csv", "stats_list_curated_tools", "stats_run_curated_tool"})
+            selected_names.update(
+                {"analyze_csv", "stats_list_curated_tools", "stats_run_curated_tool"}
+            )
         elif has_video_upload and not has_pdf_upload and not has_image_upload:
             selected_names.update(
                 {
@@ -1868,7 +1934,9 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
 
     if len(selected_names) <= 1:
         if has_table_upload:
-            selected_names.update({"analyze_csv", "stats_list_curated_tools", "stats_run_curated_tool"})
+            selected_names.update(
+                {"analyze_csv", "stats_list_curated_tools", "stats_run_curated_tool"}
+            )
         elif has_image_upload:
             selected_names.update({"bioio_load_image"})
         elif mentions_code_execution:
@@ -1890,7 +1958,7 @@ def _select_tool_subset(messages: list[dict[str, str]], uploaded_files: list | N
 
 
 def stream_chat_completion_with_tools(
-    messages: list[dict[str, str]], 
+    messages: list[dict[str, str]],
     enable_tools: bool = True,
     uploaded_files: list = None,
     execution_plan: dict = None,
@@ -1916,9 +1984,11 @@ def stream_chat_completion_with_tools(
     prompt_workpad_pipeline_enabled = bool(
         getattr(settings, "prompt_workpad_pipeline_enabled", False)
     )
-    prompt_workpad_refinement_mode = str(
-        getattr(settings, "prompt_workpad_refinement_mode", "legacy") or "legacy"
-    ).strip().lower()
+    prompt_workpad_refinement_mode = (
+        str(getattr(settings, "prompt_workpad_refinement_mode", "legacy") or "legacy")
+        .strip()
+        .lower()
+    )
     if prompt_workpad_refinement_mode not in {"legacy", "phased"}:
         prompt_workpad_refinement_mode = "legacy"
     workpad_phase_l_enabled = (
@@ -1932,6 +2002,11 @@ def stream_chat_completion_with_tools(
     )
     verbosity_rule = _response_verbosity_rule(response_verbosity)
     reframe_payload_for_planning: dict[str, Any] | None = None
+    has_ground_truth_upload = any(
+        _uploaded_path_looks_like_ground_truth(str(path))
+        for path in (uploaded_files or [])
+        if isinstance(path, str)
+    )
 
     if workpad_phase_l_enabled:
         phase_started = time.monotonic()
@@ -1970,9 +2045,7 @@ def stream_chat_completion_with_tools(
                     "missing_information_count": len(
                         reframe_payload.get("missing_information") or []
                     ),
-                    "success_criteria_count": len(
-                        reframe_payload.get("success_criteria") or []
-                    ),
+                    "success_criteria_count": len(reframe_payload.get("success_criteria") or []),
                     "ts": datetime.utcnow().isoformat() + "Z",
                 }
             )
@@ -2031,6 +2104,11 @@ def stream_chat_completion_with_tools(
         "- In the final answer, avoid exposing internal storage paths (e.g., data/... absolute paths). Use short artifact labels and quantitative findings.\n"
         "- Report numeric metrics exactly as returned by tools.\n"
         "- In result, answer the user directly with substantive content. Do not use meta narration like 'Provided...', 'Listed...', 'Outlined...', or 'Summarized...'.\n"
+        "- Treat result as a scientist-facing synthesis brief: begin with the bottom line, then explain the strongest interpretation, comparison, or implication in short paragraphs.\n"
+        "- Prefer plain paragraphs for simple conceptual turns; reserve report-style structure for measured, comparative, or tool-backed outputs.\n"
+        "- Do not duplicate the contract structure inside result. Let evidence, measurements, qc_warnings, limitations, and next_steps carry the list-like scaffolding.\n"
+        "- Do not restate generic confidence, limitation, or next-step boilerplate inside result when the dedicated fields already cover it.\n"
+        "- When figures, overlays, plots, or downloadable artifacts are produced, mention how to read the most important output and what pattern or comparison matters most.\n"
         "- For conceptual requests that do not require tools, include concrete scientific details in result (for example grouped metrics/methods with brief definitions), not a one-line abstract.\n"
         "- For tool-executed requests, summarize completion status (completed/partial/failed), key outputs produced, and any missing requested deliverables.\n"
         "- When writing equations, use valid LaTeX only with explicit delimiters: inline \\\\(...\\\\) and display \\\\[...\\\\]. Define symbols on first use, keep notation consistent, and avoid pseudo-LaTeX, unmatched delimiters, or bare bracket-wrapped math. Keep long chemical or IUPAC names in ordinary prose rather than math mode; if plain text must appear inside math, use \\\\text{...}.\n"
@@ -2044,18 +2122,23 @@ def stream_chat_completion_with_tools(
         "- Do NOT reveal chain-of-thought.\n"
     )
     if not code_execution_enabled:
-        tool_guide = tool_guide.replace(
-            "- For Python code execution workflows, first call codegen_python_plan, then call execute_python_job with returned job_id.\n",
-            "",
-        ).replace(
-            "- If execute_python_job fails, pass the failure payload to codegen_python_plan.previous_failure and iterate.\n",
-            "",
-        ).replace(
-            "- Keep code execution retries bounded; stop after budget is exhausted and report limitations clearly.\n",
-            "",
-        ).replace(
-            "- For code execution outputs, report concrete method + metrics + artifacts (for example dataset shape/class balance, PCA variance metrics, model performance metrics, output filenames) instead of a one-line status.\n",
-            "",
+        tool_guide = (
+            tool_guide.replace(
+                "- For Python code execution workflows, first call codegen_python_plan, then call execute_python_job with returned job_id.\n",
+                "",
+            )
+            .replace(
+                "- If execute_python_job fails, pass the failure payload to codegen_python_plan.previous_failure and iterate.\n",
+                "",
+            )
+            .replace(
+                "- Keep code execution retries bounded; stop after budget is exhausted and report limitations clearly.\n",
+                "",
+            )
+            .replace(
+                "- For code execution outputs, report concrete method + metrics + artifacts (for example dataset shape/class balance, PCA variance metrics, model performance metrics, output filenames) instead of a one-line status.\n",
+                "",
+            )
         )
 
     messages = [{"role": "system", "content": tool_guide}] + list(base_messages)
@@ -2107,9 +2190,7 @@ def stream_chat_completion_with_tools(
         )
     tools = _select_tool_subset(messages, uploaded_files=uploaded_files, all_tools=all_tools)
     selected_tool_set = {
-        str(tool.get("function", {}).get("name", ""))
-        for tool in tools
-        if isinstance(tool, dict)
+        str(tool.get("function", {}).get("name", "")) for tool in tools if isinstance(tool, dict)
     }
     explicit_tool_names = sorted(_explicit_tool_mentions(user_text, selected_tool_set))
     dynamic_rules: list[str] = []
@@ -2142,7 +2223,9 @@ def stream_chat_completion_with_tools(
             dynamic_rules.append(
                 "This prompt asks for evaluation, but no uploaded ground-truth mask files were detected. Do not call segment_evaluate_batch unless ground_truth_paths are available; if labels are missing, run segmentation-only analysis or ask for the label masks."
             )
-    if _contains_any(user_text, ("mask quantification", "quantify segmentation", "quantify_segmentation_masks")):
+    if _contains_any(
+        user_text, ("mask quantification", "quantify segmentation", "quantify_segmentation_masks")
+    ):
         dynamic_rules.append(
             "This prompt is mask-centric; prefer quantify_segmentation_masks over quantify_objects unless boxes/detections are explicitly requested."
         )
@@ -2253,9 +2336,7 @@ def stream_chat_completion_with_tools(
                 }
             )
 
-    selected_tool_names = ", ".join(
-        str(tool.get("function", {}).get("name", "")) for tool in tools
-    )
+    selected_tool_names = ", ".join(str(tool.get("function", {}).get("name", "")) for tool in tools)
     pre_messages = [
         {
             "role": "system",
@@ -2297,9 +2378,8 @@ def stream_chat_completion_with_tools(
         else 6
     )
     use_legacy_workpad_refinement = (
-        (not prompt_workpad_pipeline_enabled)
-        or prompt_workpad_refinement_mode == "legacy"
-    )
+        not prompt_workpad_pipeline_enabled
+    ) or prompt_workpad_refinement_mode == "legacy"
     workpad_phase_h_enabled = (
         bool(scratchpad_path)
         and prompt_workpad_pipeline_enabled
@@ -2313,12 +2393,8 @@ def stream_chat_completion_with_tools(
         phase_h_min_tokens,
         int(getattr(settings, "prompt_workpad_phase_h_max_tokens", 6000)),
     )
-    quality_repair_enabled = bool(
-        getattr(settings, "prompt_workpad_quality_repair_enabled", True)
-    )
-    quality_max_meta_rate = float(
-        getattr(settings, "prompt_workpad_quality_max_meta_rate", 0.35)
-    )
+    quality_repair_enabled = bool(getattr(settings, "prompt_workpad_quality_repair_enabled", True))
+    quality_max_meta_rate = float(getattr(settings, "prompt_workpad_quality_max_meta_rate", 0.35))
     quality_min_completeness = float(
         getattr(settings, "prompt_workpad_quality_min_completeness", 0.58)
     )
@@ -2477,7 +2553,9 @@ def stream_chat_completion_with_tools(
                 wrote_contract = upsert_markdown_section(
                     path=Path(str(scratchpad_path)).expanduser().resolve(),
                     title="Final Contract",
-                    body="```json\n" + json.dumps(contract_payload, indent=2, ensure_ascii=False) + "\n```",
+                    body="```json\n"
+                    + json.dumps(contract_payload, indent=2, ensure_ascii=False)
+                    + "\n```",
                 )
                 yield encode_progress_chunk(
                     {
@@ -2543,9 +2621,7 @@ def stream_chat_completion_with_tools(
         refine_response=should_refine_from_scratchpad,
         suppress_draft_output=suppress_draft_output,
         workpad_mode=(
-            prompt_workpad_refinement_mode
-            if prompt_workpad_pipeline_enabled
-            else "legacy"
+            prompt_workpad_refinement_mode if prompt_workpad_pipeline_enabled else "legacy"
         ),
     )
 
@@ -2558,18 +2634,18 @@ def stream_chat_completion(
 ) -> Iterator[str]:
     """
     Stream a chat completion response (backward compatibility wrapper).
-    
+
     Args:
         messages: List of message dictionaries with 'role' and 'content'.
         uploaded_files: Optional list of uploaded files for tool context.
         execution_plan: Optional execution plan for progress tracking.
-        
+
     Yields:
         Streamed response chunks.
     """
     yield from stream_chat_completion_with_tools(
-        messages, 
-        enable_tools=True, 
+        messages,
+        enable_tools=True,
         uploaded_files=uploaded_files,
         execution_plan=execution_plan,
         scratchpad_path=scratchpad_path,
@@ -2584,7 +2660,9 @@ def _mock_stream_chat_completion(
     user_text = _latest_user_message(messages).lower()
     uploaded = [str(path) for path in (uploaded_files or []) if str(path).strip()]
     uploaded_count = len(uploaded)
-    sample_artifact = str((Path(__file__).resolve().parents[1] / "tests" / "test_inputs" / "test.png"))
+    sample_artifact = str(
+        Path(__file__).resolve().parents[1] / "tests" / "test_inputs" / "test.png"
+    )
 
     def _emit_started(tool_name: str, message: str) -> str:
         return encode_progress_chunk(
@@ -2632,7 +2710,8 @@ def _mock_stream_chat_completion(
             "qc_warnings": [],
             "limitations": limitations
             or ["This is a deterministic mock-mode response intended for E2E testing."],
-            "next_steps": next_steps or [{"action": "Continue with the next requested analysis stage."}],
+            "next_steps": next_steps
+            or [{"action": "Continue with the next requested analysis stage."}],
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -2793,7 +2872,7 @@ def _mock_stream_chat_completion(
 def get_available_models() -> list[str]:
     """
     Get list of available models from the API.
-    
+
     Returns:
         List of model names.
     """

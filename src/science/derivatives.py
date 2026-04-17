@@ -7,10 +7,11 @@ request, so identical requests can be reused across API endpoints.
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable, Hashable
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Hashable
+from typing import Any
 
 import numpy as np
 
@@ -48,7 +49,9 @@ def _estimate_value_bytes(value: Any) -> int:
     if isinstance(value, np.generic):
         return int(value.dtype.itemsize)
     if isinstance(value, dict):
-        return sum(_estimate_value_bytes(key) + _estimate_value_bytes(raw) for key, raw in value.items())
+        return sum(
+            _estimate_value_bytes(key) + _estimate_value_bytes(raw) for key, raw in value.items()
+        )
     if isinstance(value, (list, tuple, set)):
         return sum(_estimate_value_bytes(item) for item in value)
     return 0

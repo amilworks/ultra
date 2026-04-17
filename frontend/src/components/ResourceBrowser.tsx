@@ -3,6 +3,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
 import {
@@ -14,6 +22,7 @@ import {
   Link2,
   Loader2,
   RefreshCw,
+  SlidersHorizontal,
   Table2,
   Trash2,
   Upload,
@@ -136,8 +145,22 @@ export function ResourceBrowser({
   onDeleteResource,
   thumbnailUrlFor,
 }: ResourceBrowserProps) {
+  const isMobileView = useBreakpoint(721);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [failedThumbnailIds, setFailedThumbnailIds] = useState<Record<string, true>>({});
   const cardResources = useMemo(() => resources, [resources]);
+  const activeFilterCount =
+    Number(kindFilter !== "all") + Number(sourceFilter !== "all");
+  const activeFilterLabels = useMemo(() => {
+    const labels: string[] = [];
+    if (kindFilter !== "all") {
+      labels.push(kindFilters.find((item) => item.value === kindFilter)?.label ?? "Type");
+    }
+    if (sourceFilter !== "all") {
+      labels.push(sourceFilters.find((item) => item.value === sourceFilter)?.label ?? "Source");
+    }
+    return labels;
+  }, [kindFilter, sourceFilter]);
 
   return (
     <section className="resource-browser mx-auto flex-1 overflow-y-auto px-3 py-6 sm:px-6 sm:py-8">
@@ -159,42 +182,84 @@ export function ResourceBrowser({
               disabled={loading}
             >
               <RefreshCw className={cn("size-4", loading && "animate-spin")} />
-              Refresh
+              <span className="resource-browser-refresh-label">Refresh</span>
             </Button>
           </div>
           <div className="resource-browser-controls">
-            <Input
-              value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="Search files, BisQue IDs, or URLs"
-              className="resource-browser-search"
-            />
-            <div className="resource-browser-filter-row">
-              {kindFilters.map((item) => (
+            <div className="resource-browser-toolbar">
+              <Input
+                value={query}
+                onChange={(event) => onQueryChange(event.target.value)}
+                placeholder="Search files, BisQue IDs, or URLs"
+                className="resource-browser-search"
+              />
+              {isMobileView ? (
                 <Button
-                  key={item.value}
                   type="button"
-                  variant={kindFilter === item.value ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => onKindFilterChange(item.value)}
+                  variant="outline"
+                  className="resource-browser-filter-trigger"
+                  onClick={() => setMobileFiltersOpen(true)}
                 >
-                  {item.label}
+                  <SlidersHorizontal className="size-4" />
+                  <span>Filters</span>
+                  {activeFilterCount > 0 ? (
+                    <span className="resource-browser-filter-count">{activeFilterCount}</span>
+                  ) : null}
                 </Button>
-              ))}
+              ) : null}
             </div>
-            <div className="resource-browser-filter-row">
-              {sourceFilters.map((item) => (
-                <Button
-                  key={item.value}
-                  type="button"
-                  variant={sourceFilter === item.value ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => onSourceFilterChange(item.value)}
-                >
-                  {item.label}
-                </Button>
-              ))}
-            </div>
+            {isMobileView ? (
+              activeFilterCount > 0 ? (
+                <div className="resource-browser-active-filters">
+                  {activeFilterLabels.map((label) => (
+                    <Badge key={label} variant="outline" className="resource-browser-tag">
+                      {label}
+                    </Badge>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="resource-browser-clear-filters"
+                    onClick={() => {
+                      onKindFilterChange("all");
+                      onSourceFilterChange("all");
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                </div>
+              ) : null
+            ) : (
+              <>
+                <div className="resource-browser-filter-row">
+                  {kindFilters.map((item) => (
+                    <Button
+                      key={item.value}
+                      type="button"
+                      variant={kindFilter === item.value ? "secondary" : "ghost"}
+                      size="sm"
+                      onClick={() => onKindFilterChange(item.value)}
+                    >
+                      {item.label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="resource-browser-filter-row">
+                  {sourceFilters.map((item) => (
+                    <Button
+                      key={item.value}
+                      type="button"
+                      variant={sourceFilter === item.value ? "secondary" : "ghost"}
+                      size="sm"
+                      onClick={() => onSourceFilterChange(item.value)}
+                    >
+                      {item.label}
+                    </Button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </CardHeader>
         <CardContent className="resource-browser-content">
@@ -326,6 +391,68 @@ export function ResourceBrowser({
           )}
         </CardContent>
       </Card>
+      {isMobileView ? (
+        <Sheet open={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
+          <SheetContent
+            side="bottom"
+            className="resource-browser-filter-sheet rounded-t-[1.75rem] px-4 pb-[calc(1.2rem+env(safe-area-inset-bottom,0px))] pt-3"
+          >
+            <SheetHeader className="space-y-2 text-left">
+              <SheetTitle className="text-base">Filter resources</SheetTitle>
+              <SheetDescription className="text-sm leading-6 text-muted-foreground">
+                Narrow the catalog by resource type and source without losing your place.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="resource-browser-sheet-section">
+              <p className="resource-browser-sheet-label">Type</p>
+              <div className="resource-browser-sheet-options">
+                {kindFilters.map((item) => (
+                  <Button
+                    key={item.value}
+                    type="button"
+                    variant={kindFilter === item.value ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={() => onKindFilterChange(item.value)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div className="resource-browser-sheet-section">
+              <p className="resource-browser-sheet-label">Source</p>
+              <div className="resource-browser-sheet-options">
+                {sourceFilters.map((item) => (
+                  <Button
+                    key={item.value}
+                    type="button"
+                    variant={sourceFilter === item.value ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={() => onSourceFilterChange(item.value)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div className="resource-browser-sheet-actions">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  onKindFilterChange("all");
+                  onSourceFilterChange("all");
+                }}
+              >
+                Reset
+              </Button>
+              <Button type="button" onClick={() => setMobileFiltersOpen(false)}>
+                Done
+              </Button>
+            </div>
+          </SheetContent>
+        </Sheet>
+      ) : null}
     </section>
   );
 }

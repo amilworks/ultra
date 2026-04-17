@@ -4,6 +4,7 @@
 .env.*.local
 !.env.example
 .claude/
+.clause/
 
 # Python
 __pycache__/
@@ -24,6 +25,7 @@ frontend/test-results/
 
 # Runtime state and generated artifacts
 .tmp/
+.worktrees/
 .viewer-cache/
 .codex-artifacts/
 data/

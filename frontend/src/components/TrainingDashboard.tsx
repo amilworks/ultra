@@ -16,6 +16,10 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, type ApiClient } from "@/lib/api";
+import {
+  loadTrainingDashboardSnapshot,
+  loadTrainingLineageSnapshot,
+} from "@/features/training/client";
 import type {
   PrairieRetrainRecord,
   PrairieStatusResponse,
@@ -230,38 +234,18 @@ export function TrainingDashboard({
   }, [status]);
 
   const loadLineageAndVersions = useCallback(async (): Promise<void> => {
-    const domains = await apiClient.listTrainingDomains(500);
-    for (const domain of domains.domains) {
-      const lineages = await apiClient.listDomainLineages(domain.domain_id, { limit: 500 });
-      const found =
-        lineages.lineages.find(
-          (row) => row.model_key === PRAIRIE_MODEL_KEY && row.scope === "shared"
-        ) ??
-        lineages.lineages.find((row) => row.model_key === PRAIRIE_MODEL_KEY) ??
-        null;
-      if (!found) {
-        continue;
-      }
-      setLineage(found);
-      const versionsPayload = await apiClient.listLineageVersions(found.lineage_id, { limit: 200 });
-      setVersions(versionsPayload.versions);
-      return;
-    }
-    setLineage(null);
-    setVersions([]);
+    const snapshot = await loadTrainingLineageSnapshot(apiClient, PRAIRIE_MODEL_KEY);
+    setLineage(snapshot.lineage);
+    setVersions(snapshot.versions);
   }, [apiClient]);
 
   const loadDashboard = useCallback(async (): Promise<void> => {
-    const [modelsPayload, statusPayload, retrainPayload] = await Promise.all([
-      apiClient.listTrainingModels(),
-      apiClient.getPrairieActiveLearningStatus(),
-      apiClient.listPrairieRetrainRequests(),
-    ]);
-    setModels(modelsPayload.models);
-    setStatus(statusPayload);
-    setRetrainRequests(retrainPayload.requests);
+    const snapshot = await loadTrainingDashboardSnapshot(apiClient);
+    setModels(snapshot.models);
+    setStatus(snapshot.status);
+    setRetrainRequests(snapshot.retrainRequests);
     setSelectedInferenceModel((previous) => {
-      const candidates = modelsPayload.models.filter((row) => row.supports_inference);
+      const candidates = snapshot.models.filter((row) => row.supports_inference);
       if (candidates.some((row) => row.key === previous)) {
         return previous;
       }

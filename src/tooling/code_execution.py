@@ -522,6 +522,23 @@ def _service_execution_enabled(settings: Any) -> bool:
     return bool(str(getattr(settings, "code_execution_service_url", "") or "").strip())
 
 
+def choose_code_execution_backend(
+    *,
+    requested_backend: str | None,
+    settings: Any,
+) -> str:
+    candidate = str(
+        requested_backend or getattr(settings, "code_execution_default_backend", "docker")
+    ).strip().lower()
+    service_enabled = _service_execution_enabled(settings)
+    if service_enabled:
+        if candidate not in {"docker", "service"}:
+            candidate = "service"
+        if candidate == "docker":
+            return "service"
+    return "service" if candidate == "service" else "docker"
+
+
 def _build_service_request_inputs(
     inputs: list[dict[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], list[Path]]:
@@ -1438,10 +1455,9 @@ def execute_python_job_once(
     execution_backend: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    backend = (
-        str(execution_backend or getattr(settings, "code_execution_default_backend", "docker"))
-        .strip()
-        .lower()
+    backend = choose_code_execution_backend(
+        requested_backend=execution_backend,
+        settings=settings,
     )
     service_enabled = _service_execution_enabled(settings)
     if backend not in {"docker", "service"}:

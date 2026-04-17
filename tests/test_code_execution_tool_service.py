@@ -4,7 +4,28 @@ import json
 from pathlib import Path
 
 from src.config import Settings
-from src.tooling.code_execution import execute_python_job_once
+from src.tooling.code_execution import choose_code_execution_backend, execute_python_job_once
+
+
+def test_execute_python_job_prefers_service_backend_when_service_is_configured(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=str(tmp_path / "artifacts"),
+        code_execution_enabled=True,
+        code_execution_default_backend="docker",
+        code_execution_service_url="http://codeexec.internal:8020",
+        code_execution_service_api_key="secret-token",
+    )
+    monkeypatch.setattr("src.tooling.code_execution.get_settings", lambda: settings)
+
+    resolved_backend = choose_code_execution_backend(
+        requested_backend=None,
+        settings=settings,
+    )
+
+    assert resolved_backend == "service"
 
 
 def test_execute_python_job_once_uses_service_when_configured(

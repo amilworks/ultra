@@ -937,7 +937,11 @@ class Settings(BaseSettings):
     )
     code_execution_default_backend: Literal["docker", "service"] = Field(
         default="docker",
-        description="Default execution backend for execute_python_job.",
+        description=(
+            "Default execution backend for execute_python_job. "
+            "When the dedicated service URL is configured, production deployments should prefer "
+            "`service`."
+        ),
     )
     code_execution_durable_default: bool = Field(
         default=True,

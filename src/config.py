@@ -935,7 +935,7 @@ class Settings(BaseSettings):
         default=False,
         description="Enable LLM-authored Python code execution tools.",
     )
-    code_execution_default_backend: Literal["docker"] = Field(
+    code_execution_default_backend: Literal["docker", "service"] = Field(
         default="docker",
         description="Default execution backend for execute_python_job.",
     )

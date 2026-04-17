@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -67,3 +68,37 @@ class CodeExecutionServiceClient:
                 for handle in open_handles:
                     handle.close()
         return response.json()
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        """Fetch the current lifecycle state for one service job."""
+
+        response = self._request("GET", f"/v1/jobs/{job_id}")
+        return response.json()
+
+    def wait_for_job(
+        self,
+        *,
+        job_id: str,
+        poll_interval_seconds: float = 1.5,
+        wait_timeout_seconds: float = 7200.0,
+    ) -> dict[str, Any]:
+        """Poll until the service reports a terminal state."""
+
+        deadline = time.monotonic() + max(1.0, float(wait_timeout_seconds or 7200.0))
+        interval = max(0.2, float(poll_interval_seconds or 1.5))
+        while True:
+            payload = self.get_job(job_id)
+            status = str(payload.get("status") or "").strip().lower()
+            if status in {"succeeded", "failed"}:
+                return payload
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Code execution service job {job_id} exceeded wait timeout.")
+            time.sleep(interval)
+
+    def download_artifact(self, *, job_id: str, artifact_name: str, destination: Path) -> Path:
+        """Download one artifact into the local job directory."""
+
+        response = self._request("GET", f"/v1/jobs/{job_id}/artifacts/{artifact_name}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(response.content)
+        return destination

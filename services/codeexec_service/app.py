@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import tarfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
-
 from services.codeexec_service.models import ServiceSettings
 from services.codeexec_service.runner import run_codeexec_attempt
 from src.tooling.code_execution_contract import (
@@ -76,10 +73,8 @@ def create_app(settings: ServiceSettings) -> FastAPI:
             yield
         finally:
             worker_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError):
                 await worker_task
-
-    import contextlib
 
     app = FastAPI(lifespan=lifespan)
 
@@ -98,6 +93,7 @@ def create_app(settings: ServiceSettings) -> FastAPI:
         request: Request,
         request_json: str = Form(),
         bundle: UploadFile = File(),
+        files: list[UploadFile] | None = File(default=None),
     ) -> dict[str, str]:
         _require_auth(request)
         request_payload = CodeExecutionJobRequest.model_validate_json(request_json)
@@ -112,6 +108,32 @@ def create_app(settings: ServiceSettings) -> FastAPI:
         bundle_path.write_bytes(bundle_bytes)
         with tarfile.open(bundle_path, "r:gz") as archive:
             archive.extractall(work_dir)
+
+        uploads_by_name = {
+            str(upload.filename or "").strip(): upload
+            for upload in list(files or [])
+            if str(upload.filename or "").strip()
+        }
+        missing_local_inputs: list[str] = []
+        for input_spec in request_payload.inputs:
+            if input_spec.uri:
+                continue
+            upload = uploads_by_name.get(str(input_spec.name or "").strip())
+            if upload is None:
+                missing_local_inputs.append(str(input_spec.name or input_spec.sandbox_path))
+                continue
+            relative_target = str(input_spec.sandbox_path).lstrip("/")
+            destination = (work_dir / relative_target).resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(await upload.read())
+        if missing_local_inputs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Missing uploaded inputs for service request: "
+                    + ", ".join(sorted(set(missing_local_inputs)))
+                ),
+            )
 
         record = CodeExecutionJobRecord(
             job_id=requested_job_id,
@@ -146,4 +168,3 @@ def create_app(settings: ServiceSettings) -> FastAPI:
         return FileResponse(path)
 
     return app
-

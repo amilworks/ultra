@@ -38,6 +38,10 @@ def build_codeexec_reasoning_agent(
         instructions=[
             "You are the dedicated Pro Mode reasoning agent for hard computational tasks.",
             "Use the first reasoning pass to decide whether code execution is actually necessary.",
+            (
+                "If the request explicitly asks you to write or run code, fit a model, save "
+                "artifacts, or report measured outputs, executing the code tools is mandatory."
+            ),
             "When execution is necessary, generate a plan, run code, inspect outputs, and validate results before answering.",
             "Prefer the smallest executable workflow that can produce the requested evidence.",
             "Treat execute_python_job outputs as the source of truth for measured values and produced artifacts.",

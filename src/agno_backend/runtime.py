@@ -55,6 +55,7 @@ from src.tooling.domains import (
 from src.tooling.engine import _progress_summary_from_result
 from src.tools import AVAILABLE_TOOLS, execute_tool_call, extract_scientific_image_paths_from_text
 
+from .codeexec_reasoning import build_codeexec_reasoning_agent
 from .knowledge import ScientificKnowledgeContext, ScientificKnowledgeHub, ScientificKnowledgeScope
 from .learning import ScientificLearningJournal
 from .memory import (
@@ -63,7 +64,6 @@ from .memory import (
     ScientificMemoryService,
     ScientificMemoryUpdate,
 )
-from .codeexec_reasoning import build_codeexec_reasoning_agent
 from .pro_mode import (
     ProModeIntakeDecision,
     ProModeSynthesis,
@@ -6265,6 +6265,7 @@ class AgnoChatRuntime:
         user_id: str | None,
         max_runtime_seconds: int,
         debug: bool | None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProModeWorkflowResult:
         tool_names = [
             tool_name
@@ -6391,8 +6392,63 @@ class AgnoChatRuntime:
         tool_invocations = self._tool_invocations_from_run_output(run_output)
         response_text, _source = self._coerce_visible_output(result)
         normalized_response_text = str(response_text or "").strip()
+        deterministic_fallback_meta: dict[str, Any] | None = None
+        if not self._tool_workflow_satisfied(
+            tool_invocations=tool_invocations,
+            required_tool_names=tool_names,
+            strict_validation=True,
+        ):
+            missing_required_tool_names = self._missing_required_tool_names(
+                tool_invocations=tool_invocations,
+                required_tool_names=tool_names,
+            )
+            if missing_required_tool_names:
+                deterministic_invocations = await self._execute_tool_program_actions(
+                    phase="reasoning_solver",
+                    phase_label="code execution reasoning solver",
+                    actions=[
+                        ToolProgramAction(
+                            tool_name=tool_name,
+                            purpose=(
+                                "Running the required code-execution tool directly because the "
+                                "reasoning agent did not execute it."
+                            ),
+                            args={},
+                        )
+                        for tool_name in missing_required_tool_names
+                    ],
+                    uploaded_files=uploaded_files,
+                    latest_user_text=latest_user_text,
+                    selection_context=selection_context,
+                    event_callback=event_callback,
+                    latest_result_refs_seed=self._latest_result_refs_from_tool_invocations(
+                        tool_invocations
+                    ),
+                    request_bisque_auth=get_request_bisque_auth(),
+                )
+                if deterministic_invocations:
+                    tool_invocations = self._merge_tool_invocations(
+                        tool_invocations,
+                        deterministic_invocations,
+                    )
+                    deterministic_fallback_meta = {
+                        "required_tool_names": list(tool_names),
+                        "missing_required_tool_names": list(missing_required_tool_names),
+                        "tool_invocation_count": len(deterministic_invocations),
+                    }
+                    normalized_response_text = (
+                        self._tool_invocation_fallback_text(tool_invocations)
+                        or normalized_response_text
+                    )
         fail_closed_text = self._code_execution_fail_closed_text(tool_invocations)
-        if fail_closed_text and not normalized_response_text:
+        if fail_closed_text and (
+            not normalized_response_text
+            or not self._tool_workflow_satisfied(
+                tool_invocations=tool_invocations,
+                required_tool_names=tool_names,
+                strict_validation=True,
+            )
+        ):
             normalized_response_text = fail_closed_text
         if not normalized_response_text and not tool_invocations:
             return ProModeWorkflowResult(
@@ -6409,25 +6465,36 @@ class AgnoChatRuntime:
                 runtime_error="Code-execution reasoning agent returned no answer and no tool outputs.",
             )
         verifier_issues = self._code_execution_fail_closed_reservations(tool_invocations)
+        satisfied = self._tool_workflow_satisfied(
+            tool_invocations=tool_invocations,
+            required_tool_names=tool_names,
+            strict_validation=True,
+        )
         verifier_report = ProModeVerifierReport(
-            passed=not bool(verifier_issues),
+            passed=bool(satisfied and not verifier_issues),
             issues=list(verifier_issues),
             suggested_changes=[],
             confidence="medium" if tool_invocations else "low",
         )
+        pro_mode_metadata = {
+            "execution_path": "codeexec_reasoning_solver",
+            "task_regime": str(task_regime or "self_contained_reasoning").strip().lower()
+            or "self_contained_reasoning",
+            "model_route": model_route,
+            "verifier": verifier_report.model_dump(mode="json"),
+        }
+        if deterministic_fallback_meta:
+            pro_mode_metadata["deterministic_required_tool_fallback"] = (
+                deterministic_fallback_meta
+            )
         return ProModeWorkflowResult(
             response_text=normalized_response_text,
             metadata={
-                "pro_mode": {
-                    "execution_path": "codeexec_reasoning_solver",
-                    "task_regime": str(task_regime or "self_contained_reasoning").strip().lower()
-                    or "self_contained_reasoning",
-                    "model_route": model_route,
-                    "verifier": verifier_report.model_dump(mode="json"),
-                },
+                "pro_mode": pro_mode_metadata,
                 "tool_invocations": tool_invocations,
             },
-            runtime_status="completed",
+            runtime_status="completed" if satisfied else "failed",
+            runtime_error=None if satisfied else "required_code_execution_tools_did_not_complete",
         )
 
     async def _run_pro_mode_reasoning_solver(
@@ -17816,6 +17883,7 @@ class AgnoChatRuntime:
                         user_id=user_id,
                         max_runtime_seconds=effective_max_runtime_seconds,
                         debug=pro_mode_debug,
+                        event_callback=event_callback,
                     )
                 else:
                     pro_mode_result = await self._run_pro_mode_reasoning_solver(
@@ -18012,21 +18080,47 @@ class AgnoChatRuntime:
                         solver_metadata["model_route"] = dict(
                             solver_runtime_meta.get("model_route") or {}
                         )
+                    deterministic_fallback_meta = dict(
+                        solver_runtime_meta.get("deterministic_required_tool_fallback") or {}
+                    )
+                    if deterministic_fallback_meta:
+                        solver_metadata["deterministic_required_tool_fallback"] = (
+                            deterministic_fallback_meta
+                        )
+                        solver_metadata["summary"] = (
+                            "Planned with the dedicated code-execution reasoner and completed "
+                            "the required code tools through deterministic fallback."
+                        )
                     response_text = str(pro_mode_result.response_text or "").strip()
                     writer_stats: dict[str, Any] = {}
+                    supporting_points = []
+                    if codeexec_reasoning_turn:
+                        for invocation in list(solver_tool_invocations or []):
+                            summary = invocation.get("output_summary")
+                            if isinstance(summary, dict) and summary:
+                                supporting_points.append(json.dumps(summary, ensure_ascii=False))
+                            elif str(summary or "").strip():
+                                supporting_points.append(str(summary or "").strip())
+                    reservations = [
+                        str(item or "").strip()
+                        for item in list(
+                            dict(solver_metadata.get("verifier") or {}).get("issues") or []
+                        )
+                        if str(item or "").strip()
+                    ]
+                    if codeexec_reasoning_turn:
+                        reservations.extend(
+                            self._code_execution_fail_closed_reservations(
+                                solver_tool_invocations
+                            )
+                        )
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                         latest_user_text=latest_user_text,
                         draft_response_text=response_text,
                         execution_regime="reasoning_solver",
                         task_regime=intake_decision.task_regime,
-                        supporting_points=[],
-                        reservations=[
-                            str(item or "").strip()
-                            for item in list(
-                                dict(solver_metadata.get("verifier") or {}).get("issues") or []
-                            )
-                            if str(item or "").strip()
-                        ],
+                        supporting_points=supporting_points,
+                        reservations=reservations,
                         session_state={"pro_mode_context": dict(shared_context or {})},
                         conversation_id=conversation_id,
                         run_id=run_id,

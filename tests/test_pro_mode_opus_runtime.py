@@ -5,10 +5,10 @@ import sys
 import types
 from pathlib import Path
 
-import src.llm as llm_module
 import src.agno_backend.pro_mode as pro_mode_module
 import src.agno_backend.pro_mode_prompts as prompts_module
 import src.agno_backend.runtime as runtime_module
+import src.llm as llm_module
 from src.agno_backend.pro_mode import (
     ProModeIntakeDecision,
     ProModeVerifierReport,
@@ -1638,6 +1638,135 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
     assert metadata["pro_mode"]["model_routes"]["pro_mode_final_writer"]["transport"] == (
         "aws_bedrock_claude"
     )
+
+
+def test_codeexec_reasoning_solver_surfaces_fallback_tool_outputs_in_stream(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="sandbox-profile",
+        pro_mode_aws_sso_auth=True,
+    )
+    captured_supporting_points: list[str] = []
+
+    stabilized_decision = ProModeIntakeDecision(
+        route="deep_reasoning",
+        execution_regime="reasoning_solver",
+        reason="Hard computational request.",
+        selected_tool_names=["codegen_python_plan", "execute_python_job"],
+        tool_plan_category="code_execution",
+        task_regime="self_contained_reasoning",
+    )
+
+    async def fake_intake(**_kwargs):
+        return stabilized_decision
+
+    async def fake_solver(**_kwargs):
+        return ProModeWorkflowResult(
+            response_text="Completed the required code workflow.",
+            metadata={
+                "pro_mode": {
+                    "execution_path": "codeexec_reasoning_solver",
+                    "runtime_status": "completed",
+                    "verifier": {
+                        "passed": True,
+                        "issues": [],
+                        "suggested_changes": [],
+                        "confidence": "medium",
+                    },
+                    "deterministic_required_tool_fallback": {
+                        "missing_required_tool_names": [
+                            "codegen_python_plan",
+                            "execute_python_job",
+                        ]
+                    },
+                },
+                "tool_invocations": [
+                    {
+                        "tool": "codegen_python_plan",
+                        "status": "completed",
+                        "output_summary": {
+                            "success": True,
+                            "job_id": "job-123",
+                        },
+                    },
+                    {
+                        "tool": "execute_python_job",
+                        "status": "completed",
+                        "output_summary": {
+                            "success": True,
+                            "status": "completed",
+                            "artifacts": ["result.json"],
+                        },
+                    },
+                ],
+            },
+            runtime_status="completed",
+            runtime_error=None,
+        )
+
+    async def fake_final_writer(**kwargs):
+        captured_supporting_points.extend(list(kwargs.get("supporting_points") or []))
+        return "Measured output is ready.", {
+            "model_route": {
+                "transport": "aws_bedrock_claude",
+                "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+                "fallback_used": False,
+            }
+        }
+
+    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime._stabilize_pro_mode_intake_decision = (  # type: ignore[method-assign]
+        lambda **_kwargs: stabilized_decision
+    )
+    runtime._run_pro_mode_codeexec_reasoning_solver = fake_solver  # type: ignore[method-assign]
+    runtime._run_pro_mode_final_writer = fake_final_writer  # type: ignore[method-assign]
+    runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    async def _collect() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in runtime.stream(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Write and run Python to compare random forest and logistic regression "
+                        "and save result.json."
+                    ),
+                }
+            ],
+            uploaded_files=["/tmp/input.csv"],
+            conversation_id="conv-1",
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            reasoning_mode="deep",
+            user_id="user-1",
+            run_id="run-1",
+            debug=True,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    done_event = next(event for event in events if event.get("event") == "done")
+    payload = dict(done_event.get("data") or {})
+    metadata = dict(payload.get("metadata") or {})
+
+    assert payload["response_text"] == "Measured output is ready."
+    assert [item["tool"] for item in metadata["tool_invocations"]] == [
+        "codegen_python_plan",
+        "execute_python_job",
+    ]
+    assert metadata["pro_mode"]["summary"] == (
+        "Planned with the dedicated code-execution reasoner and completed "
+        "the required code tools through deterministic fallback."
+    )
+    assert captured_supporting_points
 
 
 def test_tool_workflow_fail_closes_when_code_execution_does_not_produce_measurements(

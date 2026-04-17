@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import src.agno_backend.codeexec_reasoning as codeexec_reasoning_module
@@ -76,3 +77,86 @@ def test_build_codeexec_reasoning_agent_enables_agno_reasoning(monkeypatch) -> N
     assert kwargs["reasoning_max_steps"] == 10
     assert kwargs["reasoning_min_steps"] == 2
     assert kwargs["tools"] == [CODEGEN_PYTHON_PLAN_TOOL, EXECUTE_PYTHON_JOB_TOOL]
+    assert any(
+        "executing the code tools is mandatory" in str(item or "")
+        for item in list(kwargs["instructions"] or [])
+    )
+
+
+def test_codeexec_reasoning_solver_runs_required_tools_when_agent_skips_execution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path, code_execution_enabled=True)
+    executed_tools: list[str] = []
+
+    async def fake_arun_with_optional_pro_mode_fallback(**_kwargs):
+        return "Random forest outperformed logistic regression with stable performance.", {
+            "transport": "openai",
+            "active_model": "gpt-oss-120b",
+            "fallback_used": False,
+        }
+
+    async def fake_execute_tool_program_actions(**kwargs):
+        actions = list(kwargs.get("actions") or [])
+        executed_tools.extend(str(action.tool_name or "") for action in actions)
+        return [
+            {
+                "tool": "codegen_python_plan",
+                "status": "completed",
+                "output_summary": {
+                    "success": True,
+                    "job_id": "job-123",
+                    "summary": "Prepared a deterministic Python plan.",
+                },
+            },
+            {
+                "tool": "execute_python_job",
+                "status": "completed",
+                "output_summary": {
+                    "success": True,
+                    "status": "completed",
+                    "artifacts": ["result.json", "outputs/feature_importance.png"],
+                },
+            },
+        ]
+
+    monkeypatch.setattr(
+        runtime,
+        "_arun_with_optional_pro_mode_fallback",
+        fake_arun_with_optional_pro_mode_fallback,
+    )
+    monkeypatch.setattr(runtime, "_execute_tool_program_actions", fake_execute_tool_program_actions)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_codeexec_reasoning_solver(
+            latest_user_text=(
+                "Write and run Python to compare random forest and logistic regression, "
+                "save a figure, and report measured results."
+            ),
+            task_regime="programmatic_experiment",
+            shared_context={},
+            uploaded_files=["/tmp/input.csv"],
+            selection_context=None,
+            selected_tool_names=["codegen_python_plan", "execute_python_job"],
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            max_runtime_seconds=120,
+            debug=False,
+            event_callback=None,
+        )
+    )
+
+    assert result.runtime_status == "completed"
+    assert executed_tools == ["codegen_python_plan", "execute_python_job"]
+    assert [item["tool"] for item in result.metadata["tool_invocations"]] == [
+        "codegen_python_plan",
+        "execute_python_job",
+    ]
+    assert (
+        result.metadata["pro_mode"]["deterministic_required_tool_fallback"][
+            "missing_required_tool_names"
+        ]
+        == ["codegen_python_plan", "execute_python_job"]
+    )

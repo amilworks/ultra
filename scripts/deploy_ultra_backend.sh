@@ -12,6 +12,7 @@ RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA/backend"
 CURRENT_LINK="$ULTRA_RELEASE_ROOT/current"
 ULTRA_VENV_ROOT="${ULTRA_VENV_ROOT:-$ULTRA_RELEASE_ROOT/venvs}"
 ULTRA_PYTHON_ROOT="${ULTRA_PYTHON_ROOT:-$ULTRA_RELEASE_ROOT/python}"
+ULTRA_BACKEND_ENV_FILE="${ULTRA_BACKEND_ENV_FILE:-/etc/ultra/ultra-backend.env}"
 UV_PYTHON_VERSION="${UV_PYTHON_VERSION:-3.10}"
 VENV_DIR="$ULTRA_VENV_ROOT/$RELEASE_SHA"
 
@@ -66,8 +67,49 @@ wait_for_health() {
   return 1
 }
 
+validate_codeexec_service_env() {
+  if [ ! -f "$ULTRA_BACKEND_ENV_FILE" ]; then
+    echo "Skipping code execution env validation because $ULTRA_BACKEND_ENV_FILE does not exist yet."
+    return 0
+  fi
+  python3 - "$ULTRA_BACKEND_ENV_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+values = {}
+for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key.strip()] = value.strip().strip('"').strip("'")
+
+backend = values.get("CODE_EXECUTION_DEFAULT_BACKEND", "").strip().lower()
+service_url = values.get("CODE_EXECUTION_SERVICE_URL", "").strip()
+service_key = values.get("CODE_EXECUTION_SERVICE_API_KEY", "").strip()
+enabled = values.get("CODE_EXECUTION_ENABLED", "true").strip().lower()
+
+if backend == "service":
+    missing = []
+    if enabled == "false":
+        missing.append("CODE_EXECUTION_ENABLED=true")
+    if not service_url:
+        missing.append("CODE_EXECUTION_SERVICE_URL")
+    if not service_key:
+        missing.append("CODE_EXECUTION_SERVICE_API_KEY")
+    if missing:
+        raise SystemExit(
+            "Service-backed code execution is enabled, but the backend env is missing: "
+            + ", ".join(missing)
+        )
+    print("Validated service-backed code execution env.")
+PY
+}
+
 echo "Preparing backend release: $RELEASE_DIR"
 cd "$RELEASE_DIR"
+validate_codeexec_service_env
 
 # Keep managed Python and virtualenvs on local disk so systemd can execute them
 # reliably even when releases live on a shared mount.

@@ -117,6 +117,7 @@ import {
   buildScientificResultGroups,
   type ScientificResultFigure,
 } from "./features/chat/scientific-results";
+import { shouldHydrateRunArtifacts } from "./features/chat/run-artifact-hydration";
 import {
   loadComposerResources,
   loadLibraryResources,
@@ -8694,7 +8695,7 @@ export function App() {
   const stopRequestedConversationIdsRef = useRef<Set<string>>(new Set());
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
   const reuseDecisionResolverRef = useRef<((decision: ReuseDecision) => void) | null>(null);
-  const legacyYoloArtifactHydrationsRef = useRef<Set<string>>(new Set());
+  const runArtifactHydrationsRef = useRef<Set<string>>(new Set());
   const [activeSlashWorkflowId, setActiveSlashWorkflowId] = useState<ComposerWorkflowId | null>(
     null
   );
@@ -11509,7 +11510,7 @@ export function App() {
           return;
         }
         const hydrationKey = `${conversation.id}:${message.id}:${message.runId}`;
-        if (legacyYoloArtifactHydrationsRef.current.has(hydrationKey)) {
+        if (runArtifactHydrationsRef.current.has(hydrationKey)) {
           return;
         }
         const cards = buildToolResultCards(
@@ -11524,12 +11525,7 @@ export function App() {
             responseMetadata: message.responseMetadata ?? null,
           }
         );
-        const needsAnnotatedFigureRefresh = cards.some(
-          (card) =>
-            card.tool === "yolo_detect" &&
-            Boolean(card.yoloFigureAvailability?.missingAnnotatedFigure)
-        );
-        if (!needsAnnotatedFigureRefresh) {
+        if (!shouldHydrateRunArtifacts(message, cards)) {
           return;
         }
         targets.push({
@@ -11546,17 +11542,17 @@ export function App() {
     }
 
     let cancelled = false;
-    const hydrateLegacyYoloArtifacts = async (): Promise<void> => {
+    const hydrateRunArtifactTargets = async (): Promise<void> => {
       for (const target of targets) {
         if (cancelled) {
           return;
         }
-        legacyYoloArtifactHydrationsRef.current.add(target.key);
+        runArtifactHydrationsRef.current.add(target.key);
         await hydrateRunArtifacts(target.conversationId, target.messageId, target.runId);
       }
     };
 
-    void hydrateLegacyYoloArtifacts();
+    void hydrateRunArtifactTargets();
     return () => {
       cancelled = true;
     };

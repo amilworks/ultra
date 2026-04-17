@@ -2008,6 +2008,24 @@ const ConversationMessageRow = memo(
           : null,
       [isAssistant, message, toolResultCards]
     );
+    const hasScientificPrimaryToolCard = toolResultCards.some((card) =>
+      Boolean(card.megasegInsights)
+    );
+    const collapseScientificInterpretation = useMemo(() => {
+      if (isStreamingAssistant || !hasScientificPrimaryToolCard) {
+        return false;
+      }
+      const content = String(message.content || "").trim();
+      if (!content) {
+        return false;
+      }
+      return (
+        content.length > 320 ||
+        /(^|\n)#{1,6}\s+/m.test(content) ||
+        /(^|\n)\|.+\|/m.test(content) ||
+        /(^|\n)(?:- |\d+\. )/m.test(content)
+      );
+    }, [hasScientificPrimaryToolCard, isStreamingAssistant, message.content]);
     const hasPrimaryToolCard = toolResultCards.length > 0;
     const showResearchDigest =
       Boolean(researchDigest) && (!isStreamingAssistant || !message.liveStream);
@@ -2383,13 +2401,28 @@ const ConversationMessageRow = memo(
               />
             </div>
           ) : (
-            <MessageContent
-              className="w-full bg-transparent p-0 text-foreground"
-              id={message.id}
-              markdown
-            >
-              {message.content}
-            </MessageContent>
+            collapseScientificInterpretation ? (
+              <details className="chat-scientific-appendix">
+                <summary>Model interpretation</summary>
+                <div className="chat-scientific-appendix-body">
+                  <MessageContent
+                    className="w-full bg-transparent p-0 text-foreground"
+                    id={message.id}
+                    markdown
+                  >
+                    {message.content}
+                  </MessageContent>
+                </div>
+              </details>
+            ) : (
+              <MessageContent
+                className="w-full bg-transparent p-0 text-foreground"
+                id={message.id}
+                markdown
+              >
+                {message.content}
+              </MessageContent>
+            )
           )}
           {proModeDevConversation
             ? renderProModeDevConversation(message.id, proModeDevConversation, {

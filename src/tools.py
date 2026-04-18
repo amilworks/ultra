@@ -409,6 +409,20 @@ def _init_bq_session(
             bisque_root=bisque_root,
             create_mex=False,
         )
+        try:
+            whoami = bq.fetchxml(f"{bisque_root}/auth_service/whoami")
+        except Exception as exc:
+            raise ValueError(f"BisQue basic authentication failed: {exc}") from exc
+        resolved_user = _extract_bisque_user_from_xml(whoami)
+        normalized_user = str(resolved_user or "").strip().lower()
+        if not normalized_user or normalized_user in {
+            "anonymous",
+            "guest",
+            "anon",
+            "public",
+            "none",
+        }:
+            raise ValueError("BisQue basic authentication resolved to anonymous identity.")
         return False, "basic"
     raise ValueError(
         "BisQue authentication required. Provide BisQue session cookie, API access token, or BISQUE_USER/BISQUE_PASSWORD."
@@ -4233,22 +4247,60 @@ def _extract_bisque_user_from_xml(xml: etree._Element | None) -> str | None:
             if tag is None:
                 continue
             value = str(tag.get("value") or tag.get("name") or tag.text or "").strip()
+            if _looks_like_bisque_resource_uri(value):
+                continue
             if value:
                 return value
 
     user_nodes = [xml] if xml.tag == "user" else list(xml.findall(".//user"))
     for node in user_nodes:
         value = str(node.get("name") or node.get("value") or node.text or "").strip()
+        if _looks_like_bisque_resource_uri(value):
+            continue
         if value:
             return value
 
     for attr in ("name", "value", "user", "username"):
         value = str(xml.get(attr) or "").strip()
+        if _looks_like_bisque_resource_uri(value):
+            continue
         if value:
             return value
 
     text_value = str(xml.text or "").strip()
+    if _looks_like_bisque_resource_uri(text_value):
+        return None
     return text_value or None
+
+
+def _looks_like_bisque_resource_uri(value: str | None) -> bool:
+    token = str(value or "").strip().lower()
+    if not token:
+        return False
+    return "/data_service/" in token or "/image_service/" in token
+
+
+def _loaded_bisque_resource_type(
+    *,
+    resource: Any | None,
+    resource_xml: etree._Element | None,
+) -> str | None:
+    candidates: list[str | None] = []
+    if resource is not None:
+        for attr in ("tag", "resource_type", "type", "xmltag"):
+            if hasattr(resource, attr):
+                candidates.append(str(getattr(resource, attr) or "").strip() or None)
+        xmltree = getattr(resource, "xmltree", None)
+        if xmltree is not None and getattr(xmltree, "tag", None) is not None:
+            candidates.append(str(etree.QName(xmltree.tag).localname or "").strip() or None)
+    if resource_xml is not None:
+        candidates.append(str(etree.QName(resource_xml.tag).localname or "").strip() or None)
+
+    for value in candidates:
+        token = str(value or "").strip()
+        if token:
+            return token
+    return None
 
 
 def _short_bisque_id(uri: str | None) -> str | None:
@@ -5547,9 +5599,7 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
                 else (resource_xml.get("name") if resource_xml is not None else None)
             ),
             "resource_type": (
-                resource.tag
-                if resource is not None and hasattr(resource, "tag")
-                else (etree.QName(resource_xml.tag).localname if resource_xml is not None else None)
+                _loaded_bisque_resource_type(resource=resource, resource_xml=resource_xml)
             ),
             "owner": (
                 resource.owner
@@ -14587,7 +14637,7 @@ def _infer_bisque_dataset_target_from_text(user_text: str | None) -> dict[str, A
             False,
         ),
         (
-            r"\b(?:upload|save|store|put|add|organize|group|aggregate)\b.{0,40}\b(?:to|into|in)\s+(?:the\s+)?(?:dataset\s+)?[\"“']?([^\"”'\n\r.!?]+)",
+            r"\b(?:upload|save|store|put|add|organize|group|aggregate)\b.{0,40}\b(?:to|into|in)\s+(?:the\s+)?(?:dataset|collection)\s+[\"“']?([^\"”'\n\r.!?]+)",
             False,
         ),
     ]

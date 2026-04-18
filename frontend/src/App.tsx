@@ -1920,6 +1920,7 @@ type ConversationTranscriptActions = {
   onImportBisqueResourcesIntoConversation: (
     resourcesToImport: string[],
     options?: {
+      materialize?: boolean;
       persistSelectionContext?: boolean;
       source?: string;
       suggestedDomain?: string | null;
@@ -2177,6 +2178,7 @@ const ConversationMessageRow = memo(
                                         void actions.onImportBisqueResourcesIntoConversation(
                                           [row.resourceUri as string],
                                           {
+                                            materialize: false,
                                             persistSelectionContext: true,
                                             source: "tool_result_use_in_chat",
                                             originatingMessageId: message.id,
@@ -2268,6 +2270,7 @@ const ConversationMessageRow = memo(
                           void actions.onImportBisqueResourcesIntoConversation(
                             [resourceUri],
                             {
+                              materialize: false,
                               persistSelectionContext: true,
                               source: "tool_result_use_in_chat",
                               originatingMessageId: message.id,
@@ -9983,6 +9986,7 @@ export function App() {
   const importBisqueResourcesIntoConversation = async (
     resourcesToImport: string[],
     options?: {
+      materialize?: boolean;
       persistSelectionContext?: boolean;
       source?: string;
       suggestedDomain?: string | null;
@@ -10003,11 +10007,12 @@ export function App() {
       return { uploadedFiles: [], bisqueLinksByFileId: {} };
     }
     const partitionedSelectionUris = partitionBisqueUris(normalizedResources);
+    const shouldMaterialize = options?.materialize !== false;
     if (options?.persistSelectionContext) {
       updateConversation(conversationId, (current) => ({
         ...current,
         updatedAt: Date.now(),
-        selectionImportPending: true,
+        selectionImportPending: shouldMaterialize,
         chatError: null,
       }));
     }
@@ -10030,6 +10035,41 @@ export function App() {
     const resourcesMissingImport = normalizedResources.filter(
       (resourceUri) => !existingFileByResourceUri.has(resourceUri.toLowerCase())
     );
+
+    if (!shouldMaterialize) {
+      const orderedExistingFileIds = normalizedResources
+        .map((resourceUri) => existingFileByResourceUri.get(resourceUri.toLowerCase())?.file_id ?? null)
+        .filter((fileId): fileId is string => Boolean(fileId));
+      updateConversation(conversationId, (current) => ({
+        ...current,
+        updatedAt: Date.now(),
+        activeSelectionContext:
+          options?.persistSelectionContext
+            ? ({
+                context_id: makeId(),
+                source: options?.source ?? "use_in_chat",
+                focused_file_ids: orderedExistingFileIds,
+                resource_uris: partitionedSelectionUris.resourceUris,
+                dataset_uris: partitionedSelectionUris.datasetUris,
+                originating_message_id: options?.originatingMessageId ?? null,
+                originating_user_text:
+                  options?.originatingUserText?.trim() ||
+                  [...current.messages]
+                    .reverse()
+                    .find((message) => message.role === "user" && message.content.trim().length > 0)
+                    ?.content?.trim() ||
+                  null,
+                suggested_domain: options?.suggestedDomain ?? null,
+                suggested_tool_names: Array.from(
+                  new Set((options?.suggestedToolNames ?? []).map((name) => String(name || "").trim()))
+                ).filter((name) => name.length > 0),
+              } satisfies SelectionContext)
+            : current.activeSelectionContext,
+        selectionImportPending: false,
+        chatError: null,
+      }));
+      return { uploadedFiles: [], bisqueLinksByFileId: {} };
+    }
 
     try {
       const importResponse =
@@ -10219,6 +10259,7 @@ export function App() {
       hasStagedUploads: false,
     });
     const importedSelection = await importBisqueResourcesIntoConversation(resourceUris, {
+      materialize: selectedToolNames.length === 0,
       persistSelectionContext: true,
       source: "deictic_followup",
       suggestedToolNames: selectedToolNames,
@@ -10237,7 +10278,9 @@ export function App() {
       resolvedRows: selection.selectedRows,
       selectedToolNames,
       selectionContext:
-        focusedFileIds.length > 0
+        focusedFileIds.length > 0 ||
+        partitionedUris.resourceUris.length > 0 ||
+        partitionedUris.datasetUris.length > 0
           ? {
               context_id: makeId(),
               source: "deictic_followup",

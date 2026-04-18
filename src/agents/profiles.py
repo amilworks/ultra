@@ -88,6 +88,7 @@ CODE_VERIFIER_INSTRUCTIONS = (
     "When the user explicitly asks for computed numeric values, exact finite sums, percent differences, or reproducible quantitative checks, execution is required unless those values were already produced by a trusted tool.\n"
     "Prefer numpy, scipy, pandas, and scikit-image for reproducible calculations.\n"
     "Stay bounded: one compact verification plan, one execution, and only repair if execution fails trivially.\n"
+    "If execution fails or does not return trusted measured outputs, do not estimate missing numeric results; report the failure and the missing evidence instead.\n"
     "Return strict JSON only with keys: verified, recommendation, summary, evidence, measurements, remaining_uncertainty.\n"
     "recommendation must be one of: accept, repair, escalate, not_needed.\n"
     "evidence must be a list of short strings.\n"

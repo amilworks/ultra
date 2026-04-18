@@ -409,6 +409,20 @@ def _init_bq_session(
             bisque_root=bisque_root,
             create_mex=False,
         )
+        try:
+            whoami = bq.fetchxml(f"{bisque_root}/auth_service/whoami")
+        except Exception as exc:
+            raise ValueError(f"BisQue basic authentication failed: {exc}") from exc
+        resolved_user = _extract_bisque_user_from_xml(whoami)
+        normalized_user = str(resolved_user or "").strip().lower()
+        if not normalized_user or normalized_user in {
+            "anonymous",
+            "guest",
+            "anon",
+            "public",
+            "none",
+        }:
+            raise ValueError("BisQue basic authentication resolved to anonymous identity.")
         return False, "basic"
     raise ValueError(
         "BisQue authentication required. Provide BisQue session cookie, API access token, or BISQUE_USER/BISQUE_PASSWORD."
@@ -3146,6 +3160,9 @@ def _segmentation_result_paths_exist(result: dict[str, Any]) -> bool:
 
 def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]:
     refs: dict[str, Any] = {}
+    result_group_id = str(result.get("result_group_id") or "").strip()
+    if result_group_id:
+        refs["latest_segmentation_result_group_id"] = result_group_id
     preferred = result.get("preferred_upload_paths")
     if isinstance(preferred, list) and preferred:
         refs["latest_segmentation_mask_path"] = str(preferred[-1])
@@ -3165,6 +3182,36 @@ def _tool_result_refs_for_segmentation(result: dict[str, Any]) -> dict[str, Any]
     if result.get("output_directory"):
         refs["latest_segmentation_output_directory"] = str(result.get("output_directory"))
     return refs
+
+
+def _stable_result_group_id(prefix: str, *parts: Any) -> str:
+    normalized_parts = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    digest_input = "||".join(normalized_parts) or prefix
+    digest = hashlib.sha1(digest_input.encode("utf-8")).hexdigest()[:12]
+    safe_prefix = _safe_slug(prefix).replace("-", "_")
+    return f"{safe_prefix}_{digest}"
+
+
+def _segmentation_result_group_id(result: dict[str, Any], *, tool_name: str) -> str:
+    explicit = str(result.get("result_group_id") or "").strip()
+    if explicit:
+        return explicit
+    output_directory = str(result.get("output_directory") or "").strip()
+    if output_directory:
+        return _stable_result_group_id(tool_name, output_directory)
+    preferred = result.get("preferred_upload_paths")
+    preferred_paths = (
+        [str(item or "").strip() for item in preferred if str(item or "").strip()]
+        if isinstance(preferred, list)
+        else []
+    )
+    files_processed = result.get("files_processed")
+    file_tokens = [
+        str((row or {}).get("file") or "").strip()
+        for row in list(files_processed or [])
+        if isinstance(row, dict) and str((row or {}).get("file") or "").strip()
+    ]
+    return _stable_result_group_id(tool_name, *preferred_paths[:8], *file_tokens[:8])
 
 
 def _rewrite_megaseg_payload_paths(value: Any, path_map: dict[str, str]) -> Any:
@@ -3244,6 +3291,7 @@ def _build_megaseg_tool_response(
                     "coverage_percent": segmentation.get("coverage_percent"),
                     "object_count": segmentation.get("object_count"),
                     "active_slice_count": segmentation.get("active_slice_count"),
+                    "z_slice_count": segmentation.get("z_slice_count"),
                     "largest_component_voxels": segmentation.get("largest_component_voxels"),
                     "preferred_upload_path": preferred_path,
                     "probability_path": probability_path,
@@ -3257,6 +3305,7 @@ def _build_megaseg_tool_response(
                     "coverage_percent": segmentation.get("coverage_percent"),
                     "object_count": segmentation.get("object_count"),
                     "active_slice_count": segmentation.get("active_slice_count"),
+                    "z_slice_count": segmentation.get("z_slice_count"),
                     "largest_component_voxels": segmentation.get("largest_component_voxels"),
                     "structure_inside_outside_ratio": intensity_context.get(
                         "structure_inside_outside_ratio"
@@ -3279,6 +3328,11 @@ def _build_megaseg_tool_response(
     aggregate = (
         runner_result.get("aggregate") if isinstance(runner_result.get("aggregate"), dict) else {}
     )
+    result_group_id = _stable_result_group_id(
+        "megaseg",
+        str(output_dir),
+        *preferred_upload_paths[:8],
+    )
     summary_payload = {
         "processed_files": len(successful),
         "total_files": len(runner_files),
@@ -3292,11 +3346,13 @@ def _build_megaseg_tool_response(
         {
             "type": "metrics",
             "title": "Megaseg summary",
+            "result_group_id": result_group_id,
             "payload": summary_payload,
         },
         {
             "type": "table",
             "title": "Megaseg per-file metrics",
+            "result_group_id": result_group_id,
             "payload": scientific_rows[:200],
         },
     ]
@@ -3307,6 +3363,7 @@ def _build_megaseg_tool_response(
                     "type": "image",
                     "title": item.get("title") or "Megaseg overlay",
                     "path": item.get("path"),
+                    "result_group_id": result_group_id,
                 }
             )
 
@@ -3323,6 +3380,7 @@ def _build_megaseg_tool_response(
         "success": len(successful) > 0,
         "processed": len(successful),
         "total_files": len(runner_files),
+        "result_group_id": result_group_id,
         "files_processed": files_processed,
         "output_directory": str(output_dir),
         "model": "Megaseg DynUNet",
@@ -3362,6 +3420,7 @@ def _build_megaseg_tool_response(
                     str(path) for path in preferred_upload_paths
                 ],
                 "segment_image_megaseg.latest_mask_path": str(preferred_upload_paths[-1]),
+                "segment_image_megaseg.result_group_id": result_group_id,
             }
         )
     if response.get("report_path"):
@@ -4188,22 +4247,60 @@ def _extract_bisque_user_from_xml(xml: etree._Element | None) -> str | None:
             if tag is None:
                 continue
             value = str(tag.get("value") or tag.get("name") or tag.text or "").strip()
+            if _looks_like_bisque_resource_uri(value):
+                continue
             if value:
                 return value
 
     user_nodes = [xml] if xml.tag == "user" else list(xml.findall(".//user"))
     for node in user_nodes:
         value = str(node.get("name") or node.get("value") or node.text or "").strip()
+        if _looks_like_bisque_resource_uri(value):
+            continue
         if value:
             return value
 
     for attr in ("name", "value", "user", "username"):
         value = str(xml.get(attr) or "").strip()
+        if _looks_like_bisque_resource_uri(value):
+            continue
         if value:
             return value
 
     text_value = str(xml.text or "").strip()
+    if _looks_like_bisque_resource_uri(text_value):
+        return None
     return text_value or None
+
+
+def _looks_like_bisque_resource_uri(value: str | None) -> bool:
+    token = str(value or "").strip().lower()
+    if not token:
+        return False
+    return "/data_service/" in token or "/image_service/" in token
+
+
+def _loaded_bisque_resource_type(
+    *,
+    resource: Any | None,
+    resource_xml: etree._Element | None,
+) -> str | None:
+    candidates: list[str | None] = []
+    if resource is not None:
+        for attr in ("tag", "resource_type", "type", "xmltag"):
+            if hasattr(resource, attr):
+                candidates.append(str(getattr(resource, attr) or "").strip() or None)
+        xmltree = getattr(resource, "xmltree", None)
+        if xmltree is not None and getattr(xmltree, "tag", None) is not None:
+            candidates.append(str(etree.QName(xmltree.tag).localname or "").strip() or None)
+    if resource_xml is not None:
+        candidates.append(str(etree.QName(resource_xml.tag).localname or "").strip() or None)
+
+    for value in candidates:
+        token = str(value or "").strip()
+        if token:
+            return token
+    return None
 
 
 def _short_bisque_id(uri: str | None) -> str | None:
@@ -5502,9 +5599,7 @@ def load_bisque_resource(resource_uri: str, view: str = "deep") -> dict[str, Any
                 else (resource_xml.get("name") if resource_xml is not None else None)
             ),
             "resource_type": (
-                resource.tag
-                if resource is not None and hasattr(resource, "tag")
-                else (etree.QName(resource_xml.tag).localname if resource_xml is not None else None)
+                _loaded_bisque_resource_type(resource=resource, resource_xml=resource_xml)
             ),
             "owner": (
                 resource.owner
@@ -8769,6 +8864,7 @@ def quantify_segmentation_masks(
     pixel_size: float | None = None,
     pixel_unit: str = "px",
     stem_strip_tokens: list[str] | None = None,
+    result_group_id: str | None = None,
 ) -> dict[str, Any]:
     """Quantify segmentation masks into per-mask morphology summaries."""
     if not mask_paths:
@@ -8885,8 +8981,13 @@ def quantify_segmentation_masks(
                     {"name": f"mean_{metric_name}", "value": float(metric_value), "unit": "score"}
                 )
 
+    normalized_result_group_id = (
+        str(result_group_id or "").strip()
+        or _stable_result_group_id("quantify_segmentation_masks", *list(mask_paths or [])[:8])
+    )
     result: dict[str, Any] = {
         "success": len(success_rows) > 0,
+        "result_group_id": normalized_result_group_id,
         "summary": summary,
         "rows": rows,
         "component_size_count": len(all_component_sizes),
@@ -8894,15 +8995,30 @@ def quantify_segmentation_masks(
         "evaluation": eval_result,
         "evaluation_pairing_fallback_used": bool(eval_pairing_fallback_used),
         "ui_artifacts": [
-            {"type": "metrics", "title": "Mask quantification summary", "payload": summary},
-            {"type": "table", "title": "Per-mask quantification", "payload": rows[:500]},
+            {
+                "type": "metrics",
+                "title": "Mask quantification summary",
+                "result_group_id": normalized_result_group_id,
+                "payload": summary,
+            },
+            {
+                "type": "table",
+                "title": "Per-mask quantification",
+                "result_group_id": normalized_result_group_id,
+                "payload": rows[:500],
+            },
         ],
     }
     if eval_result and isinstance(eval_result, dict):
         metrics_payload = eval_result.get("metrics_mean")
         if isinstance(metrics_payload, dict):
             result["ui_artifacts"].append(
-                {"type": "metrics", "title": "Overlap metrics (mean)", "payload": metrics_payload}
+                {
+                    "type": "metrics",
+                    "title": "Overlap metrics (mean)",
+                    "result_group_id": normalized_result_group_id,
+                    "payload": metrics_payload,
+                }
             )
     result["latest_result_refs"] = {
         "latest_segmentation_quant_rows": rows[:500],
@@ -8913,6 +9029,7 @@ def quantify_segmentation_masks(
         "latest_eval_metrics_mean": (eval_result or {}).get("metrics_mean")
         if isinstance(eval_result, dict)
         else {},
+        "latest_segmentation_result_group_id": normalized_result_group_id,
     }
     return result
 
@@ -14520,7 +14637,7 @@ def _infer_bisque_dataset_target_from_text(user_text: str | None) -> dict[str, A
             False,
         ),
         (
-            r"\b(?:upload|save|store|put|add|organize|group|aggregate)\b.{0,40}\b(?:to|into|in)\s+(?:the\s+)?(?:dataset\s+)?[\"“']?([^\"”'\n\r.!?]+)",
+            r"\b(?:upload|save|store|put|add|organize|group|aggregate)\b.{0,40}\b(?:to|into|in)\s+(?:the\s+)?(?:dataset|collection)\s+[\"“']?([^\"”'\n\r.!?]+)",
             False,
         ),
     ]
@@ -14839,6 +14956,31 @@ def execute_tool_call(
             )
             return has_local_missing and not has_local_existing
 
+        def _image_paths_need_current_local_replacement(paths: list[str]) -> bool:
+            if _paths_need_current_local_replacement(paths):
+                return True
+            if not paths:
+                return False
+            has_local_existing = any(
+                Path(path).expanduser().exists()
+                for path in paths
+                if not _looks_like_remote_path(path)
+            )
+            has_supported_remote = any(
+                _looks_like_remote_path(path) and _looks_like_segmentation_remote_path(path)
+                for path in paths
+            )
+            has_unsupported_remote = any(
+                _looks_like_remote_path(path) and not _looks_like_segmentation_remote_path(path)
+                for path in paths
+            )
+            # BisQue data_service/image_service URLs and other non-file remote placeholders
+            # are not directly loadable scientific inputs for the segmentation stack. When the
+            # current turn already has concrete uploaded/selection-local image files, prefer
+            # those over stale conversational placeholders. Keep valid remote microscopy paths
+            # like s3://...ome.zarr intact.
+            return has_unsupported_remote and not has_supported_remote and not has_local_existing
+
         def _safe_download_token(value: Any, *, default: str) -> str:
             token = str(value or "").strip().rstrip("/").split("/")[-1]
             token = re.sub(r"[^A-Za-z0-9._-]+", "_", token)
@@ -15094,6 +15236,112 @@ def execute_tool_call(
                     args["file_path"],
                 )
 
+        def _apply_quantify_segmentation_defaults() -> str | None:
+            provided_mask_paths = _list_arg("mask_paths")
+            provided_gt_paths = _list_arg("ground_truth_paths")
+            latest_mask_paths = _collect_latest_mask_paths_from_refs(latest_result_refs)
+            latest_gt_paths = _collect_latest_ground_truth_paths_from_refs(latest_result_refs)
+            uploaded_mask_files = [
+                str(p)
+                for p in uploaded_files
+                if _looks_like_uploaded_mask_artifact(Path(str(p)))
+            ]
+            uploaded_gt_files = [
+                str(p)
+                for p in uploaded_files
+                if _looks_like_uploaded_ground_truth_artifact(Path(str(p)))
+            ]
+            explicit_mask_locals = _existing_local_paths(provided_mask_paths)
+            explicit_gt_locals = _existing_local_paths(provided_gt_paths)
+            explicit_mask_is_plausible = any(
+                _looks_like_explicit_mask_path(path) for path in explicit_mask_locals
+            )
+            explicit_gt_is_plausible = any(
+                _looks_like_explicit_ground_truth_path(path) for path in explicit_gt_locals
+            )
+            replacement_mask_paths = latest_mask_paths or uploaded_mask_files
+            replacement_gt_paths = latest_gt_paths or uploaded_gt_files
+            latest_result_group_id = str(
+                (latest_result_refs or {}).get("latest_segmentation_result_group_id") or ""
+            ).strip()
+
+            if not provided_mask_paths:
+                if replacement_mask_paths:
+                    args["mask_paths"] = replacement_mask_paths[:8]
+                    logger.info(
+                        "Injected %s mask artifact path(s) into quantify_segmentation_masks tool call",
+                        len(args["mask_paths"]),
+                    )
+                else:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                "No segmentation mask artifacts are available for quantify_segmentation_masks. "
+                                "Pass mask_paths explicitly or run segment_image_sam2 first."
+                            ),
+                            "next_step": "Run segment_image_sam2 or provide mask_paths.",
+                        },
+                        ensure_ascii=False,
+                    )
+            elif replacement_mask_paths and (
+                not explicit_mask_locals or not explicit_mask_is_plausible
+            ):
+                args["mask_paths"] = replacement_mask_paths[:8]
+                logger.info(
+                    "Replaced ambiguous/non-mask inputs in quantify_segmentation_masks with %s inferred mask artifact(s)",
+                    len(args["mask_paths"]),
+                )
+            elif provided_mask_paths and not explicit_mask_locals:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "quantify_segmentation_masks mask_paths must reference local mask artifacts for this turn. "
+                            "The provided mask paths were not available locally."
+                        ),
+                        "next_step": "Use local mask artifact paths or run segment_image_sam2 first.",
+                    },
+                    ensure_ascii=False,
+                )
+            elif explicit_mask_locals:
+                args["mask_paths"] = explicit_mask_locals
+
+            if not provided_gt_paths and replacement_gt_paths:
+                args["ground_truth_paths"] = replacement_gt_paths[:8]
+                logger.info(
+                    "Injected %s ground-truth mask path(s) into quantify_segmentation_masks tool call",
+                    len(args["ground_truth_paths"]),
+                )
+            elif (
+                provided_gt_paths
+                and replacement_gt_paths
+                and (not explicit_gt_locals or not explicit_gt_is_plausible)
+            ):
+                args["ground_truth_paths"] = replacement_gt_paths[:8]
+                logger.info(
+                    "Replaced ambiguous/non-ground-truth inputs in quantify_segmentation_masks with %s inferred label artifact(s)",
+                    len(args["ground_truth_paths"]),
+                )
+            elif provided_gt_paths and not explicit_gt_locals:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "quantify_segmentation_masks ground_truth_paths must reference local label masks for this turn. "
+                            "The provided ground-truth paths were not available locally."
+                        ),
+                        "next_step": "Use local label-mask paths or re-upload the ground-truth masks.",
+                    },
+                    ensure_ascii=False,
+                )
+            elif explicit_gt_locals:
+                args["ground_truth_paths"] = explicit_gt_locals
+
+            if latest_result_group_id and not str(args.get("result_group_id") or "").strip():
+                args["result_group_id"] = latest_result_group_id
+            return None
+
         if uploaded_files:
             if tool_name == "upload_to_bisque":
                 if not args.get("file_paths") or args.get("file_paths") == []:
@@ -15311,7 +15559,9 @@ def execute_tool_call(
                     image_files = [
                         p for p in uploaded_files if _is_segmentation_image(Path(str(p)))
                     ]
-                    if image_files and _paths_need_current_local_replacement(provided_paths):
+                    if image_files and _image_paths_need_current_local_replacement(
+                        provided_paths
+                    ):
                         args["file_paths"] = image_files
                         logger.info(
                             "Replaced unavailable %s inputs with %s uploaded image(s)",
@@ -15395,103 +15645,9 @@ def execute_tool_call(
                         ensure_ascii=False,
                     )
             elif tool_name == "quantify_segmentation_masks":
-                provided_mask_paths = _list_arg("mask_paths")
-                provided_gt_paths = _list_arg("ground_truth_paths")
-                latest_mask_paths = _collect_latest_mask_paths_from_refs(latest_result_refs)
-                latest_gt_paths = _collect_latest_ground_truth_paths_from_refs(latest_result_refs)
-                uploaded_mask_files = [
-                    str(p)
-                    for p in uploaded_files
-                    if _looks_like_uploaded_mask_artifact(Path(str(p)))
-                ]
-                uploaded_gt_files = [
-                    str(p)
-                    for p in uploaded_files
-                    if _looks_like_uploaded_ground_truth_artifact(Path(str(p)))
-                ]
-                explicit_mask_locals = _existing_local_paths(provided_mask_paths)
-                explicit_gt_locals = _existing_local_paths(provided_gt_paths)
-                explicit_mask_is_plausible = any(
-                    _looks_like_explicit_mask_path(path) for path in explicit_mask_locals
-                )
-                explicit_gt_is_plausible = any(
-                    _looks_like_explicit_ground_truth_path(path) for path in explicit_gt_locals
-                )
-                replacement_mask_paths = latest_mask_paths or uploaded_mask_files
-                replacement_gt_paths = latest_gt_paths or uploaded_gt_files
-
-                if not provided_mask_paths:
-                    if replacement_mask_paths:
-                        args["mask_paths"] = replacement_mask_paths[:8]
-                        logger.info(
-                            "Injected %s mask artifact path(s) into quantify_segmentation_masks tool call",
-                            len(args["mask_paths"]),
-                        )
-                    else:
-                        return json.dumps(
-                            {
-                                "success": False,
-                                "error": (
-                                    "No segmentation mask artifacts are available for quantify_segmentation_masks. "
-                                    "Pass mask_paths explicitly or run segment_image_sam2 first."
-                                ),
-                                "next_step": "Run segment_image_sam2 or provide mask_paths.",
-                            },
-                            ensure_ascii=False,
-                        )
-                elif replacement_mask_paths and (
-                    not explicit_mask_locals or not explicit_mask_is_plausible
-                ):
-                    args["mask_paths"] = replacement_mask_paths[:8]
-                    logger.info(
-                        "Replaced ambiguous/non-mask inputs in quantify_segmentation_masks with %s inferred mask artifact(s)",
-                        len(args["mask_paths"]),
-                    )
-                elif provided_mask_paths and not explicit_mask_locals:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "quantify_segmentation_masks mask_paths must reference local mask artifacts for this turn. "
-                                "The provided mask paths were not available locally."
-                            ),
-                            "next_step": "Use local mask artifact paths or run segment_image_sam2 first.",
-                        },
-                        ensure_ascii=False,
-                    )
-                elif explicit_mask_locals:
-                    args["mask_paths"] = explicit_mask_locals
-
-                if not provided_gt_paths and replacement_gt_paths:
-                    args["ground_truth_paths"] = replacement_gt_paths[:8]
-                    logger.info(
-                        "Injected %s ground-truth mask path(s) into quantify_segmentation_masks tool call",
-                        len(args["ground_truth_paths"]),
-                    )
-                elif (
-                    provided_gt_paths
-                    and replacement_gt_paths
-                    and (not explicit_gt_locals or not explicit_gt_is_plausible)
-                ):
-                    args["ground_truth_paths"] = replacement_gt_paths[:8]
-                    logger.info(
-                        "Replaced ambiguous/non-ground-truth inputs in quantify_segmentation_masks with %s inferred label artifact(s)",
-                        len(args["ground_truth_paths"]),
-                    )
-                elif provided_gt_paths and not explicit_gt_locals:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "quantify_segmentation_masks ground_truth_paths must reference local label masks for this turn. "
-                                "The provided ground-truth paths were not available locally."
-                            ),
-                            "next_step": "Use local label-mask paths or re-upload the ground-truth masks.",
-                        },
-                        ensure_ascii=False,
-                    )
-                elif explicit_gt_locals:
-                    args["ground_truth_paths"] = explicit_gt_locals
+                quantify_error = _apply_quantify_segmentation_defaults()
+                if quantify_error:
+                    return quantify_error
 
         if (not uploaded_files) and tool_name in {
             "segment_image_megaseg",
@@ -15518,20 +15674,28 @@ def execute_tool_call(
                     len(prompt_image_files),
                     tool_name,
                 )
-            elif selection_image_files and _paths_need_current_local_replacement(provided_paths):
+            elif selection_image_files and _image_paths_need_current_local_replacement(
+                provided_paths
+            ):
                 args["file_paths"] = selection_image_files
                 logger.info(
                     "Replaced unavailable %s inputs with %s selection-context image(s)",
                     tool_name,
                     len(selection_image_files),
                 )
-            elif prompt_image_files and _paths_need_current_local_replacement(provided_paths):
+            elif prompt_image_files and _image_paths_need_current_local_replacement(
+                provided_paths
+            ):
                 args["file_paths"] = prompt_image_files
                 logger.info(
                     "Replaced unavailable %s inputs with %s prompt-scoped image(s)",
                     tool_name,
                     len(prompt_image_files),
                 )
+        if (not uploaded_files) and tool_name == "quantify_segmentation_masks":
+            quantify_error = _apply_quantify_segmentation_defaults()
+            if quantify_error:
+                return quantify_error
 
         signature = inspect.signature(func)
         accepts_var_kwargs = any(

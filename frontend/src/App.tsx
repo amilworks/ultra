@@ -35,6 +35,7 @@ import {
 } from "./components/prompt-kit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -112,6 +113,11 @@ import {
   listRunEvents,
   listSessionConversations,
 } from "./features/chat/client";
+import {
+  buildScientificResultGroups,
+  type ScientificResultFigure,
+} from "./features/chat/scientific-results";
+import { shouldHydrateRunArtifacts } from "./features/chat/run-artifact-hydration";
 import {
   loadComposerResources,
   loadLibraryResources,
@@ -206,6 +212,7 @@ type RunImageArtifact = {
   previewable: boolean;
   downloadUrl?: string;
   linkedFileId?: string | null;
+  resultGroupId?: string | null;
 };
 
 type ToolCardMetric = {
@@ -356,8 +363,15 @@ type MegasegFileInsight = {
 };
 
 type MegasegInsights = {
-  figureCards: ScientificFigureCard[];
+  resultGroupId: string;
+  heroFigure: ScientificResultFigure | null;
+  secondaryFigures: ScientificResultFigure[];
   fileRows: MegasegFileInsight[];
+  reportPath?: string | null;
+  summaryCsvPath?: string | null;
+  reportDownloadUrl?: string | null;
+  summaryCsvDownloadUrl?: string | null;
+  technicalSummary?: string | null;
   collectionLabel?: string;
   device?: string | null;
   structureChannel?: number | null;
@@ -1906,6 +1920,7 @@ type ConversationTranscriptActions = {
   onImportBisqueResourcesIntoConversation: (
     resourcesToImport: string[],
     options?: {
+      materialize?: boolean;
       persistSelectionContext?: boolean;
       source?: string;
       suggestedDomain?: string | null;
@@ -1990,10 +2005,29 @@ const ConversationMessageRow = memo(
           ? buildResearchDigestData({
               message,
               hasToolCards: toolResultCards.length > 0,
+              hasScientificPrimary: toolResultCards.some((card) => Boolean(card.megasegInsights)),
             })
           : null,
-      [isAssistant, message, toolResultCards.length]
+      [isAssistant, message, toolResultCards]
     );
+    const hasScientificPrimaryToolCard = toolResultCards.some((card) =>
+      Boolean(card.megasegInsights)
+    );
+    const collapseScientificInterpretation = useMemo(() => {
+      if (isStreamingAssistant || !hasScientificPrimaryToolCard) {
+        return false;
+      }
+      const content = String(message.content || "").trim();
+      if (!content) {
+        return false;
+      }
+      return (
+        content.length > 320 ||
+        /(^|\n)#{1,6}\s+/m.test(content) ||
+        /(^|\n)\|.+\|/m.test(content) ||
+        /(^|\n)(?:- |\d+\. )/m.test(content)
+      );
+    }, [hasScientificPrimaryToolCard, isStreamingAssistant, message.content]);
     const hasPrimaryToolCard = toolResultCards.length > 0;
     const showResearchDigest =
       Boolean(researchDigest) && (!isStreamingAssistant || !message.liveStream);
@@ -2144,6 +2178,7 @@ const ConversationMessageRow = memo(
                                         void actions.onImportBisqueResourcesIntoConversation(
                                           [row.resourceUri as string],
                                           {
+                                            materialize: false,
                                             persistSelectionContext: true,
                                             source: "tool_result_use_in_chat",
                                             originatingMessageId: message.id,
@@ -2235,6 +2270,7 @@ const ConversationMessageRow = memo(
                           void actions.onImportBisqueResourcesIntoConversation(
                             [resourceUri],
                             {
+                              materialize: false,
                               persistSelectionContext: true,
                               source: "tool_result_use_in_chat",
                               originatingMessageId: message.id,
@@ -2369,13 +2405,28 @@ const ConversationMessageRow = memo(
               />
             </div>
           ) : (
-            <MessageContent
-              className="w-full bg-transparent p-0 text-foreground"
-              id={message.id}
-              markdown
-            >
-              {message.content}
-            </MessageContent>
+            collapseScientificInterpretation ? (
+              <details className="chat-scientific-appendix">
+                <summary>Model interpretation</summary>
+                <div className="chat-scientific-appendix-body">
+                  <MessageContent
+                    className="w-full bg-transparent p-0 text-foreground"
+                    id={message.id}
+                    markdown
+                  >
+                    {message.content}
+                  </MessageContent>
+                </div>
+              </details>
+            ) : (
+              <MessageContent
+                className="w-full bg-transparent p-0 text-foreground"
+                id={message.id}
+                markdown
+              >
+                {message.content}
+              </MessageContent>
+            )
           )}
           {proModeDevConversation
             ? renderProModeDevConversation(message.id, proModeDevConversation, {
@@ -3384,9 +3435,11 @@ const extractAssistantContractFromMessage = (message: UiMessage): AssistantContr
 const buildResearchDigestData = ({
   message,
   hasToolCards,
+  hasScientificPrimary,
 }: {
   message: UiMessage;
   hasToolCards: boolean;
+  hasScientificPrimary: boolean;
 }): ResearchDigestData | null => {
   const contract = extractAssistantContractFromMessage(message);
   if (!contract) {
@@ -3446,6 +3499,9 @@ const buildResearchDigestData = ({
     return null;
   }
   if (!hasToolBackedContext || !hasQuantitativeEvidence) {
+    return null;
+  }
+  if (hasScientificPrimary) {
     return null;
   }
   if (!hasToolCards && populatedSections < 2 && result.length < 120) {
@@ -3649,10 +3705,16 @@ const buildToolResultCards = (
   const toolInvocations = Array.isArray(responseMetadataRecord?.tool_invocations)
     ? responseMetadataRecord.tool_invocations
     : [];
-  toolInvocations
+  const toolInvocationRecords = toolInvocations
     .map((entry) => toRecord(entry))
-    .filter((entry): entry is Record<string, unknown> => entry !== null)
-    .forEach((entry) => {
+    .filter((entry): entry is Record<string, unknown> => entry !== null);
+  const scientificToolInvocations = toolInvocationRecords.map((entry) => ({
+    tool: String(entry.tool ?? ""),
+    status: String(entry.status ?? ""),
+    output_summary: toRecord(entry.output_summary),
+    output_envelope: toRecord(entry.output_envelope),
+  }));
+  toolInvocationRecords.forEach((entry) => {
       const tool = normalizeToolName(entry.tool);
       const outputSummary = toRecord(entry.output_summary);
       if (!tool || !outputSummary) {
@@ -3691,6 +3753,114 @@ const buildToolResultCards = (
   let bestBisqueFindAssetsScore = Number.NEGATIVE_INFINITY;
   let bestBisqueFindAssetsIndex = -1;
   let hasSuccessfulBisqueModule = false;
+  const scientificResultGroups = buildScientificResultGroups({
+    progressEvents,
+    toolInvocations: scientificToolInvocations,
+    runArtifacts: runArtifacts.map((artifact) => ({
+      path: artifact.path,
+      title: artifact.title,
+      sourcePath: artifact.sourcePath,
+      url: artifact.url,
+      downloadUrl: artifact.downloadUrl,
+      previewable: artifact.previewable,
+      resultGroupId: artifact.resultGroupId ?? null,
+    })),
+    runId: options?.runId,
+    buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
+  });
+  scientificResultGroups.forEach((group, groupIndex) => {
+    const singleFile = group.fileRows.length <= 1;
+    const firstRow = group.fileRows[0];
+    cards.push({
+      id: `scientific-result-${group.resultGroupId}-${groupIndex}`,
+      tool: "segment_image_megaseg",
+      title:
+        group.fileRows.length > 1 ? "Megaseg cohort summary" : "Megaseg segmentation",
+      metrics: singleFile
+        ? [
+            {
+              label: "Coverage",
+              value: formatPercentMetric(group.metrics.coveragePercent),
+            },
+            {
+              label: "Objects",
+              value: formatIntegerMetric(group.metrics.objectCount),
+            },
+            {
+              label: "Active z-slices",
+              value:
+                group.metrics.activeSliceCount !== null &&
+                group.metrics.activeSliceCount !== undefined &&
+                group.metrics.zSliceCount !== null &&
+                group.metrics.zSliceCount !== undefined
+                  ? `${formatIntegerMetric(group.metrics.activeSliceCount)}/${formatIntegerMetric(group.metrics.zSliceCount)}`
+                  : "n/a",
+            },
+            {
+              label: "Largest component",
+              value: formatIntegerMetric(group.metrics.largestComponentVoxels),
+            },
+          ]
+        : [
+            {
+              label: "Images",
+              value: `${group.fileRows.length}`,
+            },
+            {
+              label: "Mean coverage",
+              value: formatPercentMetric(group.metrics.coveragePercent),
+            },
+            {
+              label: "Mean objects",
+              value: formatIntegerMetric(group.metrics.objectCount),
+            },
+            {
+              label: "Representative figures",
+              value: `${1 + group.secondaryFigures.length}`,
+            },
+          ],
+      classes: [],
+      images: [],
+      resourceRows: [],
+      downloadRows: [],
+      placement: "before_text",
+      narrative:
+        group.technicalSummary ??
+        buildMegasegNarrative({
+          fileRows: group.fileRows,
+          processed: group.fileRows.length,
+          meanCoverage: group.metrics.coveragePercent,
+          meanObjectCount: group.metrics.objectCount,
+        }),
+      megasegInsights: {
+        resultGroupId: group.resultGroupId,
+        heroFigure: group.heroFigure,
+        secondaryFigures: group.secondaryFigures,
+        fileRows: group.fileRows,
+        reportPath: group.reportPath ?? null,
+        summaryCsvPath: group.summaryCsvPath ?? null,
+        reportDownloadUrl:
+          group.reportPath && options?.runId && options?.buildArtifactDownloadUrl
+            ? options.buildArtifactDownloadUrl(options.runId, group.reportPath)
+            : null,
+        summaryCsvDownloadUrl:
+          group.summaryCsvPath && options?.runId && options?.buildArtifactDownloadUrl
+            ? options.buildArtifactDownloadUrl(options.runId, group.summaryCsvPath)
+            : null,
+        technicalSummary: group.technicalSummary ?? null,
+        collectionLabel:
+          group.fileRows.length > 1
+            ? `${group.fileRows.length} images summarized in one report-first result`
+            : firstRow?.file
+              ? toDisplayFileLabel(firstRow.file)
+              : undefined,
+        device: null,
+        structureChannel: null,
+        nucleusChannel: null,
+      },
+    });
+  });
+  const hasMegasegScientificResultSurface = scientificResultGroups.length > 0;
   const mergeBisqueResourceRows = (
     left: ToolResourceRow[],
     right: ToolResourceRow[]
@@ -3737,6 +3907,14 @@ const buildToolResultCards = (
       toolName !== "search_bisque_resources" &&
       toolName !== "bisque_advanced_search" &&
       toolName !== "bisque_find_assets"
+    ) {
+      return;
+    }
+
+    if (
+      hasMegasegScientificResultSurface &&
+      (toolName === "segment_image_megaseg" ||
+        toolName === "quantify_segmentation_masks")
     ) {
       return;
     }
@@ -4827,8 +5005,48 @@ const buildToolResultCards = (
         placement: "before_text",
         scientificFigures: figureCardsFromHydratedArtifacts,
         megasegInsights: {
-          figureCards: figureCardsFromHydratedArtifacts,
+          resultGroupId:
+            String(megasegSummary.result_group_id ?? megasegSummary.output_directory ?? `${toolName}-${index}`),
+          heroFigure:
+            figureCardsFromHydratedArtifacts[0]
+              ? {
+                  key: figureCardsFromHydratedArtifacts[0].key,
+                  kind: "overlay_mip",
+                  title: figureCardsFromHydratedArtifacts[0].title,
+                  file: figureCardsFromHydratedArtifacts[0].subtitle,
+                  summary: figureCardsFromHydratedArtifacts[0].summary,
+                  url: figureCardsFromHydratedArtifacts[0].previewUrl,
+                  downloadUrl:
+                    figureCardsFromHydratedArtifacts[0].downloadUrl ??
+                    figureCardsFromHydratedArtifacts[0].previewUrl,
+                  previewable: figureCardsFromHydratedArtifacts[0].previewable,
+                }
+              : null,
+          secondaryFigures: figureCardsFromHydratedArtifacts.slice(1).map((figure) => ({
+            key: figure.key,
+            kind: /overlay_midz|mid[-\s]?z/i.test(`${figure.title} ${figure.summary}`)
+              ? "overlay_mid_z"
+              : /mask_preview/i.test(`${figure.title} ${figure.summary}`)
+                ? "mask_preview"
+                : "figure",
+            title: figure.title,
+            file: figure.subtitle,
+            summary: figure.summary,
+            url: figure.previewUrl,
+            downloadUrl: figure.downloadUrl ?? figure.previewUrl,
+            previewable: figure.previewable,
+          })),
           fileRows,
+          reportPath:
+            typeof megasegSummary.report_path === "string" ? megasegSummary.report_path : null,
+          summaryCsvPath:
+            typeof megasegSummary.summary_csv_path === "string"
+              ? megasegSummary.summary_csv_path
+              : null,
+          reportDownloadUrl: null,
+          summaryCsvDownloadUrl: null,
+          technicalSummary:
+            typeof firstRow?.technicalSummary === "string" ? firstRow.technicalSummary : null,
           collectionLabel:
             processed !== null && totalFiles !== null
               ? `${formatIntegerMetric(processed)} of ${formatIntegerMetric(totalFiles)} images processed`
@@ -7902,6 +8120,23 @@ function ScientificFigureStack({
   );
 }
 
+const scientificFigureTabLabel = (figure: ScientificResultFigure): string => {
+  const kind = String(figure.kind || "").trim().toLowerCase();
+  if (kind === "overlay_mid_z") {
+    return "Mid-Z";
+  }
+  if (kind === "overlay_mip") {
+    return "MIP";
+  }
+  if (kind === "mask_preview") {
+    return "Mask";
+  }
+  if (kind === "probability_preview") {
+    return "Probability";
+  }
+  return figure.title;
+};
+
 function MegasegCardBody({
   card,
 }: {
@@ -7912,24 +8147,155 @@ function MegasegCardBody({
     return null;
   }
 
+  const heroFigure = insights.heroFigure;
+  const visibleSecondaryFigures = insights.secondaryFigures.filter(
+    (figure) => figure.kind !== "mask_preview"
+  );
+  const deferredFigures = insights.secondaryFigures.filter(
+    (figure) => figure.kind === "mask_preview"
+  );
+  const defaultSecondaryFigure =
+    visibleSecondaryFigures[0] ?? deferredFigures[0] ?? null;
+
   return (
-    <div className="chat-tool-megaseg-shell" data-testid="megaseg-card">
-      {insights.figureCards.length > 0 ? (
-        <ScientificFigureStack figures={insights.figureCards} />
-      ) : card.images.length > 0 ? (
-        <ToolImageCarousel images={card.images} />
+    <div className="chat-scientific-result-shell" data-testid="megaseg-card">
+      {heroFigure ? (
+        <figure className="chat-scientific-hero">
+          <div className="chat-scientific-hero-media">
+            {heroFigure.previewable ? (
+              <img
+                src={heroFigure.url}
+                alt={heroFigure.title}
+                loading="eager"
+                className="chat-scientific-hero-image"
+              />
+            ) : (
+              <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
+                <ImageIcon className="size-5" />
+                <span>Preview unavailable</span>
+              </div>
+            )}
+          </div>
+          <figcaption className="chat-scientific-caption">
+            <div className="chat-scientific-caption-copy">
+              <p className="chat-tool-figure-title">{heroFigure.title}</p>
+              {heroFigure.file ? (
+                <p className="chat-tool-figure-subtitle">
+                  {toDisplayFileLabel(heroFigure.file)}
+                </p>
+              ) : null}
+              {heroFigure.summary ? (
+                <p className="chat-tool-figure-summary">{heroFigure.summary}</p>
+              ) : null}
+            </div>
+            <div className="chat-scientific-caption-actions">
+              <Button asChild variant="outline" size="sm">
+                <a href={heroFigure.url} target="_blank" rel="noreferrer">
+                  Open figure
+                </a>
+              </Button>
+              <Button asChild variant="ghost" size="sm">
+                <a
+                  href={heroFigure.downloadUrl ?? heroFigure.url}
+                  download
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </a>
+              </Button>
+            </div>
+          </figcaption>
+        </figure>
       ) : null}
       {card.narrative ? (
-        <div className="chat-tool-insight-panel">
-          <p className="chat-tool-insight-title">Scientific takeaway</p>
+        <div className="chat-scientific-takeaway">
+          <p className="chat-scientific-section-label">Takeaway</p>
           <p className="chat-tool-insight-body">{card.narrative}</p>
         </div>
+      ) : null}
+      {(insights.reportDownloadUrl || insights.summaryCsvDownloadUrl) ? (
+        <div className="chat-scientific-downloads">
+          {insights.reportDownloadUrl ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={insights.reportDownloadUrl} target="_blank" rel="noreferrer">
+                Open report
+              </a>
+            </Button>
+          ) : null}
+          {insights.summaryCsvDownloadUrl ? (
+            <Button asChild variant="ghost" size="sm">
+              <a href={insights.summaryCsvDownloadUrl} download target="_blank" rel="noreferrer">
+                Download CSV
+              </a>
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {defaultSecondaryFigure ? (
+        <Tabs
+          defaultValue={defaultSecondaryFigure.key}
+          className="chat-scientific-secondary"
+        >
+          <TabsList className="chat-scientific-tabs-list">
+            {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
+              <TabsTrigger key={figure.key} value={figure.key}>
+                {scientificFigureTabLabel(figure)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
+            <TabsContent
+              key={figure.key}
+              value={figure.key}
+              className="chat-scientific-tab-panel"
+            >
+              <figure className="chat-scientific-secondary-figure">
+                <div className="chat-scientific-secondary-media">
+                  {figure.previewable ? (
+                    <img
+                      src={figure.url}
+                      alt={figure.title}
+                      loading="lazy"
+                      className="chat-scientific-secondary-image"
+                    />
+                  ) : (
+                    <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
+                      <ImageIcon className="size-5" />
+                      <span>Preview unavailable</span>
+                    </div>
+                  )}
+                </div>
+                <figcaption className="chat-scientific-secondary-caption">
+                  <div>
+                    <p className="chat-tool-figure-title">{figure.title}</p>
+                    {figure.file ? (
+                      <p className="chat-tool-figure-subtitle">
+                        {toDisplayFileLabel(figure.file)}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Button asChild variant="ghost" size="sm">
+                    <a
+                      href={figure.downloadUrl ?? figure.url}
+                      download
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Download
+                    </a>
+                  </Button>
+                </figcaption>
+              </figure>
+            </TabsContent>
+          ))}
+        </Tabs>
       ) : null}
       {insights.fileRows.length > 0 ? (
         <div className="chat-tool-resource-table-wrap">
           <div className="chat-tool-megaseg-table-head">
             <div>
-              <p className="chat-tool-card-subtitle">Quantitative summary</p>
+              <p className="chat-scientific-section-label">Quantitative summary</p>
               {insights.collectionLabel ? (
                 <p className="chat-tool-card-summary">{insights.collectionLabel}</p>
               ) : null}
@@ -7984,6 +8350,43 @@ function MegasegCardBody({
             </tbody>
           </table>
         </div>
+      ) : null}
+      {(insights.technicalSummary ||
+        deferredFigures.length > 0 ||
+        insights.reportPath ||
+        insights.summaryCsvPath) ? (
+        <details className="chat-scientific-appendix">
+          <summary>Methods & evidence</summary>
+          <div className="chat-scientific-appendix-body">
+            {insights.technicalSummary ? (
+              <p className="chat-tool-card-summary">{insights.technicalSummary}</p>
+            ) : null}
+            {deferredFigures.length > 0 ? (
+              <ul className="chat-research-list">
+                {deferredFigures.map((figure) => (
+                  <li key={figure.key}>
+                    {figure.title}
+                    {figure.file ? ` (${toDisplayFileLabel(figure.file)})` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {(insights.reportPath || insights.summaryCsvPath) ? (
+              <ul className="chat-research-list">
+                {insights.reportPath ? (
+                  <li>
+                    <strong>Report</strong>: {toDisplayFileLabel(insights.reportPath)}
+                  </li>
+                ) : null}
+                {insights.summaryCsvPath ? (
+                  <li>
+                    <strong>CSV</strong>: {toDisplayFileLabel(insights.summaryCsvPath)}
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+          </div>
+        </details>
       ) : null}
     </div>
   );
@@ -8297,7 +8700,7 @@ export function App() {
   const stopRequestedConversationIdsRef = useRef<Set<string>>(new Set());
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
   const reuseDecisionResolverRef = useRef<((decision: ReuseDecision) => void) | null>(null);
-  const legacyYoloArtifactHydrationsRef = useRef<Set<string>>(new Set());
+  const runArtifactHydrationsRef = useRef<Set<string>>(new Set());
   const [activeSlashWorkflowId, setActiveSlashWorkflowId] = useState<ComposerWorkflowId | null>(
     null
   );
@@ -9583,6 +9986,7 @@ export function App() {
   const importBisqueResourcesIntoConversation = async (
     resourcesToImport: string[],
     options?: {
+      materialize?: boolean;
       persistSelectionContext?: boolean;
       source?: string;
       suggestedDomain?: string | null;
@@ -9603,11 +10007,12 @@ export function App() {
       return { uploadedFiles: [], bisqueLinksByFileId: {} };
     }
     const partitionedSelectionUris = partitionBisqueUris(normalizedResources);
+    const shouldMaterialize = options?.materialize !== false;
     if (options?.persistSelectionContext) {
       updateConversation(conversationId, (current) => ({
         ...current,
         updatedAt: Date.now(),
-        selectionImportPending: true,
+        selectionImportPending: shouldMaterialize,
         chatError: null,
       }));
     }
@@ -9630,6 +10035,41 @@ export function App() {
     const resourcesMissingImport = normalizedResources.filter(
       (resourceUri) => !existingFileByResourceUri.has(resourceUri.toLowerCase())
     );
+
+    if (!shouldMaterialize) {
+      const orderedExistingFileIds = normalizedResources
+        .map((resourceUri) => existingFileByResourceUri.get(resourceUri.toLowerCase())?.file_id ?? null)
+        .filter((fileId): fileId is string => Boolean(fileId));
+      updateConversation(conversationId, (current) => ({
+        ...current,
+        updatedAt: Date.now(),
+        activeSelectionContext:
+          options?.persistSelectionContext
+            ? ({
+                context_id: makeId(),
+                source: options?.source ?? "use_in_chat",
+                focused_file_ids: orderedExistingFileIds,
+                resource_uris: partitionedSelectionUris.resourceUris,
+                dataset_uris: partitionedSelectionUris.datasetUris,
+                originating_message_id: options?.originatingMessageId ?? null,
+                originating_user_text:
+                  options?.originatingUserText?.trim() ||
+                  [...current.messages]
+                    .reverse()
+                    .find((message) => message.role === "user" && message.content.trim().length > 0)
+                    ?.content?.trim() ||
+                  null,
+                suggested_domain: options?.suggestedDomain ?? null,
+                suggested_tool_names: Array.from(
+                  new Set((options?.suggestedToolNames ?? []).map((name) => String(name || "").trim()))
+                ).filter((name) => name.length > 0),
+              } satisfies SelectionContext)
+            : current.activeSelectionContext,
+        selectionImportPending: false,
+        chatError: null,
+      }));
+      return { uploadedFiles: [], bisqueLinksByFileId: {} };
+    }
 
     try {
       const importResponse =
@@ -9819,6 +10259,7 @@ export function App() {
       hasStagedUploads: false,
     });
     const importedSelection = await importBisqueResourcesIntoConversation(resourceUris, {
+      materialize: selectedToolNames.length === 0,
       persistSelectionContext: true,
       source: "deictic_followup",
       suggestedToolNames: selectedToolNames,
@@ -9837,7 +10278,9 @@ export function App() {
       resolvedRows: selection.selectedRows,
       selectedToolNames,
       selectionContext:
-        focusedFileIds.length > 0
+        focusedFileIds.length > 0 ||
+        partitionedUris.resourceUris.length > 0 ||
+        partitionedUris.datasetUris.length > 0
           ? {
               context_id: makeId(),
               source: "deictic_followup",
@@ -11034,6 +11477,9 @@ export function App() {
                       sourcePath: String(artifact.source_path || "").trim() || undefined,
                       previewable: matchedUpload ? true : canInlinePreview,
                       linkedFileId: matchedUpload?.file_id ?? null,
+                      resultGroupId:
+                        String(artifact.result_group_id || "").trim() ||
+                        null,
                     } satisfies RunImageArtifact;
                   }),
                 }
@@ -11109,7 +11555,7 @@ export function App() {
           return;
         }
         const hydrationKey = `${conversation.id}:${message.id}:${message.runId}`;
-        if (legacyYoloArtifactHydrationsRef.current.has(hydrationKey)) {
+        if (runArtifactHydrationsRef.current.has(hydrationKey)) {
           return;
         }
         const cards = buildToolResultCards(
@@ -11124,12 +11570,7 @@ export function App() {
             responseMetadata: message.responseMetadata ?? null,
           }
         );
-        const needsAnnotatedFigureRefresh = cards.some(
-          (card) =>
-            card.tool === "yolo_detect" &&
-            Boolean(card.yoloFigureAvailability?.missingAnnotatedFigure)
-        );
-        if (!needsAnnotatedFigureRefresh) {
+        if (!shouldHydrateRunArtifacts(message, cards)) {
           return;
         }
         targets.push({
@@ -11146,17 +11587,17 @@ export function App() {
     }
 
     let cancelled = false;
-    const hydrateLegacyYoloArtifacts = async (): Promise<void> => {
+    const hydrateRunArtifactTargets = async (): Promise<void> => {
       for (const target of targets) {
         if (cancelled) {
           return;
         }
-        legacyYoloArtifactHydrationsRef.current.add(target.key);
+        runArtifactHydrationsRef.current.add(target.key);
         await hydrateRunArtifacts(target.conversationId, target.messageId, target.runId);
       }
     };
 
-    void hydrateLegacyYoloArtifacts();
+    void hydrateRunArtifactTargets();
     return () => {
       cancelled = true;
     };

@@ -55,6 +55,7 @@ from src.tooling.domains import (
 from src.tooling.engine import _progress_summary_from_result
 from src.tools import AVAILABLE_TOOLS, execute_tool_call, extract_scientific_image_paths_from_text
 
+from .codeexec_reasoning import build_codeexec_reasoning_agent
 from .knowledge import ScientificKnowledgeContext, ScientificKnowledgeHub, ScientificKnowledgeScope
 from .learning import ScientificLearningJournal
 from .memory import (
@@ -70,6 +71,7 @@ from .pro_mode import (
     ProModeWorkflowResult,
     ProModeWorkflowRunner,
 )
+from .pro_mode_prompts import build_pro_mode_final_writer_prompt
 
 ALL_TOOL_SCHEMAS = [
     *BISQUE_TOOL_SCHEMAS,
@@ -2339,21 +2341,89 @@ class AgnoChatRuntime:
         }
 
     @staticmethod
-    def _is_code_execution_request(user_text: str) -> bool:
-        lowered = str(user_text or "").strip().lower()
-        return bool(
+    def _is_lightweight_numeric_request(user_text: str) -> bool:
+        lowered = " ".join(str(user_text or "").strip().lower().split())
+        if not lowered:
+            return False
+        if re.search(
+            r"\b("
+            r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+            r"plot|figure|chart|save|export|report|image|images|mask|segmentation|random forest|"
+            r"cross[- ]?validation|train|fit|classifier|regressor|cluster|clustering|pca|umap|"
+            r"opencv|scikit-learn|sklearn|pandas|scipy|pipeline|batch"
+            r")\b",
+            lowered,
+        ):
+            return False
+        asks_for_closed_form_value = bool(
             re.search(
                 r"\b("
-                r"write|generate|create|produce|run|execute|debug|fix|test|profile|benchmark|optimi[sz]e"
-                r")\s+(python|code|script)\b",
-                lowered,
-            )
-            or re.search(
-                r"\b("
-                r"python|script|sandbox|notebook|numpy|pandas|scipy|sklearn|scikit-learn|opencv"
+                r"calculate|compute|derive|evaluate|solve|determine|find|what is|what's|"
+                r"mean|average|median|sum|difference|product|variance|standard deviation|std|"
+                r"covariance|correlation|dot product|norm|determinant|eigenvalue|integral|derivative"
                 r")\b",
                 lowered,
             )
+        )
+        has_inline_expression = bool(
+            re.search(r"(\[[^\]]+\]|\([^\)]*\)|\{[^\}]*\}|[-+]?\d+(?:\.\d+)?|=)", lowered)
+        )
+        return asks_for_closed_form_value and has_inline_expression and len(lowered) <= 220
+
+    @staticmethod
+    def _is_code_execution_request(user_text: str) -> bool:
+        lowered = " ".join(str(user_text or "").strip().lower().split())
+        if not lowered or AgnoChatRuntime._is_lightweight_numeric_request(lowered):
+            return False
+        explicit_code_signal = bool(
+            re.search(
+                r"\b("
+                r"write|generate|create|produce|run|execute|debug|fix|test|profile|benchmark|optimi[sz]e"
+                r")\s+(python|code|script|program|notebook)\b",
+                lowered,
+            )
+        )
+        heavy_analysis_signal = bool(
+            re.search(
+                r"\b("
+                r"random forest|xgboost|lightgbm|svm|logistic regression|linear regression|"
+                r"cross[- ]?validation|grid search|hyperparameter|feature importance|confusion matrix|"
+                r"roc|auc|precision-recall|bootstrap|monte carlo|principal component|pca|umap|"
+                r"cluster(?:ing)?|classifier|regressor|image processing|computer vision|opencv|"
+                r"scikit-learn|sklearn"
+                r")\b",
+                lowered,
+            )
+        )
+        scientific_stack_signal = bool(
+            re.search(
+                r"\b("
+                r"python|script|sandbox|notebook|numpy|pandas|scipy|matplotlib|seaborn|"
+                r"scikit-learn|sklearn|opencv"
+                r")\b",
+                lowered,
+            )
+        )
+        dataset_or_artifact_signal = bool(
+            re.search(
+                r"\b("
+                r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+                r"plot|figure|chart|report|artifact|png|pdf"
+                r")\b",
+                lowered,
+            )
+        )
+        workflow_signal = bool(
+            re.search(
+                r"\b("
+                r"fit|train|benchmark|profile|process|analy[sz]e|classify|segment|detect|featurize|"
+                r"preprocess|clean|aggregate|transform|simulate|save|export|compare"
+                r")\b",
+                lowered,
+            )
+        )
+        return explicit_code_signal or heavy_analysis_signal or (
+            workflow_signal and (scientific_stack_signal or dataset_or_artifact_signal)
         )
 
     @staticmethod
@@ -3058,6 +3128,13 @@ class AgnoChatRuntime:
                 for tool_name in list(early_bisque_plan.selected_tool_names or [])
             ):
                 return early_bisque_plan
+        if AgnoChatRuntime._is_code_execution_request(user_text):
+            return ProModeToolPlan(
+                category="code_execution",
+                selected_tool_names=["codegen_python_plan", "execute_python_job"],
+                strict_validation=True,
+                reason="Prompt explicitly requests code generation and sandbox execution.",
+            )
         if AgnoChatRuntime._requires_iterative_research_program(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -3077,14 +3154,6 @@ class AgnoChatRuntime:
                     "Prompt requires a multi-step scientific evidence program rather than a single-tool pass."
                 ),
             )
-        if AgnoChatRuntime._is_code_execution_request(user_text):
-            return ProModeToolPlan(
-                category="code_execution",
-                selected_tool_names=["codegen_python_plan", "execute_python_job"],
-                strict_validation=True,
-                reason="Prompt explicitly requests code generation and sandbox execution.",
-            )
-
         if AgnoChatRuntime._requires_validated_numeric_workflow(
             user_text=user_text,
             uploaded_files=uploaded_files,
@@ -4436,6 +4505,23 @@ class AgnoChatRuntime:
         return len(lowered) > 280 or sentence_count >= 3
 
     @staticmethod
+    def _requires_codeexec_reasoning_agent(user_text: str) -> bool:
+        lowered = str(user_text or "").strip().lower()
+        if not lowered or not AgnoChatRuntime._is_code_execution_request(lowered):
+            return False
+        return AgnoChatRuntime._requires_deep_reasoning(lowered) or bool(
+            re.search(
+                r"\b("
+                r"bootstrap|cross[- ]?validation|diagnostic plot|diagnostic plots|"
+                r"compare .*model|compare .*famil|model famil(?:y|ies)|nonlinear model|"
+                r"confidence interval|uncertainty|justify|best model|why .* preferable|"
+                r"quality[- ]control report|qc report|outlier"
+                r")\b",
+                lowered,
+            )
+        )
+
+    @staticmethod
     def _requires_validated_numeric_workflow(
         *,
         user_text: str,
@@ -4484,7 +4570,7 @@ class AgnoChatRuntime:
         explicit = self._normalize_selected_tool_names(selected_tool_names)
         if explicit:
             return [tool_name for tool_name in explicit if tool_name in TOOL_SCHEMA_MAP]
-        from src.llm import _select_tool_subset
+        from src.tooling.tool_selection import _select_tool_subset
 
         selected_schemas = _select_tool_subset(
             messages=[
@@ -4602,6 +4688,54 @@ class AgnoChatRuntime:
         if strict_validation:
             return set(required).issubset(used_tool_names)
         return bool(used_tool_names.intersection(required))
+
+    @staticmethod
+    def _completed_tool_names(tool_invocations: list[dict[str, Any]]) -> set[str]:
+        return {
+            str(invocation.get("tool") or "").strip()
+            for invocation in list(tool_invocations or [])
+            if str(invocation.get("status") or "").strip().lower() == "completed"
+            and str(invocation.get("tool") or "").strip()
+        }
+
+    @classmethod
+    def _missing_required_tool_names(
+        cls,
+        *,
+        tool_invocations: list[dict[str, Any]],
+        required_tool_names: list[str],
+    ) -> list[str]:
+        completed = cls._completed_tool_names(tool_invocations)
+        return [
+            str(tool_name or "").strip()
+            for tool_name in list(required_tool_names or [])
+            if str(tool_name or "").strip() and str(tool_name or "").strip() not in completed
+        ]
+
+    @staticmethod
+    def _latest_result_refs_from_tool_invocations(
+        tool_invocations: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        refs: dict[str, Any] = {}
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("status") or "").strip().lower() != "completed":
+                continue
+            envelope = invocation.get("output_envelope")
+            if not isinstance(envelope, dict):
+                continue
+            raw_refs = envelope.get("latest_result_refs")
+            if isinstance(raw_refs, dict):
+                for key, value in raw_refs.items():
+                    if value is None:
+                        continue
+                    refs[str(key)] = value
+            result_group_id = (
+                str(envelope.get("result_group_id") or "").strip()
+                or str(refs.get("latest_segmentation_result_group_id") or "").strip()
+            )
+            if result_group_id:
+                refs.setdefault("latest_segmentation_result_group_id", result_group_id)
+        return refs
 
     def _stabilize_pro_mode_intake_decision(
         self,
@@ -4731,6 +4865,25 @@ class AgnoChatRuntime:
             )
             return stabilized
         if tool_plan is not None:
+            if tool_plan.category == "code_execution" and self._requires_codeexec_reasoning_agent(
+                latest_user_text
+            ):
+                stabilized.route = "deep_reasoning"
+                stabilized.reason = (
+                    str(tool_plan.reason or stabilized.reason or "").strip()
+                    + " Hard computational prompt upgraded to the dedicated code-execution reasoning agent."
+                ).strip()
+                stabilized.direct_response = None
+                stabilized.selected_tool_names = list(tool_plan.selected_tool_names)
+                stabilized.tool_plan_category = str(tool_plan.category or "").strip() or None
+                stabilized.strict_tool_validation = bool(tool_plan.strict_validation)
+                _apply_policy(
+                    route="deep_reasoning",
+                    tool_plan_override=tool_plan,
+                    regime_override="reasoning_solver",
+                    task_regime_override="self_contained_reasoning",
+                )
+                return stabilized
             stabilized.route = "tool_workflow"
             stabilized.reason = str(tool_plan.reason or stabilized.reason or "").strip()
             stabilized.direct_response = None
@@ -5345,6 +5498,7 @@ class AgnoChatRuntime:
                 "prairie_dog_count",
                 "burrow_count",
                 "output_directory",
+                "result_group_id",
             ):
                 if key in parsed:
                     summary[key] = parsed[key]
@@ -5631,6 +5785,20 @@ class AgnoChatRuntime:
             rendered = self._presentation_text(item, max_chars=160)
             if rendered:
                 lines.append(f"Key measurement: {rendered}")
+        active_result_group_id = str(state.get("active_result_group_id") or "").strip()
+        if active_result_group_id:
+            lines.append(
+                f"Active result group: {self._presentation_text(active_result_group_id, max_chars=120)}"
+            )
+        active_report_handle = str(state.get("active_report_handle") or "").strip()
+        if active_report_handle:
+            lines.append(
+                f"Active report: {self._presentation_text(Path(active_report_handle).name, max_chars=120)}"
+            )
+        for item in list(state.get("active_selected_files") or [])[:2]:
+            rendered = self._presentation_text(Path(str(item)).name, max_chars=120)
+            if rendered:
+                lines.append(f"Selected file: {rendered}")
         for item in list(state.get("recommended_next_steps") or [])[:2]:
             rendered = self._presentation_text(item, max_chars=180)
             if rendered:
@@ -6081,6 +6249,252 @@ class AgnoChatRuntime:
                 }
             },
             runtime_status="completed",
+        )
+
+    async def _run_pro_mode_codeexec_reasoning_solver(
+        self,
+        *,
+        latest_user_text: str,
+        task_regime: str | None,
+        shared_context: dict[str, Any],
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+        selected_tool_names: list[str],
+        conversation_id: str | None,
+        run_id: str | None,
+        user_id: str | None,
+        max_runtime_seconds: int,
+        debug: bool | None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProModeWorkflowResult:
+        tool_names = [
+            tool_name
+            for tool_name in self._normalize_selected_tool_names(selected_tool_names)
+            if tool_name in {"codegen_python_plan", "execute_python_job"}
+        ] or ["codegen_python_plan", "execute_python_job"]
+        memory_messages = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("memory_messages") or [])
+            if str(item or "").strip()
+        ]
+        knowledge_messages = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("knowledge_messages") or [])
+            if str(item or "").strip()
+        ]
+        analysis_brief_lines = [
+            str(item or "").strip()
+            for item in list((shared_context or {}).get("analysis_brief_lines") or [])
+            if str(item or "").strip()
+        ]
+        context_sections: list[str] = []
+        if memory_messages:
+            context_sections.append(
+                "Relevant prior context:\n" + "\n".join(f"- {item}" for item in memory_messages[:6])
+            )
+        if knowledge_messages:
+            context_sections.append(
+                "Relevant knowledge context:\n"
+                + "\n".join(f"- {item}" for item in knowledge_messages[:6])
+            )
+        if analysis_brief_lines:
+            context_sections.append(
+                "Relevant running summary:\n"
+                + "\n".join(f"- {item}" for item in analysis_brief_lines[:4])
+            )
+
+        prompt = "\n\n".join(
+            [
+                "Solve the following hard computational research request.",
+                "Use reasoning first to decide the minimum code workflow needed.",
+                "When execution is needed, you must ground the answer in produced artifacts or structured tool outputs.",
+                "If the execution fails or yields incomplete evidence, say so explicitly and do not fabricate measured outputs.",
+                "Return a scientist-facing answer with methods, key findings, interpretation, and limitations.",
+                *context_sections,
+                f"Request: {latest_user_text}",
+            ]
+        )
+        session_payload = {
+            "pro_mode_context": {
+                "memory_messages": memory_messages[:6],
+                "knowledge_messages": knowledge_messages[:6],
+                "analysis_brief_lines": analysis_brief_lines[:4],
+            }
+        }
+        tool_functions = self._build_tool_functions(
+            tool_names=tool_names,
+            uploaded_files=uploaded_files,
+            user_text=latest_user_text,
+            selection_context=selection_context,
+        )
+
+        def _build_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
+            return build_codeexec_reasoning_agent(
+                model_builder=model_builder,
+                tools=tool_functions,
+                max_runtime_seconds=max_runtime_seconds,
+                session_state=session_payload,
+                debug_mode=bool(debug),
+            )
+
+        model_route = self._pro_mode_model_route_metadata(
+            fallback_used=False,
+            active_model=str(
+                self._setting(self.settings, "resolved_pro_mode_model", self.model) or self.model
+            ),
+        )
+        try:
+            if self._uses_published_pro_mode_api():
+                result = await _build_agent(self._build_model).arun(
+                    prompt,
+                    stream=False,
+                    user_id=user_id,
+                    session_id=self._scope_session_id(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        run_id=f"{str(run_id or '').strip()}::codeexec_reasoning_solver"
+                        if run_id
+                        else "codeexec_reasoning_solver",
+                    ),
+                    debug_mode=bool(debug),
+                )
+                model_route = self._pro_mode_model_route_metadata(
+                    fallback_used=True,
+                    failure_code="structured_phase_requires_tool_capable_model",
+                    active_model=self.model,
+                )
+            else:
+                result, model_route = await self._arun_with_optional_pro_mode_fallback(
+                    phase_name="codeexec_reasoning_solver",
+                    prompt=prompt,
+                    build_agent=_build_agent,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    debug=debug,
+                )
+        except Exception as exc:
+            return ProModeWorkflowResult(
+                response_text="",
+                metadata={
+                    "pro_mode": {
+                        "execution_path": "codeexec_reasoning_solver",
+                        "runtime_status": "failed",
+                        "model_route": model_route,
+                    },
+                    "tool_invocations": [],
+                },
+                runtime_status="failed",
+                runtime_error=str(exc or exc.__class__.__name__),
+            )
+
+        run_output = result if isinstance(result, RunOutput) else None
+        tool_invocations = self._tool_invocations_from_run_output(run_output)
+        response_text, _source = self._coerce_visible_output(result)
+        normalized_response_text = str(response_text or "").strip()
+        deterministic_fallback_meta: dict[str, Any] | None = None
+        if not self._tool_workflow_satisfied(
+            tool_invocations=tool_invocations,
+            required_tool_names=tool_names,
+            strict_validation=True,
+        ):
+            missing_required_tool_names = self._missing_required_tool_names(
+                tool_invocations=tool_invocations,
+                required_tool_names=tool_names,
+            )
+            if missing_required_tool_names:
+                deterministic_invocations = await self._execute_tool_program_actions(
+                    phase="reasoning_solver",
+                    phase_label="code execution reasoning solver",
+                    actions=[
+                        ToolProgramAction(
+                            tool_name=tool_name,
+                            purpose=(
+                                "Running the required code-execution tool directly because the "
+                                "reasoning agent did not execute it."
+                            ),
+                            args={},
+                        )
+                        for tool_name in missing_required_tool_names
+                    ],
+                    uploaded_files=uploaded_files,
+                    latest_user_text=latest_user_text,
+                    selection_context=selection_context,
+                    event_callback=event_callback,
+                    latest_result_refs_seed=self._latest_result_refs_from_tool_invocations(
+                        tool_invocations
+                    ),
+                    request_bisque_auth=get_request_bisque_auth(),
+                )
+                if deterministic_invocations:
+                    tool_invocations = self._merge_tool_invocations(
+                        tool_invocations,
+                        deterministic_invocations,
+                    )
+                    deterministic_fallback_meta = {
+                        "required_tool_names": list(tool_names),
+                        "missing_required_tool_names": list(missing_required_tool_names),
+                        "tool_invocation_count": len(deterministic_invocations),
+                    }
+                    normalized_response_text = (
+                        self._tool_invocation_fallback_text(tool_invocations)
+                        or normalized_response_text
+                    )
+        fail_closed_text = self._code_execution_fail_closed_text(tool_invocations)
+        if fail_closed_text and (
+            not normalized_response_text
+            or not self._tool_workflow_satisfied(
+                tool_invocations=tool_invocations,
+                required_tool_names=tool_names,
+                strict_validation=True,
+            )
+        ):
+            normalized_response_text = fail_closed_text
+        if not normalized_response_text and not tool_invocations:
+            return ProModeWorkflowResult(
+                response_text="",
+                metadata={
+                    "pro_mode": {
+                        "execution_path": "codeexec_reasoning_solver",
+                        "runtime_status": "failed",
+                        "model_route": model_route,
+                    },
+                    "tool_invocations": [],
+                },
+                runtime_status="failed",
+                runtime_error="Code-execution reasoning agent returned no answer and no tool outputs.",
+            )
+        verifier_issues = self._code_execution_fail_closed_reservations(tool_invocations)
+        satisfied = self._tool_workflow_satisfied(
+            tool_invocations=tool_invocations,
+            required_tool_names=tool_names,
+            strict_validation=True,
+        )
+        verifier_report = ProModeVerifierReport(
+            passed=bool(satisfied and not verifier_issues),
+            issues=list(verifier_issues),
+            suggested_changes=[],
+            confidence="medium" if tool_invocations else "low",
+        )
+        pro_mode_metadata = {
+            "execution_path": "codeexec_reasoning_solver",
+            "task_regime": str(task_regime or "self_contained_reasoning").strip().lower()
+            or "self_contained_reasoning",
+            "model_route": model_route,
+            "verifier": verifier_report.model_dump(mode="json"),
+        }
+        if deterministic_fallback_meta:
+            pro_mode_metadata["deterministic_required_tool_fallback"] = (
+                deterministic_fallback_meta
+            )
+        return ProModeWorkflowResult(
+            response_text=normalized_response_text,
+            metadata={
+                "pro_mode": pro_mode_metadata,
+                "tool_invocations": tool_invocations,
+            },
+            runtime_status="completed" if satisfied else "failed",
+            runtime_error=None if satisfied else "required_code_execution_tools_did_not_complete",
         )
 
     async def _run_pro_mode_reasoning_solver(
@@ -10268,6 +10682,11 @@ class AgnoChatRuntime:
                 strict_validation=True,
             )
         ):
+            existing_tool_invocations = list(last_result.get("tool_invocations") or [])
+            missing_required_tool_names = self._missing_required_tool_names(
+                tool_invocations=existing_tool_invocations,
+                required_tool_names=required_tool_names,
+            )
             fallback_actions = [
                 ToolProgramAction(
                     tool_name=tool_name,
@@ -10277,7 +10696,7 @@ class AgnoChatRuntime:
                     ),
                     args={},
                 )
-                for tool_name in list(required_tool_names)
+                for tool_name in missing_required_tool_names
                 if str(tool_name or "").strip()
             ]
             if fallback_actions:
@@ -10291,6 +10710,7 @@ class AgnoChatRuntime:
                         "message": "Running the required tool directly because the earlier answer skipped it.",
                         "payload": {
                             "required_tool_names": list(required_tool_names),
+                            "missing_required_tool_names": missing_required_tool_names,
                             "tool_plan_category": str(
                                 tool_plan.category if tool_plan is not None else ""
                             ),
@@ -10305,11 +10725,14 @@ class AgnoChatRuntime:
                     latest_user_text=latest_user_text,
                     selection_context=selection_context,
                     event_callback=event_callback,
+                    latest_result_refs_seed=self._latest_result_refs_from_tool_invocations(
+                        existing_tool_invocations
+                    ),
                     request_bisque_auth=request_bisque_auth,
                 )
                 if deterministic_invocations:
                     merged_tool_invocations = self._merge_tool_invocations(
-                        list(last_result.get("tool_invocations") or []),
+                        existing_tool_invocations,
                         deterministic_invocations,
                     )
                     deterministic_satisfied = self._tool_workflow_satisfied(
@@ -10330,6 +10753,7 @@ class AgnoChatRuntime:
                     )
                     deterministic_tool_workflow_meta["deterministic_required_tool_fallback"] = {
                         "required_tool_names": list(required_tool_names),
+                        "missing_required_tool_names": missing_required_tool_names,
                         "tool_invocation_count": len(deterministic_invocations),
                     }
                     deterministic_metadata["tool_workflow"] = deterministic_tool_workflow_meta
@@ -10670,6 +11094,8 @@ class AgnoChatRuntime:
             "preview_paths": [],
             "array_paths": [],
             "job_ids": [],
+            "report_paths": [],
+            "summary_csv_paths": [],
         }
 
         for key, raw_values in dict(
@@ -10765,6 +11191,8 @@ class AgnoChatRuntime:
                         continue
                     for key in ("preferred_upload_path", "mask_path", "mask_volume_path"):
                         _append("mask_paths", row.get(key))
+                _append("report_paths", envelope.get("report_path"))
+                _append("summary_csv_paths", envelope.get("summary_csv_path"))
             elif tool_name == "yolo_detect":
                 _append(
                     "prediction_json_paths",
@@ -11242,6 +11670,15 @@ class AgnoChatRuntime:
             state["last_next_steps"] = contract_brief["next_steps"][-4:]
         if contract_brief["limitations"]:
             state["last_limitations"] = contract_brief["limitations"][-4:]
+        scientific_handles = self._scientific_result_handles_from_tool_invocations(tool_invocations)
+        if scientific_handles["active_result_group_id"]:
+            state["active_result_group_id"] = scientific_handles["active_result_group_id"]
+        if scientific_handles["active_report_handle"]:
+            state["active_report_handle"] = scientific_handles["active_report_handle"]
+        if scientific_handles["active_summary_csv_handle"]:
+            state["active_summary_csv_handle"] = scientific_handles["active_summary_csv_handle"]
+        if scientific_handles["active_selected_files"]:
+            state["active_selected_files"] = scientific_handles["active_selected_files"][-8:]
         self._save_analysis_conversation_state(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -11249,6 +11686,61 @@ class AgnoChatRuntime:
             state=state,
             title=title,
         )
+
+    @staticmethod
+    def _scientific_result_handles_from_tool_invocations(
+        tool_invocations: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        active_result_group_id = ""
+        active_report_handle = ""
+        active_summary_csv_handle = ""
+        active_selected_files: list[str] = []
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("status") or "").strip().lower() != "completed":
+                continue
+            tool_name = str(invocation.get("tool") or "").strip()
+            if tool_name not in {
+                "segment_image_megaseg",
+                "quantify_segmentation_masks",
+                "segment_image_sam2",
+                "segment_image_sam3",
+            }:
+                continue
+            envelope = invocation.get("output_envelope")
+            if not isinstance(envelope, dict):
+                continue
+            refs = envelope.get("latest_result_refs")
+            refs_dict = dict(refs) if isinstance(refs, dict) else {}
+            candidate_group_id = (
+                str(envelope.get("result_group_id") or "").strip()
+                or str(refs_dict.get("latest_segmentation_result_group_id") or "").strip()
+            )
+            if candidate_group_id:
+                active_result_group_id = candidate_group_id
+            candidate_report = (
+                str(envelope.get("report_path") or "").strip()
+                or str(refs_dict.get("segment_image_megaseg.report_path") or "").strip()
+            )
+            if candidate_report:
+                active_report_handle = candidate_report
+            candidate_summary_csv = (
+                str(envelope.get("summary_csv_path") or "").strip()
+                or str(refs_dict.get("segment_image_megaseg.summary_csv_path") or "").strip()
+            )
+            if candidate_summary_csv:
+                active_summary_csv_handle = candidate_summary_csv
+            for row in list(envelope.get("files_processed") or []):
+                if not isinstance(row, dict):
+                    continue
+                file_label = str(row.get("file") or row.get("path") or "").strip()
+                if file_label and file_label not in active_selected_files:
+                    active_selected_files.append(file_label)
+        return {
+            "active_result_group_id": active_result_group_id,
+            "active_report_handle": active_report_handle,
+            "active_summary_csv_handle": active_summary_csv_handle,
+            "active_selected_files": active_selected_files,
+        }
 
     def _analysis_session_state_payload(
         self,
@@ -11319,6 +11811,20 @@ class AgnoChatRuntime:
                 "open_limits": [
                     str(item or "").strip()
                     for item in list(state.get("last_limitations") or [])[:3]
+                    if str(item or "").strip()
+                ],
+                "active_result_group_id": (
+                    str(state.get("active_result_group_id") or "").strip() or None
+                ),
+                "active_report_handle": (
+                    str(state.get("active_report_handle") or "").strip() or None
+                ),
+                "active_summary_csv_handle": (
+                    str(state.get("active_summary_csv_handle") or "").strip() or None
+                ),
+                "active_selected_files": [
+                    str(item or "").strip()
+                    for item in list(state.get("active_selected_files") or [])[:4]
                     if str(item or "").strip()
                 ],
                 "handle_counts": handle_counts,
@@ -11921,6 +12427,8 @@ class AgnoChatRuntime:
             "array_paths",
             "job_ids",
             "image_files",
+            "report_paths",
+            "summary_csv_paths",
         ):
             if current_turn_replaces_saved_image_target and key in {
                 "download_dirs",
@@ -13436,10 +13944,18 @@ class AgnoChatRuntime:
         normalized_draft = str(draft_response_text or "").strip()
         if not normalized_draft:
             return "", {}
+        code_execution_failed = any(
+            "Code execution failed in this turn." in str(item or "")
+            for item in list(reservations or [])
+        )
+        code_execution_turn = self._is_code_execution_request(latest_user_text) or any(
+            "code execution" in str(item or "").strip().lower() for item in list(reservations or [])
+        )
         math_explainer_request = self._is_math_explanation_request(latest_user_text)
         proof_writer_instructions: list[str] = []
         report_writer_instructions: list[str] = []
         math_writer_instructions: list[str] = []
+        codeexec_writer_instructions: list[str] = []
         if (
             execution_regime == "proof_workflow"
             or str(task_regime or "").strip().lower() == "rigorous_proof"
@@ -13465,6 +13981,49 @@ class AgnoChatRuntime:
                 "Treat the reader as a strong student: smart and technical, but not already in possession of the entire conceptual map.",
                 "Turn brittle prescriptions into conditional guidance with assumptions and scope made explicit.",
             ]
+        if code_execution_turn:
+            codeexec_writer_instructions = [
+                "For code-execution answers, separate: methods used, key quantitative findings, interpretation, and limitations.",
+                "Name the exact artifact classes produced, such as CSV, PNG, JSON, or report outputs, when they exist.",
+                "Prefer technically literate prose for PhD-level readers: concise, explicit, and evidence-led.",
+                "If a caveat materially changes the conclusion, place it in the same paragraph as the claim.",
+            ]
+        scientific_result_surface_active = execution_regime == "tool_workflow"
+        explicit_full_chat_report = bool(
+            re.search(
+                r"\b(full|detailed|complete|manuscript[- ]style)\b.{0,24}\b(report|write-up|writeup)\b",
+                str(latest_user_text or ""),
+                re.IGNORECASE | re.DOTALL,
+            )
+        )
+
+        def _compact_scientific_surface_response(text: str) -> str:
+            normalized = str(text or "").strip()
+            if not normalized:
+                return ""
+            blocks = [
+                block.strip()
+                for block in re.split(r"\n\s*\n+", normalized)
+                if str(block or "").strip()
+            ]
+            preferred_blocks: list[str] = []
+            for block in blocks:
+                stripped = block.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("```"):
+                    continue
+                if re.match(r"^#{1,6}\s+", stripped):
+                    continue
+                if re.match(r"^\s*(?:[-*+]\s|\d+\.\s)", stripped):
+                    continue
+                if "|" in stripped and "\n" in stripped:
+                    continue
+                preferred_blocks.append(stripped)
+                if len(preferred_blocks) >= 2:
+                    break
+            selected_blocks = preferred_blocks or blocks[:2]
+            return "\n\n".join(selected_blocks[:2]).strip()
         compression_stats: dict[str, Any] = {}
 
         def _build_final_writer_agent(model_builder: Callable[..., AgnoModel]) -> Agent:
@@ -13514,10 +14073,20 @@ class AgnoChatRuntime:
                     "Do not mention internal workflows, routes, councils, tools, blockers, or hidden reasoning.",
                     "Do not imitate any named living writer; aim instead for clear, elegant, idea-first prose.",
                     "Use disciplined explanatory nonfiction techniques rather than generic assistant prose.",
+                    *(
+                        [
+                            "A structured scientific result surface with figures and tables will be shown separately in the UI for this turn.",
+                            "Do not restate figure captions, metric tables, or methods sections in prose unless the user explicitly asked for a full written report.",
+                            "For tool-backed scientific analysis, prefer one short takeaway paragraph and, if needed, one short caveat or next-step paragraph.",
+                        ]
+                        if scientific_result_surface_active
+                        else []
+                    ),
                     *[f"Technique: {item}" for item in PROSE_STYLE_GUIDELINES],
                     *[f"Student technique: {item}" for item in STUDENT_EXPLANATION_GUIDELINES],
                     *report_writer_instructions,
                     *math_writer_instructions,
+                    *codeexec_writer_instructions,
                     *proof_writer_instructions,
                 ],
                 markdown=True,
@@ -13535,72 +14104,19 @@ class AgnoChatRuntime:
                 debug_mode=bool(debug),
             )
 
-        prompt = "\n".join(
-            [
-                "Rewrite the grounded draft below into the final user-facing Pro Mode answer.",
-                "If the draft is already strong, improve it lightly rather than rewriting for its own sake.",
-                "Keep the answer faithful to the draft and supporting points.",
-                *(
-                    [
-                        "For proof answers, make the structure teachable: identify the main reduction, the crucial intermediate obligations, and the closing bridge."
-                    ]
-                    if execution_regime == "proof_workflow"
-                    or str(task_regime or "").strip().lower() == "rigorous_proof"
-                    else []
-                ),
-                *(
-                    [
-                        "For report-style answers, strengthen structure and synthesis: give the reader a real report with explicit takeaways, major distinctions, limitations, and a clean bottom line."
-                    ]
-                    if self._is_report_like_request(latest_user_text)
-                    else []
-                ),
-                *(
-                    [
-                        "For this report-style turn, use these prose techniques: lead with the governing idea, move from intuition to mechanism to implication, use contrast to sharpen distinctions, and bring in concrete examples only when they illuminate the point."
-                    ]
-                    if self._is_report_like_request(latest_user_text)
-                    else []
-                ),
-                *(
-                    [
-                        "Because this is a mathematical explanation, use this cadence wherever it helps: intuition, formal statement or equation, interpretation, consequence.",
-                        "Keep equations that clarify the concept, and trim equations that merely display formalism without explanatory payoff.",
-                        "Review any practical recommendations and make them robust, conditional, and audience-appropriate for student readers.",
-                    ]
-                    if math_explainer_request
-                    else []
-                ),
-                "",
-                f"User request: {latest_user_text}",
-                f"Execution regime: {execution_regime}",
-                f"Task regime: {str(task_regime or '').strip() or 'unknown'}",
-                "",
-                "Grounded draft:",
-                normalized_draft,
-                "",
-                "Supporting points:",
-                json.dumps(
-                    [
-                        str(item or "").strip()
-                        for item in list(supporting_points or [])
-                        if str(item or "").strip()
-                    ][:16],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                "",
-                "Reservations to preserve if material:",
-                json.dumps(
-                    [
-                        str(item or "").strip()
-                        for item in list(reservations or [])
-                        if str(item or "").strip()
-                    ][:8],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            ]
+        prompt = build_pro_mode_final_writer_prompt(
+            latest_user_text=latest_user_text,
+            execution_regime=execution_regime,
+            task_regime=task_regime,
+            normalized_draft=normalized_draft,
+            supporting_points=supporting_points,
+            reservations=reservations,
+            scientific_result_surface_active=scientific_result_surface_active,
+            explicit_full_chat_report=explicit_full_chat_report,
+            report_like_request=self._is_report_like_request(latest_user_text),
+            math_explainer_request=math_explainer_request,
+            code_execution_turn=code_execution_turn,
+            code_execution_failed=code_execution_failed,
         )
         model_route = self._pro_mode_model_route_metadata(
             fallback_used=False,
@@ -13645,7 +14161,11 @@ class AgnoChatRuntime:
                 **dict(compression_stats),
                 "model_route": dict(model_route),
             }
-        if re.search(r"\d", normalized_draft) and not re.search(r"\d", normalized_response):
+        if (
+            re.search(r"\d", normalized_draft)
+            and not re.search(r"\d", normalized_response)
+            and not code_execution_failed
+        ):
             return "", {
                 **dict(compression_stats),
                 "model_route": dict(model_route),
@@ -13655,6 +14175,8 @@ class AgnoChatRuntime:
                 **dict(compression_stats),
                 "model_route": dict(model_route),
             }
+        if scientific_result_surface_active and not explicit_full_chat_report:
+            normalized_response = _compact_scientific_surface_response(normalized_response)
         return normalized_response, {
             **dict(compression_stats),
             "model_route": dict(model_route),
@@ -13670,6 +14192,7 @@ class AgnoChatRuntime:
         latest_user_text: str,
         selection_context: dict[str, Any] | None,
         event_callback: Callable[[dict[str, Any]], None] | None,
+        latest_result_refs_seed: dict[str, Any] | None = None,
         request_bisque_auth: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         normalized_actions = [
@@ -13679,9 +14202,21 @@ class AgnoChatRuntime:
             return []
 
         results: list[dict[str, Any]] = []
+        latest_result_refs: dict[str, Any] = {
+            str(key): value
+            for key, value in dict(latest_result_refs_seed or {}).items()
+            if value is not None
+        }
         for action in normalized_actions:
             tool_name = str(action.tool_name or "").strip()
-            args = dict(action.args or {})
+            args = self._hydrate_tool_program_action_args(
+                tool_name=tool_name,
+                args=dict(action.args or {}),
+                latest_user_text=latest_user_text,
+                uploaded_files=uploaded_files,
+                selection_context=selection_context,
+                latest_result_refs=latest_result_refs,
+            )
             self._emit_event(
                 event_callback,
                 {
@@ -13703,9 +14238,22 @@ class AgnoChatRuntime:
                     args,
                     uploaded_files=list(uploaded_files or []),
                     user_text=latest_user_text,
+                    latest_result_refs=dict(latest_result_refs),
                     selection_context=dict(selection_context or {}),
                 )
                 parsed_output, raw_text = self._json_result(raw_output)
+                if isinstance(parsed_output, dict):
+                    refs = parsed_output.get("latest_result_refs")
+                    if isinstance(refs, dict):
+                        for key, value in refs.items():
+                            if value is None:
+                                continue
+                            latest_result_refs[str(key)] = value
+                    if tool_name == "codegen_python_plan":
+                        job_id = str(parsed_output.get("job_id") or "").strip()
+                        if job_id:
+                            latest_result_refs["latest_code_execution_job_id"] = job_id
+                            latest_result_refs["codegen_python_plan.job_id"] = job_id
                 invocation = {
                     "tool": tool_name,
                     "status": "completed",
@@ -13755,6 +14303,75 @@ class AgnoChatRuntime:
                 },
             )
         return results
+
+    @staticmethod
+    def _codeexec_fallback_inputs(
+        *,
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        candidates: list[str] = []
+        candidates.extend(str(path or "").strip() for path in list(uploaded_files or []))
+        if isinstance(selection_context, dict):
+            for key in (
+                "selected_files",
+                "selected_file_paths",
+                "file_paths",
+                "local_file_paths",
+                "uploaded_files",
+            ):
+                value = selection_context.get(key)
+                if isinstance(value, list):
+                    candidates.extend(str(path or "").strip() for path in value)
+        inputs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_path in candidates:
+            path_value = str(raw_path or "").strip()
+            if not path_value or path_value in seen:
+                continue
+            source_path = Path(path_value).expanduser()
+            if not source_path.exists():
+                continue
+            seen.add(path_value)
+            inputs.append(
+                {
+                    "path": str(source_path),
+                    "kind": ("directory" if source_path.is_dir() else "file"),
+                    "description": "Selected input carried into deterministic code-execution fallback.",
+                }
+            )
+        return inputs
+
+    def _hydrate_tool_program_action_args(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        latest_user_text: str,
+        uploaded_files: list[str],
+        selection_context: dict[str, Any] | None,
+        latest_result_refs: dict[str, Any],
+    ) -> dict[str, Any]:
+        hydrated = dict(args or {})
+        if tool_name == "codegen_python_plan":
+            if not str(hydrated.get("task_summary") or "").strip():
+                hydrated["task_summary"] = str(latest_user_text or "").strip()
+            if not isinstance(hydrated.get("inputs"), list):
+                inputs = self._codeexec_fallback_inputs(
+                    uploaded_files=uploaded_files,
+                    selection_context=selection_context,
+                )
+                if inputs:
+                    hydrated["inputs"] = inputs
+        elif tool_name == "execute_python_job":
+            if not str(hydrated.get("job_id") or "").strip():
+                job_id = (
+                    str(latest_result_refs.get("latest_code_execution_job_id") or "").strip()
+                    or str(latest_result_refs.get("codegen_python_plan.job_id") or "").strip()
+                )
+                if job_id:
+                    hydrated["job_id"] = job_id
+        return hydrated
 
     async def _execute_research_program_actions(
         self,
@@ -15275,6 +15892,71 @@ class AgnoChatRuntime:
                 lines.append(prefix + rendered)
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def _latest_failed_code_execution_summary(
+        tool_invocations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        latest_failure: dict[str, Any] | None = None
+        for invocation in list(tool_invocations or []):
+            if str(invocation.get("tool") or "").strip() != "execute_python_job":
+                continue
+            status = str(invocation.get("status") or "").strip().lower()
+            raw_summary = invocation.get("output_summary")
+            summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+            if bool(summary.get("success")) or status == "completed":
+                latest_failure = None
+                continue
+            if (
+                status in {"failed", "error"}
+                or summary.get("success") is False
+                or str(summary.get("error_message") or "").strip()
+                or str(summary.get("error_class") or "").strip()
+            ):
+                latest_failure = {
+                    **summary,
+                    "status": status or str(summary.get("status") or "").strip().lower(),
+                    "output_preview": str(invocation.get("output_preview") or "").strip(),
+                }
+        return latest_failure
+
+    def _code_execution_fail_closed_text(
+        self,
+        tool_invocations: list[dict[str, Any]],
+    ) -> str | None:
+        failure = self._latest_failed_code_execution_summary(tool_invocations)
+        if not isinstance(failure, dict):
+            return None
+        error_class = str(failure.get("error_class") or "").strip()
+        error_message = str(failure.get("error_message") or failure.get("output_preview") or "").strip()
+        lines = [
+            "The requested code execution did not complete successfully, so this turn does not include measured code-derived outputs."
+        ]
+        if error_class and error_message:
+            lines.append(f"The latest execution failed with {error_class}: {error_message}")
+        elif error_message:
+            lines.append(f"The latest execution failed: {error_message}")
+        elif error_class:
+            lines.append(f"The latest execution failed with {error_class}.")
+        lines.append(
+            "I am not reporting expected, approximate, or inferred numeric results from the failed run."
+        )
+        return " ".join(line.rstrip(".") + "." for line in lines if line).strip()
+
+    def _code_execution_fail_closed_reservations(
+        self,
+        tool_invocations: list[dict[str, Any]],
+    ) -> list[str]:
+        failure = self._latest_failed_code_execution_summary(tool_invocations)
+        if not isinstance(failure, dict):
+            return []
+        notes = [
+            "Code execution failed in this turn. Do not report expected, estimated, approximate, or visually inferred numeric outputs as measured results."
+        ]
+        error_message = str(failure.get("error_message") or failure.get("output_preview") or "").strip()
+        if error_message:
+            notes.append(f"Latest code execution failure: {error_message}")
+        return notes
+
     def _resume_requirements(
         self,
         *,
@@ -16035,6 +16717,11 @@ class AgnoChatRuntime:
                     ):
                         response_text = str(metadata_specialist.direct_answer or "").strip()
                 if response_text:
+                    fail_closed_text = self._code_execution_fail_closed_text(
+                        list(tool_result.get("tool_invocations") or [])
+                    )
+                    if fail_closed_text:
+                        response_text = fail_closed_text
                     supporting_points = [
                         str(item.get("output_summary") or "").strip()
                         for item in list(tool_result.get("tool_invocations") or [])
@@ -16079,6 +16766,11 @@ class AgnoChatRuntime:
                             ]
                             if str(item or "").strip()
                         ]
+                    )
+                    reservations.extend(
+                        self._code_execution_fail_closed_reservations(
+                            list(tool_result.get("tool_invocations") or [])
+                        )
                     )
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                         latest_user_text=latest_user_text,
@@ -17232,6 +17924,15 @@ class AgnoChatRuntime:
                 }
                 return
             if intake_decision.execution_regime == "reasoning_solver":
+                codeexec_reasoning_turn = (
+                    str(intake_decision.tool_plan_category or "").strip() == "code_execution"
+                    and {
+                        tool_name
+                        for tool_name in list(intake_decision.selected_tool_names or [])
+                        if str(tool_name or "").strip()
+                    }
+                    >= {"codegen_python_plan", "execute_python_job"}
+                )
                 self._emit_event(
                     event_callback,
                     {
@@ -17239,19 +17940,47 @@ class AgnoChatRuntime:
                         "event_type": "pro_mode.phase_started",
                         "phase": "reasoning_solver",
                         "status": "started",
-                        "message": "Delegating to the self-contained reasoning solver.",
-                        "payload": {"task_regime": intake_decision.task_regime},
+                        "message": (
+                            "Delegating to the dedicated code-execution reasoning agent."
+                            if codeexec_reasoning_turn
+                            else "Delegating to the self-contained reasoning solver."
+                        ),
+                        "payload": {
+                            "task_regime": intake_decision.task_regime,
+                            "selected_tool_names": list(intake_decision.selected_tool_names or []),
+                        },
                     },
                 )
-                pro_mode_result = await self._run_pro_mode_reasoning_solver(
-                    latest_user_text=latest_user_text,
-                    task_regime=intake_decision.task_regime,
-                    shared_context=shared_context,
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    user_id=user_id,
-                    max_runtime_seconds=effective_max_runtime_seconds,
-                    debug=pro_mode_debug,
+                if codeexec_reasoning_turn:
+                    pro_mode_result = await self._run_pro_mode_codeexec_reasoning_solver(
+                        latest_user_text=latest_user_text,
+                        task_regime=intake_decision.task_regime,
+                        shared_context=shared_context,
+                        uploaded_files=uploaded_files,
+                        selection_context=effective_selection_context,
+                        selected_tool_names=list(intake_decision.selected_tool_names or []),
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        max_runtime_seconds=effective_max_runtime_seconds,
+                        debug=pro_mode_debug,
+                        event_callback=event_callback,
+                    )
+                else:
+                    pro_mode_result = await self._run_pro_mode_reasoning_solver(
+                        latest_user_text=latest_user_text,
+                        task_regime=intake_decision.task_regime,
+                        shared_context=shared_context,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        max_runtime_seconds=effective_max_runtime_seconds,
+                        debug=pro_mode_debug,
+                    )
+                solver_tool_invocations = (
+                    list(pro_mode_result.metadata.get("tool_invocations") or [])
+                    if isinstance(pro_mode_result.metadata, dict)
+                    else []
                 )
                 if not str(pro_mode_result.response_text or "").strip():
                     self._emit_event(
@@ -17320,7 +18049,7 @@ class AgnoChatRuntime:
                         knowledge_context=knowledge_context,
                         memory_context=memory_context.metadata(),
                         knowledge_result=knowledge_result.metadata(),
-                        fallback_tool_invocations=[],
+                        fallback_tool_invocations=solver_tool_invocations,
                         runtime_status=pro_mode_result.runtime_status,
                         runtime_error=pro_mode_result.runtime_error,
                         extra_metadata={
@@ -17381,13 +18110,21 @@ class AgnoChatRuntime:
                     )
                     verifier_payload = dict(solver_runtime_meta.get("verifier") or {})
                     solver_metadata = {
-                        "execution_path": "reasoning_solver",
+                        "execution_path": (
+                            "codeexec_reasoning_solver"
+                            if codeexec_reasoning_turn
+                            else "reasoning_solver"
+                        ),
                         "route": intake_decision.route,
                         "execution_regime": "reasoning_solver",
                         "task_regime": intake_decision.task_regime,
                         "context_policy": context_policy,
                         "intake": intake_decision.model_dump(mode="json"),
-                        "active_roles": ["Front Door Triage", "Reasoning Solver"],
+                        "active_roles": (
+                            ["Front Door Triage", "Code Execution Reasoner"]
+                            if codeexec_reasoning_turn
+                            else ["Front Door Triage", "Reasoning Solver"]
+                        ),
                         "phase_order": [
                             "intake",
                             "context_policy",
@@ -17424,21 +18161,47 @@ class AgnoChatRuntime:
                         solver_metadata["model_route"] = dict(
                             solver_runtime_meta.get("model_route") or {}
                         )
+                    deterministic_fallback_meta = dict(
+                        solver_runtime_meta.get("deterministic_required_tool_fallback") or {}
+                    )
+                    if deterministic_fallback_meta:
+                        solver_metadata["deterministic_required_tool_fallback"] = (
+                            deterministic_fallback_meta
+                        )
+                        solver_metadata["summary"] = (
+                            "Planned with the dedicated code-execution reasoner and completed "
+                            "the required code tools through deterministic fallback."
+                        )
                     response_text = str(pro_mode_result.response_text or "").strip()
                     writer_stats: dict[str, Any] = {}
+                    supporting_points = []
+                    if codeexec_reasoning_turn:
+                        for invocation in list(solver_tool_invocations or []):
+                            summary = invocation.get("output_summary")
+                            if isinstance(summary, dict) and summary:
+                                supporting_points.append(json.dumps(summary, ensure_ascii=False))
+                            elif str(summary or "").strip():
+                                supporting_points.append(str(summary or "").strip())
+                    reservations = [
+                        str(item or "").strip()
+                        for item in list(
+                            dict(solver_metadata.get("verifier") or {}).get("issues") or []
+                        )
+                        if str(item or "").strip()
+                    ]
+                    if codeexec_reasoning_turn:
+                        reservations.extend(
+                            self._code_execution_fail_closed_reservations(
+                                solver_tool_invocations
+                            )
+                        )
                     polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                         latest_user_text=latest_user_text,
                         draft_response_text=response_text,
                         execution_regime="reasoning_solver",
                         task_regime=intake_decision.task_regime,
-                        supporting_points=[],
-                        reservations=[
-                            str(item or "").strip()
-                            for item in list(
-                                dict(solver_metadata.get("verifier") or {}).get("issues") or []
-                            )
-                            if str(item or "").strip()
-                        ],
+                        supporting_points=supporting_points,
+                        reservations=reservations,
                         session_state={"pro_mode_context": dict(shared_context or {})},
                         conversation_id=conversation_id,
                         run_id=run_id,
@@ -17470,7 +18233,7 @@ class AgnoChatRuntime:
                         knowledge_context=knowledge_context,
                         memory_context=memory_context.metadata(),
                         knowledge_result=knowledge_result.metadata(),
-                        fallback_tool_invocations=[],
+                        fallback_tool_invocations=solver_tool_invocations,
                         runtime_status=pro_mode_result.runtime_status,
                         runtime_error=pro_mode_result.runtime_error,
                         extra_metadata={
@@ -17570,6 +18333,11 @@ class AgnoChatRuntime:
                 ):
                     response_text = str(metadata_specialist.direct_answer or "").strip()
             if response_text and execution_regime and execution_regime != "fast_dialogue":
+                fail_closed_text = self._code_execution_fail_closed_text(
+                    list(pro_mode_result.tool_invocations or [])
+                )
+                if fail_closed_text:
+                    response_text = fail_closed_text
                 supporting_points = [
                     str(item.get("output_summary") or "").strip()
                     for item in list(pro_mode_result.tool_invocations or [])
@@ -17611,6 +18379,11 @@ class AgnoChatRuntime:
                         ]
                         if str(item or "").strip()
                     ]
+                )
+                reservations.extend(
+                    self._code_execution_fail_closed_reservations(
+                        list(pro_mode_result.tool_invocations or [])
+                    )
                 )
                 polished_response_text, writer_stats = await self._run_pro_mode_final_writer(
                     latest_user_text=latest_user_text,

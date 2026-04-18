@@ -112,3 +112,38 @@ def test_oidc_start_uses_forwarded_public_origin_for_callback(client: TestClient
     parsed = urlparse(response.headers["location"])
     params = parse_qs(parsed.query)
     assert params["redirect_uri"] == ["https://api.ultra.example.org/v1/auth/oidc/callback"]
+
+
+def test_selected_bisque_resource_inspection_skips_eager_materialization() -> None:
+    should_materialize = api_main._should_materialize_bisque_chat_inputs(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Load the selected BisQue resource and tell me its resource type, accession, "
+                    "and whether it looks like a dataset or image collection."
+                ),
+            }
+        ],
+        resource_uris=["https://bisque.example.org/data_service/00-RESOURCE"],
+    )
+
+    assert should_materialize is False
+
+
+def test_selected_bisque_dataset_lookup_skips_eager_materialization() -> None:
+    should_materialize = api_main._should_materialize_bisque_chat_inputs(
+        messages=[{"role": "user", "content": "Tell me about this dataset and summarize it."}],
+        dataset_uris=["https://bisque.example.org/data_service/dataset/00-DATASET"],
+    )
+
+    assert should_materialize is False
+
+
+def test_selected_bisque_resource_analysis_still_materializes() -> None:
+    should_materialize = api_main._should_materialize_bisque_chat_inputs(
+        messages=[{"role": "user", "content": "Run Megaseg on this selected BisQue image."}],
+        resource_uris=["https://bisque.example.org/data_service/00-IMAGE"],
+    )
+
+    assert should_materialize is True

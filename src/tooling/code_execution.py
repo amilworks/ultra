@@ -17,6 +17,8 @@ from uuid import uuid4
 from openai import OpenAI
 from src.config import get_settings
 from src.logger import logger
+from src.tooling.code_execution_jobs import build_service_submission_bundle
+from src.tooling.code_execution_service_client import CodeExecutionServiceClient
 
 _ALLOWED_DEPENDENCIES = {
     "numpy",
@@ -49,6 +51,7 @@ _MAX_JSON_PARSE_BYTES = 1_000_000
 _MAX_MEASUREMENT_CANDIDATES = 64
 _MAX_ANALYSIS_OUTPUTS = 12
 _CODE_FENCE_RE = re.compile(r"```(?:python|py)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_REMOTE_INPUT_PREFIXES = ("s3://", "http://", "https://")
 
 
 def _stable_json(value: Any) -> str:
@@ -515,6 +518,100 @@ def _docker_available() -> bool:
         return False
 
 
+def _service_execution_enabled(settings: Any) -> bool:
+    return bool(str(getattr(settings, "code_execution_service_url", "") or "").strip())
+
+
+def choose_code_execution_backend(
+    *,
+    requested_backend: str | None,
+    settings: Any,
+) -> str:
+    candidate = str(
+        requested_backend or getattr(settings, "code_execution_default_backend", "docker")
+    ).strip().lower()
+    service_enabled = _service_execution_enabled(settings)
+    if service_enabled:
+        if candidate not in {"docker", "service"}:
+            candidate = "service"
+        if candidate == "docker":
+            return "service"
+    return "service" if candidate == "service" else "docker"
+
+
+def _build_service_request_inputs(
+    inputs: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[Path]]:
+    normalized_inputs: list[dict[str, Any]] = []
+    local_input_paths: list[Path] = []
+    for item in list(inputs or []):
+        if not isinstance(item, dict):
+            continue
+        sandbox_path = str(item.get("sandbox_path") or "").strip()
+        if not sandbox_path.startswith("/inputs/"):
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        raw_kind = str(item.get("kind") or "file").strip().lower()
+        kind = raw_kind if raw_kind in {"file", "directory"} else "file"
+        name = str(item.get("name") or "").strip() or Path(raw_path or sandbox_path).name
+        payload: dict[str, Any] = {
+            "name": name,
+            "kind": kind,
+            "sandbox_path": sandbox_path,
+        }
+        description = str(item.get("description") or "").strip()
+        if description:
+            payload["description"] = description
+        if raw_path.startswith(_REMOTE_INPUT_PREFIXES):
+            payload["uri"] = raw_path
+        elif raw_path:
+            local_path = Path(raw_path).expanduser()
+            if local_path.exists():
+                local_input_paths.append(local_path)
+        normalized_inputs.append(payload)
+    return normalized_inputs, local_input_paths
+
+
+def _download_service_artifacts(
+    *,
+    client: CodeExecutionServiceClient,
+    service_job_id: str,
+    source_dir: Path,
+    artifact_manifest: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    downloaded_artifacts: list[dict[str, Any]] = []
+    source_root = source_dir.resolve()
+    seen_relative_paths: set[str] = set()
+    for item in artifact_manifest:
+        if not isinstance(item, dict):
+            continue
+        relative_path = _normalize_output_token(
+            str(item.get("relative_path") or item.get("name") or item.get("path") or "")
+        )
+        artifact_name = str(item.get("name") or relative_path).strip()
+        if not relative_path or not artifact_name or relative_path in seen_relative_paths:
+            continue
+        destination = (source_root / relative_path).resolve()
+        if source_root not in destination.parents and destination != source_root:
+            raise ValueError(f"Rejected service artifact path: {relative_path}")
+        client.download_artifact(
+            job_id=service_job_id,
+            artifact_name=artifact_name,
+            destination=destination,
+        )
+        downloaded_artifacts.append(
+            {
+                "path": str(destination),
+                "relative_path": relative_path,
+                "size_bytes": int(destination.stat().st_size),
+                "kind": str(item.get("kind") or "file"),
+                "title": str(item.get("title") or Path(relative_path).name or relative_path),
+            }
+        )
+        seen_relative_paths.add(relative_path)
+    return downloaded_artifacts
+
+
 def _sha256_file(path: Path) -> str:
     import hashlib
 
@@ -936,6 +1033,170 @@ def _repair_hint(error_class: str | None) -> str:
     return mapping.get(error_class or "", "Inspect stderr traceback and update the generated code.")
 
 
+def _execute_python_job_attempt_via_service(
+    *,
+    job_id: str,
+    spec: dict[str, Any],
+    source_dir: Path,
+    effective_timeout: int,
+    effective_cpu: float | str,
+    effective_memory_mb: int,
+) -> dict[str, Any]:
+    settings = get_settings()
+    service_url = str(getattr(settings, "code_execution_service_url", "") or "").strip()
+    if not service_url:
+        return {
+            "success": False,
+            "job_id": str(job_id),
+            "execution_backend": "service",
+            "error_class": "backend_unavailable",
+            "error_message": (
+                "Code execution service is not configured. Set CODE_EXECUTION_SERVICE_URL "
+                "or use the local docker backend."
+            ),
+        }
+
+    expected_output_tokens: list[str] = []
+    for item in list(spec.get("expected_outputs") or []):
+        token = _normalize_expected_output_token(str(item or ""))
+        if token:
+            expected_output_tokens.append(token)
+
+    request_inputs, local_input_paths = _build_service_request_inputs(
+        spec.get("inputs") if isinstance(spec.get("inputs"), list) else []
+    )
+    request_payload = {
+        "job_id": str(job_id),
+        "timeout_seconds": int(effective_timeout),
+        "cpu_limit": float(effective_cpu),
+        "memory_mb": int(effective_memory_mb),
+        "expected_outputs": expected_output_tokens,
+        "inputs": request_inputs,
+    }
+    client = CodeExecutionServiceClient(
+        base_url=service_url,
+        api_key=getattr(settings, "code_execution_service_api_key", None),
+        timeout_seconds=float(getattr(settings, "code_execution_service_timeout_seconds", 60) or 60),
+    )
+    wait_timeout = int(
+        max(
+            effective_timeout + 120,
+            int(getattr(settings, "code_execution_service_wait_timeout_seconds", 7200) or 7200),
+        )
+    )
+    poll_interval = float(
+        getattr(settings, "code_execution_service_poll_interval_seconds", 1.5) or 1.5
+    )
+    bundle_path, _remote_inputs, _local_inputs = build_service_submission_bundle(_job_dir(job_id))
+    try:
+        submitted = client.submit_job(
+            request_payload=request_payload,
+            bundle_path=bundle_path,
+            local_input_paths=local_input_paths,
+        )
+        service_job_id = str(submitted.get("job_id") or "").strip() or str(job_id)
+        terminal = client.wait_for_job(
+            job_id=service_job_id,
+            poll_interval_seconds=poll_interval,
+            wait_timeout_seconds=wait_timeout,
+        )
+    finally:
+        bundle_path.unlink(missing_ok=True)
+
+    status = str(terminal.get("status") or "").strip().lower()
+    raw_result = terminal.get("result")
+    result_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
+    raw_manifest = terminal.get("artifact_manifest")
+    artifact_manifest = list(raw_manifest) if isinstance(raw_manifest, list) else []
+    downloaded_artifacts = _download_service_artifacts(
+        client=client,
+        service_job_id=service_job_id,
+        source_dir=source_dir,
+        artifact_manifest=artifact_manifest,
+    )
+
+    insights = _extract_execution_insights(
+        source_dir=source_dir,
+        artifacts=downloaded_artifacts,
+        expected_outputs=expected_output_tokens,
+    )
+    measurement_candidates = list(
+        result_payload.get("measurement_candidates") or insights.get("measurement_candidates") or []
+    )
+    key_measurements = list(result_payload.get("key_measurements") or [])
+    if not key_measurements:
+        key_measurements = sorted(
+            [
+                item
+                for item in measurement_candidates
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ],
+            key=lambda item: _measurement_priority(str(item.get("name") or "")),
+        )[:12]
+
+    success = bool(result_payload.get("success"))
+    if not result_payload and status == "succeeded":
+        success = True
+    return {
+        "success": success,
+        "job_id": str(job_id),
+        "service_job_id": service_job_id,
+        "execution_backend": "service",
+        "exit_code": result_payload.get("exit_code"),
+        "runtime_seconds": result_payload.get("runtime_seconds"),
+        "timeout_seconds": effective_timeout,
+        "stdout_tail": str(result_payload.get("stdout_tail") or ""),
+        "stderr_tail": str(result_payload.get("stderr_tail") or ""),
+        "error_class": (
+            str(result_payload.get("error_class") or "").strip()
+            or ("service_execution_failed" if not success else None)
+        ),
+        "error_message": (
+            str(result_payload.get("error_message") or "").strip()
+            or str(terminal.get("error") or "").strip()
+            or ("" if success else "Code execution service failed.")
+        ),
+        "repair_hint": (
+            str(result_payload.get("repair_hint") or "").strip()
+            or (None if success else _repair_hint(str(result_payload.get("error_class") or "")))
+        ),
+        "attempt_id": str(result_payload.get("attempt_id") or f"svc_{service_job_id}"),
+        "artifacts": downloaded_artifacts,
+        "output_files": list(result_payload.get("output_files") or insights.get("output_files") or []),
+        "expected_outputs": list(
+            result_payload.get("expected_outputs") or insights.get("expected_outputs") or []
+        ),
+        "missing_expected_outputs": list(
+            result_payload.get("missing_expected_outputs")
+            or insights.get("missing_expected_outputs")
+            or []
+        ),
+        "analysis_outputs": list(
+            result_payload.get("analysis_outputs") or insights.get("analysis_outputs") or []
+        ),
+        "measurement_candidates": measurement_candidates[:_MAX_MEASUREMENT_CANDIDATES],
+        "key_measurements": key_measurements,
+        "metrics": result_payload.get("metrics")
+        or {
+            "artifacts_count": len(downloaded_artifacts),
+            "output_files_count": len(insights.get("output_files") or []),
+            "missing_expected_outputs_count": len(insights.get("missing_expected_outputs") or []),
+            "measurement_candidates_count": len(measurement_candidates),
+        },
+        "ui_artifacts": [
+            {
+                "path": item["path"],
+                "title": str(item.get("title") or item.get("relative_path") or "artifact"),
+                "type": "file",
+                "kind": str(item.get("kind") or "file"),
+            }
+            for item in downloaded_artifacts[:80]
+        ],
+        "execution_command": str(spec.get("command") or _DEFAULT_COMMAND).strip() or _DEFAULT_COMMAND,
+        "service_url": service_url,
+    }
+
+
 def _execute_python_job_attempt(
     *,
     job_id: str,
@@ -1194,19 +1455,32 @@ def execute_python_job_once(
     execution_backend: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    backend = (
-        str(execution_backend or getattr(settings, "code_execution_default_backend", "docker"))
-        .strip()
-        .lower()
+    backend = choose_code_execution_backend(
+        requested_backend=execution_backend,
+        settings=settings,
     )
-    if backend != "docker":
+    service_enabled = _service_execution_enabled(settings)
+    if backend not in {"docker", "service"}:
         return {
             "success": False,
             "job_id": str(job_id),
             "error_class": "unsupported_backend",
-            "error_message": f"Unsupported execution_backend={backend}. v1 supports docker.",
+            "error_message": (
+                f"Unsupported execution_backend={backend}. "
+                "v1 supports docker and the dedicated service backend."
+            ),
         }
-    if not _docker_available():
+    if backend == "service" and not service_enabled:
+        return {
+            "success": False,
+            "job_id": str(job_id),
+            "error_class": "backend_unavailable",
+            "error_message": (
+                "Code execution service is not configured. Set CODE_EXECUTION_SERVICE_URL "
+                "or use the docker backend."
+            ),
+        }
+    if not service_enabled and not _docker_available():
         return {
             "success": False,
             "job_id": str(job_id),
@@ -1214,10 +1488,13 @@ def execute_python_job_once(
             "error_message": "Docker is not available. Build/start Docker and retry execute_python_job.",
         }
 
-    image = str(
-        getattr(settings, "code_execution_docker_image", "bisque-ultra-codeexec:py311")
-    ).strip()
-    network = str(getattr(settings, "code_execution_docker_network", "none")).strip() or "none"
+    image = ""
+    network = ""
+    if not service_enabled:
+        image = str(
+            getattr(settings, "code_execution_docker_image", "bisque-ultra-codeexec:py311")
+        ).strip()
+        network = str(getattr(settings, "code_execution_docker_network", "none")).strip() or "none"
     timeout_default = int(getattr(settings, "code_execution_default_timeout_seconds", 900))
     timeout_cap = int(getattr(settings, "code_execution_max_timeout_seconds", 3600))
     effective_timeout = int(timeout_seconds or timeout_default)
@@ -1259,16 +1536,26 @@ def execute_python_job_once(
     while True:
         spec = load_python_job_spec(job_id)
         attempt_index = int(max(1, int(spec.get("attempt_index") or 1)))
-        result = _execute_python_job_attempt(
-            job_id=str(job_id),
-            spec=spec,
-            source_dir=source_dir,
-            image=image,
-            network=network,
-            effective_timeout=effective_timeout,
-            effective_cpu=effective_cpu,
-            effective_memory_mb=effective_memory_mb,
-        )
+        if service_enabled:
+            result = _execute_python_job_attempt_via_service(
+                job_id=str(job_id),
+                spec=spec,
+                source_dir=source_dir,
+                effective_timeout=effective_timeout,
+                effective_cpu=effective_cpu,
+                effective_memory_mb=effective_memory_mb,
+            )
+        else:
+            result = _execute_python_job_attempt(
+                job_id=str(job_id),
+                spec=spec,
+                source_dir=source_dir,
+                image=image,
+                network=network,
+                effective_timeout=effective_timeout,
+                effective_cpu=effective_cpu,
+                effective_memory_mb=effective_memory_mb,
+            )
         result["attempt_index"] = attempt_index
         attempt_history.append(
             {
@@ -1338,7 +1625,7 @@ def execute_python_job_once(
         result = {
             "success": False,
             "job_id": str(job_id),
-            "execution_backend": "docker",
+            "execution_backend": "service" if service_enabled else "docker",
             "error_class": "unknown_execution_error",
             "error_message": "Execution ended before producing a result.",
         }

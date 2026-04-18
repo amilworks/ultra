@@ -1227,6 +1227,47 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
             "files": files_summary,
         }
 
+    if tool_name == "segment_image_megaseg":
+        scientific_summary = (
+            result.get("scientific_summary")
+            if isinstance(result.get("scientific_summary"), dict)
+            else {}
+        )
+        scientific_files = (
+            scientific_summary.get("files") if isinstance(scientific_summary.get("files"), list) else []
+        )
+        first_row = next(
+            (row for row in scientific_files if isinstance(row, dict)),
+            None,
+        )
+        return {
+            "success": True,
+            "kind": "segment_image_megaseg",
+            "processed": result.get("processed"),
+            "total_files": result.get("total_files"),
+            "output_directory": result.get("output_directory"),
+            "result_group_id": result.get("result_group_id"),
+            "report_path": result.get("report_path"),
+            "summary_csv_path": result.get("summary_csv_path"),
+            "mean_coverage_percent": (
+                scientific_summary.get("aggregate", {}).get("mean_coverage_percent")
+                if isinstance(scientific_summary.get("aggregate"), dict)
+                else None
+            ),
+            "mean_object_count": (
+                scientific_summary.get("aggregate", {}).get("mean_object_count")
+                if isinstance(scientific_summary.get("aggregate"), dict)
+                else None
+            ),
+            "coverage_percent": first_row.get("coverage_percent") if first_row else None,
+            "object_count": first_row.get("object_count") if first_row else None,
+            "active_slice_count": first_row.get("active_slice_count") if first_row else None,
+            "z_slice_count": first_row.get("z_slice_count") if first_row else None,
+            "largest_component_voxels": (
+                first_row.get("largest_component_voxels") if first_row else None
+            ),
+        }
+
     if tool_name == "quantify_segmentation_masks":
         summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
         evaluation = result.get("evaluation") if isinstance(result.get("evaluation"), dict) else {}
@@ -1239,6 +1280,7 @@ def _progress_summary_from_result(tool_name: str, result: dict[str, Any]) -> dic
         return {
             "success": True,
             "kind": "quantify_segmentation_masks",
+            "result_group_id": result.get("result_group_id"),
             "summary": summary,
             "metrics_mean": metrics_mean,
             "row_count": len(rows),

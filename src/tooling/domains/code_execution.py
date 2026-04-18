@@ -106,8 +106,12 @@ EXECUTE_PYTHON_JOB_TOOL = {
                 },
                 "execution_backend": {
                     "type": "string",
-                    "enum": ["docker"],
-                    "description": "Execution backend. The production release uses docker directly.",
+                    "enum": ["docker", "service"],
+                    "description": (
+                        "Execution backend. When the dedicated code execution service is configured, "
+                        "the backend can offload execution there asynchronously while preserving the "
+                        "same tool response contract."
+                    ),
                     "default": "docker",
                 },
                 "durable_execution": {

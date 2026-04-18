@@ -176,6 +176,7 @@ export type V2ArtifactRecord = {
   source_path?: string | null;
   preview_path?: string | null;
   title?: string | null;
+  result_group_id?: string | null;
   mime_type?: string | null;
   size_bytes?: number | null;
   sha256?: string | null;

@@ -275,6 +275,102 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in haystack for needle in needles)
 
 
+def _is_lightweight_numeric_request(text: str) -> bool:
+    lowered = " ".join(str(text or "").strip().lower().split())
+    if not lowered:
+        return False
+    if re.search(
+        r"\b("
+        r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+        r"plot|figure|chart|save|export|report|image|images|mask|segmentation|random forest|"
+        r"cross[- ]?validation|train|fit|classifier|regressor|cluster|clustering|pca|umap|"
+        r"opencv|scikit-learn|sklearn|pandas|scipy|pipeline|batch"
+        r")\b",
+        lowered,
+    ):
+        return False
+    asks_for_closed_form_value = bool(
+        re.search(
+            r"\b("
+            r"calculate|compute|derive|evaluate|solve|determine|find|what is|what's|"
+            r"mean|average|median|sum|difference|product|variance|standard deviation|std|"
+            r"covariance|correlation|dot product|norm|determinant|eigenvalue|integral|derivative"
+            r")\b",
+            lowered,
+        )
+    )
+    has_inline_expression = bool(
+        re.search(r"(\[[^\]]+\]|\([^\)]*\)|\{[^\}]*\}|[-+]?\d+(?:\.\d+)?|=)", lowered)
+    )
+    return asks_for_closed_form_value and has_inline_expression and len(lowered) <= 220
+
+
+def _requires_code_execution_tooling(text: str) -> bool:
+    lowered = " ".join(str(text or "").strip().lower().split())
+    if not lowered or _is_lightweight_numeric_request(lowered):
+        return False
+    explicit_code_signal = bool(
+        re.search(
+            r"\b("
+            r"write|generate|create|produce|run|execute|debug|fix|test|profile|benchmark|optimi[sz]e"
+            r")\s+(python|code|script|program|notebook)\b",
+            lowered,
+        )
+    )
+    heavy_analysis_signal = bool(
+        re.search(
+            r"\b("
+            r"random forest|xgboost|lightgbm|svm|logistic regression|linear regression|"
+            r"cross[- ]?validation|grid search|hyperparameter|feature importance|confusion matrix|"
+            r"roc|auc|precision-recall|bootstrap|monte carlo|principal component|pca|umap|"
+            r"cluster(?:ing)?|classifier|regressor|image processing|computer vision|opencv|"
+            r"scikit-learn|sklearn"
+            r")\b",
+            lowered,
+        )
+    )
+    scientific_stack_signal = bool(
+        re.search(
+            r"\b("
+            r"python|script|sandbox|notebook|numpy|pandas|scipy|matplotlib|seaborn|"
+            r"scikit-learn|sklearn|opencv"
+            r")\b",
+            lowered,
+        )
+    )
+    dataset_or_artifact_signal = bool(
+        re.search(
+            r"\b("
+            r"csv|tsv|parquet|dataframe|dataset|spreadsheet|table|file|files|folder|directory|"
+            r"plot|figure|chart|report|artifact|png|pdf"
+            r")\b",
+            lowered,
+        )
+    )
+    workflow_signal = bool(
+        re.search(
+            r"\b("
+            r"fit|train|benchmark|profile|process|analy[sz]e|classify|segment|detect|featurize|"
+            r"preprocess|clean|aggregate|transform|simulate|save|export|compare"
+            r")\b",
+            lowered,
+        )
+    )
+    return explicit_code_signal or heavy_analysis_signal or (
+        workflow_signal and (scientific_stack_signal or dataset_or_artifact_signal)
+    )
+
+
+def _code_execution_usage_rules(*, code_execution_enabled: bool) -> str:
+    if not code_execution_enabled:
+        return ""
+    return (
+        "- Use execute_python_job for reproducible, multi-step computation that needs code execution, files, figures, model fitting, image processing, or saved artifacts.\n"
+        "- Use numpy_calculator for a single deterministic expression or closed-form numeric check that can be computed directly from the prompt.\n"
+        "- Do not call code execution tools for purely conceptual questions, literature-style explanations, or lightweight arithmetic that does not require sandbox execution.\n"
+    )
+
+
 def _needs_extended_next_steps(user_text: str) -> bool:
     text = str(user_text or "").lower()
     return _contains_any(
@@ -1728,27 +1824,7 @@ def _select_tool_subset(
             "row ",
         ),
     )
-    mentions_code_execution = _contains_any(
-        text,
-        (
-            "write code",
-            "run code",
-            "python script",
-            "python code",
-            "sandbox",
-            "execute python",
-            "debug code",
-            "fix code",
-            "pca",
-            "random forest",
-            "scikit-learn",
-            "sklearn",
-            "opencv",
-            "scipy",
-            "numpy",
-            "pandas",
-        ),
-    )
+    mentions_code_execution = _requires_code_execution_tooling(text)
     mentions_image_measurements = _contains_any(
         text,
         (
@@ -2093,6 +2169,7 @@ def stream_chat_completion_with_tools(
         "- If the user asks to segment depth outputs, use estimate_depth_pro first, then call segment_image_sam3 with file_paths set to depth_map_paths from the depth result.\n"
         "- For CSV/tabular workflows, call analyze_csv to validate/repair parsing, document issues/fixes, and apply dataframe operations.\n"
         "- For uploaded images, use uploaded local paths directly; do not re-download the same files from BisQue.\n"
+        f"{_code_execution_usage_rules(code_execution_enabled=code_execution_enabled)}"
         "- For Python code execution workflows, first call codegen_python_plan, then call execute_python_job with returned job_id.\n"
         "- If execute_python_job fails, pass the failure payload to codegen_python_plan.previous_failure and iterate.\n"
         "- Keep code execution retries bounded; stop after budget is exhausted and report limitations clearly.\n"
@@ -2241,21 +2318,7 @@ def stream_chat_completion_with_tools(
             "Edge-module request with uploaded image(s): call run_bisque_module directly on uploaded local file paths. "
             "Do not call search_bisque_resources/bisque_find_assets unless the user explicitly asks to search BisQue assets."
         )
-    code_execution_prompt = _contains_any(
-        user_text,
-        (
-            "write code",
-            "run code",
-            "python",
-            "pca",
-            "random forest",
-            "sklearn",
-            "opencv",
-            "scipy",
-            "numpy",
-            "pandas",
-        ),
-    )
+    code_execution_prompt = _requires_code_execution_tooling(user_text)
     if code_execution_prompt and code_execution_enabled:
         dynamic_rules.append(
             "Code execution workflow: use codegen_python_plan -> execute_python_job and keep retries within max 12 code-tool calls."

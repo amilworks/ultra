@@ -6,7 +6,9 @@ import types
 from pathlib import Path
 
 import src.agno_backend.pro_mode as pro_mode_module
+import src.agno_backend.pro_mode_prompts as prompts_module
 import src.agno_backend.runtime as runtime_module
+import src.llm as llm_module
 from src.agno_backend.pro_mode import (
     ProModeIntakeDecision,
     ProModeVerifierReport,
@@ -191,6 +193,10 @@ def test_analysis_session_state_payload_includes_contract_brief_fields(tmp_path:
             "last_limitations": ["Only one field of view was analyzed."],
             "evidence_summaries": ["answer_summary: The mask is sparse."],
             "handles": {"mask_paths": ["/tmp/mask.tiff"]},
+            "active_result_group_id": "megaseg-group-1",
+            "active_report_handle": "/tmp/megaseg_report.md",
+            "active_summary_csv_handle": "/tmp/megaseg_summary.csv",
+            "active_selected_files": ["NPM1_13054_IM.tiff"],
         },
         selection_context=None,
         uploaded_files=[],
@@ -206,6 +212,10 @@ def test_analysis_session_state_payload_includes_contract_brief_fields(tmp_path:
         "Compare the same metric against a matched control."
     ]
     assert analysis_state["open_limits"] == ["Only one field of view was analyzed."]
+    assert analysis_state["active_result_group_id"] == "megaseg-group-1"
+    assert analysis_state["active_report_handle"] == "/tmp/megaseg_report.md"
+    assert analysis_state["active_summary_csv_handle"] == "/tmp/megaseg_summary.csv"
+    assert analysis_state["active_selected_files"] == ["NPM1_13054_IM.tiff"]
 
 
 def test_tool_workflow_default_execution_regime_stays_validated_tool(tmp_path: Path) -> None:
@@ -1059,14 +1069,17 @@ def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them
 
     def fake_execute_tool_call(tool_name, args, **_kwargs):
         executed_tools.append(tool_name)
-        assert args == {}
         if tool_name == "codegen_python_plan":
+            assert args == {
+                "task_summary": "Write Python to analyze this image and run it."
+            }
             return {
                 "success": True,
                 "job_id": "job-123",
                 "summary": "Prepared a deterministic Python analysis job.",
             }
         assert tool_name == "execute_python_job"
+        assert args == {"job_id": "job-123"}
         return {
             "success": True,
             "status": "completed",
@@ -1110,6 +1123,194 @@ def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them
         "execute_python_job",
     ]
     assert result["response_text"] != "I can write some Python if you want."
+
+
+def test_deterministic_required_tool_fallback_threads_latest_result_refs_between_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    mask_path = "/tmp/NPM1_13054_IM__megaseg_mask.tiff"
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "I can analyze that image for you.",
+                "metadata": {"tool_invocations": []},
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **kwargs):
+        assert args == {}
+        if tool_name == "segment_image_megaseg":
+            assert kwargs["uploaded_files"] == ["/tmp/NPM1_13054_IM.tiff"]
+            assert kwargs["latest_result_refs"] == {}
+            return {
+                "success": True,
+                "preferred_upload_paths": [mask_path],
+                "files_processed": [
+                    {
+                        "file": "NPM1_13054_IM.tiff",
+                        "preferred_upload_path": mask_path,
+                        "success": True,
+                    }
+                ],
+                "latest_result_refs": {
+                    "latest_segmentation_mask_path": mask_path,
+                    "latest_segmentation_mask_paths": [mask_path],
+                    "segment_image_megaseg.mask_paths": [mask_path],
+                    "segment_image_megaseg.latest_mask_path": mask_path,
+                },
+            }
+        assert tool_name == "quantify_segmentation_masks"
+        assert kwargs["latest_result_refs"]["latest_segmentation_mask_path"] == mask_path
+        assert kwargs["latest_result_refs"]["segment_image_megaseg.mask_paths"] == [mask_path]
+        return {
+            "success": True,
+            "summary": {"mask_count": 1, "successful_masks": 1},
+            "rows": [{"mask_path": mask_path, "success": True}],
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run MegaSeg on the selected image and quantify the mask.",
+                }
+            ],
+            latest_user_text="Run MegaSeg on the selected image and quantify the mask.",
+            uploaded_files=["/tmp/NPM1_13054_IM.tiff"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            tool_plan_category="segmentation",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert [item["tool"] for item in result["tool_invocations"]] == [
+        "segment_image_megaseg",
+        "quantify_segmentation_masks",
+    ]
+    assert result["tool_invocations"][1]["status"] == "completed"
+
+
+def test_deterministic_required_tool_fallback_skips_completed_megaseg_and_reuses_refs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    mask_path = "/tmp/NPM1_13054_IM__megaseg_mask.tiff"
+    executed_tools: list[str] = []
+
+    async def fake_stream(**_kwargs):
+        yield {
+            "event": "done",
+            "data": {
+                "response_text": "Segmentation finished.",
+                "metadata": {
+                    "tool_invocations": [
+                        {
+                            "tool": "segment_image_megaseg",
+                            "status": "completed",
+                            "output_summary": {
+                                "success": True,
+                                "processed": 1,
+                                "result_group_id": "megaseg-group-1",
+                            },
+                            "output_envelope": {
+                                "success": True,
+                                "result_group_id": "megaseg-group-1",
+                                "preferred_upload_paths": [mask_path],
+                                "latest_result_refs": {
+                                    "latest_segmentation_mask_path": mask_path,
+                                    "latest_segmentation_mask_paths": [mask_path],
+                                    "segment_image_megaseg.mask_paths": [mask_path],
+                                    "segment_image_megaseg.latest_mask_path": mask_path,
+                                    "segment_image_megaseg.result_group_id": "megaseg-group-1",
+                                    "latest_segmentation_result_group_id": "megaseg-group-1",
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        }
+
+    def fake_execute_tool_call(tool_name, args, **kwargs):
+        executed_tools.append(str(tool_name))
+        assert tool_name == "quantify_segmentation_masks"
+        assert args == {}
+        assert kwargs["latest_result_refs"]["latest_segmentation_mask_path"] == mask_path
+        assert (
+            kwargs["latest_result_refs"]["latest_segmentation_result_group_id"]
+            == "megaseg-group-1"
+        )
+        return {
+            "success": True,
+            "summary": {"mask_count": 1, "successful_masks": 1},
+            "rows": [{"mask_path": mask_path, "success": True}],
+            "latest_result_refs": {
+                "latest_segmentation_quant_rows": [
+                    {"mask_path": mask_path, "success": True}
+                ],
+                "latest_segmentation_result_group_id": "megaseg-group-1",
+            },
+        }
+
+    runtime.stream = fake_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime_module, "execute_tool_call", fake_execute_tool_call)
+
+    result = asyncio.run(
+        runtime._run_pro_mode_tool_workflow(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run MegaSeg on the selected image and quantify the mask.",
+                }
+            ],
+            latest_user_text="Run MegaSeg on the selected image and quantify the mask.",
+            uploaded_files=["/tmp/NPM1_13054_IM.tiff"],
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            reasoning_mode="deep",
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            event_callback=None,
+            selected_tool_names=["segment_image_megaseg", "quantify_segmentation_masks"],
+            tool_plan_category="segmentation",
+            strict_tool_validation=True,
+            selection_context=None,
+            knowledge_context=None,
+            shared_context={},
+            conversation_state_seed=None,
+            debug=False,
+        )
+    )
+
+    assert result["runtime_status"] == "completed"
+    assert executed_tools == ["quantify_segmentation_masks"]
+    assert [item["tool"] for item in result["tool_invocations"]] == [
+        "segment_image_megaseg",
+        "quantify_segmentation_masks",
+    ]
 
 
 def test_tool_program_phase_records_native_bedrock_model_route_in_compression_stats(
@@ -1214,7 +1415,7 @@ def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Pat
             runtime_error=None,
         )
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
 
@@ -1296,7 +1497,7 @@ def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(
             runtime_error="403 Forbidden",
         )
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
 
@@ -1352,7 +1553,9 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             route="tool_workflow",
             execution_regime="validated_tool",
             reason="Need deterministic tool use.",
-            selected_tool_names=["execute_python_job"],
+            selected_tool_names=["codegen_python_plan", "execute_python_job"],
+            tool_plan_category="code_execution",
+            strict_tool_validation=True,
         )
 
     async def fake_tool_workflow(**_kwargs):
@@ -1387,8 +1590,8 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             "selected_domains": ["core"],
             "runtime_status": "completed",
             "runtime_error": None,
-            "selected_tool_names": ["execute_python_job"],
-            "attempted_tool_sets": [["execute_python_job"]],
+            "selected_tool_names": ["codegen_python_plan", "execute_python_job"],
+            "attempted_tool_sets": [["codegen_python_plan", "execute_python_job"]],
         }
 
     async def fake_final_writer(**_kwargs):
@@ -1400,7 +1603,7 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             }
         }
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_tool_workflow = fake_tool_workflow  # type: ignore[method-assign]
     runtime._run_pro_mode_final_writer = fake_final_writer  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
@@ -1419,6 +1622,7 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             max_tool_calls=8,
             max_runtime_seconds=120,
             workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            benchmark={"force_pro_mode_execution_regime": "validated_tool"},
             reasoning_mode="deep",
             user_id="user-1",
             run_id="run-1",
@@ -1440,3 +1644,243 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
     assert metadata["pro_mode"]["model_routes"]["pro_mode_final_writer"]["transport"] == (
         "aws_bedrock_claude"
     )
+
+
+def test_codeexec_reasoning_solver_surfaces_fallback_tool_outputs_in_stream(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="sandbox-profile",
+        pro_mode_aws_sso_auth=True,
+    )
+    captured_supporting_points: list[str] = []
+
+    stabilized_decision = ProModeIntakeDecision(
+        route="deep_reasoning",
+        execution_regime="reasoning_solver",
+        reason="Hard computational request.",
+        selected_tool_names=["codegen_python_plan", "execute_python_job"],
+        tool_plan_category="code_execution",
+        task_regime="self_contained_reasoning",
+    )
+
+    async def fake_intake(**_kwargs):
+        return stabilized_decision
+
+    async def fake_solver(**_kwargs):
+        return ProModeWorkflowResult(
+            response_text="Completed the required code workflow.",
+            metadata={
+                "pro_mode": {
+                    "execution_path": "codeexec_reasoning_solver",
+                    "runtime_status": "completed",
+                    "verifier": {
+                        "passed": True,
+                        "issues": [],
+                        "suggested_changes": [],
+                        "confidence": "medium",
+                    },
+                    "deterministic_required_tool_fallback": {
+                        "missing_required_tool_names": [
+                            "codegen_python_plan",
+                            "execute_python_job",
+                        ]
+                    },
+                },
+                "tool_invocations": [
+                    {
+                        "tool": "codegen_python_plan",
+                        "status": "completed",
+                        "output_summary": {
+                            "success": True,
+                            "job_id": "job-123",
+                        },
+                    },
+                    {
+                        "tool": "execute_python_job",
+                        "status": "completed",
+                        "output_summary": {
+                            "success": True,
+                            "status": "completed",
+                            "artifacts": ["result.json"],
+                        },
+                    },
+                ],
+            },
+            runtime_status="completed",
+            runtime_error=None,
+        )
+
+    async def fake_final_writer(**kwargs):
+        captured_supporting_points.extend(list(kwargs.get("supporting_points") or []))
+        return "Measured output is ready.", {
+            "model_route": {
+                "transport": "aws_bedrock_claude",
+                "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+                "fallback_used": False,
+            }
+        }
+
+    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime._stabilize_pro_mode_intake_decision = (  # type: ignore[method-assign]
+        lambda **_kwargs: stabilized_decision
+    )
+    runtime._run_pro_mode_codeexec_reasoning_solver = fake_solver  # type: ignore[method-assign]
+    runtime._run_pro_mode_final_writer = fake_final_writer  # type: ignore[method-assign]
+    runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    async def _collect() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in runtime.stream(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Write and run Python to compare random forest and logistic regression "
+                        "and save result.json."
+                    ),
+                }
+            ],
+            uploaded_files=["/tmp/input.csv"],
+            conversation_id="conv-1",
+            max_tool_calls=8,
+            max_runtime_seconds=120,
+            workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            reasoning_mode="deep",
+            user_id="user-1",
+            run_id="run-1",
+            debug=True,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    done_event = next(event for event in events if event.get("event") == "done")
+    payload = dict(done_event.get("data") or {})
+    metadata = dict(payload.get("metadata") or {})
+
+    assert payload["response_text"] == "Measured output is ready."
+    assert [item["tool"] for item in metadata["tool_invocations"]] == [
+        "codegen_python_plan",
+        "execute_python_job",
+    ]
+    assert metadata["pro_mode"]["summary"] == (
+        "Planned with the dedicated code-execution reasoner and completed "
+        "the required code tools through deterministic fallback."
+    )
+    assert captured_supporting_points
+
+
+def test_tool_workflow_fail_closes_when_code_execution_does_not_produce_measurements(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        pro_mode_transport="aws_bedrock_claude",
+        pro_mode_model="anthropic.claude-opus-4-5-20251101-v1:0",
+        pro_mode_aws_region="us-east-1",
+        pro_mode_aws_profile="sandbox-profile",
+        pro_mode_aws_sso_auth=True,
+    )
+    tool_invocations = [
+        {
+            "tool": "execute_python_job",
+            "status": "failed",
+            "output_summary": {
+                "success": False,
+                "error_class": "backend_unavailable",
+                "error_message": (
+                    "Docker is not available. Build/start Docker and retry "
+                    "execute_python_job."
+                ),
+            },
+        }
+    ]
+    fail_closed_text = runtime._code_execution_fail_closed_text(tool_invocations)
+    reservations = runtime._code_execution_fail_closed_reservations(tool_invocations)
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_writer_phase(**kwargs):
+        captured_prompt["prompt"] = str(kwargs.get("prompt") or "")
+        return str(fail_closed_text or ""), {
+            "transport": "aws_bedrock_claude",
+            "active_model": "anthropic.claude-opus-4-5-20251101-v1:0",
+            "fallback_used": False,
+        }
+
+    runtime._arun_text_phase_with_optional_pro_mode_transport = fake_writer_phase  # type: ignore[method-assign]
+
+    response_text, _writer_stats = asyncio.run(
+        runtime._run_pro_mode_final_writer(
+            latest_user_text="Fit a 4-parameter logistic curve and report EC50 and Hill slope.",
+            draft_response_text="Expected Results: EC50 ~ 1.7 uM and Hill slope ~ 1.2.",
+            execution_regime="tool_workflow",
+            task_regime="programmatic_experiment",
+            supporting_points=["Code execution failed before producing measured outputs."],
+            reservations=reservations,
+            session_state={"pro_mode_context": {}},
+            conversation_id="conv-1",
+            run_id="run-1",
+            user_id="user-1",
+            max_runtime_seconds=30,
+            debug=False,
+        )
+    )
+
+    prompt = captured_prompt["prompt"]
+    assert fail_closed_text is not None
+    assert "did not complete successfully" in fail_closed_text
+    assert "EC50" not in fail_closed_text
+    assert "Hill slope" not in fail_closed_text
+    assert any(
+        "Code execution failed in this turn." in str(item or "") for item in reservations
+    )
+    assert "A requested code execution step failed in this turn." in prompt
+    assert "Do not report expected, estimated, approximate" in prompt
+    assert response_text == fail_closed_text
+
+
+def test_code_execution_request_classifier_distinguishes_heavy_vs_lightweight_numeric_turns(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path, code_execution_enabled=True)
+
+    assert runtime._is_code_execution_request(
+        "Fit a random forest on this CSV, run cross-validation, and save a figure."
+    )
+    assert not runtime._is_code_execution_request(
+        "Using numpy notation, what is the mean of the list [1, 2, 3, 4]?"
+    )
+
+
+def test_tool_guide_includes_code_execution_usage_rubric_when_enabled() -> None:
+    rules = llm_module._code_execution_usage_rules(code_execution_enabled=True)
+
+    assert "Use execute_python_job for reproducible, multi-step computation" in rules
+    assert "Use numpy_calculator for a single deterministic expression" in rules
+
+
+def test_code_execution_writer_guidance_requires_methods_results_limitations() -> None:
+    prompt = prompts_module.build_pro_mode_final_writer_prompt(
+        latest_user_text="Fit multiple models to this CSV and explain the result.",
+        execution_regime="tool_workflow",
+        task_regime="programmatic_experiment",
+        normalized_draft="Random forest outperformed linear regression.",
+        supporting_points=["Cross-validated accuracy improved by 0.08."],
+        reservations=[],
+        scientific_result_surface_active=False,
+        explicit_full_chat_report=False,
+        report_like_request=False,
+        math_explainer_request=False,
+        code_execution_turn=True,
+        code_execution_failed=False,
+    )
+
+    lowered = prompt.lower()
+    assert "methods used" in lowered
+    assert "quantitative findings" in lowered
+    assert "limitations" in lowered

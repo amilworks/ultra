@@ -935,9 +935,13 @@ class Settings(BaseSettings):
         default=False,
         description="Enable LLM-authored Python code execution tools.",
     )
-    code_execution_default_backend: Literal["docker"] = Field(
+    code_execution_default_backend: Literal["docker", "service"] = Field(
         default="docker",
-        description="Default execution backend for execute_python_job.",
+        description=(
+            "Default execution backend for execute_python_job. "
+            "When the dedicated service URL is configured, production deployments should prefer "
+            "`service`."
+        ),
     )
     code_execution_durable_default: bool = Field(
         default=True,
@@ -945,6 +949,26 @@ class Settings(BaseSettings):
             "When true, execute_python_job submits execution to a durable run before polling "
             "for completion."
         ),
+    )
+    code_execution_service_url: str | None = Field(
+        default=None,
+        description="Private base URL for the dedicated code execution service.",
+    )
+    code_execution_service_api_key: str | None = Field(
+        default=None,
+        description="Bearer token used by the backend when calling the code execution service.",
+    )
+    code_execution_service_timeout_seconds: int = Field(
+        default=60,
+        description="HTTP timeout for individual code execution service requests.",
+    )
+    code_execution_service_poll_interval_seconds: float = Field(
+        default=1.5,
+        description="Poll interval when waiting for code execution service jobs.",
+    )
+    code_execution_service_wait_timeout_seconds: int = Field(
+        default=7200,
+        description="Maximum wait time for a code execution service job before timing out.",
     )
     code_execution_default_timeout_seconds: int = Field(
         default=900,

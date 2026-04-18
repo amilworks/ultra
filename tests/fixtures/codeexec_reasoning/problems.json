@@ -1,0 +1,16 @@
+[
+  {
+    "id": "nonlinear_model_selection",
+    "prompt": "In Pro Mode, write and run Python to generate a synthetic dose-response dataset, fit multiple candidate nonlinear models, estimate uncertainty with bootstrap confidence intervals, save result.json and outputs/model_comparison.png, and justify the selected model for a skeptical methods reviewer.",
+    "expected_tools": ["codegen_python_plan", "execute_python_job"],
+    "expected_artifacts": ["result.json", "outputs/model_comparison.png"],
+    "scoring_targets": ["quantitative_metrics", "artifact_completion", "failure_honesty", "scientific_prose"]
+  },
+  {
+    "id": "microscopy_feature_qc",
+    "prompt": "In Pro Mode, write and run Python to generate a synthetic set of microscopy-like field-of-view images, extract region-level features, cluster the fields of view, save result.json, outputs/report.md, and outputs/qc_overview.png, then explain which images are outliers and why.",
+    "expected_tools": ["codegen_python_plan", "execute_python_job"],
+    "expected_artifacts": ["result.json", "outputs/report.md", "outputs/qc_overview.png"],
+    "scoring_targets": ["batch_handling", "artifact_completion", "scientific_prose", "limitations"]
+  }
+]

@@ -254,6 +254,7 @@ export type ArtifactRecord = {
   modified_at: string;
   source_path?: string | null;
   title?: string | null;
+  result_group_id?: string | null;
 };
 
 export type ArtifactListResponse = {
@@ -1763,6 +1764,7 @@ export type V3ArtifactRecord = {
   path?: string | null;
   source_path?: string | null;
   preview_path?: string | null;
+  result_group_id?: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;

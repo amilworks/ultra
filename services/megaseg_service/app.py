@@ -14,14 +14,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import torch
+from fsspec.core import url_to_fs
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("megaseg_service")
+REMOTE_SOURCE_SCHEMES = {"http", "https", "s3"}
+REMOTE_TIFF_SUFFIXES = (".ome.tif", ".ome.tiff", ".tif", ".tiff")
 
 
 def build_megaseg_model(*args: Any, **kwargs: Any) -> Any:
@@ -194,6 +198,50 @@ def _safe_upload_name(name: str, existing: set[str]) -> str:
             existing.add(updated)
             return updated
         index += 1
+
+
+def _looks_like_remote_source(uri: str) -> bool:
+    parsed = urlparse(str(uri or "").strip())
+    return bool(parsed.scheme and parsed.netloc and parsed.scheme.lower() in REMOTE_SOURCE_SCHEMES)
+
+
+def _remote_source_name(uri: str) -> str:
+    parsed = urlparse(str(uri or "").strip())
+    name = Path(unquote(parsed.path.rstrip("/"))).name
+    if name:
+        return name
+    return unquote(parsed.netloc or "remote.bin")
+
+
+def _should_materialize_remote_source(uri: str) -> bool:
+    raw = str(uri or "").strip()
+    if not _looks_like_remote_source(raw):
+        return False
+    return raw.lower().endswith(REMOTE_TIFF_SUFFIXES)
+
+
+def _materialize_remote_source(uri: str, inputs_dir: Path, existing_names: set[str]) -> Path:
+    safe_name = _safe_upload_name(_remote_source_name(uri), existing_names)
+    destination = inputs_dir / safe_name
+    attempts: list[dict[str, Any]] = [{}]
+    if str(uri or "").strip().lower().startswith("s3://"):
+        attempts.append({"anon": True})
+
+    last_error: Exception | None = None
+    for fs_kwargs in attempts:
+        try:
+            fs, path = url_to_fs(str(uri), **fs_kwargs)
+            if not fs.exists(path):
+                raise FileNotFoundError(f"Remote source does not exist: {uri}")
+            with fs.open(path, "rb") as source_handle, destination.open("wb") as destination_handle:
+                shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
+            return destination
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            destination.unlink(missing_ok=True)
+            continue
+
+    raise RuntimeError(f"Failed to materialize remote source {uri}: {last_error}")
 
 
 def _collect_artifact_manifest(results_dir: Path) -> list[ArtifactEntry]:
@@ -369,6 +417,15 @@ async def _parse_job_request(runtime: ServiceRuntime, request: Request) -> JobRe
     job_id = uuid4().hex
     uploaded_files: list[str] = []
     resolved_sources: list[str] = []
+    existing_names: set[str] = set()
+    inputs_dir: Path | None = None
+
+    def ensure_inputs_dir() -> Path:
+        nonlocal inputs_dir
+        if inputs_dir is None:
+            inputs_dir = _job_inputs_dir(runtime.settings, job_id)
+            inputs_dir.mkdir(parents=True, exist_ok=True)
+        return inputs_dir
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -379,19 +436,17 @@ async def _parse_job_request(runtime: ServiceRuntime, request: Request) -> JobRe
             payload = JobRequest.model_validate_json(str(request_json))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Invalid request_json: {exc}") from exc
-        inputs_dir = _job_inputs_dir(runtime.settings, job_id)
-        inputs_dir.mkdir(parents=True, exist_ok=True)
-        existing_names: set[str] = set()
+        materialized_inputs_dir = ensure_inputs_dir()
         for _, value in form.multi_items():
             filename = getattr(value, "filename", None)
             file_handle = getattr(value, "file", None)
             if not filename or file_handle is None:
                 continue
             safe_name = _safe_upload_name(str(filename), existing_names)
-            destination = inputs_dir / safe_name
+            destination = materialized_inputs_dir / safe_name
             with destination.open("wb") as handle:
                 shutil.copyfileobj(file_handle, handle)
-            materialized_source = _materialize_uploaded_source(destination, inputs_dir)
+            materialized_source = _materialize_uploaded_source(destination, materialized_inputs_dir)
             uploaded_files.append(str(materialized_source))
             resolved_sources.append(str(materialized_source))
     else:
@@ -402,6 +457,16 @@ async def _parse_job_request(runtime: ServiceRuntime, request: Request) -> JobRe
 
     for source in list(payload.sources or []):
         uri = str(source.uri or "").strip()
+        if not uri:
+            continue
+        if _should_materialize_remote_source(uri):
+            materialized_source = _materialize_remote_source(
+                uri,
+                ensure_inputs_dir(),
+                existing_names,
+            )
+            resolved_sources.append(str(materialized_source))
+            continue
         if uri:
             resolved_sources.append(uri)
 

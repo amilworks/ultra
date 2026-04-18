@@ -299,6 +299,50 @@ def _probe_local_code_tools(settings: Settings) -> int:
         return 13
 
 
+def _probe_local_codeexec_reasoning(settings: Settings) -> int:
+    _print_header("Local Codeexec Reasoning Probe")
+    api_root = str(settings.orchestrator_api_url or "http://127.0.0.1:8000").strip().rstrip("/")
+    payload: dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "In Pro Mode, write and run Python to generate a synthetic dose-response "
+                    "dataset, fit multiple candidate nonlinear models, bootstrap confidence intervals, "
+                    "save result.json and outputs/model_comparison.png, and justify the selected model "
+                    "for a skeptical methods reviewer."
+                ),
+            }
+        ],
+        "conversation_id": "local-opus-codeexec-reasoning-smoke",
+        "workflow_hint": {"id": "pro_mode", "source": "slash_menu"},
+        "reasoning_mode": "deep",
+        "debug": True,
+        "budgets": {"max_tool_calls": 12, "max_runtime_seconds": 420},
+    }
+    try:
+        parsed = _post_local_chat(api_root, payload, timeout_seconds=480.0)
+        metadata = parsed.get("metadata") or {}
+        pro_mode_meta = metadata.get("pro_mode") or {}
+        tool_invocations = _tool_invocations(parsed)
+        tool_names = [_tool_name(item) for item in tool_invocations]
+        print(f"response_model={parsed.get('model')}")
+        print(f"execution_path={pro_mode_meta.get('execution_path')}")
+        print(f"execution_regime={pro_mode_meta.get('execution_regime')}")
+        print(f"tool_names={json.dumps(tool_names)}")
+        print(f"response_text={str(parsed.get('response_text') or '')[:300]}")
+        if "codegen_python_plan" not in tool_names or "execute_python_job" not in tool_names:
+            print("Expected hard code reasoning probe to run both code execution tools.")
+            return 17
+        if str(pro_mode_meta.get("execution_regime") or "").strip() != "reasoning_solver":
+            print("Expected hard code reasoning probe to land on the reasoning_solver regime.")
+            return 18
+        return 0
+    except Exception as exc:  # pragma: no cover - smoke script
+        print(f"local_codeexec_reasoning_error={exc}")
+        return 19
+
+
 def _probe_local_bisque_tools(settings: Settings) -> int:
     _print_header("Local BisQue Tool Probe")
     if not str(settings.bisque_user or "").strip() or not str(settings.bisque_password or "").strip():
@@ -365,6 +409,9 @@ def main() -> int:
     code_tool_status = _probe_local_code_tools(settings)
     if code_tool_status != 0 and exit_code == 0:
         exit_code = code_tool_status
+    codeexec_reasoning_status = _probe_local_codeexec_reasoning(settings)
+    if codeexec_reasoning_status != 0 and exit_code == 0:
+        exit_code = codeexec_reasoning_status
     bisque_tool_status = _probe_local_bisque_tools(settings)
     if bisque_tool_status != 0 and exit_code == 0:
         exit_code = bisque_tool_status

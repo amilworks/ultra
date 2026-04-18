@@ -1363,13 +1363,8 @@ body {
 }
 
 .chat-tool-card--scientific {
-  background:
-    radial-gradient(circle at top left, color-mix(in oklab, #d4e8ec 22%, transparent), transparent 38%),
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--bg-panel) 92%, #eef7f9 8%),
-      color-mix(in oklab, var(--bg-panel) 96%, #d7e7eb 4%)
-    );
+  background: color-mix(in oklab, var(--bg-panel) 98%, var(--bg-main) 2%);
+  border-color: color-mix(in oklab, var(--line) 88%, var(--text-muted) 12%);
 }
 
 .chat-research-digest {
@@ -1532,9 +1527,106 @@ body {
   background: var(--bg-panel-strong);
 }
 
-.chat-tool-megaseg-shell {
+.chat-scientific-result-shell {
   display: grid;
-  gap: 0.9rem;
+  gap: 0.95rem;
+}
+
+.chat-scientific-hero,
+.chat-scientific-secondary-figure {
+  margin: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.chat-scientific-hero-media,
+.chat-scientific-secondary-media {
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--line) 86%, var(--text-muted) 14%);
+  border-radius: calc(var(--radius-md) + 2px);
+  background: #020202;
+}
+
+.chat-scientific-hero-image,
+.chat-scientific-secondary-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.chat-scientific-caption,
+.chat-scientific-secondary-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+}
+
+.chat-scientific-caption-copy {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.chat-scientific-caption-actions,
+.chat-scientific-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.chat-scientific-takeaway {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.chat-scientific-section-label {
+  margin: 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--text-muted) 82%, var(--text-main) 18%);
+}
+
+.chat-scientific-secondary {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.chat-scientific-tabs-list {
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.chat-scientific-tab-panel {
+  margin-top: 0;
+}
+
+.chat-scientific-appendix {
+  border-top: 1px solid var(--line);
+  padding-top: 0.7rem;
+}
+
+.chat-scientific-appendix summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  list-style: none;
+}
+
+.chat-scientific-appendix summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-scientific-appendix-body {
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 0.65rem;
 }
 
 .chat-tool-megaseg-table-head {

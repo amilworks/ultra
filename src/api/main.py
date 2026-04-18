@@ -206,9 +206,10 @@ from src.auth import (
 from src.auth import (
     touch_bisque_session as shared_touch_bisque_session,
 )
+from src.chat_titles import generate_chat_title
 from src.config import get_settings
 from src.evals.research_review import audit_contract_payload, score_research_value
-from src.llm import _select_tool_subset, generate_chat_title, get_openai_client
+from src.llm_client import get_openai_client
 from src.orchestration.executor import PlanExecutor
 from src.orchestration.models import RunStatus, WorkflowPlan, WorkflowRun
 from src.orchestration.store import RunStore
@@ -246,6 +247,7 @@ from src.science.viewer import (
 )
 from src.tooling.domains import BISQUE_TOOL_SCHEMAS
 from src.tooling.progress import decode_progress_chunk
+from src.tooling.tool_selection import _select_tool_subset
 from src.tools import _render_yolo_detection_figure, sam2_prompt_image, segment_image_sam3
 from src.training import (
     ContinuousLearningPolicy,
@@ -1717,6 +1719,66 @@ def create_app() -> FastAPI:
             return selected_names
         return []
 
+    def _should_materialize_bisque_chat_inputs(
+        *,
+        messages: list[dict[str, str]],
+        resource_uris: list[str] | None = None,
+        dataset_uris: list[str] | None = None,
+        uploaded_files: list[str] | None = None,
+        file_ids: list[str] | None = None,
+    ) -> bool:
+        normalized_resource_uris = [
+            str(item or "").strip() for item in (resource_uris or []) if str(item or "").strip()
+        ]
+        normalized_dataset_uris = [
+            str(item or "").strip() for item in (dataset_uris or []) if str(item or "").strip()
+        ]
+        if not normalized_resource_uris and not normalized_dataset_uris:
+            return False
+
+        latest_user_text = _latest_user_text(messages).strip()
+        if not latest_user_text:
+            return False
+
+        lowered = latest_user_text.lower()
+        analysis_requested = bool(
+            re.search(
+                r"\b("
+                r"segment|megaseg|medsam|detect|detection|quantif(?:y|ication)|measure(?:ment)?|"
+                r"analy[sz]e|analysis|process|compute|run|execute|train|fit|classif(?:y|ication)|"
+                r"predict|prediction|model|plot|visuali[sz]e|chart|histogram|random forest|"
+                r"sklearn|python|code|script|notebook"
+                r")\b",
+                lowered,
+            )
+        )
+        selection_lookup_requested = bool(
+            re.search(
+                r"\b("
+                r"load|inspect|view|show|summari[sz]e|describe|metadata|header|details|"
+                r"download|export|save|open|browse|search|find|list|add|append|update|put|"
+                r"delete|remove|trash|tag|annotate"
+                r")\b",
+                lowered,
+            )
+            or re.search(
+                r"\b("
+                r"resource uri|dataset uri|accession|resource type|dataset type|image collection|"
+                r"create dataset|new dataset|run module|bisque module|pipeline|workflow"
+                r")\b",
+                lowered,
+            )
+            or re.search(r"\b(what is|what's|tell me about)\b", lowered)
+        )
+
+        if normalized_dataset_uris and not analysis_requested:
+            return False
+        if selection_lookup_requested and not analysis_requested:
+            return False
+        return True
+
+    globals()["_should_materialize_bisque_chat_inputs"] = _should_materialize_bisque_chat_inputs
+
     def _ensure_run_artifact_dir(run_id: str) -> Path:
         path = artifact_root / run_id
         path.mkdir(parents=True, exist_ok=True)
@@ -1786,6 +1848,7 @@ def create_app() -> FastAPI:
                         modified_at=modified_at,
                         source_path=source_path,
                         title=str(item.get("title") or "") or None,
+                        result_group_id=str(item.get("result_group_id") or "").strip() or None,
                     )
                 )
             if manifest_updated:
@@ -1804,6 +1867,7 @@ def create_app() -> FastAPI:
                     size_bytes=int(stat.st_size),
                     mime_type=mimetypes.guess_type(file_path.name)[0],
                     modified_at=datetime.utcfromtimestamp(stat.st_mtime),
+                    result_group_id=None,
                 )
             )
             if len(records) >= limit:
@@ -2699,6 +2763,7 @@ def create_app() -> FastAPI:
             "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
             "sha256": _sha256_file(resolved),
             "source_path": source_path,
+            "result_group_id": None,
         }
 
     def _manifest_path(run_id: str) -> Path:
@@ -2933,6 +2998,48 @@ def create_app() -> FastAPI:
             return manifest
         return _update_manifest_with_entries(run_id, added_entries)
 
+    def _backfill_progress_output_artifacts(
+        run_id: str, manifest: dict[str, Any]
+    ) -> dict[str, Any]:
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = []
+
+        progress_events: list[dict[str, Any]] = []
+        for event in store.list_events(run_id, limit=300):
+            if str(event.get("event_type") or "").strip() != "chat_done_payload":
+                continue
+            payload = event.get("payload")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            response = payload_dict.get("response")
+            response_dict = response if isinstance(response, dict) else {}
+            progress_items = response_dict.get("progress_events")
+            if not isinstance(progress_items, list):
+                continue
+            progress_events.extend(
+                item for item in progress_items[:300] if isinstance(item, dict)
+            )
+
+        if not progress_events:
+            return manifest
+
+        existing_paths = {
+            str(item.get("path") or "").strip()
+            for item in artifacts
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        }
+        added_entries: list[dict[str, Any]] = []
+        for entry in _snapshot_progress_artifacts(run_id, progress_events):
+            rel_path = str(entry.get("path") or "").strip()
+            if not rel_path or rel_path in existing_paths:
+                continue
+            existing_paths.add(rel_path)
+            added_entries.append(entry)
+
+        if not added_entries:
+            return manifest
+        return _update_manifest_with_entries(run_id, added_entries)
+
     def _update_manifest_with_entries(run_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
         manifest = _load_manifest(run_id)
         artifacts = manifest.get("artifacts")
@@ -3102,9 +3209,14 @@ def create_app() -> FastAPI:
                 continue
             artifacts = event.get("artifacts")
             candidate_items: list[Any] = []
+            summary = event.get("summary")
+            summary_result_group_id = (
+                str(summary.get("result_group_id") or "").strip()
+                if isinstance(summary, dict)
+                else ""
+            )
             if isinstance(artifacts, list) and artifacts:
                 candidate_items.extend(artifacts[:160])
-            summary = event.get("summary")
             output_dir_raw = summary.get("output_directory") if isinstance(summary, dict) else None
             output_dir = _resolve_existing_path(str(output_dir_raw or ""), allow_directory=True)
             if output_dir is not None and output_dir.is_dir():
@@ -3125,9 +3237,15 @@ def create_app() -> FastAPI:
                 if isinstance(item, dict):
                     source_raw = item.get("path")
                     title = str(item.get("title") or "").strip() or None
+                    result_group_id = (
+                        str(item.get("result_group_id") or "").strip()
+                        or summary_result_group_id
+                        or None
+                    )
                 else:
                     source_raw = item
                     title = None
+                    result_group_id = summary_result_group_id or None
 
                 source_path = _resolve_source_path(str(source_raw or ""))
                 if source_path is None:
@@ -3149,6 +3267,7 @@ def create_app() -> FastAPI:
                 entry["category"] = "tool_output"
                 entry["tool"] = tool_name
                 entry["kind"] = "image" if _is_image_artifact(source_path) else "file"
+                entry["result_group_id"] = result_group_id
                 if title:
                     entry["title"] = title
                 entries.append(entry)
@@ -3160,6 +3279,7 @@ def create_app() -> FastAPI:
                     )
                     preview_entry["category"] = "tool_output_preview"
                     preview_entry["tool"] = tool_name
+                    preview_entry["result_group_id"] = result_group_id
                     preview_entry["title"] = f"{title or source_path.name} (preview)"
                     entries.append(preview_entry)
 
@@ -4161,6 +4281,13 @@ def create_app() -> FastAPI:
             envelope_dict = envelope if isinstance(envelope, dict) else {}
             summary = invocation.get("output_summary")
             summary_dict = dict(summary) if isinstance(summary, dict) else {}
+            result_group_id = str(
+                summary_dict.get("result_group_id")
+                or envelope_dict.get("result_group_id")
+                or ""
+            ).strip()
+            if result_group_id and "result_group_id" not in summary_dict:
+                summary_dict["result_group_id"] = result_group_id
             if tool_name == "yolo_detect" and "classes" not in summary_dict:
                 top_classes = (
                     summary_dict.get("top_classes")
@@ -4192,6 +4319,12 @@ def create_app() -> FastAPI:
                             "path": path_value,
                             "title": str(item.get("title") or "").strip() or Path(path_value).name,
                             "kind": ("image" if artifact_group == "ui_artifacts" else "artifact"),
+                            "source_path": str(item.get("file") or "").strip() or None,
+                            "result_group_id": (
+                                str(item.get("result_group_id") or "").strip()
+                                or result_group_id
+                                or None
+                            ),
                         }
                     )
             progress_events.append(
@@ -4872,7 +5005,9 @@ def create_app() -> FastAPI:
     def _materialize_manifest_if_missing(run_id: str) -> dict[str, Any]:
         manifest_path = _manifest_path(run_id)
         if manifest_path.exists():
-            return _backfill_yolo_annotated_artifacts(run_id, _load_manifest(run_id))
+            manifest = _load_manifest(run_id)
+            manifest = _backfill_progress_output_artifacts(run_id, manifest)
+            return _backfill_yolo_annotated_artifacts(run_id, manifest)
 
         run_dir = _ensure_run_artifact_dir(run_id)
         entries: list[dict[str, Any]] = []
@@ -4880,6 +5015,7 @@ def create_app() -> FastAPI:
             if file_path.is_file() and file_path.name != "artifact_manifest.json":
                 entries.append(_artifact_entry(run_id, file_path))
         manifest = _update_manifest_with_entries(run_id, entries)
+        manifest = _backfill_progress_output_artifacts(run_id, manifest)
         return _backfill_yolo_annotated_artifacts(run_id, manifest)
 
     def _request_hash(payload: Any) -> str:
@@ -10823,17 +10959,35 @@ def create_app() -> FastAPI:
         dataset_import_summaries: list[dict[str, Any]] = []
         bisque_import_summaries: list[dict[str, Any]] = []
         if req.resource_uris or req.dataset_uris:
-            (
-                imported_bisque_rows,
-                dataset_import_summaries,
-                bisque_import_summaries,
-            ) = await _prepare_bisque_chat_inputs(
-                active_run=active_run,
-                req=req,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                bisque_auth=bisque_auth,
+            should_materialize_bisque_inputs = _should_materialize_bisque_chat_inputs(
+                messages=wire_messages,
+                resource_uris=req.resource_uris,
+                dataset_uris=req.dataset_uris,
+                uploaded_files=req.uploaded_files,
+                file_ids=req.file_ids,
             )
+            if should_materialize_bisque_inputs:
+                (
+                    imported_bisque_rows,
+                    dataset_import_summaries,
+                    bisque_import_summaries,
+                ) = await _prepare_bisque_chat_inputs(
+                    active_run=active_run,
+                    req=req,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    bisque_auth=bisque_auth,
+                )
+            else:
+                store.append_event(
+                    active_run.run_id,
+                    "bisque_selection_preserved",
+                    {
+                        "resource_uri_count": len(req.resource_uris),
+                        "dataset_uri_count": len(req.dataset_uris),
+                        "latest_user_text": _latest_user_text(wire_messages),
+                    },
+                )
 
         source_meta: dict[str, dict[str, Any]] = {}
         all_sources: list[str] = []
@@ -11928,6 +12082,7 @@ def create_app() -> FastAPI:
             source_path=str(artifact.source_path or "").strip() or None,
             preview_path=None,
             title=str(artifact.title or "").strip() or None,
+            result_group_id=str(artifact.result_group_id or "").strip() or None,
             mime_type=str(artifact.mime_type or "").strip() or None,
             size_bytes=int(artifact.size_bytes or 0),
             created_at=created_at,

@@ -1719,6 +1719,66 @@ def create_app() -> FastAPI:
             return selected_names
         return []
 
+    def _should_materialize_bisque_chat_inputs(
+        *,
+        messages: list[dict[str, str]],
+        resource_uris: list[str] | None = None,
+        dataset_uris: list[str] | None = None,
+        uploaded_files: list[str] | None = None,
+        file_ids: list[str] | None = None,
+    ) -> bool:
+        normalized_resource_uris = [
+            str(item or "").strip() for item in (resource_uris or []) if str(item or "").strip()
+        ]
+        normalized_dataset_uris = [
+            str(item or "").strip() for item in (dataset_uris or []) if str(item or "").strip()
+        ]
+        if not normalized_resource_uris and not normalized_dataset_uris:
+            return False
+
+        latest_user_text = _latest_user_text(messages).strip()
+        if not latest_user_text:
+            return False
+
+        lowered = latest_user_text.lower()
+        analysis_requested = bool(
+            re.search(
+                r"\b("
+                r"segment|megaseg|medsam|detect|detection|quantif(?:y|ication)|measure(?:ment)?|"
+                r"analy[sz]e|analysis|process|compute|run|execute|train|fit|classif(?:y|ication)|"
+                r"predict|prediction|model|plot|visuali[sz]e|chart|histogram|random forest|"
+                r"sklearn|python|code|script|notebook"
+                r")\b",
+                lowered,
+            )
+        )
+        selection_lookup_requested = bool(
+            re.search(
+                r"\b("
+                r"load|inspect|view|show|summari[sz]e|describe|metadata|header|details|"
+                r"download|export|save|open|browse|search|find|list|add|append|update|put|"
+                r"delete|remove|trash|tag|annotate"
+                r")\b",
+                lowered,
+            )
+            or re.search(
+                r"\b("
+                r"resource uri|dataset uri|accession|resource type|dataset type|image collection|"
+                r"create dataset|new dataset|run module|bisque module|pipeline|workflow"
+                r")\b",
+                lowered,
+            )
+            or re.search(r"\b(what is|what's|tell me about)\b", lowered)
+        )
+
+        if normalized_dataset_uris and not analysis_requested:
+            return False
+        if selection_lookup_requested and not analysis_requested:
+            return False
+        return True
+
+    globals()["_should_materialize_bisque_chat_inputs"] = _should_materialize_bisque_chat_inputs
+
     def _ensure_run_artifact_dir(run_id: str) -> Path:
         path = artifact_root / run_id
         path.mkdir(parents=True, exist_ok=True)
@@ -10899,17 +10959,35 @@ def create_app() -> FastAPI:
         dataset_import_summaries: list[dict[str, Any]] = []
         bisque_import_summaries: list[dict[str, Any]] = []
         if req.resource_uris or req.dataset_uris:
-            (
-                imported_bisque_rows,
-                dataset_import_summaries,
-                bisque_import_summaries,
-            ) = await _prepare_bisque_chat_inputs(
-                active_run=active_run,
-                req=req,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                bisque_auth=bisque_auth,
+            should_materialize_bisque_inputs = _should_materialize_bisque_chat_inputs(
+                messages=wire_messages,
+                resource_uris=req.resource_uris,
+                dataset_uris=req.dataset_uris,
+                uploaded_files=req.uploaded_files,
+                file_ids=req.file_ids,
             )
+            if should_materialize_bisque_inputs:
+                (
+                    imported_bisque_rows,
+                    dataset_import_summaries,
+                    bisque_import_summaries,
+                ) = await _prepare_bisque_chat_inputs(
+                    active_run=active_run,
+                    req=req,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    bisque_auth=bisque_auth,
+                )
+            else:
+                store.append_event(
+                    active_run.run_id,
+                    "bisque_selection_preserved",
+                    {
+                        "resource_uri_count": len(req.resource_uris),
+                        "dataset_uri_count": len(req.dataset_uris),
+                        "latest_user_text": _latest_user_text(wire_messages),
+                    },
+                )
 
         source_meta: dict[str, dict[str, Any]] = {}
         all_sources: list[str] = []

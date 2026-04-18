@@ -41,9 +41,9 @@ describe("shouldHydrateRunArtifacts", () => {
         runArtifacts: [
           {
             path: "tool_outputs/example_overlay_mip.png",
-            url: "https://ultra.ece.ucsb.edu/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
+            url: "https://example.invalid/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
             downloadUrl:
-              "https://ultra.ece.ucsb.edu/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
+              "https://example.invalid/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
           },
         ],
         responseMetadata: {
@@ -59,7 +59,7 @@ describe("shouldHydrateRunArtifacts", () => {
           tool: "segment_image_megaseg",
           megasegInsights: {
             heroFigure: {
-              url: "https://ultra.ece.ucsb.edu/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
+              url: "https://example.invalid/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
             },
             secondaryFigures: [],
           },

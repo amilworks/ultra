@@ -1069,14 +1069,17 @@ def test_strict_tool_workflow_executes_required_code_tools_when_model_skips_them
 
     def fake_execute_tool_call(tool_name, args, **_kwargs):
         executed_tools.append(tool_name)
-        assert args == {}
         if tool_name == "codegen_python_plan":
+            assert args == {
+                "task_summary": "Write Python to analyze this image and run it."
+            }
             return {
                 "success": True,
                 "job_id": "job-123",
                 "summary": "Prepared a deterministic Python analysis job.",
             }
         assert tool_name == "execute_python_job"
+        assert args == {"job_id": "job-123"}
         return {
             "success": True,
             "status": "completed",
@@ -1412,7 +1415,7 @@ def test_pro_mode_direct_response_path_uses_dedicated_model_branch(tmp_path: Pat
             runtime_error=None,
         )
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
 
@@ -1494,7 +1497,7 @@ def test_pro_mode_direct_response_failure_does_not_claim_completed_opus_turn(
             runtime_error="403 Forbidden",
         )
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_fast_dialogue = fake_fast_dialogue  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
 
@@ -1550,7 +1553,9 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             route="tool_workflow",
             execution_regime="validated_tool",
             reason="Need deterministic tool use.",
-            selected_tool_names=["execute_python_job"],
+            selected_tool_names=["codegen_python_plan", "execute_python_job"],
+            tool_plan_category="code_execution",
+            strict_tool_validation=True,
         )
 
     async def fake_tool_workflow(**_kwargs):
@@ -1585,8 +1590,8 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             "selected_domains": ["core"],
             "runtime_status": "completed",
             "runtime_error": None,
-            "selected_tool_names": ["execute_python_job"],
-            "attempted_tool_sets": [["execute_python_job"]],
+            "selected_tool_names": ["codegen_python_plan", "execute_python_job"],
+            "attempted_tool_sets": [["codegen_python_plan", "execute_python_job"]],
         }
 
     async def fake_final_writer(**_kwargs):
@@ -1598,7 +1603,7 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             }
         }
 
-    runtime.pro_mode.intake = fake_intake  # type: ignore[method-assign]
+    runtime.pro_mode = types.SimpleNamespace(intake=fake_intake)  # type: ignore[assignment]
     runtime._run_pro_mode_tool_workflow = fake_tool_workflow  # type: ignore[method-assign]
     runtime._run_pro_mode_final_writer = fake_final_writer  # type: ignore[method-assign]
     runtime._persist_analysis_state = lambda **_kwargs: None  # type: ignore[method-assign]
@@ -1617,6 +1622,7 @@ def test_tool_workflow_metadata_exposes_structured_phase_model_routes(tmp_path: 
             max_tool_calls=8,
             max_runtime_seconds=120,
             workflow_hint={"id": "pro_mode", "source": "slash_menu"},
+            benchmark={"force_pro_mode_execution_regime": "validated_tool"},
             reasoning_mode="deep",
             user_id="user-1",
             run_id="run-1",

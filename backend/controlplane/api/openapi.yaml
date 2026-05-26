@@ -1,0 +1,526 @@
+openapi: 3.0.3
+info:
+  title: BisQue Ultra Control Plane
+  version: 0.1.0
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      responses:
+        "200":
+          description: Health response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/config/public:
+    get:
+      operationId: getPublicConfig
+      responses:
+        "200":
+          description: Public config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicConfigResponse"
+  /v1/auth/session:
+    get:
+      operationId: getAuthSession
+      responses:
+        "200":
+          description: Auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/threads:
+    get:
+      operationId: listThreads
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Thread list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ThreadListResponse"
+    post:
+      operationId: createThread
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ThreadCreateRequest"
+      responses:
+        "200":
+          description: Created thread
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ThreadRecord"
+  /v2/threads/{thread_id}:
+    get:
+      operationId: getThread
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      responses:
+        "200":
+          description: Thread
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ThreadRecord"
+    put:
+      operationId: upsertThread
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ThreadUpsertRequest"
+      responses:
+        "200":
+          description: Upserted thread
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ThreadRecord"
+  /v2/threads/{thread_id}/messages:
+    get:
+      operationId: listThreadMessages
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      responses:
+        "200":
+          description: Thread messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ThreadMessageListResponse"
+  /v2/threads/{thread_id}/runs:
+    post:
+      operationId: createRun
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunCreateRequest"
+      responses:
+        "200":
+          description: Created run or stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunRecord"
+            text/event-stream:
+              schema:
+                type: string
+  /v2/runs:
+    get:
+      operationId: listRuns
+      parameters:
+        - name: thread_id
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Run list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunListResponse"
+  /v2/runs/{run_id}:
+    get:
+      operationId: getRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunRecord"
+  /v2/runs/{run_id}/resume:
+    post:
+      operationId: resumeRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunResumeRequest"
+      responses:
+        "200":
+          description: Resumed run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunRecord"
+  /v2/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunCancelRequest"
+      responses:
+        "200":
+          description: Canceled run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunRecord"
+  /v2/runs/{run_id}/events:
+    get:
+      operationId: listRunEvents
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+        - name: stream
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Run events or event stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunEventsResponse"
+            text/event-stream:
+              schema:
+                type: string
+  /v2/runs/{run_id}/artifacts:
+    get:
+      operationId: listRunArtifacts
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+      responses:
+        "200":
+          description: Run artifacts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ArtifactListResponse"
+  /v2/artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ArtifactResponse"
+components:
+  parameters:
+    ThreadID:
+      name: thread_id
+      in: path
+      required: true
+      schema: { type: string }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    JsonObject:
+      type: object
+      additionalProperties: true
+    HealthResponse:
+      type: object
+      required: [status, ts]
+      properties:
+        status: { type: string }
+        ts: { type: string }
+    PublicConfigResponse:
+      type: object
+      additionalProperties: true
+    AuthSessionResponse:
+      type: object
+      required: [authenticated, user]
+      properties:
+        authenticated: { type: boolean }
+        user:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+    V2ThreadMessage:
+      type: object
+      required: [role, content]
+      properties:
+        message_id: { type: string, nullable: true }
+        thread_id: { type: string, nullable: true }
+        role: { type: string }
+        content: { type: string }
+        created_at: { type: string, nullable: true }
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        run_id: { type: string, nullable: true }
+    V2ThreadRecord:
+      type: object
+      required: [thread_id, status, created_at, updated_at, metadata]
+      properties:
+        thread_id: { type: string }
+        user_id: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        status: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+        latest_run_id: { type: string, nullable: true }
+        checkpoint_id: { type: string, nullable: true }
+        summary: { type: string, nullable: true }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2ThreadListResponse:
+      type: object
+      required: [count, threads]
+      properties:
+        count: { type: integer }
+        threads:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ThreadRecord"
+    V2ThreadMessageListResponse:
+      type: object
+      required: [thread_id, count, messages]
+      properties:
+        thread_id: { type: string }
+        count: { type: integer }
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ThreadMessage"
+    V2ThreadCreateRequest:
+      type: object
+      properties:
+        title: { type: string, nullable: true }
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        initial_messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ThreadMessage"
+        conversation_id: { type: string, nullable: true }
+    V2ThreadUpsertRequest:
+      type: object
+      properties:
+        title: { type: string, nullable: true }
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ThreadMessage"
+    V2RunBudget:
+      type: object
+      additionalProperties: true
+      properties:
+        max_tool_calls: { type: integer, nullable: true }
+        max_runtime_seconds: { type: integer, nullable: true }
+    V2RunCreateRequest:
+      type: object
+      required: [messages]
+      properties:
+        goal: { type: string, nullable: true }
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ThreadMessage"
+        file_ids:
+          type: array
+          items: { type: string }
+        resource_uris:
+          type: array
+          items: { type: string }
+        dataset_uris:
+          type: array
+          items: { type: string }
+        selected_tool_names:
+          type: array
+          items: { type: string }
+        knowledge_context:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        selection_context:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        workflow_hint:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        reasoning_mode: { type: string, nullable: true }
+        budgets:
+          nullable: true
+          $ref: "#/components/schemas/V2RunBudget"
+        benchmark:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+    V2RunResumeRequest:
+      type: object
+      properties:
+        decision: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+    V2RunCancelRequest:
+      type: object
+      properties:
+        reason: { type: string, nullable: true }
+        metadata:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+    V2RunRecord:
+      type: object
+      required: [run_id, goal, status, workflow_kind, created_at, updated_at, metadata]
+      properties:
+        run_id: { type: string }
+        thread_id: { type: string, nullable: true }
+        user_id: { type: string, nullable: true }
+        goal: { type: string }
+        status: { type: string }
+        workflow_kind: { type: string }
+        mode: { type: string, nullable: true }
+        current_node: { type: string, nullable: true }
+        parent_run_id: { type: string, nullable: true }
+        planner_version: { type: string, nullable: true }
+        agent_role: { type: string, nullable: true }
+        trace_group_id: { type: string, nullable: true }
+        checkpoint_id: { type: string, nullable: true }
+        checkpoint_state:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        budget_state:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
+        response_text: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        started_at: { type: string, nullable: true }
+        completed_at: { type: string, nullable: true }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2RunListResponse:
+      type: object
+      required: [count, runs]
+      properties:
+        count: { type: integer }
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2RunRecord"
+    V2GraphEventRecord:
+      type: object
+      required: [run_id, event_kind, payload]
+      properties:
+        event_id: { type: string, nullable: true }
+        run_id: { type: string }
+        thread_id: { type: string, nullable: true }
+        event_kind: { type: string }
+        event_type: { type: string, nullable: true }
+        node_name: { type: string, nullable: true }
+        task_id: { type: string, nullable: true }
+        checkpoint_id: { type: string, nullable: true }
+        scope_id: { type: string, nullable: true }
+        agent_role: { type: string, nullable: true }
+        level: { type: string, nullable: true }
+        ts: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+        payload:
+          $ref: "#/components/schemas/JsonObject"
+    V2RunEventsResponse:
+      type: object
+      required: [run_id, count, events]
+      properties:
+        run_id: { type: string }
+        count: { type: integer }
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2GraphEventRecord"
+    V2ArtifactRecord:
+      type: object
+      required: [artifact_id, run_id, kind, created_at, metadata]
+      properties:
+        artifact_id: { type: string }
+        run_id: { type: string }
+        thread_id: { type: string, nullable: true }
+        kind: { type: string }
+        path: { type: string, nullable: true }
+        source_path: { type: string, nullable: true }
+        preview_path: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        result_group_id: { type: string, nullable: true }
+        mime_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64, nullable: true }
+        sha256: { type: string, nullable: true }
+        storage_uri: { type: string, nullable: true }
+        tool_name: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string, nullable: true }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2ArtifactListResponse:
+      type: object
+      required: [run_id, count, artifacts]
+      properties:
+        run_id: { type: string }
+        count: { type: integer }
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ArtifactRecord"
+    V2ArtifactResponse:
+      type: object
+      required: [artifact]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/V2ArtifactRecord"

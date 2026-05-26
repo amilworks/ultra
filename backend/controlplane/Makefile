@@ -1,7 +1,12 @@
-.PHONY: test run tidy generate
+.PHONY: test run tidy generate generate-openapi generate-sqlc
 
-generate:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+generate: generate-openapi generate-sqlc
+
+generate-openapi:
+	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.0 --config api/oapi-codegen.yaml api/openapi.yaml
+
+generate-sqlc:
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate
 
 test:
 	go test ./...

@@ -396,7 +396,7 @@ git commit -m "feat: add vllm chat model factory"
 - Create: `backend/deepagents_runtime/src/ultra_deepagents/agent.py`
 - Create: `backend/deepagents_runtime/tests/test_agent_factory.py`
 
-- [ ] **Step 1: Write failing agent factory tests**
+- [x] **Step 1: Write failing agent factory tests**
 
 Create tests that monkeypatch `ultra_deepagents.agent.create_deep_agent` and assert:
 
@@ -406,7 +406,7 @@ Create tests that monkeypatch `ultra_deepagents.agent.create_deep_agent` and ass
 - `backend` is a direct backend instance, not a deprecated runtime factory.
 - subagents include `literature-reviewer`, `methods-critic`, `imaging-analyst`, and `statistics-analyst`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -416,9 +416,9 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: FAIL because `agent.py` does not exist.
 
-- [ ] **Step 3: Implement factory**
+- [x] **Step 3: Implement factory**
 
-Create `build_research_agent(settings, model=None, backend=None, tools=None)` that imports `create_deep_agent`, builds or accepts the model/backend, and passes:
+Create `build_sandbox_backend(settings, workspace_dir=...)` plus `build_research_agent(settings, model=None, backend=None, workspace_dir=None, tools=None)`. The factory builds or accepts the model/backend, creates a direct `DockerSandboxBackend` when `workspace_dir` is supplied, otherwise falls back to a direct `StateBackend()` instance, and passes:
 
 ```python
 create_deep_agent(
@@ -428,12 +428,12 @@ create_deep_agent(
     system_prompt=SYSTEM_PROMPT,
     context_schema=AgentRunContext,
     subagents=SUBAGENTS,
-    backend=backend,
+    backend=resolved_backend,
     memory=["/memories/preferences.md", "/memories/research_context.md"],
 )
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -443,7 +443,7 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/deepagents_runtime

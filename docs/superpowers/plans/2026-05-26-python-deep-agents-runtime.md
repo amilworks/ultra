@@ -456,11 +456,11 @@ git commit -m "feat: add deep agents research factory"
 - Create: `backend/deepagents_runtime/src/ultra_deepagents/events.py`
 - Create: `backend/deepagents_runtime/tests/test_event_normalizer.py`
 
-- [ ] **Step 1: Write failing event tests**
+- [x] **Step 1: Write failing event tests**
 
 Create tests that pass synthetic message, tool-call, subagent, artifact, completion, and failure events into the normalizer and assert Go-compatible fields: `run_id`, `thread_id`, `event_kind`, `message`, `payload`, `node_name`, `task_id`, `agent_role`, and `level`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -470,7 +470,7 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: FAIL because `events.py` does not exist.
 
-- [ ] **Step 3: Implement normalizer**
+- [x] **Step 3: Implement normalizer**
 
 Implement `RunEvent` dataclass and functions:
 
@@ -484,7 +484,7 @@ normalize_run_failed(context, error)
 
 Return JSON-serializable dictionaries matching the Go `V2GraphEventRecord` contract.
 
-- [ ] **Step 4: Run event tests**
+- [x] **Step 4: Run event tests**
 
 Run:
 
@@ -494,7 +494,7 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/deepagents_runtime

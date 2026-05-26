@@ -271,7 +271,7 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .env.example Makefile backend/deepagents_runtime
@@ -287,11 +287,11 @@ git commit -m "feat: scaffold python deep agents runtime"
 - Create: `backend/deepagents_runtime/src/ultra_deepagents/code_execution/cleanup.py`
 - Create: `backend/deepagents_runtime/tests/test_code_execution.py`
 
-- [ ] **Step 1: Write failing sandbox tests**
+- [x] **Step 1: Write failing sandbox tests**
 
 Create `backend/deepagents_runtime/tests/test_code_execution.py` using the existing `ultra_agent` sandbox tests as the source of truth, replacing imports with `ultra_deepagents`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -301,9 +301,9 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: FAIL because `code_execution` package does not exist.
 
-- [ ] **Step 3: Port the previous sandbox**
+- [x] **Step 3: Port the previous sandbox**
 
-Copy and adapt these files from `/Users/macbook/Documents/ultra_agent/src/ultra_agent/code_execution`:
+Port these files from `/Users/macbook/Documents/ultra_agent/src/ultra_agent/code_execution` with imports changed to `ultra_deepagents` and behavior preserved by tests:
 
 ```text
 cleanup.py
@@ -314,7 +314,7 @@ __init__.py
 
 Keep the existing Docker isolation behavior intact: no network by default, `/workspace` mount, CPU/memory/pid/time/output limits, read-only root, `/tmp` tmpfs, path escape prevention, upload/download helpers, and recursive-root-search rejection.
 
-- [ ] **Step 4: Run sandbox tests**
+- [x] **Step 4: Run sandbox tests**
 
 Run:
 
@@ -324,7 +324,7 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/deepagents_runtime

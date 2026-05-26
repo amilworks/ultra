@@ -32,6 +32,21 @@ This design is grounded in the current Deep Agents documentation:
 The implementation should keep checking these docs before changing Deep Agents
 integration details.
 
+## Go Implementation Sources
+
+The Go control plane should be grounded in boring, well-supported libraries:
+
+- Go `net/http` routing enhancements: https://go.dev/blog/routing-enhancements
+- chi router: https://github.com/go-chi/chi
+- Gin router reference: https://github.com/gin-gonic/gin
+- pgx PostgreSQL driver: https://github.com/jackc/pgx
+- sqlc type-safe SQL generation: https://sqlc.dev/
+- NATS JetStream: https://docs.nats.io/nats-concepts/jetstream
+- Connect RPC: https://connectrpc.com/
+- oapi-codegen: https://github.com/oapi-codegen/oapi-codegen
+- OpenTelemetry Go: https://opentelemetry.io/docs/languages/go/
+- Prometheus Go client: https://prometheus.io/docs/guides/go-application/
+
 ## Goals
 
 - Provide a fast, reliable backend for researcher-heavy usage.
@@ -89,6 +104,75 @@ Go and Python communicate through a typed internal protocol. The first
 implementation can use HTTP plus server-sent events. If throughput or tail
 latency demands it later, the internal transport can move to gRPC without
 changing frontend contracts.
+
+## Go Implementation Stack
+
+Use a standard-library-first Go stack with small, focused dependencies.
+
+### Public HTTP API
+
+Use `net/http` with `chi/v5` for the public API. Go 1.22 added method-aware
+routes and wildcards to `net/http`, so the standard library is now a stronger
+baseline. `chi` remains the recommended router because it keeps the standard
+`http.Handler` model, adds route groups and middleware ergonomics, and avoids a
+framework-specific request context.
+
+Do not use Gin as the default control-plane framework. Gin is fast and viable,
+but router microbenchmarks are not the limiting factor for this product. The
+control plane needs long-lived streams, standard middleware, generated
+contracts, observability, auth, and clean modular handlers. Keeping handlers as
+plain `net/http` makes the system easier to test, instrument, and evolve.
+
+### API Contracts
+
+Use `oapi-codegen` from OpenAPI specs for public route models and handlers.
+Start with strict server generation where practical so handlers receive typed
+request objects and return typed response objects. This should cover the
+frontend-facing API and any stable internal HTTP contracts.
+
+### Database
+
+Use `pgx/v5` with `pgxpool` for PostgreSQL access. Prefer direct `pgx` over
+`database/sql` because the system targets Postgres and benefits from
+Postgres-specific features such as efficient batch queries, `COPY`, `LISTEN` /
+`NOTIFY`, prepared statement caching, and lower overhead.
+
+Use `sqlc` to generate type-safe query methods from hand-written SQL. This
+keeps the hot path explicit and fast without introducing an ORM.
+
+Use SQL migrations through `golang-migrate` or `goose`; choose one before
+implementation and keep all schema changes versioned in the Go service.
+
+### Queue and Event Bus
+
+Use Postgres as source of truth and NATS JetStream as the high-throughput
+durable event/work bus. JetStream should carry run events, worker dispatch,
+subagent task state, and replayable streams. Go should persist critical state
+before publishing or acknowledge only after state is recoverable.
+
+Use plain Go channels only for in-process fanout. Do not use in-memory queues
+for durable run scheduling.
+
+### Internal RPC
+
+Start internal Go-to-Python calls with typed HTTP plus server-sent events for
+simplicity. Add Connect RPC when the Python bridge, model services, or sandbox
+manager need a stronger typed RPC surface or bidirectional streaming. Connect
+fits the `net/http` stack and can coexist with the public API.
+
+### Observability
+
+Use `log/slog` for structured logs, OpenTelemetry for traces and metrics, and
+Prometheus for scrapeable service metrics. Every run, model call, tool call,
+queue transition, database query class, sandbox command, and artifact write
+should have trace/span metadata that includes `run_id`, `project_id`, and
+`org_id` where safe.
+
+### Configuration
+
+Use typed config loaded once at startup and passed through constructors. Avoid
+global mutable config in handlers. Keep per-run settings in the run record and
+runtime context so retries and replays can use the same configuration.
 
 ## Component Responsibilities
 
@@ -487,6 +571,10 @@ tool must include:
 Python should use Deep Agents event streaming and forward normalized events to
 Go. Go then streams to the frontend through the existing run-event shape.
 
+The frontend-facing event stream is part of the perceived-performance contract.
+The backend should acknowledge a run quickly, then continuously show useful
+movement even when the underlying research task takes minutes or hours.
+
 Events should include:
 
 ```text
@@ -516,6 +604,26 @@ Deep Agents event streams expose top-level messages, subagent streams, nested
 subagents, and tool calls. The Python bridge should preserve that hierarchy in
 event metadata.
 
+### Event Pipeline
+
+Use this event path:
+
+```text
+Python Deep Agents stream
+  -> Python event normalizer
+  -> Go event ingest endpoint
+  -> Postgres run_events append
+  -> NATS JetStream publish
+  -> in-memory per-run SSE fanout
+  -> frontend
+```
+
+Go should assign or validate monotonic per-producer sequence numbers. The SSE
+handler should support reconnect with `Last-Event-ID` and replay from
+Postgres or JetStream. UI-only token deltas may be coalesced for efficiency,
+but lifecycle events, tool starts/completions, artifact creation, approvals,
+and errors must not be dropped.
+
 ## Performance Design
 
 ### Critical Path
@@ -524,14 +632,61 @@ Fast path for a researcher prompt:
 
 1. Frontend sends message to Go.
 2. Go creates run record and admits it if budgets allow.
-3. Go starts Python supervisor run.
-4. Python uses warm Deep Agents runtime and warm sandbox lease.
-5. Python streams tokens and tool events to Go.
-6. Go fans events to frontend and persists them asynchronously.
+3. Go emits `run.accepted` and opens or reuses the SSE stream.
+4. Go dispatches the Python supervisor run through the worker queue.
+5. Python uses warm Deep Agents runtime and warm sandbox lease.
+6. Python streams tokens and tool events to Go.
+7. Go fans events to frontend and persists them asynchronously where safe.
+
+### Latency Targets
+
+Targets are local-lab or same-region deployment targets. Cloud and remote model
+latency may raise model-specific timings, but the Go control plane should still
+hit its own targets.
+
+```text
+health/config p95                         < 50 ms
+authenticated lightweight GET p95          < 100 ms
+create thread p95                          < 150 ms
+create run record + run.accepted p95       < 200 ms
+SSE stream open p95                        < 250 ms
+first visible run event p95                < 300 ms
+Python supervisor dispatch p95             < 500 ms
+warm sandbox command start p95             < 250 ms
+warm sandbox command overhead p95          < 100 ms beyond command runtime
+cold sandbox lease p95                     < 3 s
+artifact metadata write p95                < 150 ms
+small artifact signed URL p95              < 100 ms
+cancel signal accepted p95                 < 200 ms
+cancel propagated to Python/sandbox p95    < 1 s
+event fanout after ingest p95              < 100 ms
+run list/search p95                        < 200 ms
+```
+
+Performance tests should track p50, p95, and p99. A run can take a long time;
+the interface should not feel idle.
+
+### Snappy UX Contract
+
+The backend should make every user action feel acknowledged and alive:
+
+- Return or stream `run.accepted` before starting expensive work.
+- Show the current phase: planning, staging data, launching subagents, running
+  code, calling a model service, generating outputs, writing final report.
+- Stream subagent lifecycle events as soon as they launch and complete.
+- Stream tool-call starts before tool execution finishes.
+- Coalesce token deltas into small timed batches if needed, but never delay
+  lifecycle events behind token traffic.
+- Save large outputs as artifacts and stream lightweight references.
+- Keep the frontend connected during long tasks with heartbeat events.
+- Make cancellation immediate from the user's perspective, even if cleanup
+  continues in the background.
 
 ### Performance Tactics
 
 - Preload and cache Deep Agents app configuration.
+- Preconstruct or memoize reusable Python agent components where Deep Agents
+  allows it without violating per-run backend/context isolation.
 - Prewarm sandbox containers from a pinned image.
 - Use `docker exec` instead of container-per-command execution.
 - Keep model services warm and separate from code sandboxes.
@@ -541,6 +696,15 @@ Fast path for a researcher prompt:
 - Use artifact references instead of large message payloads.
 - Use background memory consolidation to reduce hot-path latency.
 - Use split deployments only when a subagent needs independent scaling.
+- Use prepared SQL through `pgx` and generated query methods through `sqlc`.
+- Keep event ingestion append-only and avoid cross-table transactions on token
+  deltas.
+- Batch or sample verbose low-value telemetry, but never sample audit-critical
+  events.
+- Use indexes specifically for active runs, run events by sequence, thread
+  message history, artifact lookup, and run search.
+- Load test with realistic long-running event volume, not only REST request
+  bursts.
 
 ### Concurrency Controls
 
@@ -577,6 +741,22 @@ knowledge of:
 - Which approval was pending.
 - Whether the run can retry, resume, or must fail.
 
+### Hot-Path Persistence
+
+Persist state according to event importance:
+
+- Synchronous before acknowledgement: run creation, cancellation requests,
+  approvals, artifact records, tool-call completion records, model-call
+  completion records, final run status, and all error events.
+- Buffered with short flush intervals: token deltas, progress messages, verbose
+  stdout/stderr chunks, and heartbeat events.
+- Stored as artifacts instead of event payloads: large logs, tables, images,
+  notebooks, model outputs, and long tool results.
+
+The event stream should remain responsive under high volume. If Postgres is
+temporarily slow, Go should apply backpressure to Python workers and preserve
+critical events rather than letting unbounded memory grow.
+
 ### Idempotency
 
 All Python-to-Go writes should include:
@@ -591,6 +771,13 @@ timestamp
 ```
 
 Go should deduplicate repeated events.
+
+### Queue Semantics
+
+Use NATS JetStream for worker dispatch and event replay, with at-least-once
+delivery and idempotent consumers. Every worker action that mutates platform
+state must be safe to receive twice. Postgres remains the final authority for
+run status, artifact records, budgets, approvals, and audit history.
 
 ### Cancellation
 
@@ -655,6 +842,22 @@ tool_registry
 tool_pack_permissions
 ```
 
+Critical indexes:
+
+```text
+runs(org_id, project_id, status, updated_at desc)
+runs(user_id, status, updated_at desc)
+run_events(run_id, sequence_number)
+run_events(run_id, event_id)
+subagent_tasks(run_id, status)
+tool_calls(run_id, started_at)
+model_calls(run_id, started_at)
+artifacts(run_id, created_at desc)
+artifacts(project_id, sha256)
+sandbox_leases(run_id, status)
+gpu_jobs(org_id, status, priority, created_at)
+```
+
 Artifacts should include:
 
 ```text
@@ -702,10 +905,15 @@ routes while the new v2 surface becomes the clean control-plane API.
 ### Milestone 1: Run Control Spine
 
 - Go API with users/projects/threads/runs/events/artifacts.
+- `net/http` + `chi` route shell.
+- OpenAPI contract with `oapi-codegen` generated server types.
+- `pgxpool` database connection and `sqlc` generated query package.
+- NATS JetStream subjects for run dispatch and run events.
 - Python Deep Agents supervisor worker.
 - Start run, stream tokens/events, cancel run.
 - One curated model/tool call.
 - Basic artifact save and download.
+- Latency test for run creation, first event, SSE fanout, and cancellation.
 
 ### Milestone 2: Warm Sandbox
 
@@ -714,6 +922,8 @@ routes while the new v2 surface becomes the clean control-plane API.
 - Stage selected files into `/workspace`.
 - Save reports, figures, tables, datasets, notebooks, and scripts as outputs.
 - Add sandbox cleanup, TTL, metrics, and tests.
+- Benchmark cold lease, warm command overhead, concurrent sandbox commands, and
+  cancellation latency.
 
 ### Milestone 3: Async Scientific Subagents
 
@@ -754,6 +964,11 @@ routes while the new v2 surface becomes the clean control-plane API.
 - Event-stream ordering and reconnect tests.
 - Integration tests with Postgres and artifact storage.
 - Load tests for many concurrent runs and event fanout.
+- Latency budget tests for lightweight API routes, run creation, SSE startup,
+  event fanout, cancellation, and artifact metadata writes.
+- Queue redelivery tests proving NATS JetStream consumers are idempotent.
+- Database query plan checks for active-run, event replay, artifact, and search
+  queries.
 
 ### Python
 
@@ -773,19 +988,24 @@ routes while the new v2 surface becomes the clean control-plane API.
 - Retry transient model service failure.
 - Generate report with artifact provenance.
 - Resume conversation with prior memory and project context.
+- Measure first visible event, warm sandbox overhead, event throughput, and
+  frontend reconnect/replay behavior during a long run.
 
 ## Open Design Assumptions
 
 - The first deployment target is self-hosted or lab-hosted, with optional cloud
   deployment later.
 - Postgres is the durable metadata store.
+- NATS JetStream is the durable queue and replayable event bus.
 - Artifact storage can start local and move to S3-compatible object storage.
 - Sandbox network access is disabled by default.
 - Heavy scientific inference runs outside the generic code sandbox.
+- Public Go APIs use `net/http`, `chi`, OpenAPI, `oapi-codegen`, `pgx`, and
+  `sqlc` unless implementation testing exposes a concrete blocker.
 - Deep Agents remains the primary Python agent harness unless official docs or
   production testing reveal a blocking issue.
 
-These are assumptions for the draft, not unresolved placeholders.
+These are assumptions for the draft, not unresolved gaps.
 
 ## Review Checklist
 
@@ -793,6 +1013,8 @@ These are assumptions for the draft, not unresolved placeholders.
 - Go owns production truth and reliability.
 - Python owns researcher-facing agent behavior.
 - Sandboxes are fast enough for hundreds of tool calls.
+- Latency targets are explicit and testable.
+- The Go stack is standard-library-first and avoids framework lock-in.
 - Memory is scoped and safe for multi-user research environments.
 - Async subagents are part of the design, not an afterthought.
 - Artifacts and provenance are first-class.

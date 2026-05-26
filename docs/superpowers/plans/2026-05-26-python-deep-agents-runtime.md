@@ -338,7 +338,7 @@ git commit -m "feat: port deep agents sandbox backend"
 - Create: `backend/deepagents_runtime/src/ultra_deepagents/smoke.py`
 - Create: `backend/deepagents_runtime/tests/test_model.py`
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 Create `backend/deepagents_runtime/tests/test_model.py`:
 
@@ -358,7 +358,7 @@ def test_build_chat_model_uses_openai_compatible_base_url():
     assert model.model_name == "deepseek_v4"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -368,11 +368,11 @@ cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/t
 
 Expected: FAIL because `model.py` does not exist.
 
-- [ ] **Step 3: Implement model factory and smoke module**
+- [x] **Step 3: Implement model factory and smoke module**
 
 Use `langchain_openai.ChatOpenAI` with explicit `base_url`, `api_key`, `model`, `timeout`, and `max_retries`. Add `smoke.py` that invokes the model with a one-sentence prompt and prints the response length.
 
-- [ ] **Step 4: Run model test and optional live smoke**
+- [x] **Step 4: Run model test and optional live smoke**
 
 Run:
 
@@ -383,7 +383,7 @@ cd backend/deepagents_runtime && OPENAI_BASE_URL=http://vrl-h200.ece.ucsb.edu:93
 
 Expected: test PASS; live smoke prints a non-empty response or a clear connection/auth error.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/deepagents_runtime

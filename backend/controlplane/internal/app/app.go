@@ -18,5 +18,6 @@ func NewHTTPHandler(cfg config.Config) http.Handler {
 		Version: cfg.AppVersion,
 		Runs:    runs,
 		Store:   mem,
+		Bus:     bus,
 	})
 }

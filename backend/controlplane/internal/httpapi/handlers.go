@@ -17,6 +17,11 @@ type ServerDeps struct {
 	Version string
 	Runs    *runcontrol.Service
 	Store   runcontrol.Store
+	Bus     runEventSource
+}
+
+type runEventSource interface {
+	Events() <-chan domain.RunEventRecord
 }
 
 func NewRouter(deps ServerDeps) http.Handler {
@@ -243,7 +248,48 @@ func (deps ServerDeps) handleListRunEvents(w http.ResponseWriter, r *http.Reques
 		writeStoreError(w, err)
 		return
 	}
+	if r.URL.Query().Get("stream") == "true" {
+		deps.streamRunEvents(w, r, runID, events)
+		return
+	}
 	writeJSON(w, http.StatusOK, runEventsResponse{RunID: runID, Count: len(events), Events: events})
+}
+
+func (deps ServerDeps) streamRunEvents(w http.ResponseWriter, r *http.Request, runID string, replay []domain.RunEventRecord) {
+	if deps.Bus == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "run event stream is not configured"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	for _, event := range replay {
+		if err := writeSSE(w, "run_event", event); err != nil {
+			return
+		}
+	}
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-deps.Bus.Events():
+			if event.RunID != runID {
+				continue
+			}
+			if err := writeSSE(w, "run_event", event); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			if err := writeSSE(w, "heartbeat", map[string]string{"status": "ok"}); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (deps ServerDeps) handleListRunArtifacts(w http.ResponseWriter, r *http.Request) {

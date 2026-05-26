@@ -17,10 +17,18 @@ import (
 func main() {
 	cfg := config.Load()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	application, err := app.New(cfg)
+	if err != nil {
+		logger.Error("application setup failed", "error", err)
+		os.Exit(1)
+	}
 
 	server := &http.Server{
 		Addr:         cfg.HTTPAddr,
-		Handler:      app.NewHTTPHandler(cfg),
+		Handler:      application.Handler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
@@ -28,16 +36,25 @@ func main() {
 
 	errs := make(chan error, 1)
 	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-application.Bus.Jobs():
+				if err := application.Worker.RunJob(ctx, job); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error("worker job failed", "run_id", job.RunID, "error", err)
+				}
+			}
+		}
+	}()
+	go func() {
 		logger.Info("starting control plane", "addr", cfg.HTTPAddr)
 		errs <- server.ListenAndServe()
 	}()
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
-	case sig := <-signals:
-		logger.Info("shutting down", "signal", sig.String())
+	case <-ctx.Done():
+		logger.Info("shutting down", "signal", ctx.Err())
 	case err := <-errs:
 		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server failed", "error", err)

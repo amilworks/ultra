@@ -503,19 +503,19 @@ git commit -m "feat: normalize deep agents run events"
 
 ## Task 6: Final Verification
 
-- [ ] **Step 1: Run Python runtime tests**
+- [x] **Step 1: Run Python runtime tests**
 
 ```bash
 make deepagents-test
 ```
 
-- [ ] **Step 2: Run Go control-plane tests**
+- [x] **Step 2: Run Go control-plane tests**
 
 ```bash
 make control-test
 ```
 
-- [ ] **Step 3: Run optional live vLLM smoke**
+- [x] **Step 3: Run optional live vLLM smoke**
 
 ```bash
 OPENAI_BASE_URL=http://vrl-h200.ece.ucsb.edu:9393/v1 OPENAI_MODEL=deepseek_v4 make deepagents-smoke
@@ -523,14 +523,14 @@ OPENAI_BASE_URL=http://vrl-h200.ece.ucsb.edu:9393/v1 OPENAI_MODEL=deepseek_v4 ma
 
 Expected: non-empty model response or a precise connection/auth/tool-calling error recorded in the final report.
 
-- [ ] **Step 4: Scan and diff-check**
+- [x] **Step 4: Scan and diff-check**
 
 ```bash
 rg -n "TB""D|TO""DO|FIX""ME|place""holder" docs/superpowers/plans/2026-05-26-python-deep-agents-runtime.md
 git diff --check
 ```
 
-- [ ] **Step 5: Commit fixes if needed**
+- [x] **Step 5: Commit fixes if needed**
 
 If formatting or generated lock files changed, commit them:
 

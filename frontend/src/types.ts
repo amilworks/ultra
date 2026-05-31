@@ -59,6 +59,7 @@ export type ChatWorkflowHintId =
   | "bisque_fetch_xml"
   | "delete_bisque_resource"
   | "segment_sam3"
+  | "rarespot_ecology"
   | "detect_prairie_dog"
   | "detect_yolo"
   | "estimate_depth_pro"
@@ -1605,8 +1606,6 @@ export type PublicConfigResponse = {
   bisque_root?: string | null;
   bisque_browser_url?: string | null;
   bisque_auth_enabled?: boolean;
-  bisque_auth_mode?: "local" | "oidc" | "dual";
-  bisque_oidc_enabled?: boolean;
   bisque_guest_enabled?: boolean;
   admin_enabled?: boolean;
   bisque_urls?: {

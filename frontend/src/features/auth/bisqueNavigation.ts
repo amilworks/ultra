@@ -5,13 +5,37 @@ export type BisqueNavLinks = {
   tables: string;
 };
 
+const normalizeBisqueClientServiceBase = (root: string): string => {
+  const candidate = String(root || "").trim();
+  if (!candidate) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const clientServiceIndex = pathname.toLowerCase().indexOf("/client_service");
+    const normalizedPath =
+      clientServiceIndex >= 0
+        ? pathname.slice(0, clientServiceIndex + "/client_service".length)
+        : `${pathname === "" || pathname === "/" ? "" : pathname}/client_service`;
+    return `${parsed.protocol}//${parsed.host}${normalizedPath}`;
+  } catch {
+    const withoutQuery = candidate.split(/[?#]/, 1)[0].replace(/\/+$/, "");
+    const clientServiceIndex = withoutQuery.toLowerCase().indexOf("/client_service");
+    return clientServiceIndex >= 0
+      ? withoutQuery.slice(0, clientServiceIndex + "/client_service".length)
+      : `${withoutQuery}/client_service`;
+  }
+};
+
 export const buildBisqueNavLinks = (root: string): BisqueNavLinks => {
-  const trimmedRoot = String(root || "").trim().replace(/\/+$/, "");
+  const clientServiceBase = normalizeBisqueClientServiceBase(root);
   return {
-    home: `${trimmedRoot}/client_service/`,
-    datasets: `${trimmedRoot}/client_service/browser?resource=/data_service/dataset`,
-    images: `${trimmedRoot}/client_service/browser?resource=/data_service/image`,
-    tables: `${trimmedRoot}/client_service/browser?resource=/data_service/table`,
+    home: `${clientServiceBase}/`,
+    datasets: `${clientServiceBase}/browser?resource=/data_service/dataset`,
+    images: `${clientServiceBase}/browser?resource=/data_service/image`,
+    tables: `${clientServiceBase}/browser?resource=/data_service/table`,
   };
 };
 

@@ -18,7 +18,8 @@ export const DEFAULT_API_KEY =
     : "";
 
 export const DEFAULT_BISQUE_BROWSER_URL =
-  readEnvString(import.meta.env.VITE_BISQUE_BROWSER_URL) ?? "";
+  readEnvString(import.meta.env.VITE_BISQUE_BROWSER_URL) ??
+  "https://bisque2.ece.ucsb.edu/client_service/";
 
 export const DEFAULT_MAX_TOOL_CALLS = 12;
 export const DEFAULT_MAX_RUNTIME_SECONDS = 900;

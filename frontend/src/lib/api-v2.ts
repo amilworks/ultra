@@ -423,6 +423,22 @@ export class ApiV2Client {
     });
   }
 
+  artifactDownloadUrl(artifactId: string): string {
+    return buildUrl(this.baseUrl, `/v2/artifacts/${encodeURIComponent(artifactId)}/download`);
+  }
+
+  async downloadArtifact(artifactId: string): Promise<Blob> {
+    const response = await fetch(this.artifactDownloadUrl(artifactId), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      await parseError(response);
+    }
+    return response.blob();
+  }
+
   async listArtifactsForRun(runId: string, query?: { limit?: number }): Promise<V2ArtifactRecord[]> {
     const response = await this.listRunArtifacts(runId, query);
     return response.artifacts;

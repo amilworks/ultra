@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
+import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
@@ -13,33 +13,48 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
     manifest: true,
-    rollupOptions: {
+    modulePreload: {
+      resolveDependencies(_url, deps, { hostType }) {
+        if (hostType !== "html") {
+          return deps;
+        }
+        return deps.filter(
+          (dep) =>
+            !dep.includes("vendor-charts") && !dep.includes("vendor-three")
+        );
+      },
+    },
+    rolldownOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes("node_modules")) {
             return undefined;
           }
+          const normalizedId = id.replace(/\\/g, "/");
           if (
-            id.includes("react-markdown") ||
-            id.includes("marked") ||
-            id.includes("remark-") ||
-            id.includes("rehype-") ||
-            id.includes("/katex/")
+            normalizedId.includes("react-markdown") ||
+            normalizedId.includes("marked") ||
+            normalizedId.includes("remark-") ||
+            normalizedId.includes("rehype-") ||
+            normalizedId.includes("/katex/")
           ) {
             return "vendor-markdown";
           }
           if (
-            id.includes("lucide-react") ||
-            id.includes("use-stick-to-bottom") ||
-            id.includes("/cmdk/") ||
-            id.includes("/radix-ui/")
+            normalizedId.includes("lucide-react") ||
+            normalizedId.includes("use-stick-to-bottom") ||
+            normalizedId.includes("tailwind-merge") ||
+            normalizedId.includes("cmdk") ||
+            normalizedId.includes("radix-ui") ||
+            normalizedId.includes("@radix-ui") ||
+            normalizedId.includes("@floating-ui")
           ) {
             return "vendor-ui";
           }
-          if (id.includes("@react-three") || id.includes("/three/")) {
+          if (normalizedId.includes("@react-three") || normalizedId.includes("/three/")) {
             return "vendor-three";
           }
-          if (id.includes("/recharts/")) {
+          if (normalizedId.includes("recharts")) {
             return "vendor-charts";
           }
           return undefined;
@@ -57,6 +72,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/v1": {
+        target: apiProxyTarget,
+        changeOrigin: false,
+      },
+      "/v2": {
         target: apiProxyTarget,
         changeOrigin: false,
       },

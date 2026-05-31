@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowUpRight, LockKeyhole, UserRound } from "lucide-react";
 
 import { BisqueMarkIcon } from "@/components/icons/BisqueMarkIcon";
+import { useTextStream } from "@/components/prompt-kit/response-stream";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,17 +14,29 @@ type AuthScreenProps = {
   bisqueRoot: string;
   bisqueHomeUrl?: string;
   loading: boolean;
-  oidcEnabled?: boolean;
   allowGuest?: boolean;
   errorMessage?: string | null;
   onAuthenticate: (payload: { username: string; password: string }) => Promise<void>;
-  onStartOidcLogin?: () => void;
   onContinueGuest: (payload: {
     name: string;
     email: string;
     affiliation: string;
   }) => Promise<void>;
 };
+
+const heroPhrases = [
+  "Build the future",
+  "What are we building today?",
+  "What are we working on?",
+  "Launch the next discovery",
+] as const;
+
+const HERO_PHRASE_DWELL_MS = 12_000;
+
+const getPrefersReducedMotion = (): boolean =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const hostFromUrl = (value: string): string => {
   try {
@@ -37,11 +50,9 @@ export function AuthScreen({
   bisqueRoot,
   bisqueHomeUrl,
   loading,
-  oidcEnabled = false,
   allowGuest = true,
   errorMessage,
   onAuthenticate,
-  onStartOidcLogin,
   onContinueGuest,
 }: AuthScreenProps) {
   const [mode, setMode] = useState<AuthMode>("login");
@@ -51,6 +62,8 @@ export function AuthScreen({
   const [guestEmail, setGuestEmail] = useState("");
   const [guestAffiliation, setGuestAffiliation] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+  const [heroPhraseIndex, setHeroPhraseIndex] = useState(0);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(getPrefersReducedMotion);
   const bisqueHost = useMemo(() => hostFromUrl(bisqueRoot), [bisqueRoot]);
   const bisqueHomeHref = useMemo(() => {
     const explicit = String(bisqueHomeUrl ?? "").trim();
@@ -60,6 +73,13 @@ export function AuthScreen({
     return `${bisqueRoot}/client_service/`;
   }, [bisqueHomeUrl, bisqueRoot]);
   const effectiveMode: AuthMode = !allowGuest && mode === "guest" ? "login" : mode;
+  const activeHeroPhrase = prefersReducedMotion ? heroPhrases[0] : heroPhrases[heroPhraseIndex];
+  const { displayedText: streamedHeroText, isComplete: heroTextComplete } = useTextStream({
+    textStream: activeHeroPhrase,
+    speed: prefersReducedMotion ? 100 : 18,
+    characterChunkSize: prefersReducedMotion ? activeHeroPhrase.length : 1,
+  });
+  const visibleHeroText = prefersReducedMotion ? activeHeroPhrase : streamedHeroText || "\u00a0";
 
   useEffect(() => {
     if (!allowGuest && mode === "guest") {
@@ -68,12 +88,29 @@ export function AuthScreen({
     }
   }, [allowGuest, mode]);
 
-  const submitLabel =
-    effectiveMode === "login"
-      ? oidcEnabled
-        ? "Continue with BisQue SSO"
-        : "Sign in"
-      : "Continue as guest";
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return undefined;
+    }
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = () => {
+      setPrefersReducedMotion(media.matches);
+    };
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
+
+  useEffect(() => {
+    if (prefersReducedMotion || !heroTextComplete) {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setHeroPhraseIndex((currentIndex) => (currentIndex + 1) % heroPhrases.length);
+    }, HERO_PHRASE_DWELL_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [heroTextComplete, prefersReducedMotion]);
+
+  const submitLabel = effectiveMode === "login" ? "Sign in" : "Continue as guest";
   const mergedError = localError || errorMessage || null;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -96,12 +133,6 @@ export function AuthScreen({
       } catch {
         // Parent component exposes API error state.
       }
-      return;
-    }
-
-    if (oidcEnabled) {
-      setLocalError(null);
-      onStartOidcLogin?.();
       return;
     }
 
@@ -129,11 +160,15 @@ export function AuthScreen({
             </div>
             <span>BisQue Ultra</span>
           </div>
-          <h1>Connect your BisQue account</h1>
+          <h1 className="auth-hero-title" aria-label={heroPhrases[0]}>
+            <span className="auth-hero-typewriter" aria-hidden="true">
+              <span className="auth-hero-typewriter-text">{visibleHeroText}</span>
+              <span className="auth-hero-typewriter-caret" />
+            </span>
+          </h1>
           <p>
-            {oidcEnabled
-              ? "Sign in through BisQue SSO to use the same account across services."
-              : "Use the same credentials you use on BisQue. After sign-in, uploads, browsing, and tool calls run against your account."}
+            Sign in to bring your BisQue data, uploads, browsing, and tool calls into one
+            workspace.
           </p>
           <a href={bisqueHomeHref} target="_blank" rel="noreferrer">
             Open {bisqueHost}
@@ -148,9 +183,7 @@ export function AuthScreen({
             <CardTitle>{effectiveMode === "login" ? "Welcome back" : "Continue as guest"}</CardTitle>
             <CardDescription>
               {effectiveMode === "login"
-                ? oidcEnabled
-                  ? "Continue with your BisQue SSO account."
-                  : "Sign in with your BisQue username and password."
+                ? "Sign in with your BisQue username and password."
                 : "Continue without BisQue credentials. Some BisQue operations may be limited."}
             </CardDescription>
           </CardHeader>
@@ -184,11 +217,6 @@ export function AuthScreen({
 
             <form className="auth-form" onSubmit={handleSubmit}>
               {effectiveMode === "login" ? (
-                oidcEnabled ? (
-                  <p className="text-muted-foreground text-sm">
-                    You will be redirected to Keycloak and returned here after authentication.
-                  </p>
-                ) : (
                 <>
                   <label className="auth-label" htmlFor="bisque-username">
                     <UserRound className="size-4" />
@@ -217,7 +245,6 @@ export function AuthScreen({
                     disabled={loading}
                   />
                 </>
-                )
               ) : (
                 <>
                   <label className="auth-label" htmlFor="guest-name">

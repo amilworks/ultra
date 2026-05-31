@@ -15,8 +15,6 @@ describe("ApiClient browser auth hardening", () => {
     });
 
     const urls = [
-      client.getBisqueOidcStartUrl("https://ultra.example.org/chat"),
-      client.getBisqueBrowserLogoutUrl("https://ultra.example.org/"),
       client.resourceThumbnailUrl("file-123"),
       client.uploadPreviewUrl("file-123"),
       client.uploadDisplayUrl("file-123"),

@@ -201,8 +201,11 @@ export function Hdf5ViewerShell({
   const geometrySummary = geometry?.dimensions?.length
     ? geometry.dimensions.join(" x ")
     : geometry?.path ?? "No geometry metadata";
+  const activeDatasetPathSegments = activeDatasetPath?.split("/") ?? [];
   const activeDatasetName =
-    selectedDatasetSummary?.dataset_name ?? activeDatasetPath?.split("/").at(-1) ?? "No dataset selected";
+    selectedDatasetSummary?.dataset_name ??
+    activeDatasetPathSegments[activeDatasetPathSegments.length - 1] ??
+    "No dataset selected";
   const datasetKinds = Object.entries(hdf5.summary.dataset_kinds ?? {})
     .filter(([, count]) => Number(count) > 0)
     .map(([label, count]) => `${formatSummaryToken(label)} (${count})`);

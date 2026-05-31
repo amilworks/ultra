@@ -35,6 +35,7 @@ import {
 } from "./components/prompt-kit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   AlertDialog,
@@ -54,11 +55,27 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   ContextMenu,
   ContextMenuCheckboxItem,
@@ -68,6 +85,15 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import {
   Sidebar,
   SidebarContent,
@@ -170,22 +196,26 @@ import type {
 import {
   ArrowUp,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
   Database,
   Download,
+  ExternalLink,
   FolderOpen,
   ImageIcon,
   Images,
   Laptop,
   Link2,
   LogOut,
+  MessageCircle,
   Moon,
   MoreHorizontal,
   Pencil,
   Plus,
   PlusIcon,
+  Settings,
   Shield,
   Square,
   Sun,
@@ -193,15 +223,18 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash,
+  UserRound,
   X,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
 type UiRole = "user" | "assistant";
 type ThemePreference = "system" | "light" | "dark";
+type AuthMode = "bisque" | "guest";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
 type ActivePanel = "chat" | "resources" | "admin" | "training";
 type ConversationPreferredPanel = "chat";
+type ComposerIntelligenceMode = "high" | "pro";
 
 type RunImageArtifact = {
   path: string;
@@ -519,6 +552,115 @@ type HistoryItem = {
   panel: ConversationPreferredPanel;
 };
 
+type CollapsedSidebarRailProps = {
+  recentItems: HistoryItem[];
+  activeConversationId: string | null;
+  resourcesActive: boolean;
+  onCreateConversation: () => void;
+  onOpenResources: () => void;
+  onOpenRecent: (conversation: HistoryItem) => void;
+};
+
+function CollapsedSidebarRail({
+  recentItems,
+  activeConversationId,
+  resourcesActive,
+  onCreateConversation,
+  onOpenResources,
+  onOpenRecent,
+}: CollapsedSidebarRailProps) {
+  const { setOpen } = useSidebar();
+  const [recentsOpen, setRecentsOpen] = useState(false);
+
+  return (
+    <nav className="app-collapsed-sidebar-rail" aria-label="Collapsed navigation">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="app-collapsed-sidebar-logo-button"
+        aria-label="Expand sidebar"
+        title="Expand sidebar"
+        onClick={() => setOpen(true)}
+      >
+        <BisqueMarkIcon className="app-collapsed-sidebar-logo-icon" />
+      </Button>
+
+      <div className="app-collapsed-sidebar-actions" role="list">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="app-collapsed-sidebar-action"
+          aria-label="New chat"
+          title="New chat"
+          onClick={onCreateConversation}
+        >
+          <PlusIcon data-icon="inline-start" />
+        </Button>
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="app-collapsed-sidebar-action"
+          aria-label="Resources"
+          title="Resources"
+          data-active={resourcesActive ? "true" : undefined}
+          onClick={onOpenResources}
+        >
+          <FolderOpen data-icon="inline-start" />
+        </Button>
+
+        <Popover open={recentsOpen} onOpenChange={setRecentsOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="app-collapsed-sidebar-action"
+              aria-label="Recents"
+              title="Recents"
+              data-active={recentsOpen ? "true" : undefined}
+            >
+              <MessageCircle data-icon="inline-start" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            side="right"
+            align="center"
+            sideOffset={8}
+            className="app-collapsed-recents-popover"
+          >
+            <div className="app-collapsed-recents-header">Recents</div>
+            <div className="app-collapsed-recents-list">
+              {recentItems.length > 0 ? (
+                recentItems.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    className="app-collapsed-recent-item"
+                    data-active={conversation.id === activeConversationId ? "true" : undefined}
+                    onClick={() => {
+                      onOpenRecent(conversation);
+                      setRecentsOpen(false);
+                    }}
+                  >
+                    <span className="truncate">{conversation.title}</span>
+                    {conversation.running ? <RunningStatusPill size="compact" /> : null}
+                  </button>
+                ))
+              ) : (
+                <div className="app-collapsed-recents-empty">No recent chats yet</div>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+    </nav>
+  );
+}
+
 type BisqueViewerLink = {
   clientViewUrl: string;
   resourceUri?: string | null;
@@ -550,6 +692,16 @@ type ConversationState = {
   chatError: string | null;
   streamingMessageId: string | null;
 };
+
+const EMPTY_UI_MESSAGES: UiMessage[] = [];
+const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
+const EMPTY_RUN_EVENTS: RunEvent[] = [];
+const EMPTY_RUN_IMAGE_ARTIFACTS: RunImageArtifact[] = [];
+const EMPTY_FILES: File[] = [];
+const EMPTY_UPLOADED_FILES: UploadedFileRecord[] = [];
+const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_FAILED_UPLOAD_PREVIEW_IDS: Record<string, true> = {};
+const EMPTY_BISQUE_LINKS_BY_FILE_ID: Record<string, BisqueViewerLink> = {};
 
 type ConversationScrollMemory = {
   scrollTop: number;
@@ -1960,9 +2112,9 @@ const ConversationMessageRow = memo(
     const isCopied = copiedMessageId === message.id;
     const proModeDevCopyKey = `pro-mode-dev-${message.id}`;
     const isProModeDevCopied = copiedMessageId === proModeDevCopyKey;
-    const progressEvents = message.progressEvents ?? [];
-    const runEvents = message.runEvents ?? [];
-    const runArtifacts = message.runArtifacts ?? [];
+    const progressEvents = message.progressEvents ?? EMPTY_PROGRESS_EVENTS;
+    const runEvents = message.runEvents ?? EMPTY_RUN_EVENTS;
+    const runArtifacts = message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS;
     const uploadPreviewUrlForFile = useCallback(
       (fileId: string) => apiClient.uploadPreviewUrl(fileId),
       [apiClient]
@@ -2279,7 +2431,10 @@ const ConversationMessageRow = memo(
                         }}
                       />
                     ) : (
-                      <ToolImageCarousel images={card.images} />
+                      <ToolImageCarousel
+                        key={card.images.map((image) => image.path).join("|")}
+                        images={card.images}
+                      />
                     )
                   ) : null}
                 </CardContent>
@@ -7342,7 +7497,6 @@ function ToolImageCarousel({
   >({});
   const stageRef = useRef<HTMLDivElement | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
-  const imageSignature = useMemo(() => images.map((image) => image.path).join("|"), [images]);
   const prefersPersistentControls = variant === "prairie";
 
   const clearLongPress = useCallback(() => {
@@ -7366,26 +7520,6 @@ function ToolImageCarousel({
       })
     );
   }, []);
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [imageSignature]);
-
-  useEffect(() => {
-    setShowDetectionOverlay(prefersPersistentControls);
-    setShowImageInfo(prefersPersistentControls);
-  }, [imageSignature, prefersPersistentControls]);
-
-  useEffect(() => {
-    setNaturalSizeByPath((prev) => {
-      const allowed = new Set(images.map((image) => image.path));
-      const nextEntries = Object.entries(prev).filter(([path]) => allowed.has(path));
-      if (nextEntries.length === Object.keys(prev).length) {
-        return prev;
-      }
-      return Object.fromEntries(nextEntries);
-    });
-  }, [images]);
 
   useEffect(() => clearLongPress, [clearLongPress]);
 
@@ -8050,76 +8184,6 @@ function YoloFigureUnavailable({
   );
 }
 
-function ScientificFigureStack({
-  figures,
-}: {
-  figures: ScientificFigureCard[];
-}) {
-  if (figures.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="chat-tool-figure-stack" data-testid="scientific-figure-stack">
-      {figures.map((figure, index) => (
-        <figure
-          key={figure.key}
-          className="chat-tool-figure-card"
-          data-testid="scientific-figure-card"
-        >
-          <div className="chat-tool-figure-media-wrap">
-            {figure.previewable ? (
-              <img
-                src={figure.previewUrl}
-                alt={figure.title}
-                loading={index === 0 ? "eager" : "lazy"}
-                className="chat-tool-figure-image"
-                data-testid="scientific-figure-image"
-              />
-            ) : (
-              <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
-                <ImageIcon className="size-5" />
-                <span>Preview unavailable</span>
-              </div>
-            )}
-          </div>
-          <figcaption className="chat-tool-figure-caption">
-            <div className="chat-tool-figure-meta">
-              <div>
-                <p className="chat-tool-figure-title">{figure.title}</p>
-                {figure.subtitle ? (
-                  <p className="chat-tool-figure-subtitle">{figure.subtitle}</p>
-                ) : null}
-              </div>
-              {figure.summary ? (
-                <p className="chat-tool-figure-summary">{figure.summary}</p>
-              ) : null}
-            </div>
-            <div className="chat-tool-figure-actions">
-              <Button asChild variant="outline" size="sm">
-                <a href={figure.previewUrl} target="_blank" rel="noreferrer">
-                  Open figure
-                </a>
-              </Button>
-              <Button asChild variant="ghost" size="sm">
-                <a
-                  href={figure.downloadUrl ?? figure.previewUrl}
-                  download
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <Download className="size-4" />
-                  Download
-                </a>
-              </Button>
-            </div>
-          </figcaption>
-        </figure>
-      ))}
-    </div>
-  );
-}
-
 const scientificFigureTabLabel = (figure: ScientificResultFigure): string => {
   const kind = String(figure.kind || "").trim().toLowerCase();
   if (kind === "overlay_mid_z") {
@@ -8577,6 +8641,431 @@ function PanelLoadingState({
   );
 }
 
+const THEME_OPTIONS: Array<{
+  value: ThemePreference;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "system",
+    label: "System",
+    detail: "Follow the appearance selected on this device.",
+  },
+  {
+    value: "light",
+    label: "Light",
+    detail: "Use the brighter interface.",
+  },
+  {
+    value: "dark",
+    label: "Dark",
+    detail: "Use the darker interface.",
+  },
+];
+
+const getAccountDisplayName = (
+  authUser: string | null,
+  authMode: AuthMode | null
+): string => {
+  const trimmedUser = String(authUser ?? "").trim();
+  if (trimmedUser) {
+    return trimmedUser;
+  }
+  return authMode === "guest" ? "Guest" : "BisQue user";
+};
+
+const getAccountSubtitle = (
+  authMode: AuthMode | null,
+  authIsAdmin: boolean
+): string => {
+  if (authMode === "guest") {
+    return "Guest access";
+  }
+  if (authIsAdmin) {
+    return "Admin account";
+  }
+  return "BisQue account";
+};
+
+const getAccountInitials = (displayName: string): string => {
+  const normalized = displayName.replace(/@.*$/, "").trim();
+  const parts = normalized.split(/[\s._-]+/).filter(Boolean);
+  const source =
+    parts.length >= 2
+      ? `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}`
+      : normalized.slice(0, 2);
+  return source.trim().toUpperCase() || "BU";
+};
+
+type SidebarAccountSettingsButtonProps = {
+  authUser: string | null;
+  authMode: AuthMode | null;
+  authIsAdmin: boolean;
+  themePreference: ThemePreference;
+  onThemePreferenceChange: (value: ThemePreference) => void;
+  onOpenSettings: () => void;
+  onLogout: () => Promise<void>;
+};
+
+function SidebarAccountSettingsButton({
+  authUser,
+  authMode,
+  authIsAdmin,
+  themePreference,
+  onThemePreferenceChange,
+  onOpenSettings,
+  onLogout,
+}: SidebarAccountSettingsButtonProps) {
+  const accountName = getAccountDisplayName(authUser, authMode);
+  const accountSubtitle = getAccountSubtitle(authMode, authIsAdmin);
+  const initials = getAccountInitials(accountName);
+
+  return (
+    <div className="app-sidebar-user-menu">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            className="app-sidebar-account-button"
+            aria-label="Open account menu"
+            {...mobileSidebarKeepOpenProps}
+          >
+            <Avatar className="app-sidebar-account-avatar">
+              <AvatarFallback>{initials}</AvatarFallback>
+            </Avatar>
+            <span className="app-sidebar-account-copy">
+              <span className="app-sidebar-account-name">{accountName}</span>
+              <span className="app-sidebar-account-subtitle">{accountSubtitle}</span>
+            </span>
+            <Settings data-icon="inline-end" aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          side="top"
+          align="start"
+          sideOffset={8}
+          className="app-sidebar-account-menu"
+        >
+          <DropdownMenuItem onClick={() => onThemePreferenceChange("system")}>
+            <Laptop data-icon="inline-start" aria-hidden="true" />
+            <span>System</span>
+            {themePreference === "system" ? (
+              <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                •
+              </span>
+            ) : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onThemePreferenceChange("light")}>
+            <Sun data-icon="inline-start" aria-hidden="true" />
+            <span>Light</span>
+            {themePreference === "light" ? (
+              <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                •
+              </span>
+            ) : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onThemePreferenceChange("dark")}>
+            <Moon data-icon="inline-start" aria-hidden="true" />
+            <span>Dark</span>
+            {themePreference === "dark" ? (
+              <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                •
+              </span>
+            ) : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={onOpenSettings} {...mobileSidebarCloseProps}>
+            <Settings data-icon="inline-start" aria-hidden="true" />
+            <span>Settings</span>
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => void onLogout()}>
+            <LogOut data-icon="inline-start" aria-hidden="true" />
+            <span>
+              {authUser
+                ? authMode === "guest"
+                  ? `Sign out (${authUser}, guest)`
+                  : `Sign out (${authUser})`
+                : "Sign out"}
+            </span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+type AppSettingsDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  authUser: string | null;
+  authMode: AuthMode | null;
+  authIsAdmin: boolean;
+  themePreference: ThemePreference;
+  resolvedTheme: "light" | "dark";
+  bisqueNavLinks: BisqueNavLinks | null;
+  onThemePreferenceChange: (value: ThemePreference) => void;
+  onOpenResources: () => void;
+  onOpenTraining: () => void;
+  onOpenAdmin: () => void;
+  onLogout: () => Promise<void>;
+};
+
+function AppSettingsDialog({
+  open,
+  onOpenChange,
+  authUser,
+  authMode,
+  authIsAdmin,
+  themePreference,
+  resolvedTheme,
+  bisqueNavLinks,
+  onThemePreferenceChange,
+  onOpenResources,
+  onOpenTraining,
+  onOpenAdmin,
+  onLogout,
+}: AppSettingsDialogProps) {
+  const accountName = getAccountDisplayName(authUser, authMode);
+  const accountSubtitle = getAccountSubtitle(authMode, authIsAdmin);
+  const initials = getAccountInitials(accountName);
+  const resolvedThemeLabel = resolvedTheme === "dark" ? "Dark" : "Light";
+
+  const runAndClose = (action: () => void): void => {
+    onOpenChange(false);
+    action();
+  };
+
+  const logoutAndClose = (): void => {
+    onOpenChange(false);
+    void onLogout();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="app-settings-dialog" showCloseButton={false}>
+        <Tabs defaultValue="general" className="app-settings-shell">
+          <aside className="app-settings-sidebar-pane">
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="app-settings-close-button"
+                aria-label="Close settings"
+              >
+                <X data-icon="inline-start" aria-hidden="true" />
+              </Button>
+            </DialogClose>
+            <DialogHeader className="app-settings-header">
+              <DialogTitle>Settings</DialogTitle>
+              <DialogDescription>
+                Tune the interface and account shortcuts for this workspace.
+              </DialogDescription>
+            </DialogHeader>
+            <TabsList className="app-settings-nav-list" aria-label="Settings sections">
+              <TabsTrigger value="general" className="app-settings-nav-item">
+                <Settings data-icon="inline-start" aria-hidden="true" />
+                General
+              </TabsTrigger>
+              <TabsTrigger value="account" className="app-settings-nav-item">
+                <UserRound data-icon="inline-start" aria-hidden="true" />
+                Account
+              </TabsTrigger>
+              <TabsTrigger value="bisque" className="app-settings-nav-item">
+                <Database data-icon="inline-start" aria-hidden="true" />
+                BisQue
+              </TabsTrigger>
+            </TabsList>
+          </aside>
+
+          <section className="app-settings-content-pane">
+            <TabsContent value="general" className="app-settings-tab-content">
+              <div className="app-settings-panel-heading">
+                <h2>General</h2>
+                <p>Keep the day-to-day interface fast, readable, and predictable.</p>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Appearance</div>
+                  <p>Match your system preference or pin BisQue Ultra to one mode.</p>
+                </div>
+                <Select
+                  value={themePreference}
+                  onValueChange={(value) =>
+                    onThemePreferenceChange(value as ThemePreference)
+                  }
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="app-settings-select-trigger"
+                    aria-label="Appearance"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {THEME_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Resolved theme</div>
+                  <p>
+                    System mode currently resolves to the active browser color scheme.
+                  </p>
+                </div>
+                <Badge variant="secondary">{resolvedThemeLabel}</Badge>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="account" className="app-settings-tab-content">
+              <div className="app-settings-panel-heading">
+                <h2>Account</h2>
+                <p>Review the active session and sign out when you are finished.</p>
+              </div>
+              <Separator />
+              <div className="app-settings-account-summary">
+                <Avatar size="lg" className="app-settings-account-avatar">
+                  <AvatarFallback>{initials}</AvatarFallback>
+                </Avatar>
+                <div className="app-settings-account-copy">
+                  <div className="app-settings-account-name">{accountName}</div>
+                  <div className="app-settings-account-subtitle">{accountSubtitle}</div>
+                </div>
+                <Badge variant={authMode === "guest" ? "secondary" : "default"}>
+                  {authMode === "guest" ? "Guest" : "Signed in"}
+                </Badge>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Admin console</div>
+                  <p>
+                    {authIsAdmin
+                      ? "Open the operational view for users, runs, and issues."
+                      : "This account does not have admin console access."}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!authIsAdmin}
+                  onClick={() => runAndClose(onOpenAdmin)}
+                >
+                  <Shield data-icon="inline-start" aria-hidden="true" />
+                  Open
+                </Button>
+              </div>
+              <Separator />
+              <div className="app-settings-action-row">
+                <Button type="button" variant="outline" onClick={logoutAndClose}>
+                  <LogOut data-icon="inline-start" aria-hidden="true" />
+                  Sign out
+                </Button>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="bisque" className="app-settings-tab-content">
+              <div className="app-settings-panel-heading">
+                <h2>BisQue</h2>
+                <p>Jump into the production BisQue instance or local Ultra panels.</p>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">BisQue production</div>
+                  <p>Open UCSB BisQue in a new browser tab.</p>
+                </div>
+                {bisqueNavLinks ? (
+                  <Button asChild variant="outline" size="sm">
+                    <a href={bisqueNavLinks.home} target="_blank" rel="noreferrer">
+                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      Open
+                    </a>
+                  </Button>
+                ) : (
+                  <Button type="button" variant="outline" size="sm" disabled>
+                    Open
+                  </Button>
+                )}
+              </div>
+              <Separator />
+              <div className="app-settings-link-grid">
+                {bisqueNavLinks ? (
+                  <>
+                    <Button asChild variant="ghost" className="app-settings-link-button">
+                      <a href={bisqueNavLinks.images} target="_blank" rel="noreferrer">
+                        <Images data-icon="inline-start" aria-hidden="true" />
+                        Images
+                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
+                      </a>
+                    </Button>
+                    <Button asChild variant="ghost" className="app-settings-link-button">
+                      <a href={bisqueNavLinks.datasets} target="_blank" rel="noreferrer">
+                        <Database data-icon="inline-start" aria-hidden="true" />
+                        Datasets
+                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
+                      </a>
+                    </Button>
+                    <Button asChild variant="ghost" className="app-settings-link-button">
+                      <a href={bisqueNavLinks.tables} target="_blank" rel="noreferrer">
+                        <Table2 data-icon="inline-start" aria-hidden="true" />
+                        Tables
+                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
+                      </a>
+                    </Button>
+                  </>
+                ) : (
+                  <div className="app-settings-unavailable">
+                    BisQue shortcuts are unavailable until the production root is configured.
+                  </div>
+                )}
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Ultra panels</div>
+                  <p>Open resources or model training inside this app.</p>
+                </div>
+                <div className="app-settings-inline-actions">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => runAndClose(onOpenResources)}
+                  >
+                    <FolderOpen data-icon="inline-start" aria-hidden="true" />
+                    Resources
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => runAndClose(onOpenTraining)}
+                  >
+                    <Database data-icon="inline-start" aria-hidden="true" />
+                    Training
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
+          </section>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function App() {
   const [apiBaseUrl] = useLocalStorageState<string>(
     "bisque.frontend.apiBaseUrl",
@@ -8602,12 +9091,12 @@ export function App() {
   });
   const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
   const [authUser, setAuthUser] = useState<string | null>(null);
-  const [authMode, setAuthMode] = useState<"bisque" | "guest" | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [authIsAdmin, setAuthIsAdmin] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
-  const [authOidcEnabled, setAuthOidcEnabled] = useState(true);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const isPhoneView = useBreakpoint(641);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
@@ -9063,17 +9552,8 @@ export function App() {
         if (isCancelled) {
           return;
         }
-        const authMode = String(payload.bisque_auth_mode ?? "").trim().toLowerCase();
-        if (authMode === "oidc") {
-          setAuthGuestEnabled(false);
-        } else if (authMode === "local" || authMode === "dual") {
-          setAuthGuestEnabled(true);
-        }
         if (typeof payload.bisque_guest_enabled === "boolean") {
           setAuthGuestEnabled(payload.bisque_guest_enabled);
-        }
-        if (typeof payload.bisque_oidc_enabled === "boolean") {
-          setAuthOidcEnabled(payload.bisque_oidc_enabled);
         }
         const explicitLinks = payload.bisque_urls;
         if (explicitLinks && typeof explicitLinks === "object") {
@@ -9811,26 +10291,10 @@ export function App() {
     }
   }, [apiClient, conversations, pendingConversationRename]);
 
-  const startBisqueOidcLogin = (): void => {
-    setAuthSubmitting(true);
-    setAuthError(null);
-    if (typeof window === "undefined") {
-      setAuthSubmitting(false);
-      setAuthError("OIDC login is only supported in a browser context.");
-      return;
-    }
-    const redirectUrl = window.location.href;
-    window.location.assign(apiClient.getBisqueOidcStartUrl(redirectUrl));
-  };
-
   const authenticateBisque = async (payload: {
     username: string;
     password: string;
   }): Promise<void> => {
-    if (authOidcEnabled) {
-      startBisqueOidcLogin();
-      return;
-    }
     setAuthSubmitting(true);
     setAuthError(null);
     try {
@@ -9859,7 +10323,7 @@ export function App() {
     affiliation: string;
   }): Promise<void> => {
     if (!authGuestEnabled) {
-      const message = "Guest access is disabled. Continue with BisQue SSO.";
+      const message = "Guest access is disabled. Sign in with your BisQue username and password.";
       setAuthError(message);
       throw new Error(message);
     }
@@ -9915,11 +10379,6 @@ export function App() {
   };
 
   const logoutBisque = async (): Promise<void> => {
-    if (authOidcEnabled && typeof window !== "undefined") {
-      clearAuthViewState();
-      window.location.assign(apiClient.getBisqueBrowserLogoutUrl(window.location.href));
-      return;
-    }
     try {
       await apiClient.logoutBisque();
     } catch {
@@ -9930,18 +10389,13 @@ export function App() {
 
   const promptBisqueAuthentication = async (message: string): Promise<void> => {
     const nextMessage = message.trim() || "BisQue authentication is required.";
-    if (authMode === "guest" || !authOidcEnabled) {
-      try {
-        await apiClient.logoutBisque();
-      } catch {
-        // If logout fails, still move the user back to the local auth screen.
-      }
-      clearAuthViewState();
-      setAuthError(nextMessage);
-      return;
+    try {
+      await apiClient.logoutBisque();
+    } catch {
+      // If logout fails, still move the user back to the local auth screen.
     }
+    clearAuthViewState();
     setAuthError(nextMessage);
-    startBisqueOidcLogin();
   };
 
   const copyTextWithUiFeedback = async (
@@ -10331,7 +10785,7 @@ export function App() {
     };
   }, [themePreference]);
 
-  const activeMessages = activeConversation?.messages ?? [];
+  const activeMessages = activeConversation?.messages ?? EMPTY_UI_MESSAGES;
   const activeConversationHydrated = activeConversation?.hydrated ?? true;
   const activePrompt =
     activeConversation &&
@@ -10341,13 +10795,18 @@ export function App() {
     )
       ? composerDraftsByConversationId[activeConversation.id] ?? ""
       : activeConversation?.prompt ?? "";
-  const activePendingFiles = activeConversation?.pendingFiles ?? [];
-  const activeAvailableUploadedFiles = activeConversation?.uploadedFiles ?? [];
-  const activeStagedUploadFileIds = activeConversation?.stagedUploadFileIds ?? [];
+  const activePendingFiles = activeConversation?.pendingFiles ?? EMPTY_FILES;
+  const activeAvailableUploadedFiles =
+    activeConversation?.uploadedFiles ?? EMPTY_UPLOADED_FILES;
+  const activeStagedUploadFileIds =
+    activeConversation?.stagedUploadFileIds ?? EMPTY_STRING_ARRAY;
   const activeSelectionContext = activeConversation?.activeSelectionContext ?? null;
-  const activeSelectionContextFileIds = activeSelectionContext?.focused_file_ids ?? [];
+  const activeSelectionContextFileIds =
+    activeSelectionContext?.focused_file_ids ?? EMPTY_STRING_ARRAY;
   const activeComposerWorkflowPreset = activeConversation?.composerWorkflowPreset ?? null;
   const isProModeComposerActive = activeComposerWorkflowPreset?.id === "pro_mode";
+  const activeComposerIntelligenceMode: ComposerIntelligenceMode =
+    isProModeComposerActive ? "pro" : "high";
   const activeUploadedFiles = useMemo(() => {
     const combinedFileIds = uniqueFileIds([
       ...activeStagedUploadFileIds,
@@ -10364,9 +10823,9 @@ export function App() {
       .filter((file): file is UploadedFileRecord => Boolean(file));
   }, [activeAvailableUploadedFiles, activeSelectionContextFileIds, activeStagedUploadFileIds]);
   const activeFailedUploadPreviewIds =
-    activeConversation?.failedUploadPreviewIds ?? {};
+    activeConversation?.failedUploadPreviewIds ?? EMPTY_FAILED_UPLOAD_PREVIEW_IDS;
   const activeBisqueLinksByFileId =
-    activeConversation?.bisqueLinksByFileId ?? {};
+    activeConversation?.bisqueLinksByFileId ?? EMPTY_BISQUE_LINKS_BY_FILE_ID;
   const activeSending = Boolean(
     activeConversation?.sending || activeConversation?.streamingMessageId
   );
@@ -10588,6 +11047,17 @@ export function App() {
 
   const refreshAdminConsole = (): void => {
     setAdminRefreshToken((value) => value + 1);
+  };
+
+  const openAdminPanel = (): void => {
+    if (!authIsAdmin) {
+      return;
+    }
+    rememberActiveConversationScrollPosition();
+    setActivePanel("admin");
+    setViewerOpen(false);
+    setResourceViewerContext(null);
+    refreshAdminConsole();
   };
 
   const cancelAdminRun = async (runId: string): Promise<void> => {
@@ -10857,8 +11327,8 @@ export function App() {
     focusComposerTextarea();
   };
 
-  const handleToggleComposerProMode = useCallback((): void => {
-    if (isProModeComposerActive) {
+  const handleSelectComposerIntelligenceMode = useCallback((mode: ComposerIntelligenceMode): void => {
+    if (mode === "high") {
       clearActiveComposerWorkflowPreset();
       setDismissedSlashPrompt(null);
       focusComposerTextarea();
@@ -10885,7 +11355,6 @@ export function App() {
     activeConversation,
     clearActiveComposerWorkflowPreset,
     focusComposerTextarea,
-    isProModeComposerActive,
     updateConversation,
   ]);
 
@@ -12702,6 +13171,18 @@ export function App() {
         };
       });
   }, [conversations]);
+  const collapsedRecentItems = useMemo(() => historyItems.slice(0, 10), [historyItems]);
+  const openHistoryItem = useCallback(
+    (conversation: HistoryItem): void => {
+      rememberActiveConversationScrollPosition();
+      setActivePanel(conversation.panel);
+      setActiveConversationId(conversation.id);
+      setViewerOpen(false);
+      setResourceViewerContext(null);
+      void ensureConversationHydrated(conversation.id);
+    },
+    [ensureConversationHydrated, rememberActiveConversationScrollPosition]
+  );
   const normalizedMobileConversationQuery = mobileConversationQuery.trim().toLowerCase();
   const filteredHistoryItems = useMemo(() => {
     if (!normalizedMobileConversationQuery) {
@@ -12765,12 +13246,10 @@ export function App() {
       <AuthScreen
         bisqueRoot={bisqueRootForAuth}
         bisqueHomeUrl={bisqueNavLinks?.home ?? undefined}
-        oidcEnabled={authOidcEnabled}
         allowGuest={authGuestEnabled}
         loading={authSubmitting || authStatus === "checking"}
         errorMessage={authStatus === "checking" ? null : authError}
         onAuthenticate={authenticateBisque}
-        onStartOidcLogin={startBisqueOidcLogin}
         onContinueGuest={continueAsGuest}
       />
     );
@@ -12781,8 +13260,16 @@ export function App() {
       className="app-shell h-dvh overflow-hidden"
       style={{ "--sidebar-width": "260px" } as CSSProperties}
     >
-      <Sidebar className="app-sidebar">
-        <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
+      <Sidebar collapsible="icon" className="app-sidebar">
+        <CollapsedSidebarRail
+          recentItems={collapsedRecentItems}
+          activeConversationId={activeConversation?.id ?? null}
+          resourcesActive={activePanel === "resources"}
+          onCreateConversation={createNewConversation}
+          onOpenResources={openResourcesPanel}
+          onOpenRecent={openHistoryItem}
+        />
+        <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-start gap-2 px-3 py-4">
           <div className="flex min-w-0 flex-row items-center gap-2 px-1">
             <div className="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
               <BisqueMarkIcon className="size-4" />
@@ -12790,41 +13277,6 @@ export function App() {
             <div className="app-shell-brand text-primary truncate">
               BisQue Ultra
             </div>
-          </div>
-          <div className="flex items-center gap-1">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="app-theme-menu-button size-11 md:size-8">
-                  {resolvedTheme === "dark" ? (
-                    <Moon className="size-4" />
-                  ) : (
-                    <Sun className="size-4" />
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setThemePreference("system")}>
-                  <Laptop className="mr-2 size-4" />
-                  System{themePreference === "system" ? " •" : ""}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setThemePreference("light")}>
-                  <Sun className="mr-2 size-4" />
-                  Light{themePreference === "light" ? " •" : ""}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setThemePreference("dark")}>
-                  <Moon className="mr-2 size-4" />
-                  Dark{themePreference === "dark" ? " •" : ""}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={logoutBisque}>
-                  <LogOut className="mr-2 size-4" />
-                  {authUser
-                    ? authMode === "guest"
-                      ? `Sign out (${authUser}, guest)`
-                      : `Sign out (${authUser})`
-                    : "Sign out"}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
         </SidebarHeader>
         <SidebarContent className="app-sidebar-content overflow-hidden pt-4">
@@ -12840,7 +13292,7 @@ export function App() {
               >
                 <span className="flex items-center gap-2">
                   <PlusIcon className="size-4" />
-                  <span>New Chat</span>
+                  <span>New chat</span>
                 </span>
                 <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/new-chat:opacity-100">
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
@@ -12906,13 +13358,7 @@ export function App() {
                 <Button
                   variant={activePanel === "admin" ? "secondary" : "ghost"}
                   className="app-resource-browser-button mb-1 flex w-full items-center gap-2"
-                  onClick={() => {
-                    rememberActiveConversationScrollPosition();
-                    setActivePanel("admin");
-                    setViewerOpen(false);
-                    setResourceViewerContext(null);
-                    refreshAdminConsole();
-                  }}
+                  onClick={openAdminPanel}
                   {...mobileSidebarCloseProps}
                 >
                   <Shield className="size-4" />
@@ -13020,7 +13466,7 @@ export function App() {
             {historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
                 <SidebarGroupLabel>
-                  {isMobileConversationSearchActive ? "Search results" : "Today"}
+                  {isMobileConversationSearchActive ? "Search results" : "Recents"}
                 </SidebarGroupLabel>
                 <SidebarMenu>
                   <SidebarMenuItem>
@@ -13035,7 +13481,9 @@ export function App() {
             ) : (
               historyGroups.map((group) => (
                 <SidebarGroup key={group.period} className="app-history-group">
-                  <SidebarGroupLabel>{group.period}</SidebarGroupLabel>
+                  <SidebarGroupLabel>
+                    {group.period === "Today" ? "Recents" : group.period}
+                  </SidebarGroupLabel>
                   <SidebarMenu>
 	                    {group.conversations.map((conversation) => (
 	                      <SidebarMenuItem key={conversation.id} className="app-history-item">
@@ -13105,14 +13553,7 @@ export function App() {
 	                                conversation.id === activeConversation?.id
 	                              }
 	                              className="app-history-button group/history h-auto py-2"
-	                              onClick={() => {
-	                                rememberActiveConversationScrollPosition();
-	                                setActivePanel(conversation.panel);
-	                                setActiveConversationId(conversation.id);
-	                                setViewerOpen(false);
-	                                setResourceViewerContext(null);
-	                                void ensureConversationHydrated(conversation.id);
-	                              }}
+	                              onClick={() => openHistoryItem(conversation)}
 	                              {...mobileSidebarCloseProps}
 	                            >
 	                              <div className="flex min-w-0 w-full items-center gap-2">
@@ -13158,8 +13599,32 @@ export function App() {
               </div>
             ) : null}
           </div>
+          <SidebarAccountSettingsButton
+            authUser={authUser}
+            authMode={authMode}
+            authIsAdmin={authIsAdmin}
+            themePreference={themePreference}
+            onThemePreferenceChange={setThemePreference}
+            onOpenSettings={() => setSettingsDialogOpen(true)}
+            onLogout={logoutBisque}
+          />
         </SidebarContent>
       </Sidebar>
+      <AppSettingsDialog
+        open={settingsDialogOpen}
+        onOpenChange={setSettingsDialogOpen}
+        authUser={authUser}
+        authMode={authMode}
+        authIsAdmin={authIsAdmin}
+        themePreference={themePreference}
+        resolvedTheme={resolvedTheme}
+        bisqueNavLinks={bisqueNavLinks}
+        onThemePreferenceChange={setThemePreference}
+        onOpenResources={openResourcesPanel}
+        onOpenTraining={openTrainingPanel}
+        onOpenAdmin={openAdminPanel}
+        onLogout={logoutBisque}
+      />
 
       <SidebarInset ref={sidebarInsetRef}>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -13651,25 +14116,57 @@ export function App() {
                             </Button>
                           </FileUploadTrigger>
                         </PromptInputAction>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          data-testid="composer-pro-mode-toggle"
-                          data-active={isProModeComposerActive ? "true" : "false"}
-                          aria-pressed={isProModeComposerActive}
-                          aria-label={isProModeComposerActive ? "Disable Pro Mode" : "Enable Pro Mode"}
-                          className="app-composer-mode-button composer-pro-button"
-                          disabled={!activeConversationHydrated}
-                          onClick={handleToggleComposerProMode}
-                        >
-                          <span className="composer-pro-button-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" className="size-3.5 fill-current" focusable="false">
-                              <path d="M13.1 2.6a1 1 0 0 0-1.83-.14l-5.4 9.62a1 1 0 0 0 .88 1.49h4.07l-1.92 7.02a1 1 0 0 0 1.83.8l7.34-11.4a1 1 0 0 0-.84-1.54h-4.42l.29-4.82a1 1 0 0 0 0-.03Z" />
-                            </svg>
-                          </span>
-                          <span>Pro</span>
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              data-testid="composer-intelligence-selector"
+                              aria-label={`Intelligence: ${
+                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                              }`}
+                              className="app-composer-intelligence-trigger"
+                              disabled={!activeConversationHydrated}
+                            >
+                              <span>
+                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                              </span>
+                              <ChevronDown data-icon="inline-end" aria-hidden="true" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="end"
+                            sideOffset={8}
+                            className="app-composer-intelligence-menu"
+                          >
+                            <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
+                            <DropdownMenuGroup>
+                              <DropdownMenuItem
+                                data-active={
+                                  activeComposerIntelligenceMode === "high" ? "true" : undefined
+                                }
+                                onClick={() => handleSelectComposerIntelligenceMode("high")}
+                              >
+                                <span>High</span>
+                                {activeComposerIntelligenceMode === "high" ? (
+                                  <Check data-icon="inline-end" aria-hidden="true" />
+                                ) : null}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                data-active={
+                                  activeComposerIntelligenceMode === "pro" ? "true" : undefined
+                                }
+                                onClick={() => handleSelectComposerIntelligenceMode("pro")}
+                              >
+                                <span>Pro</span>
+                                {activeComposerIntelligenceMode === "pro" ? (
+                                  <Check data-icon="inline-end" aria-hidden="true" />
+                                ) : null}
+                              </DropdownMenuItem>
+                            </DropdownMenuGroup>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                       <div className="app-composer-actions-end">
                         {activeSending ? (

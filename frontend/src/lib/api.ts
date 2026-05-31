@@ -963,32 +963,6 @@ export class ApiClient {
     return (await response.json()) as BisqueAuthSessionResponse;
   }
 
-  getBisqueOidcStartUrl(redirectUrl?: string): string {
-    const params: Record<string, string> = {};
-    const normalizedRedirect = String(redirectUrl ?? "").trim();
-    if (normalizedRedirect) {
-      params.next = normalizedRedirect;
-    }
-    return buildUrl(
-      this.baseUrl,
-      "/v1/auth/oidc/start",
-      Object.keys(params).length > 0 ? params : undefined
-    );
-  }
-
-  getBisqueBrowserLogoutUrl(redirectUrl?: string): string {
-    const params: Record<string, string> = {};
-    const normalizedRedirect = String(redirectUrl ?? "").trim();
-    if (normalizedRedirect) {
-      params.next = normalizedRedirect;
-    }
-    return buildUrl(
-      this.baseUrl,
-      "/v1/auth/logout/browser",
-      Object.keys(params).length > 0 ? params : undefined
-    );
-  }
-
   async loginBisque(payload: BisqueAuthLoginRequest): Promise<BisqueAuthSessionResponse> {
     const response = await fetch(buildUrl(this.baseUrl, "/v1/auth/login"), {
       method: "POST",

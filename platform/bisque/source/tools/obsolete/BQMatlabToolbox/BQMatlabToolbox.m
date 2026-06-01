@@ -40,12 +40,12 @@ BQMT.listTag=uicontrol('Parent',BQMT.panelIB,'Style','listbox','Units',BQMT.unit
     'Max',1000,'Min',1);
 BQMT.checkboxShowTag=uicontrol('Parent',BQMT.panelIB,'Style','checkbox','Units',BQMT.units,...
     'Position',[5 185 100 15],'String','Show Tags','Value',0);
-    
-%'Position',[5 45 240 20],'String','http://bodzio.ece.ucsb.edu:8080',...    
+
+%'Position',[5 45 240 20],'String','https://bisque.example.org',...
 BQMT.panelSS=uipanel('Parent',BQMT.figure,'Units',BQMT.units,...
     'Position',[5 455 250 85],'Title','Server Settings');
 BQMT.editServer=uicontrol('Parent',BQMT.panelSS,'Style','edit','Units',BQMT.units,...
-    'Position',[5 45 240 20],'String','http://bodzio.ece.ucsb.edu:8080',...
+    'Position',[5 45 240 20],'String','https://bisque.example.org',...
     'BackgroundColor','white', 'HorizontalAlignment','left');
 BQMT.textPassword=uicontrol('Parent',BQMT.panelSS,'Style','text','Units',BQMT.units,...
       'Position',[5 5 100 15],'String','Password:', 'HorizontalAlignment','right');
@@ -82,7 +82,7 @@ if nargout>0
 uiwait(BQMT.figure);
 end
 %% Outputs
-mOutputArgs     =   {}; 
+mOutputArgs     =   {};
 mOutputArgs{1} = BQMT.Image;
 if nargout>0
     [varargout{1:nargout}] = mOutputArgs{:};
@@ -120,7 +120,7 @@ function BQMTSelectImage(obj,event)
         %ImageID = BQMT.SelectedIDname{BQMT.SelectedIDix(1)};
         %ImageID = char(BQMT.SearchListJ.get(BQMT.SelectedIDix(1)-1))
         %BQAuthorization.setAuthorization(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));
-        %T = uint8(BQThumbnail.getImage(ImageID, 100,100));   
+        %T = uint8(BQThumbnail.getImage(ImageID, 100,100));
         BQMTShowThumbnails()
     end
 end
@@ -129,15 +129,15 @@ function BQMTShowThumbnails()
     import bisque.*
 	BQ = BQMatlab;
     BQ.initServers(get(BQMT.editServer,'String'),get(BQMT.editServer,'String'));
-    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));    
+    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));
     set(BQMT.textProcess,'String','Uploading'); pause(0.001);
     BQMT.SelectedIDname = get(BQMT.listIL,'String');
     BQMT.SelectedIDix = get(BQMT.listIL,'Value');
     ImageID = char(BQMT.SearchListJ.get(BQMT.SelectedIDix(1)-1));
 
-    T = uint8(BQ.loadThumbnailData(ImageID, 100,100));        
+    T = uint8(BQ.loadThumbnailData(ImageID, 100,100));
     axes(BQMT.axesIB(1));
-    imagesc(T); axis image;    
+    imagesc(T); axis image;
     set(BQMT.axesIB(1),'XTick',[],'YTick',[]);
 
     BQMTGetTags(ImageID);
@@ -148,7 +148,7 @@ function BQMTDownloadImage(obj,event)
     import bisque.*
 	BQ = BQMatlab;
     BQ.initServers(get(BQMT.editServer,'String'),get(BQMT.editServer,'String'));
-    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));       
+    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));
     BQMT.SelectedIDname = get(BQMT.listIL,'String');
     BQMT.SelectedIDix = get(BQMT.listIL,'Value');
     if isempty(BQMT.SelectedIDname)
@@ -162,8 +162,8 @@ function BQMTDownloadImage(obj,event)
         %ImageSRC = char(BQImage.getImageURL(ImageID));
         %ThumbnailURL = [ImageSRC '?remap=display&slice=,,1,1&resize=100,100&format=raw'];
         image_ = BQ.loadImage(ImageID);
-        BQMT.Image = uint8(BQ.loadImageData(image_)); 
-        %BQMT.Image = BQImage.getImage(ImageID); 
+        BQMT.Image = uint8(BQ.loadImageData(image_));
+        %BQMT.Image = BQImage.getImage(ImageID);
         %figure, imagesc(IM)
         %save(['tmp.mat'], 'IM');
     end
@@ -185,8 +185,8 @@ function BQMTGetTags(URL)
     import bisque.*
 	BQ = BQMatlab;
     BQ.initServers(get(BQMT.editServer,'String'),get(BQMT.editServer,'String'));
-    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));    
-    
+    BQ.login(get(BQMT.editUser,'String'), get(BQMT.editPassword,'String'));
+
     if get(BQMT.checkboxShowTag,'Value')==1
         image_ = BQ.loadImage([URL '?view=full']);
         BQMT.TagListJ = image_.tags;

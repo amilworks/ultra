@@ -1,0 +1,1904 @@
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+import uuid
+from collections import Counter
+from pathlib import Path
+from typing import Any
+from urllib import parse, request
+
+
+class ControlPlaneClient:
+    def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+
+    def create_thread(self, *, title: str) -> dict[str, Any]:
+        payload = self._request("POST", "/v2/threads", {"title": title, "messages": []})
+        return _unwrap(payload, "thread")
+
+    def get_thread(self, thread_id: str) -> dict[str, Any]:
+        payload = self._request("GET", f"/v2/threads/{parse.quote(thread_id, safe='')}")
+        return _unwrap(payload, "thread")
+
+    def create_run(
+        self,
+        *,
+        thread_id: str,
+        goal: str,
+        messages: list[dict[str, str]],
+        idempotency_key: str,
+        file_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = self._request(
+            "POST",
+            f"/v2/threads/{parse.quote(thread_id, safe='')}/runs",
+            {
+                "goal": goal,
+                "messages": messages,
+                "idempotency_key": idempotency_key,
+                "file_ids": file_ids or [],
+            },
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        return _unwrap(payload, "run")
+
+    def upload_files(self, paths: list[str | Path]) -> list[str]:
+        files = [Path(path).expanduser().resolve() for path in paths]
+        if not files:
+            return []
+        payload = self._request_multipart("/v2/uploads", files)
+        uploaded = payload.get("uploaded", [])
+        if not isinstance(uploaded, list):
+            return []
+        file_ids: list[str] = []
+        for item in uploaded:
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("file_id") or "").strip()
+            if file_id:
+                file_ids.append(file_id)
+        return file_ids
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        return _unwrap(self._request("GET", f"/v2/runs/{parse.quote(run_id, safe='')}"), "run")
+
+    def list_thread_messages(self, thread_id: str) -> list[dict[str, Any]]:
+        payload = self._request(
+            "GET",
+            f"/v2/threads/{parse.quote(thread_id, safe='')}/messages",
+        )
+        messages = payload.get("messages", [])
+        return messages if isinstance(messages, list) else []
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any]:
+        payload = self._request("GET", f"/v2/artifacts/{parse.quote(artifact_id, safe='')}")
+        return _unwrap(payload, "artifact")
+
+    def list_run_events(self, run_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+        requested_limit = max(1, int(limit))
+        events: list[dict[str, Any]] = []
+        after_sequence = 0
+        while True:
+            payload = self._request(
+                "GET",
+                f"/v2/runs/{parse.quote(run_id, safe='')}/events"
+                f"?limit={requested_limit}&after_sequence={after_sequence}",
+            )
+            page = payload.get("events", [])
+            if not isinstance(page, list):
+                break
+            records = [event for event in page if isinstance(event, dict)]
+            events.extend(records)
+            next_after_sequence = max(
+                [after_sequence, *(_event_sequence(event) for event in records)]
+            )
+            if len(records) < requested_limit or next_after_sequence <= after_sequence:
+                break
+            after_sequence = next_after_sequence
+        return events
+
+    def list_run_artifacts(self, run_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        payload = self._request(
+            "GET",
+            f"/v2/runs/{parse.quote(run_id, safe='')}/artifacts?limit={limit}",
+        )
+        artifacts = payload.get("artifacts", [])
+        return artifacts if isinstance(artifacts, list) else []
+
+    def download_artifact(self, artifact_id: str) -> bytes:
+        path = f"/v2/artifacts/{parse.quote(artifact_id, safe='')}/download"
+        return self._request_bytes("GET", path)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        req = request.Request(f"{self.base_url}{path}", data=data, method=method)
+        req.add_header("Accept", "application/json")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Ultra-User-Id", "local-user")
+        req.add_header("X-Ultra-Org-Id", "local-org")
+        req.add_header("X-Ultra-Role", "researcher")
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+        return json.loads(body) if body else {}
+
+    def _request_bytes(self, method: str, path: str) -> bytes:
+        req = request.Request(f"{self.base_url}{path}", method=method)
+        req.add_header("X-Ultra-User-Id", "local-user")
+        req.add_header("X-Ultra-Org-Id", "local-org")
+        req.add_header("X-Ultra-Role", "researcher")
+        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+            return response.read()
+
+    def _request_multipart(self, path: str, files: list[Path]) -> dict[str, Any]:
+        boundary = f"----ultra-trace-{uuid.uuid4().hex}"
+        chunks: list[bytes] = []
+        for file_path in files:
+            data = file_path.read_bytes()
+            filename = file_path.name
+            chunks.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    (
+                        'Content-Disposition: form-data; name="files"; '
+                        f'filename="{_escape_multipart_filename(filename)}"\r\n'
+                    ).encode("utf-8"),
+                    f"Content-Type: {_content_type_for_path(file_path)}\r\n\r\n".encode(
+                        "utf-8"
+                    ),
+                    data,
+                    b"\r\n",
+                ]
+            )
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(chunks)
+        req = request.Request(f"{self.base_url}{path}", data=body, method="POST")
+        req.add_header("Accept", "application/json")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("X-Ultra-User-Id", "local-user")
+        req.add_header("X-Ultra-Org-Id", "local-org")
+        req.add_header("X-Ultra-Role", "researcher")
+        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+            response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+
+
+def build_followup_messages(
+    *,
+    prompt: str,
+    response_text: str,
+    followup: str,
+) -> list[dict[str, str]]:
+    return append_followup_messages(
+        [{"role": "user", "content": prompt}],
+        response_text=response_text,
+        followup=followup,
+    )
+
+
+def append_followup_messages(
+    transcript: list[dict[str, str]],
+    *,
+    response_text: str,
+    followup: str,
+) -> list[dict[str, str]]:
+    return [
+        *transcript,
+        {"role": "assistant", "content": response_text},
+        {"role": "user", "content": followup},
+    ]
+
+
+def artifact_download_urls(base_url: str, artifact_ids: list[str]) -> dict[str, str]:
+    root = base_url.rstrip("/")
+    return {
+        artifact_id: f"{root}/v2/artifacts/{parse.quote(artifact_id, safe='')}/download"
+        for artifact_id in artifact_ids
+    }
+
+
+def summarize_run_trace(
+    *,
+    run: dict[str, Any],
+    events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    accepted_ms: float | None = None,
+    first_event_ms: float | None = None,
+    first_backend_event_ms: float | None = None,
+    first_delta_ms: float | None = None,
+    first_tool_ms: float | None = None,
+    first_artifact_ms: float | None = None,
+    first_recovery_ms: float | None = None,
+    terminal_ms: float | None = None,
+    download_checks: dict[str, bool] | None = None,
+    linked_artifacts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    checks = download_checks or {}
+    event_counts = Counter(str(event.get("event_kind") or "") for event in events)
+    event_counts.pop("", None)
+    response_text = str(run.get("response_text") or "")
+    tool_names = _tool_names(events)
+    terminal_event = _terminal_event(events)
+    idle_recoveries = _idle_recoveries(events)
+    rarespot_configurations = _rarespot_configurations(events)
+    tool_capability_manifests = _tool_capability_manifests(events)
+    return {
+        "run_id": run.get("run_id"),
+        "thread_id": run.get("thread_id"),
+        "goal": run.get("goal"),
+        "status": run.get("status"),
+        "response_len": len(response_text),
+        "response_preview": _response_preview(response_text),
+        "response_tail": _response_tail(response_text),
+        "tool_names": tool_names,
+        "rarespot_configurations": rarespot_configurations,
+        "tool_capability_manifests": tool_capability_manifests,
+        "event_counts": dict(sorted(event_counts.items())),
+        "accepted_ms": _round_ms(accepted_ms),
+        "first_event_ms": _round_ms(first_event_ms),
+        "first_backend_event_ms": _round_ms(first_backend_event_ms),
+        "first_delta_ms": _round_ms(first_delta_ms),
+        "first_tool_ms": _round_ms(first_tool_ms),
+        "first_artifact_ms": _round_ms(first_artifact_ms),
+        "first_recovery_ms": _round_ms(first_recovery_ms),
+        "terminal_ms": _round_ms(terminal_ms),
+        "terminal_event_kind": terminal_event.get("event_kind") if terminal_event else None,
+        "terminal_event_sequence": _event_sequence(terminal_event) if terminal_event else None,
+        "idle_recovery_count": len(idle_recoveries),
+        "idle_recoveries": idle_recoveries,
+        "artifact_count": len(artifacts),
+        "artifacts": [_summarize_artifact(artifact, checks) for artifact in artifacts],
+        "linked_artifacts": linked_artifacts or [],
+    }
+
+
+def trace_prompt(
+    client: ControlPlaneClient,
+    *,
+    thread_id: str,
+    prompt: str,
+    messages: list[dict[str, str]] | None = None,
+    idempotency_key: str | None = None,
+    file_ids: list[str] | None = None,
+    timeout_seconds: float = 300.0,
+    poll_interval_seconds: float = 1.0,
+    verify_downloads: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    key = idempotency_key or f"trace-{uuid.uuid4().hex}"
+    accepted_started = time.monotonic()
+    run = client.create_run(
+        thread_id=thread_id,
+        goal=prompt,
+        messages=messages or [{"role": "user", "content": prompt}],
+        idempotency_key=key,
+        file_ids=file_ids,
+    )
+    accepted_ms = (time.monotonic() - accepted_started) * 1000
+    run_id = str(run["run_id"])
+    started = time.monotonic()
+    first_event_ms: float | None = None
+    first_backend_event_ms: float | None = None
+    first_delta_ms: float | None = None
+    first_tool_ms: float | None = None
+    first_artifact_ms: float | None = None
+    first_recovery_ms: float | None = None
+    terminal_ms: float | None = None
+    events: list[dict[str, Any]] = []
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed > timeout_seconds:
+            raise TimeoutError(f"run {run_id} did not finish within {timeout_seconds:.1f}s")
+        run = client.get_run(run_id)
+        events = client.list_run_events(run_id)
+        elapsed_ms = elapsed * 1000
+        if first_event_ms is None and events:
+            first_event_ms = elapsed_ms
+        if first_backend_event_ms is None and any(
+            event.get("event_kind") not in {"run.accepted", ""} for event in events
+        ):
+            first_backend_event_ms = elapsed_ms
+        if first_delta_ms is None and any(
+            event.get("event_kind") == "message.delta" for event in events
+        ):
+            first_delta_ms = elapsed_ms
+        if first_tool_ms is None and any(
+            str(event.get("event_kind") or "").startswith("tool_call.") for event in events
+        ):
+            first_tool_ms = elapsed_ms
+        if first_artifact_ms is None and any(
+            event.get("event_kind") == "artifact.created" for event in events
+        ):
+            first_artifact_ms = elapsed_ms
+        if first_recovery_ms is None and _idle_recoveries(events):
+            first_recovery_ms = elapsed_ms
+        if run.get("status") in {"succeeded", "failed", "canceled"}:
+            terminal_ms = elapsed_ms
+            break
+        time.sleep(poll_interval_seconds)
+    artifacts = client.list_run_artifacts(run_id)
+    downloads = _verify_downloads(client, artifacts) if verify_downloads else {}
+    linked_artifacts = (
+        _summarize_linked_artifacts(client, str(run.get("response_text") or ""))
+        if verify_downloads
+        else []
+    )
+    summary = summarize_run_trace(
+        run=run,
+        events=events,
+        artifacts=artifacts,
+        accepted_ms=accepted_ms,
+        first_event_ms=first_event_ms,
+        first_backend_event_ms=first_backend_event_ms,
+        first_delta_ms=first_delta_ms,
+        first_tool_ms=first_tool_ms,
+        first_artifact_ms=first_artifact_ms,
+        first_recovery_ms=first_recovery_ms,
+        terminal_ms=terminal_ms,
+        download_checks=downloads,
+        linked_artifacts=linked_artifacts,
+    )
+    return run, summary
+
+
+def run_trace(args: argparse.Namespace) -> dict[str, Any]:
+    client = ControlPlaneClient(args.base_url, timeout_seconds=args.http_timeout)
+    file_ids = client.upload_files(args.upload_file) if args.upload_file else []
+    thread = client.create_thread(title=args.title)
+    thread_id = str(thread["thread_id"])
+    transcript = [{"role": "user", "content": args.prompt}]
+    first_run, first_summary = trace_prompt(
+        client,
+        thread_id=thread_id,
+        prompt=args.prompt,
+        messages=transcript,
+        file_ids=file_ids,
+        timeout_seconds=args.timeout,
+        poll_interval_seconds=args.poll_interval,
+        verify_downloads=args.verify_downloads,
+    )
+    result: dict[str, Any] = {
+        "thread_id": thread_id,
+        "prompt": first_summary,
+    }
+    if file_ids:
+        result["uploaded_file_ids"] = file_ids
+    followups = _followup_prompts(args)
+    followup_summaries: list[dict[str, Any]] = []
+    previous_run = first_run
+    for followup in followups:
+        transcript = append_followup_messages(
+            transcript,
+            response_text=str(previous_run.get("response_text") or ""),
+            followup=followup,
+        )
+        previous_run, followup_summary = trace_prompt(
+            client,
+            thread_id=thread_id,
+            prompt=followup,
+            messages=transcript,
+            file_ids=file_ids,
+            timeout_seconds=args.timeout,
+            poll_interval_seconds=args.poll_interval,
+            verify_downloads=args.verify_downloads,
+        )
+        followup_summaries.append(followup_summary)
+    if followup_summaries:
+        result["followups"] = followup_summaries
+        result["followup"] = followup_summaries[-1]
+    try:
+        thread_record = client.get_thread(thread_id)
+        result["thread"] = summarize_thread_record(thread_record)
+        result["thread_messages"] = summarize_thread_messages(
+            client.list_thread_messages(thread_id)
+        )
+    except Exception as exc:
+        result["thread_error"] = str(exc)
+    return result
+
+
+def evaluate_trace_requirements(
+    result: dict[str, Any],
+    *,
+    min_artifacts: int = 0,
+    min_response_chars: int = 0,
+    require_downloads: bool = False,
+) -> list[str]:
+    issues: list[str] = []
+    for label, summary in _labeled_trace_turn_summaries(result):
+        run_id = str(summary.get("run_id") or "<unknown>")
+        status = summary.get("status")
+        if status != "succeeded":
+            issues.append(f"{label} run {run_id} status={status}, want succeeded")
+        response_len = int(summary.get("response_len") or 0)
+        if response_len < min_response_chars:
+            issues.append(
+                f"{label} run {run_id} response_len={response_len} "
+                f"below min_response_chars={min_response_chars}"
+            )
+        artifact_count = int(summary.get("artifact_count") or 0)
+        if artifact_count < min_artifacts:
+            issues.append(
+                f"{label} run {run_id} artifact_count={artifact_count} "
+                f"below min_artifacts={min_artifacts}"
+            )
+        if require_downloads:
+            artifacts = summary.get("artifacts") or []
+            if isinstance(artifacts, list):
+                for artifact in artifacts:
+                    if not isinstance(artifact, dict):
+                        continue
+                    if artifact.get("download_ok") is not False:
+                        continue
+                    artifact_id = artifact.get("artifact_id") or "<unknown>"
+                    issues.append(
+                        f"{label} run {run_id} artifact {artifact_id} "
+                        "download verification failed"
+                    )
+    return issues
+
+
+def _labeled_trace_turn_summaries(result: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    turns: list[tuple[str, dict[str, Any]]] = []
+    prompt = result.get("prompt")
+    if isinstance(prompt, dict):
+        turns.append(("prompt", prompt))
+
+    followups = result.get("followups")
+    if isinstance(followups, list):
+        turns.extend(
+            (f"followup[{index}]", followup)
+            for index, followup in enumerate(followups, start=1)
+            if isinstance(followup, dict)
+        )
+        return turns
+
+    followup = result.get("followup")
+    if isinstance(followup, dict):
+        turns.append(("followup", followup))
+    return turns
+
+
+def evaluate_paper_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 800 for turn in turns)
+    citations_ok = _turns_have_page_citations(turns)
+    tools_ok = _turns_have_paper_tools(turns)
+    figures_ok = _trace_has_figure_evidence(turns)
+    technical_ok = _trace_has_technical_content(turns)
+    followup_context_ok = len(turns) <= 1 or all(
+        _has_any_paper_tool(turn) for turn in turns[1:]
+    )
+    no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.5
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 1.0
+    else:
+        issues.append("one or more responses are too short for paper review")
+    if citations_ok:
+        score += 2.0
+    else:
+        issues.append("missing page-grounded citations")
+    if tools_ok:
+        score += 2.0
+    else:
+        issues.append("missing paper-tool evidence")
+    if figures_ok:
+        score += 1.0
+    else:
+        issues.append("missing rendered/downloadable figure evidence")
+    if technical_ok:
+        score += 1.5
+    else:
+        issues.append("missing technical/equation content")
+    if followup_context_ok:
+        score += 0.75
+    else:
+        issues.append("follow-ups did not use cached paper context")
+    if no_recoveries:
+        score += 0.25
+    else:
+        issues.append("run had idle recoveries")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "page_citations": citations_ok,
+            "paper_tools": tools_ok,
+            "figures": figures_ok,
+            "technical_content": technical_ok,
+            "followup_context": followup_context_ok,
+            "no_idle_recoveries": no_recoveries,
+        },
+    }
+
+
+def evaluate_rarespot_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+    expected_tile_size: int = 512,
+    expected_tile_overlap: float = 0.25,
+    expected_stride: int = 384,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 500 for turn in turns)
+    rare_tools_ok = _trace_has_rarespot_tool(turns)
+    detections_ok = _trace_mentions_detection_metrics(turns)
+    artifact_ok = _trace_has_rarespot_artifacts(turns)
+    comparative_ok = len(turns) < 2 or _trace_has_comparative_language(turns)
+    report_ok = len(turns) < 3 or _trace_has_report_language(turns[-1])
+    no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
+    no_stub_outputs = not _trace_has_stub_or_duplicate_rarespot_outputs(turns)
+    report_turns_avoid_inference = _report_only_rarespot_turns_avoid_inference(turns)
+    no_irrelevant_paper_tools = not _trace_has_paper_tools(turns)
+    expected_config_ok = _trace_rarespot_config_matches(
+        turns,
+        expected_tile_size=expected_tile_size,
+        expected_tile_overlap=expected_tile_overlap,
+        expected_stride=expected_stride,
+    )
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.5
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 1.0
+    else:
+        issues.append("one or more responses are too short for RareSpot analysis")
+    if rare_tools_ok:
+        score += 2.0
+    else:
+        issues.append("no RareSpot inference tool call was observed")
+    if detections_ok:
+        score += 1.5
+    else:
+        issues.append("missing quantitative detection metrics")
+    if artifact_ok:
+        score += 1.5
+    else:
+        issues.append("missing downloadable RareSpot image/csv/report artifacts")
+    if comparative_ok:
+        score += 1.0
+    else:
+        issues.append("follow-up did not compare inference runs")
+    if report_ok:
+        score += 1.0
+    else:
+        issues.append("final follow-up did not synthesize a combined report")
+    if no_recoveries:
+        score += 0.5
+    else:
+        issues.append("run had idle recoveries")
+    if not no_stub_outputs:
+        issues.append("response mentions stub or duplicate RareSpot outputs")
+    if not report_turns_avoid_inference:
+        issues.append("report-only RareSpot turn reran inference instead of using prior artifacts")
+    if not no_irrelevant_paper_tools:
+        issues.append("RareSpot trace used irrelevant paper tools")
+    if not expected_config_ok:
+        issues.append(
+            "RareSpot configuration did not match expected "
+            f"tile_size={expected_tile_size}, tile_overlap={expected_tile_overlap}, stride={expected_stride}"
+        )
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "rarespot_tool": rare_tools_ok,
+            "detection_metrics": detections_ok,
+            "artifacts": artifact_ok,
+            "comparative_followup": comparative_ok,
+            "combined_report": report_ok,
+            "no_idle_recoveries": no_recoveries,
+            "no_stub_outputs": no_stub_outputs,
+            "report_turns_avoid_inference": report_turns_avoid_inference,
+            "no_irrelevant_paper_tools": no_irrelevant_paper_tools,
+            "expected_configuration": expected_config_ok,
+        },
+    }
+
+
+def evaluate_tool_autonomy_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 500 for turn in turns)
+    code_execution_ok = _trace_has_tool(turns, {"execute"})
+    filesystem_ok = _trace_has_tool(
+        turns,
+        {
+            "read_file",
+            "write_file",
+            "edit_file",
+            "ls",
+            "glob",
+            "grep",
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        },
+    )
+    durable_outputs_ok = _trace_has_code_and_analysis_artifacts(turns)
+    downloads_ok = _trace_artifact_downloads_verified(turns)
+    followup_context_ok = _tool_autonomy_followups_use_prior_context(turns)
+    substantive_ok = _trace_has_autonomy_analysis_content(turns)
+    no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.5
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 1.0
+    else:
+        issues.append("one or more responses are too short for autonomous analysis")
+    if code_execution_ok:
+        score += 1.5
+    else:
+        issues.append("missing execute tool evidence")
+    if filesystem_ok:
+        score += 1.0
+    else:
+        issues.append("missing filesystem/context tool evidence")
+    if durable_outputs_ok:
+        score += 2.0
+    else:
+        issues.append("missing durable code plus analysis artifacts")
+    if downloads_ok:
+        score += 1.0
+    else:
+        issues.append("artifact download verification failed or was not captured")
+    if followup_context_ok:
+        score += 1.0
+    else:
+        issues.append("follow-ups did not inspect or stage prior context")
+    if substantive_ok:
+        score += 1.0
+    else:
+        issues.append("missing quantitative/reproducibility analysis content")
+    if no_recoveries:
+        score += 1.0
+    else:
+        issues.append("run had idle recoveries")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "code_execution": code_execution_ok,
+            "filesystem_tools": filesystem_ok,
+            "durable_outputs": durable_outputs_ok,
+            "downloaded_outputs": downloads_ok,
+            "followup_context": followup_context_ok,
+            "substantive_analysis": substantive_ok,
+            "no_idle_recoveries": no_recoveries,
+        },
+    }
+
+
+def evaluate_tool_capability_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    manifests = _trace_tool_capability_manifests(turns)
+    builtin_names = _manifest_builtin_tool_names(manifests)
+    registered_names = _manifest_registered_tool_names(manifests)
+    known_builtin_names = {
+        "execute",
+        "write_file",
+        "read_file",
+        "edit_file",
+        "ls",
+        "glob",
+        "grep",
+    }
+    declared_names = builtin_names | registered_names
+    allowed_without_manifest = known_builtin_names | TOOL_CAPABILITY_TOOL_NAMES
+    used_tool_names = {
+        str(tool_name)
+        for turn in turns
+        for tool_name in (turn.get("tool_names") or [])
+        if str(tool_name).strip()
+    }
+    missing_used_tools = sorted(
+        used_tool_names - declared_names - allowed_without_manifest
+    )
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    manifest_called = bool(manifests)
+    execute_declared = "execute" in builtin_names
+    filesystem_declared = {"write_file", "read_file", "ls"}.issubset(builtin_names)
+    context_tools_declared = bool(
+        {
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        }
+        & registered_names
+    )
+    storage_declared = any(
+        isinstance(manifest.get("storage"), dict)
+        and manifest["storage"].get("workspace") == "/workspace"
+        and manifest["storage"].get("outputs") == "/outputs"
+        for manifest in manifests
+    )
+    used_tools_declared = not missing_used_tools
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.0
+    else:
+        issues.append("one or more turns did not succeed")
+    if manifest_called:
+        score += 2.0
+    else:
+        issues.append("tool capability manifest was not called or captured")
+    if execute_declared:
+        score += 1.5
+    else:
+        issues.append("execute was not declared by any captured tool capability manifest")
+    if filesystem_declared:
+        score += 1.0
+    else:
+        issues.append("filesystem tools were not declared by any captured manifest")
+    if context_tools_declared:
+        score += 1.0
+    else:
+        issues.append("context/artifact staging tools were not declared by any captured manifest")
+    if storage_declared:
+        score += 1.5
+    else:
+        issues.append("workspace/output storage routes were not declared by any captured manifest")
+    if used_tools_declared:
+        score += 2.0
+    else:
+        issues.append(
+            "used tools were not declared in any captured manifest: "
+            + ", ".join(missing_used_tools)
+        )
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "manifest_called": manifest_called,
+            "execute_declared": execute_declared,
+            "filesystem_declared": filesystem_declared,
+            "context_tools_declared": context_tools_declared,
+            "storage_declared": storage_declared,
+            "used_tools_declared": used_tools_declared,
+        },
+    }
+
+
+def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    manifests = _trace_tool_capability_manifests(turns)
+    builtin_names = _manifest_builtin_tool_names(manifests)
+    registered_names = _manifest_registered_tool_names(manifests)
+    declared_names = builtin_names | registered_names | TOOL_CAPABILITY_TOOL_NAMES
+    all_used_tools = {
+        str(tool_name)
+        for turn in turns
+        for tool_name in (turn.get("tool_names") or [])
+        if str(tool_name).strip()
+    }
+    known_builtin_names = {
+        "execute",
+        "write_file",
+        "read_file",
+        "edit_file",
+        "ls",
+        "glob",
+        "grep",
+    }
+    storage_routes = [
+        manifest.get("storage")
+        for manifest in manifests
+        if isinstance(manifest.get("storage"), dict)
+    ]
+    outputs_declared = any(
+        storage.get("outputs") == "/outputs" for storage in storage_routes
+    )
+
+    capabilities = {
+        "sandbox_execution": {
+            "available": "execute" in builtin_names,
+            "used": "execute" in all_used_tools,
+        },
+        "filesystem": {
+            "available": bool({"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & builtin_names),
+            "used": bool({"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & all_used_tools),
+        },
+        "context_staging": {
+            "available": bool(_context_staging_tool_names() & registered_names),
+            "used": bool(_context_staging_tool_names() & all_used_tools),
+        },
+        "durable_outputs": {
+            "available": outputs_declared,
+            "used": bool(_trace_artifacts(turns)),
+        },
+        "paper_review": {
+            "available": bool(PAPER_TOOL_NAMES & registered_names),
+            "used": bool(PAPER_TOOL_NAMES & all_used_tools),
+        },
+        "rarespot_detection": {
+            "available": bool(RARESPOT_TOOL_NAMES & registered_names),
+            "used": bool(RARESPOT_TOOL_NAMES & all_used_tools),
+        },
+    }
+    turn_summaries: list[dict[str, Any]] = []
+    for index, turn in enumerate(turns):
+        turn_tools = {
+            str(tool_name)
+            for tool_name in (turn.get("tool_names") or [])
+            if str(tool_name).strip()
+        }
+        turn_summaries.append(
+            {
+                "run_id": turn.get("run_id"),
+                "status": turn.get("status"),
+                "tool_names": sorted(turn_tools),
+                "artifact_count": len(
+                    [
+                        raw
+                        for raw in [*(turn.get("artifacts") or []), *(turn.get("linked_artifacts") or [])]
+                        if isinstance(raw, dict)
+                    ]
+                ),
+                "capabilities": {
+                    "sandbox_execution": "execute" in turn_tools,
+                    "filesystem": bool(
+                        {"write_file", "read_file", "edit_file", "ls", "glob", "grep"}
+                        & turn_tools
+                    ),
+                    "context_staging": bool(_context_staging_tool_names() & turn_tools),
+                    "followup_context_reuse": index > 0
+                    and bool(
+                        {
+                            "artifact_manifest",
+                            "stage_artifact_for_analysis",
+                            "read_file",
+                            "grep",
+                            "glob",
+                            "ls",
+                        }
+                        & turn_tools
+                    ),
+                    "paper_review": bool(PAPER_TOOL_NAMES & turn_tools),
+                    "rarespot_detection": bool(RARESPOT_TOOL_NAMES & turn_tools),
+                },
+            }
+        )
+
+    return {
+        "turn_count": len(turns),
+        "manifest_count": len(manifests),
+        "declared_builtin_tools": sorted(builtin_names),
+        "declared_registered_tools": sorted(registered_names),
+        "used_tools": sorted(all_used_tools),
+        "unknown_tools": sorted(all_used_tools - declared_names - known_builtin_names),
+        "capabilities": capabilities,
+        "turns": turn_summaries,
+    }
+
+
+def evaluate_thread_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    messages = result.get("thread_messages")
+    thread = result.get("thread")
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+    if not isinstance(messages, dict):
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["thread messages were not captured"],
+            "turn_count": len(turns),
+        }
+
+    expected_roles = [
+        role for _turn in turns for role in ("user", "assistant")
+    ]
+    roles = [str(role) for role in messages.get("roles") or []]
+    run_ids = [str(run_id) for run_id in messages.get("run_ids") or []]
+    content_lengths = [
+        int(length or 0) for length in messages.get("content_lengths") or []
+    ]
+    turn_run_ids = [str(turn.get("run_id") or "") for turn in turns]
+
+    score = 0.0
+    if roles == expected_roles:
+        score += 2.0
+    else:
+        issues.append("thread transcript does not contain one user/assistant pair per turn")
+
+    if not any(role in {"tool", "system", "developer"} for role in roles):
+        score += 1.5
+    else:
+        issues.append("thread transcript contains tool/internal messages")
+
+    pair_run_ids_ok = True
+    missing_assistant_runs: list[str] = []
+    for index, run_id in enumerate(turn_run_ids):
+        user_index = 2 * index
+        assistant_index = user_index + 1
+        if (
+            assistant_index >= len(run_ids)
+            or assistant_index >= len(roles)
+            or roles[assistant_index] != "assistant"
+            or run_ids[assistant_index] != run_id
+        ):
+            pair_run_ids_ok = False
+            missing_assistant_runs.append(run_id or "<unknown>")
+            continue
+        if user_index >= len(run_ids) or run_ids[user_index] != run_id:
+            pair_run_ids_ok = False
+    if pair_run_ids_ok:
+        score += 2.0
+    else:
+        for run_id in missing_assistant_runs:
+            issues.append(f"assistant message missing for run {run_id}")
+        if not missing_assistant_runs:
+            issues.append("thread message run IDs do not match trace turn run IDs")
+
+    assistant_lengths = [
+        content_lengths[index]
+        for index, role in enumerate(roles)
+        if role == "assistant" and index < len(content_lengths)
+    ]
+    if len(assistant_lengths) == len(turns) and all(length > 0 for length in assistant_lengths):
+        score += 1.5
+    else:
+        issues.append("one or more assistant messages are empty")
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    if terminal_ok:
+        score += 1.0
+    else:
+        issues.append("one or more trace turns did not succeed")
+
+    latest_run_id = str(thread.get("latest_run_id") or "") if isinstance(thread, dict) else ""
+    final_run_id = turn_run_ids[-1] if turn_run_ids else ""
+    if latest_run_id == final_run_id:
+        score += 2.0
+    else:
+        issues.append("thread latest_run_id does not match final user-facing run")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "roles_alternate": roles == expected_roles,
+            "no_tool_messages": not any(
+                role in {"tool", "system", "developer"} for role in roles
+            ),
+            "run_ids_match": pair_run_ids_ok,
+            "assistant_messages_non_empty": len(assistant_lengths) == len(turns)
+            and all(length > 0 for length in assistant_lengths),
+            "terminal_ok": terminal_ok,
+            "latest_run_matches_final": latest_run_id == final_run_id,
+        },
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Trace a live Go/NATS/Deep Agents run.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--title", default="Deep Agents live trace")
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument(
+        "--followup",
+        action="append",
+        default=[],
+        help="Follow-up prompt to run after the initial prompt. Repeat for multi-turn traces.",
+    )
+    parser.add_argument(
+        "--upload-file",
+        action="append",
+        default=[],
+        help="Path to a local file to upload through /v2/uploads before creating the run.",
+    )
+    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--http-timeout", type=float, default=10.0)
+    parser.add_argument("--verify-downloads", action="store_true")
+    parser.add_argument("--require-downloads", action="store_true")
+    parser.add_argument("--min-artifacts", type=int, default=0)
+    parser.add_argument("--min-response-chars", type=int, default=0)
+    parser.add_argument("--paper-quality", action="store_true")
+    parser.add_argument("--require-paper-quality", action="store_true")
+    parser.add_argument("--min-paper-quality-score", type=float, default=8.5)
+    parser.add_argument("--rarespot-quality", action="store_true")
+    parser.add_argument("--require-rarespot-quality", action="store_true")
+    parser.add_argument("--min-rarespot-quality-score", type=float, default=8.5)
+    parser.add_argument("--tool-autonomy-quality", action="store_true")
+    parser.add_argument("--require-tool-autonomy-quality", action="store_true")
+    parser.add_argument("--min-tool-autonomy-quality-score", type=float, default=8.5)
+    parser.add_argument("--tool-capability-quality", action="store_true")
+    parser.add_argument("--require-tool-capability-quality", action="store_true")
+    parser.add_argument("--min-tool-capability-quality-score", type=float, default=8.5)
+    parser.add_argument("--capability-matrix", action="store_true")
+    parser.add_argument("--expected-rarespot-tile-size", type=int, default=512)
+    parser.add_argument("--expected-rarespot-tile-overlap", type=float, default=0.25)
+    parser.add_argument("--expected-rarespot-stride", type=int, default=384)
+    parser.add_argument("--thread-quality", action="store_true")
+    parser.add_argument("--require-thread-quality", action="store_true")
+    parser.add_argument("--min-thread-quality-score", type=float, default=8.5)
+    args = parser.parse_args(argv)
+    try:
+        result = run_trace(args)
+        issues = evaluate_trace_requirements(
+            result,
+            min_artifacts=args.min_artifacts,
+            min_response_chars=args.min_response_chars,
+            require_downloads=args.require_downloads,
+        )
+        if args.paper_quality or args.require_paper_quality:
+            paper_quality = evaluate_paper_trace_quality(
+                result,
+                min_score=args.min_paper_quality_score,
+            )
+            result["paper_quality"] = paper_quality
+            if args.require_paper_quality and not paper_quality["passed"]:
+                issues.extend(
+                    f"paper quality: {issue}" for issue in paper_quality["issues"]
+                )
+        if args.rarespot_quality or args.require_rarespot_quality:
+            rarespot_quality = evaluate_rarespot_trace_quality(
+                result,
+                min_score=args.min_rarespot_quality_score,
+                expected_tile_size=args.expected_rarespot_tile_size,
+                expected_tile_overlap=args.expected_rarespot_tile_overlap,
+                expected_stride=args.expected_rarespot_stride,
+            )
+            result["rarespot_quality"] = rarespot_quality
+            if args.require_rarespot_quality and not rarespot_quality["passed"]:
+                issues.extend(
+                    f"rarespot quality: {issue}" for issue in rarespot_quality["issues"]
+                )
+        if args.tool_autonomy_quality or args.require_tool_autonomy_quality:
+            tool_autonomy_quality = evaluate_tool_autonomy_trace_quality(
+                result,
+                min_score=args.min_tool_autonomy_quality_score,
+            )
+            result["tool_autonomy_quality"] = tool_autonomy_quality
+            if args.require_tool_autonomy_quality and not tool_autonomy_quality["passed"]:
+                issues.extend(
+                    f"tool autonomy quality: {issue}"
+                    for issue in tool_autonomy_quality["issues"]
+                )
+        if args.tool_capability_quality or args.require_tool_capability_quality:
+            tool_capability_quality = evaluate_tool_capability_trace_quality(
+                result,
+                min_score=args.min_tool_capability_quality_score,
+            )
+            result["tool_capability_quality"] = tool_capability_quality
+            if args.require_tool_capability_quality and not tool_capability_quality["passed"]:
+                issues.extend(
+                    f"tool capability quality: {issue}"
+                    for issue in tool_capability_quality["issues"]
+                )
+        if args.capability_matrix:
+            result["capability_matrix"] = build_tool_capability_matrix(result)
+        if args.thread_quality or args.require_thread_quality:
+            thread_quality = evaluate_thread_trace_quality(
+                result,
+                min_score=args.min_thread_quality_score,
+            )
+            result["thread_quality"] = thread_quality
+            if args.require_thread_quality and not thread_quality["passed"]:
+                issues.extend(
+                    f"thread quality: {issue}" for issue in thread_quality["issues"]
+                )
+        if issues:
+            result["issues"] = issues
+        print(json.dumps(result, indent=2, sort_keys=True))
+        if issues:
+            return 2
+    except Exception as exc:
+        print(json.dumps({"error": str(exc), "error_type": type(exc).__name__}, indent=2))
+        return 1
+    return 0
+
+
+def _unwrap(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    nested = payload.get(key)
+    return nested if isinstance(nested, dict) else payload
+
+
+def _followup_prompts(args: argparse.Namespace) -> list[str]:
+    raw = getattr(args, "followup", [])
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, list | tuple):
+        return [str(item) for item in raw if str(item).strip()]
+    return [str(raw)] if str(raw).strip() else []
+
+
+def _event_sequence(event: dict[str, Any]) -> int:
+    try:
+        return int(event.get("sequence") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _response_preview(response_text: str, max_chars: int = 4000) -> str:
+    normalized = response_text.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "…"
+
+
+def _response_tail(response_text: str, max_chars: int = 4000) -> str:
+    normalized = response_text.strip()
+    if len(normalized) <= max_chars:
+        return ""
+    return "…" + normalized[-(max_chars - 1) :].lstrip()
+
+
+def _tool_names(events: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for event in events:
+        if event.get("event_kind") != "tool_call.started":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        ).strip()
+        if tool_name:
+            names.append(tool_name)
+    return names
+
+
+def _rarespot_configurations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    configurations: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("event_kind") != "tool_call.completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
+        output_text = str(payload.get("output_preview") or payload.get("output") or "")
+        parsed = _json_object_from_text(output_text)
+        if not parsed:
+            continue
+        if tool_name and tool_name not in RARESPOT_TOOL_NAMES:
+            if "configuration" not in parsed:
+                continue
+        config = parsed.get("configuration")
+        if not isinstance(config, dict):
+            continue
+        normalized = _normalize_rarespot_configuration(config)
+        if normalized:
+            configurations.append(normalized)
+    return configurations
+
+
+def _tool_capability_manifests(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("event_kind") != "tool_call.completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
+        if tool_name not in TOOL_CAPABILITY_TOOL_NAMES:
+            continue
+        output_text = str(payload.get("output_preview") or payload.get("output") or "")
+        parsed = _json_object_from_text(output_text)
+        if not parsed:
+            continue
+        if "deepagents_builtin_tools" not in parsed or "registered_tools" not in parsed:
+            continue
+        manifests.append(parsed)
+    return manifests
+
+
+def _json_object_from_text(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    candidates = [stripped]
+    first = stripped.find("{")
+    last = stripped.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(stripped[first : last + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _normalize_rarespot_configuration(config: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    tile_size = _optional_int(config.get("tile_size"))
+    if tile_size is not None:
+        normalized["tile_size"] = tile_size
+    tile_overlap = _optional_float(config.get("tile_overlap"))
+    if tile_overlap is not None:
+        normalized["tile_overlap"] = tile_overlap
+    stride = _optional_int(config.get("stride"))
+    if stride is not None:
+        normalized["stride"] = stride
+    conf = _optional_float(config.get("conf"))
+    if conf is not None:
+        normalized["conf"] = conf
+    iou = _optional_float(config.get("iou"))
+    if iou is not None:
+        normalized["iou"] = iou
+    return normalized
+
+
+def _round_ms(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)
+
+
+def _terminal_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    terminal_events = [
+        event
+        for event in events
+        if event.get("event_kind") in {"run.completed", "run.failed", "run.canceled"}
+    ]
+    if not terminal_events:
+        return None
+    return max(terminal_events, key=_event_sequence)
+
+
+def _idle_recoveries(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recoveries: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("event_kind") != "trace.message.delta":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("reason") != "model_stream_idle":
+            continue
+        recoveries.append(
+            {
+                "recovery_index": _optional_int(payload.get("recovery_index")),
+                "timeout_seconds": _optional_float(payload.get("timeout_seconds")),
+                "sequence": _event_sequence(event),
+            }
+        )
+    return recoveries
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_artifact(
+    artifact: dict[str, Any],
+    download_checks: dict[str, bool],
+) -> dict[str, Any]:
+    artifact_id = str(artifact.get("artifact_id") or "")
+    return {
+        "artifact_id": artifact_id,
+        "kind": artifact.get("kind"),
+        "path": artifact.get("path"),
+        "mime_type": artifact.get("mime_type"),
+        "size_bytes": artifact.get("size_bytes"),
+        "download_ok": download_checks.get(artifact_id),
+    }
+
+
+def summarize_thread_record(thread: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "thread_id": thread.get("thread_id"),
+        "latest_run_id": thread.get("latest_run_id"),
+        "title": thread.get("title"),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def summarize_thread_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    roles: list[str] = []
+    run_ids: list[str] = []
+    content_lengths: list[int] = []
+    content_previews: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content") or "")
+        roles.append(str(message.get("role") or ""))
+        run_ids.append(str(message.get("run_id") or ""))
+        content_lengths.append(len(content))
+        content_previews.append(_response_preview(content, max_chars=240))
+    return {
+        "count": len(roles),
+        "roles": roles,
+        "run_ids": run_ids,
+        "content_lengths": content_lengths,
+        "content_previews": content_previews,
+    }
+
+
+def _trace_turn_summaries(result: dict[str, Any]) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    prompt = result.get("prompt")
+    if isinstance(prompt, dict):
+        turns.append(prompt)
+    followups = result.get("followups")
+    if isinstance(followups, list):
+        turns.extend(turn for turn in followups if isinstance(turn, dict))
+    else:
+        followup = result.get("followup")
+        if isinstance(followup, dict):
+            turns.append(followup)
+    return turns
+
+
+def _turn_text(turn: dict[str, Any]) -> str:
+    preview = str(turn.get("response_preview") or "")
+    tail = str(turn.get("response_tail") or "")
+    if tail and tail != preview:
+        return f"{preview}\n{tail}"
+    return preview
+
+
+def _trace_has_tool(turns: list[dict[str, Any]], names: set[str]) -> bool:
+    return any(
+        isinstance(turn.get("tool_names"), list)
+        and any(str(tool_name) in names for tool_name in turn.get("tool_names") or [])
+        for turn in turns
+    )
+
+
+def _trace_has_code_and_analysis_artifacts(turns: list[dict[str, Any]]) -> bool:
+    saw_code = False
+    saw_analysis_artifact = False
+    for artifact in _trace_artifacts(turns):
+        kind = str(artifact.get("kind") or "").lower()
+        path = str(artifact.get("path") or "").lower()
+        mime_type = str(artifact.get("mime_type") or "").lower()
+        if kind == "code" or path.endswith((".py", ".ipynb", ".r", ".jl")):
+            saw_code = True
+            continue
+        if (
+            kind in {"figure", "image", "table", "report", "model", "dataset"}
+            or mime_type.startswith("image/")
+            or mime_type in {"text/csv", "application/json", "text/markdown"}
+            or path.endswith((".png", ".jpg", ".jpeg", ".gif", ".csv", ".json", ".md", ".pth", ".pt"))
+        ):
+            saw_analysis_artifact = True
+    return saw_code and saw_analysis_artifact
+
+
+def _trace_artifact_downloads_verified(turns: list[dict[str, Any]]) -> bool:
+    artifacts = _trace_artifacts(turns)
+    return bool(artifacts) and all(artifact.get("download_ok") is True for artifact in artifacts)
+
+
+def _tool_autonomy_followups_use_prior_context(turns: list[dict[str, Any]]) -> bool:
+    if len(turns) <= 1:
+        return True
+    context_tools = {
+        "artifact_manifest",
+        "stage_artifact_for_analysis",
+        "read_file",
+        "grep",
+        "glob",
+        "ls",
+    }
+    for turn in turns[1:]:
+        tool_names = turn.get("tool_names") or []
+        if not isinstance(tool_names, list):
+            return False
+        if not any(str(tool_name) in context_tools for tool_name in tool_names):
+            return False
+    return True
+
+
+def _trace_has_autonomy_analysis_content(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns).lower()
+    patterns = [
+        r"\bmetric|auc|accuracy|precision|recall|f1|loss\b",
+        r"\bplot|figure|curve|matrix|visuali[sz]",
+        r"\btable|csv|json|artifact|saved|download",
+        r"\breproduc|seed|environment|rerun",
+        r"\blimitation|caveat|uncertainty",
+        r"\brecommend|next experiment|next step",
+        r"\bcompare|comparison|tradeoff|versus|vs\.",
+    ]
+    if sum(1 for pattern in patterns if re.search(pattern, combined)) >= 5:
+        return True
+
+    quantitative_math = bool(
+        re.search(
+            r"(?:\b\d+(?:\.\d+)?\b|\\\(.*?\\\)|\by\s*=|\bx\s*=|\bx\^|\by\^|"
+            r"\bdifference|range|endpoint|monotonic|quadratic|cubic|polynomial|growth)",
+            combined,
+        )
+    )
+    visual_explanation = bool(
+        re.search(r"\bplot|figure|curve|visuali[sz]|chart|image", combined)
+    )
+    durable_work = bool(
+        re.search(r"\bartifact|saved|download|code|source|script|outputs?/", combined)
+    )
+    interpretation = bool(
+        re.search(
+            r"\bdemonstrates?|shows?|observations?|comparison|changed|faster|"
+            r"slower|versus|tradeoff|limitation|caveat|reproduc|rerun",
+            combined,
+        )
+    )
+    return quantitative_math and visual_explanation and durable_work and interpretation
+
+
+def _trace_artifacts(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for turn in turns:
+        for raw in [*(turn.get("artifacts") or []), *(turn.get("linked_artifacts") or [])]:
+            if isinstance(raw, dict):
+                artifacts.append(raw)
+    return artifacts
+
+
+def _trace_tool_capability_manifests(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for turn in turns:
+        for raw in turn.get("tool_capability_manifests") or []:
+            if isinstance(raw, dict):
+                manifests.append(raw)
+    return manifests
+
+
+def _manifest_builtin_tool_names(manifests: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for manifest in manifests:
+        for raw in manifest.get("deepagents_builtin_tools") or []:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "").strip()
+            else:
+                name = str(raw or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _manifest_registered_tool_names(manifests: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for manifest in manifests:
+        for raw in manifest.get("registered_tools") or []:
+            name = str(raw or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _context_staging_tool_names() -> set[str]:
+    return {
+        "artifact_manifest",
+        "stage_artifact_for_analysis",
+        "stage_uploaded_files_for_analysis",
+    }
+
+
+def _turns_have_page_citations(turns: list[dict[str, Any]]) -> bool:
+    citation_pattern = re.compile(
+        r"(?:[A-Za-z0-9_.-]+:p\d+\b|\bp(?:age)?\.?\s*\d+\b)",
+        re.IGNORECASE,
+    )
+    return all(citation_pattern.search(_turn_text(turn)) for turn in turns)
+
+
+PAPER_TOOL_NAMES = {
+    "ingest_arxiv_paper",
+    "ingest_pdf_resource",
+    "paper_manifest",
+    "search_paper",
+    "read_paper_pages",
+    "read_paper_section",
+    "render_paper_page",
+}
+
+
+def _has_any_paper_tool(turn: dict[str, Any]) -> bool:
+    tool_names = turn.get("tool_names") or []
+    if not isinstance(tool_names, list):
+        return False
+    return any(str(name) in PAPER_TOOL_NAMES for name in tool_names)
+
+
+def _turns_have_paper_tools(turns: list[dict[str, Any]]) -> bool:
+    return all(_has_any_paper_tool(turn) for turn in turns)
+
+
+def _trace_has_paper_tools(turns: list[dict[str, Any]]) -> bool:
+    return any(_has_any_paper_tool(turn) for turn in turns)
+
+
+def _trace_has_figure_evidence(turns: list[dict[str, Any]]) -> bool:
+    for turn in turns:
+        artifacts = turn.get("artifacts") or []
+        if isinstance(artifacts, list):
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    continue
+                kind = str(artifact.get("kind") or "").lower()
+                mime_type = str(artifact.get("mime_type") or "").lower()
+                if (
+                    kind in {"figure", "image"}
+                    or mime_type.startswith("image/")
+                    or str(artifact.get("path") or "").lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+                ):
+                    if artifact.get("download_ok") is not False:
+                        return True
+        tool_names = turn.get("tool_names") or []
+        if isinstance(tool_names, list) and "render_paper_page" in tool_names:
+            return True
+    return False
+
+
+def _trace_has_technical_content(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns).lower()
+    technical_patterns = [
+        r"\\sqrt|sqrt|√",
+        r"\bd[_-]?k\b",
+        r"\bq\b.*\bk\b.*\bv\b|\bquery\b.*\bkey\b.*\bvalue\b",
+        r"softmax",
+        r"variance",
+        r"projection|concatenat|multi-head",
+        r"limitation|assumption",
+    ]
+    matches = sum(1 for pattern in technical_patterns if re.search(pattern, combined))
+    return matches >= 4
+
+
+RARESPOT_TOOL_NAMES = {"rarespot_ecology_inference"}
+TOOL_CAPABILITY_TOOL_NAMES = {"tool_capability_manifest"}
+
+
+def _trace_has_rarespot_tool(turns: list[dict[str, Any]]) -> bool:
+    for turn in turns:
+        tool_names = turn.get("tool_names") or []
+        if isinstance(tool_names, list) and any(
+            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
+        ):
+            return True
+    return False
+
+
+def _trace_mentions_detection_metrics(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns).lower()
+    patterns = [
+        r"prairie[_ -]?dog",
+        r"burrow",
+        r"detect",
+        r"confidence|conf(?:idence)? threshold",
+        r"\bcount|counts\b",
+    ]
+    return sum(1 for pattern in patterns if re.search(pattern, combined)) >= 4
+
+
+def _trace_has_rarespot_artifacts(turns: list[dict[str, Any]]) -> bool:
+    kinds_seen: set[str] = set()
+    for turn in turns:
+        artifacts = [
+            *(turn.get("artifacts") or []),
+            *(turn.get("linked_artifacts") or []),
+        ]
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            if artifact.get("download_ok") is False:
+                continue
+            kind = str(artifact.get("kind") or "").lower()
+            path = str(artifact.get("path") or "").lower()
+            mime_type = str(artifact.get("mime_type") or "").lower()
+            if kind:
+                kinds_seen.add(kind)
+            if path.endswith(".csv") or mime_type == "text/csv":
+                kinds_seen.add("csv")
+            if mime_type.startswith("image/") or path.endswith((".png", ".jpg", ".jpeg")):
+                kinds_seen.add("image")
+            if path.endswith(".md") or kind == "report":
+                kinds_seen.add("report")
+    return "image" in kinds_seen and "csv" in kinds_seen
+
+
+def _trace_has_stub_or_duplicate_rarespot_outputs(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns).lower()
+    for sentence in re.split(r"[\n\r.!?]+", combined):
+        if not re.search(
+            r"\bstub\b|local copies? of .*rarespot|"
+            r"\bduplicate\b[^.\n\r!?]{0,80}\b(output|artifact|file|copy|rarespot)\b",
+            sentence,
+        ):
+            continue
+        if re.search(
+            r"\b(no|not|never|without|avoid(?:ed|s)?|prevent(?:ed|s)?)\b"
+            r"[^.\n\r!?]{0,80}\b(stub|duplicate|local copies?)\b",
+            sentence,
+        ):
+            continue
+        return True
+    duplicate_path_patterns = (
+        "outputs/rarespot_summary.json",
+        "outputs/rarespot_detections.csv",
+    )
+    for turn in turns:
+        artifacts = turn.get("artifacts") or []
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = str(artifact.get("path") or "").lower()
+            if any(pattern in path for pattern in duplicate_path_patterns):
+                return True
+    return False
+
+
+def _trace_has_comparative_language(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns[1:]).lower()
+    return bool(re.search(r"compare|compared|difference|stricter|threshold|robust", combined))
+
+
+def _trace_has_report_language(turn: dict[str, Any]) -> bool:
+    text = _turn_text(turn).lower()
+    return bool(re.search(r"report|synthes|summary|limitation|next steps|recommend", text))
+
+
+def _report_only_rarespot_turns_avoid_inference(turns: list[dict[str, Any]]) -> bool:
+    for turn in turns:
+        goal = str(turn.get("goal") or "")
+        if not _looks_report_only_rarespot_goal(goal):
+            continue
+        tool_names = turn.get("tool_names") or []
+        if isinstance(tool_names, list) and any(
+            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
+        ):
+            return False
+    return True
+
+
+def _trace_rarespot_config_matches(
+    turns: list[dict[str, Any]],
+    *,
+    expected_tile_size: int,
+    expected_tile_overlap: float,
+    expected_stride: int,
+) -> bool:
+    saw_rarespot_turn = False
+    for turn in turns:
+        tool_names = turn.get("tool_names") or []
+        if not isinstance(tool_names, list) or not any(
+            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
+        ):
+            continue
+        saw_rarespot_turn = True
+        configurations = turn.get("rarespot_configurations") or []
+        if not isinstance(configurations, list) or not configurations:
+            return False
+        for config in configurations:
+            if not isinstance(config, dict):
+                return False
+            tile_size = _optional_int(config.get("tile_size"))
+            tile_overlap = _optional_float(config.get("tile_overlap"))
+            stride = _optional_int(config.get("stride"))
+            if tile_size != int(expected_tile_size):
+                return False
+            if tile_overlap is None or abs(tile_overlap - float(expected_tile_overlap)) > 1e-9:
+                return False
+            if stride != int(expected_stride):
+                return False
+    return saw_rarespot_turn
+
+
+def _looks_report_only_rarespot_goal(goal: str) -> bool:
+    text = " ".join(goal.lower().split())
+    if "rarespot" not in text:
+        return False
+    if not re.search(r"\b(write|compile|combine|combined|synthes|summari[sz]e|report)\b", text):
+        return False
+    explicit_new_run = re.search(
+        r"\b(run|rerun|execute|perform|launch)\b.{0,80}\b(rarespot|inference|detect|detection|pass)\b",
+        text,
+    ) or re.search(
+        r"\b(stricter|permissive|new|another)\b.{0,80}\b(threshold|confidence|inference|pass)\b",
+        text,
+    )
+    return not bool(explicit_new_run)
+
+
+def _verify_downloads(
+    client: ControlPlaneClient,
+    artifacts: list[dict[str, Any]],
+) -> dict[str, bool]:
+    checks: dict[str, bool] = {}
+    for artifact in artifacts:
+        artifact_id = str(artifact.get("artifact_id") or "")
+        if not artifact_id:
+            continue
+        try:
+            checks[artifact_id] = len(client.download_artifact(artifact_id)) > 0
+        except Exception:
+            checks[artifact_id] = False
+    return checks
+
+
+def _summarize_linked_artifacts(
+    client: ControlPlaneClient,
+    response_text: str,
+) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for artifact_id in _artifact_ids_from_text(response_text):
+        artifact: dict[str, Any] = {"artifact_id": artifact_id}
+        try:
+            artifact = {**artifact, **client.get_artifact(artifact_id)}
+        except Exception:
+            pass
+        try:
+            download_ok = len(client.download_artifact(artifact_id)) > 0
+        except Exception:
+            download_ok = False
+        artifact["download_ok"] = download_ok
+        summaries.append(_summarize_artifact(artifact, {artifact_id: download_ok}))
+    return summaries
+
+
+def _artifact_ids_from_text(text: str) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    href_text = re.sub(r"!?\[[^\]]*\]\(([^)]+)\)", r" \1 ", text)
+    for match in re.finditer(r"/v2/artifacts/([^/\]\)\s]+)/download", href_text):
+        artifact_id = parse.unquote(match.group(1))
+        if "..." in artifact_id or "…" in artifact_id:
+            continue
+        if artifact_id and artifact_id not in seen:
+            seen.add(artifact_id)
+            ids.append(artifact_id)
+    return ids
+
+
+def _content_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".gif":
+        return "image/gif"
+    if suffix == ".csv":
+        return "text/csv"
+    if suffix in {".txt", ".md"}:
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
+
+
+def _escape_multipart_filename(filename: str) -> str:
+    return filename.replace("\\", "\\\\").replace('"', '\\"')
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

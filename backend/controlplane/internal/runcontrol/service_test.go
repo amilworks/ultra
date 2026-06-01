@@ -2,6 +2,10 @@ package runcontrol
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +49,9 @@ func TestServiceCreateRunEmitsAcceptedAndDispatches(t *testing.T) {
 	if len(events) != 1 || events[0].EventKind != "run.accepted" {
 		t.Fatalf("events = %+v, want run.accepted", events)
 	}
+	if got, want := events[0].EventID, "evt_"+run.RunID+"_accepted"; got != want {
+		t.Fatalf("accepted event id = %q, want %q", got, want)
+	}
 
 	select {
 	case job := <-bus.Jobs():
@@ -54,4 +61,3072 @@ func TestServiceCreateRunEmitsAcceptedAndDispatches(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("expected dispatched job")
 	}
+}
+
+func TestServiceCreateRunRoutesRareSpotWorkflowAndPreservesInputMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "RareSpot thread",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:          thread.ThreadID,
+		UserID:            "user-1",
+		Goal:              "Run RareSpot ecology inference.",
+		Messages:          []domain.ThreadMessage{{Role: "user", Content: "Run RareSpot."}},
+		FileIDs:           []string{"file-1"},
+		ResourceURIs:      []string{"bisque://resource/abc"},
+		DatasetURIs:       []string{"bisque://dataset/def"},
+		SelectedToolNames: []string{"rarespot_ecology_inference"},
+		WorkflowHint:      domain.JSONMap{"id": "rarespot_ecology"},
+		KnowledgeContext:  domain.JSONMap{"active_paper": "arxiv:2509.26626"},
+		SelectionContext:  domain.JSONMap{"source": "sidebar"},
+		ReasoningMode:     "deep",
+		Budgets:           domain.JSONMap{"max_runtime_seconds": 1800},
+		Benchmark:         domain.JSONMap{"suite": "rarespot-smoke"},
+		Metadata:          domain.JSONMap{"existing": "kept"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	if run.WorkflowKind != "rarespot_ecology" {
+		t.Fatalf("workflow kind = %q, want rarespot_ecology", run.WorkflowKind)
+	}
+	if run.Metadata["existing"] != "kept" {
+		t.Fatalf("metadata existing = %v, want kept", run.Metadata["existing"])
+	}
+	if got := run.Metadata["file_ids"]; !sameStringSlice(got, []string{"file-1"}) {
+		t.Fatalf("metadata file_ids = %#v, want file-1", got)
+	}
+	if got := run.Metadata["resource_uris"]; !sameStringSlice(got, []string{"bisque://resource/abc"}) {
+		t.Fatalf("metadata resource_uris = %#v, want resource URI", got)
+	}
+	if got := run.Metadata["dataset_uris"]; !sameStringSlice(got, []string{"bisque://dataset/def"}) {
+		t.Fatalf("metadata dataset_uris = %#v, want dataset URI", got)
+	}
+	if got := run.Metadata["selected_tool_names"]; !sameStringSlice(got, []string{"rarespot_ecology_inference"}) {
+		t.Fatalf("metadata selected_tool_names = %#v, want RareSpot tool", got)
+	}
+	if workflow, ok := run.Metadata["workflow_hint"].(domain.JSONMap); !ok || workflow["id"] != "rarespot_ecology" {
+		t.Fatalf("metadata workflow_hint = %#v, want rarespot_ecology", run.Metadata["workflow_hint"])
+	}
+	if knowledge, ok := run.Metadata["knowledge_context"].(domain.JSONMap); !ok || knowledge["active_paper"] != "arxiv:2509.26626" {
+		t.Fatalf("metadata knowledge_context = %#v, want active paper", run.Metadata["knowledge_context"])
+	}
+	if run.Metadata["reasoning_mode"] != "deep" {
+		t.Fatalf("metadata reasoning_mode = %#v, want deep", run.Metadata["reasoning_mode"])
+	}
+	if benchmark, ok := run.Metadata["benchmark"].(domain.JSONMap); !ok || benchmark["suite"] != "rarespot-smoke" {
+		t.Fatalf("metadata benchmark = %#v, want rarespot smoke", run.Metadata["benchmark"])
+	}
+
+	select {
+	case job := <-bus.Jobs():
+		if job.WorkflowKind != "rarespot_ecology" {
+			t.Fatalf("job workflow kind = %q, want rarespot_ecology", job.WorkflowKind)
+		}
+		if len(job.Messages) != 1 || job.Messages[0].Content != "Run RareSpot." {
+			t.Fatalf("job messages = %+v, want full prompt context", job.Messages)
+		}
+		if got := job.FileIDs; !sameStringSlice(got, []string{"file-1"}) {
+			t.Fatalf("job file ids = %#v, want file-1", got)
+		}
+		if got := job.ResourceURIs; !sameStringSlice(got, []string{"bisque://resource/abc"}) {
+			t.Fatalf("job resource uris = %#v, want resource URI", got)
+		}
+		if got := job.DatasetURIs; !sameStringSlice(got, []string{"bisque://dataset/def"}) {
+			t.Fatalf("job dataset uris = %#v, want dataset URI", got)
+		}
+		if got := job.SelectedToolNames; !sameStringSlice(got, []string{"rarespot_ecology_inference"}) {
+			t.Fatalf("job selected tools = %#v, want RareSpot tool", got)
+		}
+		if job.SelectionContext["source"] != "sidebar" {
+			t.Fatalf("job selection context = %#v, want sidebar", job.SelectionContext)
+		}
+		if job.KnowledgeContext["active_paper"] != "arxiv:2509.26626" {
+			t.Fatalf("job knowledge context = %#v, want active paper", job.KnowledgeContext)
+		}
+		if job.ReasoningMode != "deep" {
+			t.Fatalf("job reasoning mode = %q, want deep", job.ReasoningMode)
+		}
+		if job.Benchmark["suite"] != "rarespot-smoke" {
+			t.Fatalf("job benchmark = %#v, want rarespot smoke", job.Benchmark)
+		}
+		if job.Budgets["max_runtime_seconds"] != 1800 {
+			t.Fatalf("job budgets = %#v, want runtime budget", job.Budgets)
+		}
+		if got := job.Metadata["selected_tool_names"]; !sameStringSlice(got, []string{"rarespot_ecology_inference"}) {
+			t.Fatalf("job metadata selected_tool_names = %#v, want RareSpot tool", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected dispatched RareSpot job")
+	}
+}
+
+func TestServiceRequeueRunPublishesExistingRunWithFreshDispatchID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover run",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:          thread.ThreadID,
+		UserID:            "user-1",
+		Goal:              "Continue a long analysis.",
+		Messages:          []domain.ThreadMessage{{Role: "user", Content: "Continue a long analysis."}},
+		FileIDs:           []string{"file-1"},
+		ResourceURIs:      []string{"resource://file-1"},
+		SelectedToolNames: []string{"python"},
+		KnowledgeContext:  domain.JSONMap{"paper_id": "arxiv:2509.26626"},
+		IdempotencyKey:    "recover-run-key",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_started",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.started",
+		Message:   "started",
+	}); err != nil {
+		t.Fatalf("IngestRunEvent started: %v", err)
+	}
+	drainRunEvents(bus)
+	messagesBefore, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages before: %v", err)
+	}
+
+	requeued, err := service.RequeueRun(ctx, RequeueRunRequest{
+		RunID:  run.RunID,
+		Reason: "lease expired",
+	})
+	if err != nil {
+		t.Fatalf("RequeueRun: %v", err)
+	}
+	if requeued.RunID != run.RunID || requeued.Status != domain.RunStatusRunning {
+		t.Fatalf("requeued run = %+v, want same running run", requeued)
+	}
+
+	select {
+	case job := <-bus.Jobs():
+		if job.RunID != run.RunID || job.ThreadID != thread.ThreadID || job.UserID != "user-1" {
+			t.Fatalf("job identity = %+v, want original run/thread/user", job)
+		}
+		if job.DispatchID == "" {
+			t.Fatalf("job dispatch id is empty; explicit requeue must bypass JetStream job:<run_id> dedupe")
+		}
+		if job.Goal != "Continue a long analysis." || len(job.Messages) != 1 || job.Messages[0].Content != "Continue a long analysis." {
+			t.Fatalf("job context = %+v, want original prompt context", job)
+		}
+		if got := job.Metadata["requeue_reason"]; got != "lease expired" {
+			t.Fatalf("job metadata requeue_reason = %#v, want lease expired", got)
+		}
+		if got := job.Metadata["idempotency_key"]; got != "recover-run-key" {
+			t.Fatalf("job metadata idempotency_key = %#v, want original key", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected requeued job")
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventKind != "run.requeued" || event.RunID != run.RunID {
+			t.Fatalf("event = %+v, want run.requeued for run", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected requeued event fanout")
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if events[len(events)-1].EventKind != "run.requeued" {
+		t.Fatalf("last event = %+v, want run.requeued", events[len(events)-1])
+	}
+	messagesAfter, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages after: %v", err)
+	}
+	if len(messagesAfter) != len(messagesBefore) {
+		t.Fatalf("thread messages grew from %d to %d; requeue must not duplicate prompts", len(messagesBefore), len(messagesAfter))
+	}
+}
+
+func TestServiceRequeueRunEvictsActiveLeaseForImmediateRecovery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover leased run",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Continue a leased long analysis.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Continue a leased long analysis."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	lease, err := service.AcquireRunLease(ctx, AcquireRunLeaseRequest{
+		RunID:    run.RunID,
+		WorkerID: "worker-a",
+		TTL:      time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease: %v", err)
+	}
+
+	if _, err := service.RequeueRun(ctx, RequeueRunRequest{
+		RunID:  run.RunID,
+		Reason: "stale worker heartbeat",
+	}); err != nil {
+		t.Fatalf("RequeueRun: %v", err)
+	}
+
+	if _, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID:      run.RunID,
+		LeaseToken: lease.LeaseToken,
+		TTL:        time.Hour,
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("RenewRunLease with evicted token err = %v, want ErrConflict", err)
+	}
+	replacement, err := service.AcquireRunLease(ctx, AcquireRunLeaseRequest{
+		RunID:    run.RunID,
+		WorkerID: "worker-b",
+		TTL:      time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease replacement: %v", err)
+	}
+	if replacement.WorkerID != "worker-b" {
+		t.Fatalf("replacement lease = %+v, want worker-b", replacement)
+	}
+	drainJobs(bus)
+	event := <-bus.Events()
+	if event.EventKind != "run.requeued" {
+		t.Fatalf("event kind = %s, want run.requeued", event.EventKind)
+	}
+	if event.Payload["evicted_lease_worker_id"] != "worker-a" {
+		t.Fatalf("event payload = %+v, want evicted lease worker", event.Payload)
+	}
+}
+
+func TestServiceRequeueRunRejectsTerminalRuns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "terminal"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Finish.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Finish."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "done"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	_, err = service.RequeueRun(ctx, RequeueRunRequest{RunID: run.RunID, Reason: "operator retry"})
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("RequeueRun terminal err = %v, want ErrConflict", err)
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected job for terminal requeue: %+v", job)
+	default:
+	}
+}
+
+func TestServiceIngestRunHeartbeatMarksRunRunning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Heartbeat thread",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "long silent compute",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long silent compute"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	event, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-heartbeat-1",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.heartbeat",
+		EventType: "run",
+		NodeName:  "worker",
+		Level:     "info",
+		Message:   "Worker heartbeat.",
+		Payload:   domain.JSONMap{"status": "alive"},
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent heartbeat: %v", err)
+	}
+	if event.EventKind != "run.heartbeat" {
+		t.Fatalf("event kind = %s, want run.heartbeat", event.EventKind)
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusRunning {
+		t.Fatalf("status = %s, want running", updated.Status)
+	}
+	if updated.StartedAt == nil {
+		t.Fatalf("heartbeat should initialize StartedAt")
+	}
+}
+
+func TestServiceRecoverExpiredRunLeasesRequeuesOnlyExpiredLeases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover expired leases",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	expiredRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "expired long analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "expired long analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun expired: %v", err)
+	}
+	activeRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "active long analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "active long analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun active: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	expiredLease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    expiredRun.RunID,
+		WorkerID: "worker-expired",
+		TTL:      time.Minute,
+		Now:      now.Add(-2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease expired: %v", err)
+	}
+	activeLease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    activeRun.RunID,
+		WorkerID: "worker-active",
+		TTL:      time.Hour,
+		Now:      now,
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease active: %v", err)
+	}
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:    now,
+		Reason: "automatic expired lease recovery",
+		Limit:  100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if result.Checked != 2 {
+		t.Fatalf("checked = %d, want 2", result.Checked)
+	}
+	if len(result.RequeuedRuns) != 1 || result.RequeuedRuns[0].RunID != expiredRun.RunID {
+		t.Fatalf("requeued runs = %+v, want only expired run", result.RequeuedRuns)
+	}
+	if _, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID:      expiredRun.RunID,
+		LeaseToken: expiredLease.LeaseToken,
+		TTL:        time.Hour,
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("RenewRunLease expired old token err = %v, want ErrConflict", err)
+	}
+	if _, err := mem.RenewRunLease(ctx, domain.RenewRunLeaseInput{
+		RunID:      activeRun.RunID,
+		LeaseToken: activeLease.LeaseToken,
+		TTL:        time.Hour,
+		Now:        now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("RenewRunLease active token: %v", err)
+	}
+	requeuedJobs := 0
+	for {
+		select {
+		case job := <-bus.Jobs():
+			if job.RunID == expiredRun.RunID && job.DispatchID != "" {
+				requeuedJobs++
+			}
+			if job.RunID == activeRun.RunID {
+				t.Fatalf("active run was requeued: %+v", job)
+			}
+		default:
+			if requeuedJobs != 1 {
+				t.Fatalf("requeued jobs = %d, want 1", requeuedJobs)
+			}
+			return
+		}
+	}
+}
+
+func TestServiceIngestRunEventUpdatesLifecycleAndArtifacts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "ingest"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "ingest",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "ingest"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-start",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.started",
+		Payload:   domain.JSONMap{"status": "running"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent started: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-artifact",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		Message:   "Report",
+		Payload: domain.JSONMap{
+			"artifact_id": "artifact-python",
+			"kind":        "report",
+			"path":        "outputs/report.md",
+			"title":       "Report",
+			"mime_type":   "text/markdown",
+			"size_bytes":  42,
+			"sha256":      "abc123",
+			"tool_name":   "save_report_output",
+			"output_id":   "out-report",
+		},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent artifact: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-complete",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Message:   "done",
+		Payload:   domain.JSONMap{"response_text": "done"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded || updated.ResponseText != "done" {
+		t.Fatalf("updated run = %+v, want succeeded with response text", updated)
+	}
+	artifacts, err := mem.ListRunArtifacts(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunArtifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Path != "outputs/report.md" {
+		t.Fatalf("artifacts = %+v, want ingested artifact", artifacts)
+	}
+	if artifacts[0].ArtifactID != "artifact-python" {
+		t.Fatalf("artifact id = %q, want Python artifact id", artifacts[0].ArtifactID)
+	}
+	if artifacts[0].Metadata["output_id"] != "out-report" {
+		t.Fatalf("artifact metadata = %+v, want output id preserved", artifacts[0].Metadata)
+	}
+}
+
+func TestServiceIngestRunCompletedPersistsAssistantMessageOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "completed transcript"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Create a durable report.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Create a durable report."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+
+	completed := domain.AppendRunEventInput{
+		EventID:   "evt-completed-transcript",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "The durable report is ready."},
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent duplicate completed: %v", err)
+	}
+
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if got, want := len(messages), 2; got != want {
+		t.Fatalf("persisted messages = %d, want %d: %+v", got, want, messages)
+	}
+	if messages[0].Role != "user" || messages[0].RunID != run.RunID {
+		t.Fatalf("user message = %+v, want run-owned user message", messages[0])
+	}
+	if messages[1].Role != "assistant" || messages[1].Content != "The durable report is ready." || messages[1].RunID != run.RunID {
+		t.Fatalf("assistant message = %+v, want completed response owned by run %s", messages[1], run.RunID)
+	}
+}
+
+func TestServiceIngestRunEventIsIdempotentForDuplicateWorkerEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "duplicate events"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "duplicate events",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-artifact",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		Message:   "Plot",
+		Payload: domain.JSONMap{
+			"artifact_id": "artifact-python",
+			"kind":        "figure",
+			"path":        "outputs/plot.png",
+			"title":       "Plot",
+			"mime_type":   "image/png",
+			"size_bytes":  123,
+			"sha256":      "abc123",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("IngestRunEvent first: %v", err)
+	}
+	drainRunEvents(bus)
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("IngestRunEvent duplicate: %v", err)
+	}
+
+	events, err := mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	var artifactEvents int
+	for _, event := range events {
+		if event.EventID == "evt-artifact" {
+			artifactEvents++
+		}
+	}
+	if artifactEvents != 1 {
+		t.Fatalf("artifact event count = %d, want 1; events=%+v", artifactEvents, events)
+	}
+	artifacts, err := mem.ListRunArtifacts(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunArtifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ArtifactID != "artifact-python" {
+		t.Fatalf("artifacts = %+v, want one Python artifact", artifacts)
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt-artifact" || event.EventKind != "artifact.created" {
+			t.Fatalf("duplicate fanout event = %+v, want original artifact event", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected duplicate event to retry fanout with same event id")
+	}
+}
+
+func TestServiceIngestDuplicateArtifactEventWithoutArtifactIDCreatesOneArtifact(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "artifact replay"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "artifact replay",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-artifact-no-id",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		Message:   "Plot without artifact id",
+		Payload: domain.JSONMap{
+			"kind":       "figure",
+			"path":       "outputs/plot.png",
+			"title":      "Plot",
+			"mime_type":  "image/png",
+			"size_bytes": 123,
+			"sha256":     "abc123",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("IngestRunEvent first: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("IngestRunEvent duplicate: %v", err)
+	}
+
+	artifacts, err := mem.ListRunArtifacts(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunArtifacts: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %+v, want one artifact after duplicate event replay", artifacts)
+	}
+	if artifacts[0].ArtifactID != "artifact_evt-artifact-no-id" {
+		t.Fatalf("artifact id = %q, want deterministic event-derived id", artifacts[0].ArtifactID)
+	}
+}
+
+func TestServiceIngestRunEventSerializesConcurrentDuplicateEventIDs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	serviceStore := &duplicateEventRaceStore{
+		MemoryStore: base,
+		targetID:    "evt-concurrent-duplicate",
+		ready:       make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	service := NewService(serviceStore, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "duplicate race"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "duplicate race",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	input := domain.AppendRunEventInput{
+		EventID:   serviceStore.targetID,
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "message.delta",
+		Message:   "duplicate",
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := service.IngestRunEvent(ctx, input)
+			errs <- err
+		}()
+	}
+	select {
+	case <-serviceStore.ready:
+	case <-time.After(time.Second):
+		t.Fatalf("duplicate ingest calls did not reach the race barrier")
+	}
+	close(serviceStore.release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("IngestRunEvent concurrent duplicate: %v", err)
+		}
+	}
+
+	events, err := base.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	duplicates := 0
+	for _, event := range events {
+		if event.EventID == serviceStore.targetID {
+			duplicates++
+		}
+	}
+	if duplicates != 1 {
+		t.Fatalf("stored duplicate event count = %d, want 1; events=%+v", duplicates, events)
+	}
+}
+
+func TestServiceIngestDuplicateHeartbeatDoesNotRegressTerminalRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "heartbeat replay"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "heartbeat replay",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	heartbeat := domain.AppendRunEventInput{
+		EventID:   "evt-heartbeat-before-terminal",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.heartbeat",
+		Message:   "still working",
+	}
+	if _, err := service.IngestRunEvent(ctx, heartbeat); err != nil {
+		t.Fatalf("IngestRunEvent heartbeat: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-terminal-after-heartbeat",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "done"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	drainRunEvents(bus)
+
+	if _, err := service.IngestRunEvent(ctx, heartbeat); err != nil {
+		t.Fatalf("IngestRunEvent duplicate heartbeat: %v", err)
+	}
+
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded {
+		t.Fatalf("run status = %s, want succeeded after duplicate pre-terminal heartbeat", updated.Status)
+	}
+	if updated.ResponseText != "done" {
+		t.Fatalf("response text = %q, want terminal response text", updated.ResponseText)
+	}
+}
+
+func TestServiceIngestDuplicateEventUsesStoredEventForSideEffects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "duplicate collision"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "duplicate collision",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	storedInput := domain.AppendRunEventInput{
+		EventID:   "evt-terminal",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "verified answer"},
+	}
+	if _, err := service.IngestRunEvent(ctx, storedInput); err != nil {
+		t.Fatalf("IngestRunEvent stored: %v", err)
+	}
+	drainRunEvents(bus)
+
+	mutatedReplay := domain.AppendRunEventInput{
+		EventID:   "evt-terminal",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.failed",
+		Message:   "mutated replay should not win",
+		Payload:   domain.JSONMap{"error": "mutated replay should not corrupt status"},
+	}
+	if _, err := service.IngestRunEvent(ctx, mutatedReplay); err != nil {
+		t.Fatalf("IngestRunEvent duplicate replay: %v", err)
+	}
+
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded {
+		t.Fatalf("run status = %s, want succeeded from stored event", updated.Status)
+	}
+	if updated.ResponseText != "verified answer" {
+		t.Fatalf("response text = %q, want stored completed response", updated.ResponseText)
+	}
+	if updated.Error != "" {
+		t.Fatalf("run error = %q, want no error from mutated duplicate payload", updated.Error)
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt-terminal" || event.EventKind != "run.completed" {
+			t.Fatalf("duplicate fanout event = %+v, want stored completed event", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected duplicate replay to fan out stored event")
+	}
+}
+
+func TestServiceIngestDuplicateArtifactEventDoesNotTrustMutatedReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "artifact replay"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "artifact replay",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	storedInput := domain.AppendRunEventInput{
+		EventID:   "evt-artifact",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		Message:   "Good plot",
+		Payload: domain.JSONMap{
+			"artifact_id": "artifact-good",
+			"kind":        "figure",
+			"path":        "outputs/good.png",
+			"title":       "Good plot",
+			"mime_type":   "image/png",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, storedInput); err != nil {
+		t.Fatalf("IngestRunEvent stored artifact: %v", err)
+	}
+	drainRunEvents(bus)
+
+	mutatedReplay := domain.AppendRunEventInput{
+		EventID:   "evt-artifact",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		Message:   "Bad replay plot",
+		Payload: domain.JSONMap{
+			"artifact_id": "artifact-bad",
+			"kind":        "figure",
+			"path":        "outputs/bad.png",
+			"title":       "Bad replay plot",
+			"mime_type":   "image/png",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, mutatedReplay); err != nil {
+		t.Fatalf("IngestRunEvent duplicate artifact replay: %v", err)
+	}
+
+	artifacts, err := mem.ListRunArtifacts(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunArtifacts: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifact count = %d, want only stored artifact; artifacts=%+v", len(artifacts), artifacts)
+	}
+	if artifacts[0].ArtifactID != "artifact-good" || artifacts[0].Path != "outputs/good.png" {
+		t.Fatalf("artifact = %+v, want stored artifact metadata", artifacts[0])
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt-artifact" || event.Payload["artifact_id"] != "artifact-good" {
+			t.Fatalf("duplicate fanout event = %+v, want stored artifact event", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected duplicate replay to fan out stored artifact event")
+	}
+}
+
+func TestServiceIngestDuplicateTerminalEventRetriesLifecycleSideEffects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failOnceStatusStore{
+		MemoryStore: store.NewMemoryStore(),
+		failStatus:  domain.RunStatusSucceeded,
+		err:         errors.New("temporary status write failure"),
+	}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "retry terminal"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "retry terminal",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-complete",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "final answer"},
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err == nil {
+		t.Fatalf("first IngestRunEvent error = nil, want transient status write failure")
+	}
+	afterFailure, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun after failure: %v", err)
+	}
+	if afterFailure.Status == domain.RunStatusSucceeded {
+		t.Fatalf("run unexpectedly succeeded after injected status failure: %+v", afterFailure)
+	}
+
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("second IngestRunEvent duplicate should finish lifecycle: %v", err)
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded || updated.ResponseText != "final answer" {
+		t.Fatalf("updated run = %+v, want succeeded with response text after duplicate retry", updated)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	var completedEvents int
+	for _, event := range events {
+		if event.EventID == "evt-complete" {
+			completedEvents++
+		}
+	}
+	if completedEvents != 1 {
+		t.Fatalf("completed event count = %d, want 1; events=%+v", completedEvents, events)
+	}
+}
+
+func TestServiceCompletedRunDoesNotPersistAssistantWhenTerminalStatusFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failOnceStatusStore{
+		MemoryStore: store.NewMemoryStore(),
+		failStatus:  domain.RunStatusSucceeded,
+		err:         errors.New("temporary terminal write failure"),
+	}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "atomic terminal"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "finish atomically",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "finish atomically"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-atomic-complete",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "durable answer"},
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err == nil {
+		t.Fatalf("first IngestRunEvent error = nil, want transient terminal write failure")
+	}
+	messagesAfterFailure, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages after failed terminal write: %v", err)
+	}
+	if got, want := len(messagesAfterFailure), 1; got != want {
+		t.Fatalf("messages after failed terminal write = %d, want %d user-only messages: %+v", got, want, messagesAfterFailure)
+	}
+
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("duplicate completed event should finish atomic terminal write: %v", err)
+	}
+	messagesAfterRetry, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages after retry: %v", err)
+	}
+	if got, want := len(messagesAfterRetry), 2; got != want {
+		t.Fatalf("messages after retry = %d, want %d user+assistant messages: %+v", got, want, messagesAfterRetry)
+	}
+	if messagesAfterRetry[1].Role != "assistant" || messagesAfterRetry[1].Content != "durable answer" || messagesAfterRetry[1].RunID != run.RunID {
+		t.Fatalf("assistant message after retry = %+v, want durable answer owned by run", messagesAfterRetry[1])
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun after retry: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded || updated.ResponseText != "durable answer" {
+		t.Fatalf("updated run after retry = %+v, want succeeded with response text", updated)
+	}
+}
+
+func TestServiceIngestDuplicateTerminalEventRetriesFanoutAfterPublishFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := &failOnceRunEventBus{
+		MemoryBus: eventbus.NewMemoryBus(),
+		matchKind: "run.completed",
+		err:       errors.New("temporary fanout failure"),
+	}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "retry fanout"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "retry fanout",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus.MemoryBus)
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-complete",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "final answer"},
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err == nil {
+		t.Fatalf("first IngestRunEvent error = nil, want transient fanout failure")
+	}
+	afterFailure, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun after failure: %v", err)
+	}
+	if afterFailure.Status != domain.RunStatusSucceeded {
+		t.Fatalf("run status = %s, want succeeded even though fanout failed", afterFailure.Status)
+	}
+	if _, err := service.IngestRunEvent(ctx, input); err != nil {
+		t.Fatalf("duplicate terminal IngestRunEvent should retry fanout: %v", err)
+	}
+
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt-complete" || event.EventKind != "run.completed" {
+			t.Fatalf("fanned event = %+v, want original completed event", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected duplicate terminal event to be fanned out after retry")
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	var completedEvents int
+	for _, event := range events {
+		if event.EventID == "evt-complete" {
+			completedEvents++
+		}
+	}
+	if completedEvents != 1 {
+		t.Fatalf("completed event count = %d, want 1; events=%+v", completedEvents, events)
+	}
+}
+
+func TestServiceIngestRunEventDropsLateEventsAfterTerminalRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "late events"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "late events",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-complete",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "final answer"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	drainRunEvents(bus)
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-late",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "message.delta",
+		Payload:   domain.JSONMap{"text": "late text"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent late: %v", err)
+	}
+
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusSucceeded || updated.ResponseText != "final answer" {
+		t.Fatalf("updated run = %+v, want terminal state preserved", updated)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.EventID == "evt-late" {
+			t.Fatalf("late event should not be persisted after terminal run: %+v", events)
+		}
+	}
+	select {
+	case event := <-bus.Events():
+		t.Fatalf("late event should not be fanned out: %+v", event)
+	default:
+	}
+}
+
+func TestServiceIngestRunEventDropsUnknownRunEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	event, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-missing-run-completed",
+		RunID:     "run-missing",
+		ThreadID:  "thread-missing",
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "stale event"},
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent missing run error = %v, want stale event dropped", err)
+	}
+	if event.EventID != "evt-missing-run-completed" || event.RunID != "run-missing" {
+		t.Fatalf("dropped event = %+v, want metadata preserved for ack/drop path", event)
+	}
+}
+
+func TestServiceCreateRunReusesExistingRunForIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Idempotent thread",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	req := CreateRunRequest{
+		ThreadID:         thread.ThreadID,
+		UserID:           "user-1",
+		Goal:             "Run a long autonomous analysis.",
+		Messages:         []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey:   "prompt-key-1",
+		SelectionContext: domain.JSONMap{"source": "chat"},
+	}
+	first, err := service.CreateRun(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateRun first: %v", err)
+	}
+	second, err := service.CreateRun(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateRun second: %v", err)
+	}
+
+	if second.RunID != first.RunID {
+		t.Fatalf("second run id = %q, want original %q", second.RunID, first.RunID)
+	}
+	events, err := mem.ListRunEvents(ctx, first.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != "run.accepted" {
+		t.Fatalf("events = %+v, want single run.accepted", events)
+	}
+	select {
+	case <-bus.Jobs():
+	case <-time.After(time.Second):
+		t.Fatalf("expected first job")
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected duplicate job: %+v", job)
+	default:
+	}
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("thread messages = %d, want exactly one user message", len(messages))
+	}
+}
+
+func TestServiceCreateRunConcurrentRetriesReuseOneRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := newRacingIdempotencyStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Concurrent idempotency",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	req := CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run one expensive job.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run one expensive job."}},
+		IdempotencyKey: "prompt-key-concurrent",
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]domain.RunRecord, 2)
+	errs := make([]error, 2)
+	for index := range results {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			results[index], errs[index] = service.CreateRun(ctx, req)
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("CreateRun %d: %v", index, err)
+		}
+	}
+	if results[0].RunID != results[1].RunID {
+		t.Fatalf("concurrent run ids = %q and %q, want same run", results[0].RunID, results[1].RunID)
+	}
+	events, err := mem.ListRunEvents(ctx, results[0].RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != "run.accepted" {
+		t.Fatalf("events = %+v, want one accepted event", events)
+	}
+	select {
+	case <-bus.Jobs():
+	case <-time.After(time.Second):
+		t.Fatalf("expected one dispatched job")
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected duplicate job: %+v", job)
+	default:
+	}
+}
+
+func TestServiceCreateRunRecoversExistingRunAfterStoreIdempotencyConflict(t *testing.T) {
+	ctx := context.Background()
+	base := store.NewMemoryStore()
+	thread, err := base.CreateThread(ctx, domain.CreateThreadInput{
+		UserID: "user-1",
+		Title:  "Cross instance idempotency",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	existing, err := base.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Only one long run.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Only one long run."}},
+		Metadata: domain.JSONMap{"idempotency_key": "same-browser-submit"},
+	})
+	if err != nil {
+		t.Fatalf("seed CreateRun: %v", err)
+	}
+	mem := &conflictingIdempotencyStore{MemoryStore: base}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	recovered, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Only one long run.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Only one long run."}},
+		IdempotencyKey: "same-browser-submit",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun should recover existing idempotent run after store conflict: %v", err)
+	}
+	if recovered.RunID != existing.RunID {
+		t.Fatalf("recovered run id = %s, want existing %s", recovered.RunID, existing.RunID)
+	}
+	events, err := base.ListRunEvents(ctx, existing.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "evt_"+existing.RunID+"_accepted" {
+		t.Fatalf("events = %+v, want one stable accepted event", events)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if job.RunID != existing.RunID {
+			t.Fatalf("job run id = %s, want %s", job.RunID, existing.RunID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected recovery dispatch job")
+	}
+}
+
+func TestServiceCompletedRunPersistsAssistantBeforeTerminalStatusVisible(t *testing.T) {
+	ctx := context.Background()
+	mem := &blockingAppendThreadMessageStore{
+		MemoryStore: store.NewMemoryStore(),
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Terminal transcript ordering",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Complete with transcript.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Complete with transcript."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_started",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.started",
+	}); err != nil {
+		t.Fatalf("IngestRunEvent started: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "evt_" + run.RunID + "_completed",
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "run.completed",
+			Payload:   domain.JSONMap{"response_text": "terminal answer"},
+		})
+		result <- err
+	}()
+
+	select {
+	case <-mem.started:
+	case <-time.After(time.Second):
+		t.Fatalf("assistant append was not attempted")
+	}
+	visible, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun while assistant append is blocked: %v", err)
+	}
+	if visible.Status == domain.RunStatusSucceeded {
+		t.Fatalf("run status became succeeded before assistant message append completed")
+	}
+	close(mem.release)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("IngestRunEvent completed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("completed event did not finish after releasing assistant append")
+	}
+	terminal, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun terminal: %v", err)
+	}
+	if terminal.Status != domain.RunStatusSucceeded {
+		t.Fatalf("terminal status = %s, want succeeded", terminal.Status)
+	}
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if len(messages) != 2 || messages[1].Role != "assistant" || messages[1].Content != "terminal answer" {
+		t.Fatalf("messages = %+v, want user plus assistant terminal answer", messages)
+	}
+}
+
+func TestServiceControlPlaneSoakConcurrentIdempotentRunsAndWorkerEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Control-plane soak",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	const uniqueRuns = 40
+	const duplicateSubmitsPerRun = 4
+	const deltasPerRun = 32
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	type submitResult struct {
+		key string
+		run domain.RunRecord
+		err error
+	}
+	results := make(chan submitResult, uniqueRuns*duplicateSubmitsPerRun)
+	for runIndex := 0; runIndex < uniqueRuns; runIndex++ {
+		key := "soak-key-" + twoDigit(runIndex)
+		for submitIndex := 0; submitIndex < duplicateSubmitsPerRun; submitIndex++ {
+			wg.Add(1)
+			go func(runIndex int, key string) {
+				defer wg.Done()
+				<-start
+				goal := "Run autonomous soak task " + twoDigit(runIndex)
+				run, err := service.CreateRun(ctx, CreateRunRequest{
+					ThreadID:       thread.ThreadID,
+					UserID:         "user-1",
+					Goal:           goal,
+					Messages:       []domain.ThreadMessage{{Role: "user", Content: goal}},
+					IdempotencyKey: key,
+				})
+				results <- submitResult{key: key, run: run, err: err}
+			}(runIndex, key)
+		}
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	runsByKey := map[string]string{}
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("CreateRun for %s: %v", result.key, result.err)
+		}
+		if existing := runsByKey[result.key]; existing != "" && existing != result.run.RunID {
+			t.Fatalf("idempotency key %s produced runs %s and %s", result.key, existing, result.run.RunID)
+		}
+		runsByKey[result.key] = result.run.RunID
+	}
+	if len(runsByKey) != uniqueRuns {
+		t.Fatalf("unique run count = %d, want %d: %+v", len(runsByKey), uniqueRuns, runsByKey)
+	}
+
+	jobsByRunID := map[string]int{}
+	for i := 0; i < uniqueRuns; i++ {
+		select {
+		case job := <-bus.Jobs():
+			jobsByRunID[job.RunID]++
+		case <-time.After(time.Second):
+			t.Fatalf("received %d/%d jobs before timeout", i, uniqueRuns)
+		}
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected duplicate job after soak submissions: %+v", job)
+	default:
+	}
+	for key, runID := range runsByKey {
+		if jobsByRunID[runID] != 1 {
+			t.Fatalf("run %s for key %s job count = %d, want 1; jobs=%+v", runID, key, jobsByRunID[runID], jobsByRunID)
+		}
+	}
+
+	var eventWG sync.WaitGroup
+	for key, runID := range runsByKey {
+		eventWG.Add(1)
+		go func(key string, runID string) {
+			defer eventWG.Done()
+			_, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "evt_" + runID + "_started",
+				RunID:     runID,
+				ThreadID:  thread.ThreadID,
+				EventKind: "run.started",
+				EventType: "run",
+				Message:   "Worker started.",
+				Payload:   domain.JSONMap{"key": key},
+			})
+			if err != nil {
+				t.Errorf("IngestRunEvent started for %s: %v", runID, err)
+				return
+			}
+			for index := 0; index < deltasPerRun; index++ {
+				_, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+					EventID:   "evt_" + runID + "_delta_" + twoDigit(index),
+					RunID:     runID,
+					ThreadID:  thread.ThreadID,
+					EventKind: "message.delta",
+					EventType: "message",
+					Message:   "delta",
+					Payload:   domain.JSONMap{"text": "chunk " + twoDigit(index)},
+				})
+				if err != nil {
+					t.Errorf("IngestRunEvent delta %d for %s: %v", index, runID, err)
+					return
+				}
+			}
+			_, err = service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "evt_" + runID + "_completed",
+				RunID:     runID,
+				ThreadID:  thread.ThreadID,
+				EventKind: "run.completed",
+				EventType: "run",
+				Message:   "Run completed.",
+				Payload:   domain.JSONMap{"response_text": "completed " + key},
+			})
+			if err != nil {
+				t.Errorf("IngestRunEvent completed for %s: %v", runID, err)
+			}
+		}(key, runID)
+	}
+	eventWG.Wait()
+
+	for key, runID := range runsByKey {
+		run, err := mem.GetRun(ctx, runID)
+		if err != nil {
+			t.Fatalf("GetRun %s: %v", runID, err)
+		}
+		if run.Status != domain.RunStatusSucceeded {
+			t.Fatalf("run %s status = %s, want succeeded", runID, run.Status)
+		}
+		if run.ResponseText != "completed "+key {
+			t.Fatalf("run %s response = %q, want completed %s", runID, run.ResponseText, key)
+		}
+		events, err := mem.ListRunEventsAfter(ctx, runID, 0, 1000)
+		if err != nil {
+			t.Fatalf("ListRunEventsAfter %s: %v", runID, err)
+		}
+		if got, want := len(events), deltasPerRun+3; got != want {
+			t.Fatalf("run %s events = %d, want %d", runID, got, want)
+		}
+		if events[0].Sequence != 1 || events[len(events)-1].Sequence != int64(deltasPerRun+3) {
+			t.Fatalf("run %s event sequence range = %d..%d, want 1..%d", runID, events[0].Sequence, events[len(events)-1].Sequence, deltasPerRun+3)
+		}
+		if events[len(events)-1].EventKind != "run.completed" {
+			t.Fatalf("run %s last event = %s, want run.completed", runID, events[len(events)-1].EventKind)
+		}
+	}
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if got, want := len(messages), uniqueRuns*2; got != want {
+		t.Fatalf("thread messages = %d, want %d user+assistant messages", got, want)
+	}
+}
+
+func TestServiceControlPlaneSoakHighVolumeToolEventsRemainReplayable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "High-volume tool event soak",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous tool-heavy analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous tool-heavy analysis."}},
+		IdempotencyKey: "tool-heavy-soak",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	const toolIterations = 1000
+	const artifactEvery = 10
+	const heartbeatEvery = 25
+	const deltaEvery = 20
+	const replayPageSize = 137
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_started",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.started",
+		EventType: "run",
+		Message:   "Worker started tool-heavy run.",
+		Payload:   domain.JSONMap{"phase": "started"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent started: %v", err)
+	}
+
+	for index := 0; index < toolIterations; index++ {
+		suffix := fmt.Sprintf("%04d", index)
+		if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "evt_" + run.RunID + "_tool_started_" + suffix,
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "tool_call.started",
+			EventType: "tool_call",
+			NodeName:  "execute",
+			TaskID:    "tool-" + suffix,
+			Message:   "execute started " + suffix,
+			Payload: domain.JSONMap{
+				"tool_name": "execute",
+				"index":     index,
+			},
+		}); err != nil {
+			t.Fatalf("IngestRunEvent tool started %d: %v", index, err)
+		}
+		if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "evt_" + run.RunID + "_tool_completed_" + suffix,
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "tool_call.completed",
+			EventType: "tool_call",
+			NodeName:  "execute",
+			TaskID:    "tool-" + suffix,
+			Message:   "execute completed " + suffix,
+			Payload: domain.JSONMap{
+				"tool_name":   "execute",
+				"index":       index,
+				"duration_ms": 7,
+			},
+		}); err != nil {
+			t.Fatalf("IngestRunEvent tool completed %d: %v", index, err)
+		}
+		if index%artifactEvery == 0 {
+			if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "evt_" + run.RunID + "_artifact_" + suffix,
+				RunID:     run.RunID,
+				ThreadID:  thread.ThreadID,
+				EventKind: "artifact.created",
+				EventType: "artifact",
+				Message:   "Artifact " + suffix,
+				Payload: domain.JSONMap{
+					"artifact_id": "artifact_" + run.RunID + "_" + suffix,
+					"kind":        "figure",
+					"title":       "Diagnostic figure " + suffix,
+					"path":        "figures/diagnostic_" + suffix + ".png",
+					"mime_type":   "image/png",
+					"tool_name":   "save_figure_output",
+					"sha256":      "sha256-" + suffix,
+				},
+			}); err != nil {
+				t.Fatalf("IngestRunEvent artifact %d: %v", index, err)
+			}
+		}
+		if index%heartbeatEvery == 0 {
+			if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "evt_" + run.RunID + "_heartbeat_" + suffix,
+				RunID:     run.RunID,
+				ThreadID:  thread.ThreadID,
+				EventKind: "run.heartbeat",
+				EventType: "run",
+				Message:   "heartbeat " + suffix,
+				Payload:   domain.JSONMap{"tool_iterations_completed": index + 1},
+			}); err != nil {
+				t.Fatalf("IngestRunEvent heartbeat %d: %v", index, err)
+			}
+		}
+		if index%deltaEvery == 0 {
+			if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "evt_" + run.RunID + "_delta_" + suffix,
+				RunID:     run.RunID,
+				ThreadID:  thread.ThreadID,
+				EventKind: "message.delta",
+				EventType: "message",
+				Message:   "coordinator delta " + suffix,
+				Payload:   domain.JSONMap{"text": "coordinator delta " + suffix},
+			}); err != nil {
+				t.Fatalf("IngestRunEvent delta %d: %v", index, err)
+			}
+		}
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		EventType: "run",
+		Message:   "Run completed.",
+		Payload:   domain.JSONMap{"response_text": "Final coordinator answer from the tool-heavy run."},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+
+	expectedArtifacts := toolIterations / artifactEvery
+	expectedHeartbeats := toolIterations / heartbeatEvery
+	expectedDeltas := toolIterations / deltaEvery
+	expectedEvents := 1 + 1 + (toolIterations * 2) + expectedArtifacts + expectedHeartbeats + expectedDeltas + 1
+
+	var replayed []domain.RunEventRecord
+	var after int64
+	for {
+		page, err := mem.ListRunEventsAfter(ctx, run.RunID, after, replayPageSize)
+		if err != nil {
+			t.Fatalf("ListRunEventsAfter after=%d: %v", after, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, event := range page {
+			if event.Sequence != after+1 {
+				t.Fatalf("event sequence after %d = %d, want %d", after, event.Sequence, after+1)
+			}
+			after = event.Sequence
+			replayed = append(replayed, event)
+		}
+		if len(page) > replayPageSize {
+			t.Fatalf("page length = %d, want <= %d", len(page), replayPageSize)
+		}
+	}
+	if got := len(replayed); got != expectedEvents {
+		t.Fatalf("replayed events = %d, want %d", got, expectedEvents)
+	}
+	if replayed[0].EventKind != "run.accepted" {
+		t.Fatalf("first event kind = %s, want run.accepted", replayed[0].EventKind)
+	}
+	if replayed[len(replayed)-1].EventKind != "run.completed" {
+		t.Fatalf("last event kind = %s, want run.completed", replayed[len(replayed)-1].EventKind)
+	}
+
+	storedRun, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if storedRun.Status != domain.RunStatusSucceeded {
+		t.Fatalf("run status = %s, want succeeded", storedRun.Status)
+	}
+	if storedRun.ResponseText != "Final coordinator answer from the tool-heavy run." {
+		t.Fatalf("response text = %q, want final coordinator answer only", storedRun.ResponseText)
+	}
+	artifacts, err := mem.ListRunArtifacts(ctx, run.RunID, expectedArtifacts+1)
+	if err != nil {
+		t.Fatalf("ListRunArtifacts: %v", err)
+	}
+	if got := len(artifacts); got != expectedArtifacts {
+		t.Fatalf("artifacts = %d, want %d", got, expectedArtifacts)
+	}
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if got, want := len(messages), 2; got != want {
+		t.Fatalf("thread messages = %d, want user+assistant", got)
+	}
+	if messages[1].Role != "assistant" || messages[1].RunID != run.RunID {
+		t.Fatalf("assistant message = %+v, want persisted terminal assistant answer for run", messages[1])
+	}
+}
+
+func TestServiceCreateRunMarksRunFailedWhenJobDispatchFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := &failingJobBus{jobErr: errors.New("nats unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Dispatch failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	created, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey: "dispatch-key-1",
+	})
+	if err == nil {
+		t.Fatalf("CreateRun error = nil, want job dispatch error")
+	}
+	run, found, err := mem.FindRunByIdempotencyKey(ctx, thread.ThreadID, "user-1", "dispatch-key-1")
+	if err != nil {
+		t.Fatalf("FindRunByIdempotencyKey: %v", err)
+	}
+	if !found {
+		t.Fatalf("created run with idempotency key was not persisted; returned run=%+v", created)
+	}
+	if run.Status != domain.RunStatusFailed {
+		t.Fatalf("run status = %s, want failed so it cannot remain queued forever", run.Status)
+	}
+	if run.Error == "" {
+		t.Fatalf("run error is empty, want enqueue failure detail")
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if got, want := events[len(events)-1].EventKind, "run.failed"; got != want {
+		t.Fatalf("last event kind = %q, want %q; events=%+v", got, want, events)
+	}
+	if events[len(events)-1].Payload["stage"] != "job_enqueue" {
+		t.Fatalf("failure payload = %+v, want job_enqueue stage", events[len(events)-1].Payload)
+	}
+	if len(bus.jobs) != 1 {
+		t.Fatalf("job publish attempts = %d, want exactly one", len(bus.jobs))
+	}
+}
+
+func TestServiceCreateRunDoesNotMarkFailedWhenDispatchFailureEventAppendFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failingAppendEventStore{
+		MemoryStore: store.NewMemoryStore(),
+		matchKind:   "run.failed",
+		err:         errors.New("event store unavailable"),
+	}
+	bus := &failingJobBus{jobErr: errors.New("nats unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Dispatch event append failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	created, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey: "dispatch-key-event-append-fails",
+	})
+	if err == nil {
+		t.Fatalf("CreateRun error = nil, want event append failure")
+	}
+	run, found, err := mem.FindRunByIdempotencyKey(ctx, thread.ThreadID, "user-1", "dispatch-key-event-append-fails")
+	if err != nil {
+		t.Fatalf("FindRunByIdempotencyKey: %v", err)
+	}
+	if !found {
+		t.Fatalf("created run with idempotency key was not persisted; returned run=%+v", created)
+	}
+	if run.Status == domain.RunStatusFailed {
+		t.Fatalf("run status = %s, want non-terminal because run.failed was not durable", run.Status)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.EventKind == "run.failed" {
+			t.Fatalf("run.failed event should not be persisted when append fails: %+v", events)
+		}
+	}
+}
+
+func TestServiceCreateRunIdempotentRetryReconcilesStoredDispatchFailureEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failOnceStatusStore{
+		MemoryStore: store.NewMemoryStore(),
+		failStatus:  domain.RunStatusFailed,
+		err:         errors.New("temporary status write failure"),
+	}
+	bus := &failingJobBus{jobErr: errors.New("nats unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Dispatch status retry",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	req := CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey: "dispatch-key-status-retry",
+	}
+
+	if _, err := service.CreateRun(ctx, req); err == nil {
+		t.Fatalf("first CreateRun error = nil, want status write failure after dispatch failure event append")
+	}
+	run, found, err := mem.FindRunByIdempotencyKey(ctx, thread.ThreadID, "user-1", req.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("FindRunByIdempotencyKey: %v", err)
+	}
+	if !found {
+		t.Fatalf("created run with idempotency key was not persisted")
+	}
+	if run.Status == domain.RunStatusFailed {
+		t.Fatalf("run unexpectedly failed after injected status failure: %+v", run)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if got, want := events[len(events)-1].EventKind, "run.failed"; got != want {
+		t.Fatalf("last stored event = %q, want durable %q; events=%+v", got, want, events)
+	}
+
+	reconciled, err := service.CreateRun(ctx, req)
+	if err != nil {
+		t.Fatalf("second CreateRun should reconcile stored failure event: %v", err)
+	}
+	if reconciled.Status != domain.RunStatusFailed {
+		t.Fatalf("reconciled run status = %s, want failed from stored dispatch failure event", reconciled.Status)
+	}
+	if reconciled.Error == "" {
+		t.Fatalf("reconciled run error is empty, want dispatch failure text")
+	}
+	events, err = mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents after retry: %v", err)
+	}
+	var failedEvents int
+	for _, event := range events {
+		if event.EventID == "evt_"+run.RunID+"_dispatch_failed" {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("dispatch failure event count = %d, want 1; events=%+v", failedEvents, events)
+	}
+	if len(bus.jobs) != 1 {
+		t.Fatalf("job publish attempts = %d, want original attempt only", len(bus.jobs))
+	}
+}
+
+func TestServiceCreateRunStillDispatchesWhenAcceptedFanoutFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := &failingRunEventBus{eventErr: errors.New("event fanout unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Accepted fanout failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run despite fanout failure.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run despite fanout failure."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun should not fail when accepted-event fanout fails after durable append: %v", err)
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusQueued {
+		t.Fatalf("run status = %s, want queued for dispatched worker job", updated.Status)
+	}
+	if len(bus.jobs) != 1 || bus.jobs[0].RunID != run.RunID {
+		t.Fatalf("jobs = %+v, want dispatched run job despite accepted fanout failure", bus.jobs)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != "run.accepted" {
+		t.Fatalf("stored events = %+v, want durable run.accepted", events)
+	}
+	if len(bus.events) != 1 || bus.events[0].EventKind != "run.accepted" {
+		t.Fatalf("event fanout attempts = %+v, want one accepted fanout attempt", bus.events)
+	}
+}
+
+func TestServiceCreateRunIdempotentRetryDispatchesQueuedRunAfterAcceptedAppendFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failOnceAppendEventStore{
+		MemoryStore: store.NewMemoryStore(),
+		matchKind:   "run.accepted",
+		err:         errors.New("temporary accepted event write failure"),
+	}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Accepted event retry",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	req := CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey: "accepted-append-retry",
+	}
+
+	if _, err := service.CreateRun(ctx, req); err == nil {
+		t.Fatalf("first CreateRun error = nil, want accepted event append failure")
+	}
+	run, found, err := mem.FindRunByIdempotencyKey(ctx, thread.ThreadID, "user-1", req.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("FindRunByIdempotencyKey: %v", err)
+	}
+	if !found {
+		t.Fatalf("run should be persisted even though accepted event append failed")
+	}
+	if run.Status != domain.RunStatusQueued {
+		t.Fatalf("run status = %s, want queued before retry", run.Status)
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected job after failed accepted event append: %+v", job)
+	default:
+	}
+
+	retried, err := service.CreateRun(ctx, req)
+	if err != nil {
+		t.Fatalf("second CreateRun should recover and dispatch existing queued run: %v", err)
+	}
+	if retried.RunID != run.RunID {
+		t.Fatalf("retried run id = %s, want existing run %s", retried.RunID, run.RunID)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if job.RunID != run.RunID {
+			t.Fatalf("job run id = %s, want %s", job.RunID, run.RunID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected retry to dispatch queued run")
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != "run.accepted" {
+		t.Fatalf("events = %+v, want recovered run.accepted event", events)
+	}
+}
+
+func TestServiceCreateRunIdempotentRetryDispatchesQueuedRunAfterAcceptedPersistedBeforePublish(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Accepted-before-publish retry",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	req := CreateRunRequest{
+		ThreadID:       thread.ThreadID,
+		UserID:         "user-1",
+		Goal:           "Run a long autonomous analysis.",
+		Messages:       []domain.ThreadMessage{{Role: "user", Content: "Run a long autonomous analysis."}},
+		IdempotencyKey: "accepted-before-publish-retry",
+	}
+	stored, err := mem.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: req.ThreadID,
+		UserID:   req.UserID,
+		Goal:     req.Goal,
+		Messages: req.Messages,
+		Metadata: domain.JSONMap{"idempotency_key": req.IdempotencyKey},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun seed: %v", err)
+	}
+	if _, err := mem.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		RunID:     stored.RunID,
+		ThreadID:  stored.ThreadID,
+		EventKind: "run.accepted",
+		Message:   "Run accepted.",
+		Payload:   domain.JSONMap{"status": string(stored.Status), "workflow_kind": stored.WorkflowKind},
+	}); err != nil {
+		t.Fatalf("AppendRunEvent seed accepted: %v", err)
+	}
+
+	retried, err := service.CreateRun(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateRun retry should redispatch accepted queued run: %v", err)
+	}
+	if retried.RunID != stored.RunID {
+		t.Fatalf("retried run id = %s, want existing run %s", retried.RunID, stored.RunID)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if job.RunID != stored.RunID {
+			t.Fatalf("redispatched job run id = %s, want %s", job.RunID, stored.RunID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected retry to redispatch queued run after accepted-before-publish crash window")
+	}
+	events, err := mem.ListRunEvents(ctx, stored.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != "run.accepted" {
+		t.Fatalf("events = %+v, want existing single run.accepted only", events)
+	}
+}
+
+func TestServiceCancelRunDoesNotMarkCanceledWhenCancelSignalFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := &failingCancelBus{cancelErr: errors.New("nats unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Cancel transport failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run until explicitly stopped.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run until explicitly stopped."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	if _, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"}); err == nil {
+		t.Fatalf("CancelRun error = nil, want cancel transport error")
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status == domain.RunStatusCanceled {
+		t.Fatalf("run status = %s, want non-terminal because cancel signal was not delivered", updated.Status)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.EventKind == "run.canceled" {
+			t.Fatalf("run.canceled event should not be persisted when cancel signal fails: %+v", events)
+		}
+	}
+	if len(bus.cancellations) != 1 {
+		t.Fatalf("cancel attempts = %d, want exactly one attempted signal", len(bus.cancellations))
+	}
+}
+
+func TestServiceCancelRunDoesNotMarkCanceledWhenCanceledEventAppendFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := &failingAppendEventStore{
+		MemoryStore: store.NewMemoryStore(),
+		matchKind:   "run.canceled",
+		err:         errors.New("event store unavailable"),
+	}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Cancel event append failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run until explicitly stopped.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run until explicitly stopped."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	if _, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"}); err == nil {
+		t.Fatalf("CancelRun error = nil, want event append error")
+	}
+	updated, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status == domain.RunStatusCanceled {
+		t.Fatalf("run status = %s, want non-terminal because run.canceled was not durable", updated.Status)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.EventKind == "run.canceled" {
+			t.Fatalf("run.canceled event should not be persisted when append fails: %+v", events)
+		}
+	}
+	select {
+	case cancel := <-bus.Cancellations():
+		if cancel.RunID != run.RunID {
+			t.Fatalf("cancel signal = %+v, want run %s", cancel, run.RunID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected cancel signal to be published before durable event append failed")
+	}
+}
+
+func TestServiceCancelRunUsesWorkerCompatibleCanceledEventID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Cancel idempotency",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run until canceled.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run until canceled."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	canceled, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"})
+	if err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	if canceled.Status != domain.RunStatusCanceled {
+		t.Fatalf("run status = %s, want canceled", canceled.Status)
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt_"+run.RunID+"_canceled" || event.EventKind != "run.canceled" {
+			t.Fatalf("cancel fanout event = %+v, want deterministic run.canceled", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected cancel fanout event")
+	}
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt_" + run.RunID + "_canceled",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.canceled",
+		Message:   "worker replay should not create a new terminal event",
+		Payload:   domain.JSONMap{"reason": "worker observed cancel"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent duplicate canceled: %v", err)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 20)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	var canceledEvents int
+	for _, event := range events {
+		if event.EventID == "evt_"+run.RunID+"_canceled" {
+			canceledEvents++
+		}
+	}
+	if canceledEvents != 1 {
+		t.Fatalf("canceled event count = %d, want 1; events=%+v", canceledEvents, events)
+	}
+	select {
+	case event := <-bus.Events():
+		if event.EventID != "evt_"+run.RunID+"_canceled" || event.Payload["reason"] != "user stop" {
+			t.Fatalf("duplicate cancel fanout = %+v, want stored control-plane event", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected duplicate worker cancel to fan out stored event")
+	}
+}
+
+func TestServiceCreateRunPersistsOnlyNewTranscriptSuffixForFollowups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Followup thread",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	firstRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Make the first plot.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Make the first plot."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun first: %v", err)
+	}
+	drainJobs(bus)
+
+	fullFollowupTranscript := []domain.ThreadMessage{
+		{Role: "user", Content: "Make the first plot."},
+		{Role: "assistant", Content: "The first plot is saved."},
+		{Role: "user", Content: "Change the plot color to viridis."},
+	}
+	followupRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Change the plot color to viridis.",
+		Messages: fullFollowupTranscript,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun followup: %v", err)
+	}
+
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if got, want := len(messages), 3; got != want {
+		t.Fatalf("persisted messages = %d, want %d: %+v", got, want, messages)
+	}
+	if messages[0].Content != "Make the first plot." || messages[1].Content != "The first plot is saved." || messages[2].Content != "Change the plot color to viridis." {
+		t.Fatalf("persisted messages = %+v, want non-duplicated transcript order", messages)
+	}
+	if messages[0].RunID != firstRun.RunID {
+		t.Fatalf("first user message run id = %q, want %q", messages[0].RunID, firstRun.RunID)
+	}
+	if messages[1].RunID != firstRun.RunID {
+		t.Fatalf("previous assistant message run id = %q, want previous run id %q", messages[1].RunID, firstRun.RunID)
+	}
+	if messages[1].RunID == followupRun.RunID {
+		t.Fatalf("previous assistant message was mislabeled with followup run id %q", followupRun.RunID)
+	}
+	if messages[2].RunID != followupRun.RunID {
+		t.Fatalf("followup user message run id = %q, want %q", messages[2].RunID, followupRun.RunID)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if len(job.Messages) != len(fullFollowupTranscript) {
+			t.Fatalf("job messages = %d, want full transcript %d", len(job.Messages), len(fullFollowupTranscript))
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected followup job")
+	}
+}
+
+func TestServiceCreateRunKeepsInternalToolRunsOutOfVisibleThreadState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "RareSpot followup thread",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	firstRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run prairie dog detection on this image.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run prairie dog detection on this image."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun first: %v", err)
+	}
+	drainJobs(bus)
+
+	internalRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:          thread.ThreadID,
+		UserID:            "user-1",
+		Goal:              "Run RareSpot ecology inference.",
+		Messages:          []domain.ThreadMessage{{Role: "tool", Content: "RareSpot ecology inference requested."}},
+		SelectedToolNames: []string{"rarespot_ecology_inference"},
+		WorkflowHint:      domain.JSONMap{"id": "rarespot_ecology"},
+		Metadata:          domain.JSONMap{"parent_run_id": firstRun.RunID, "tool_name": "rarespot_ecology_inference"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun internal tool run: %v", err)
+	}
+	if internalRun.RunID == firstRun.RunID {
+		t.Fatalf("internal run reused first run id %q", firstRun.RunID)
+	}
+	drainJobs(bus)
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-internal-rarespot-completed",
+		RunID:     internalRun.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "Internal RareSpot run completed."},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent internal completed: %v", err)
+	}
+
+	afterInternal, err := mem.GetThread(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("GetThread after internal run: %v", err)
+	}
+	if afterInternal.LatestRunID != firstRun.RunID {
+		t.Fatalf("thread latest run id = %q, want user-facing run %q", afterInternal.LatestRunID, firstRun.RunID)
+	}
+	messagesAfterInternal, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages after internal run: %v", err)
+	}
+	if got, want := len(messagesAfterInternal), 1; got != want {
+		t.Fatalf("messages after internal run = %d, want %d: %+v", got, want, messagesAfterInternal)
+	}
+	if messagesAfterInternal[0].Role != "user" {
+		t.Fatalf("first visible message role = %q, want user", messagesAfterInternal[0].Role)
+	}
+
+	followupTranscript := []domain.ThreadMessage{
+		{Role: "user", Content: "Run prairie dog detection on this image."},
+		{Role: "assistant", Content: "RareSpot detection completed with downloadable outputs."},
+		{Role: "user", Content: "Now summarize the GPS metadata and compare detections."},
+	}
+	followupRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Now summarize the GPS metadata and compare detections.",
+		Messages: followupTranscript,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun followup: %v", err)
+	}
+
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages followup: %v", err)
+	}
+	if got, want := len(messages), 3; got != want {
+		t.Fatalf("persisted messages = %d, want %d: %+v", got, want, messages)
+	}
+	if messages[1].RunID != firstRun.RunID {
+		t.Fatalf("previous assistant run id = %q, want first user-facing run %q", messages[1].RunID, firstRun.RunID)
+	}
+	if messages[2].RunID != followupRun.RunID {
+		t.Fatalf("followup user run id = %q, want followup run %q", messages[2].RunID, followupRun.RunID)
+	}
+}
+
+func TestServiceCreateRunIncludesPriorArtifactsInFollowupJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Artifact followup",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	firstRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Create the first plot.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Create the first plot."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun first: %v", err)
+	}
+	drainJobs(bus)
+
+	_, err = service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-artifact-1",
+		RunID:     firstRun.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "artifact.created",
+		EventType: "artifact",
+		Message:   "Created plot.",
+		Payload: domain.JSONMap{
+			"artifact_id": "artifact-plot",
+			"output_id":   "output-plot",
+			"kind":        "figure",
+			"title":       "Squared Plot",
+			"path":        "outputs/plot_squared.png",
+			"source_path": "/tmp/artifacts/" + firstRun.RunID + "/outputs/plot_squared.png",
+			"mime_type":   "image/png",
+			"size_bytes":  123,
+			"sha256":      "abc123",
+			"tool_name":   "outputs_collector",
+		},
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent artifact: %v", err)
+	}
+
+	_, err = service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Add a reference line.",
+		Messages: []domain.ThreadMessage{
+			{Role: "user", Content: "Create the first plot."},
+			{Role: "assistant", Content: "Created the first plot."},
+			{Role: "user", Content: "Add a reference line."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun followup: %v", err)
+	}
+
+	select {
+	case job := <-bus.Jobs():
+		if got, want := len(job.ResourceDescriptors), 1; got != want {
+			t.Fatalf("job resource descriptors = %d, want %d: %+v", got, want, job.ResourceDescriptors)
+		}
+		descriptor := job.ResourceDescriptors[0]
+		if descriptor["artifact_id"] != "artifact-plot" {
+			t.Fatalf("descriptor artifact id = %#v, want artifact-plot", descriptor["artifact_id"])
+		}
+		if descriptor["run_id"] != firstRun.RunID {
+			t.Fatalf("descriptor run id = %#v, want %s", descriptor["run_id"], firstRun.RunID)
+		}
+		if descriptor["path"] != "outputs/plot_squared.png" {
+			t.Fatalf("descriptor path = %#v, want outputs/plot_squared.png", descriptor["path"])
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected followup job")
+	}
+}
+
+type racingIdempotencyStore struct {
+	*store.MemoryStore
+	mu      sync.Mutex
+	calls   int
+	release chan struct{}
+	once    sync.Once
+}
+
+func newRacingIdempotencyStore() *racingIdempotencyStore {
+	return &racingIdempotencyStore{
+		MemoryStore: store.NewMemoryStore(),
+		release:     make(chan struct{}),
+	}
+}
+
+func (s *racingIdempotencyStore) FindRunByIdempotencyKey(ctx context.Context, threadID string, userID string, idempotencyKey string) (domain.RunRecord, bool, error) {
+	run, found, err := s.MemoryStore.FindRunByIdempotencyKey(ctx, threadID, userID, idempotencyKey)
+	s.mu.Lock()
+	s.calls++
+	if s.calls == 2 {
+		s.once.Do(func() { close(s.release) })
+	}
+	s.mu.Unlock()
+	select {
+	case <-s.release:
+	case <-time.After(50 * time.Millisecond):
+		s.once.Do(func() { close(s.release) })
+	}
+	return run, found, err
+}
+
+type conflictingIdempotencyStore struct {
+	*store.MemoryStore
+	mu        sync.Mutex
+	findCalls int
+}
+
+func (s *conflictingIdempotencyStore) FindRunByIdempotencyKey(ctx context.Context, threadID string, userID string, idempotencyKey string) (domain.RunRecord, bool, error) {
+	s.mu.Lock()
+	s.findCalls++
+	call := s.findCalls
+	s.mu.Unlock()
+	if call == 1 {
+		return domain.RunRecord{}, false, nil
+	}
+	return s.MemoryStore.FindRunByIdempotencyKey(ctx, threadID, userID, idempotencyKey)
+}
+
+func (s *conflictingIdempotencyStore) CreateRun(ctx context.Context, input domain.CreateRunInput) (domain.RunRecord, error) {
+	_ = ctx
+	_ = input
+	return domain.RunRecord{}, store.ErrConflict
+}
+
+type blockingAppendThreadMessageStore struct {
+	*store.MemoryStore
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingAppendThreadMessageStore) AppendThreadMessage(ctx context.Context, message domain.ThreadMessage) (domain.ThreadMessage, error) {
+	if strings.EqualFold(strings.TrimSpace(message.Role), "assistant") {
+		s.once.Do(func() { close(s.started) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return domain.ThreadMessage{}, ctx.Err()
+		}
+	}
+	return s.MemoryStore.AppendThreadMessage(ctx, message)
+}
+
+func (s *blockingAppendThreadMessageStore) CompleteRun(ctx context.Context, input domain.CompleteRunInput) (domain.RunRecord, error) {
+	if strings.TrimSpace(input.ResponseText) != "" {
+		s.once.Do(func() { close(s.started) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return domain.RunRecord{}, ctx.Err()
+		}
+	}
+	return s.MemoryStore.CompleteRun(ctx, input)
+}
+
+type failOnceStatusStore struct {
+	*store.MemoryStore
+	mu         sync.Mutex
+	failStatus domain.RunStatus
+	err        error
+	failed     bool
+}
+
+func (s *failOnceStatusStore) UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus, responseText string, errorText string) (domain.RunRecord, error) {
+	s.mu.Lock()
+	shouldFail := !s.failed && status == s.failStatus
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.RunRecord{}, s.err
+	}
+	return s.MemoryStore.UpdateRunStatus(ctx, runID, status, responseText, errorText)
+}
+
+func (s *failOnceStatusStore) CompleteRun(ctx context.Context, input domain.CompleteRunInput) (domain.RunRecord, error) {
+	s.mu.Lock()
+	shouldFail := !s.failed && s.failStatus == domain.RunStatusSucceeded
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.RunRecord{}, s.err
+	}
+	return s.MemoryStore.CompleteRun(ctx, input)
+}
+
+type failingAppendEventStore struct {
+	*store.MemoryStore
+	matchKind string
+	err       error
+}
+
+func (s *failingAppendEventStore) AppendRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	if input.EventKind == s.matchKind {
+		return domain.RunEventRecord{}, s.err
+	}
+	return s.MemoryStore.AppendRunEvent(ctx, input)
+}
+
+type failOnceAppendEventStore struct {
+	*store.MemoryStore
+	mu        sync.Mutex
+	matchKind string
+	err       error
+	failed    bool
+}
+
+func (s *failOnceAppendEventStore) AppendRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	s.mu.Lock()
+	shouldFail := !s.failed && input.EventKind == s.matchKind
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.RunEventRecord{}, s.err
+	}
+	return s.MemoryStore.AppendRunEvent(ctx, input)
+}
+
+type duplicateEventRaceStore struct {
+	*store.MemoryStore
+	targetID string
+	ready    chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	calls    int
+	mu       sync.Mutex
+}
+
+func (s *duplicateEventRaceStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
+	if eventID != s.targetID {
+		return s.MemoryStore.GetRunEvent(ctx, eventID)
+	}
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	if call == 2 {
+		s.once.Do(func() { close(s.ready) })
+	}
+	s.mu.Unlock()
+	if call <= 2 {
+		<-s.release
+		return domain.RunEventRecord{}, false, nil
+	}
+	return s.MemoryStore.GetRunEvent(ctx, eventID)
+}
+
+type failOnceRunEventBus struct {
+	*eventbus.MemoryBus
+	mu        sync.Mutex
+	matchKind string
+	err       error
+	failed    bool
+}
+
+func (b *failOnceRunEventBus) PublishRunEvent(ctx context.Context, event domain.RunEventRecord) error {
+	b.mu.Lock()
+	shouldFail := !b.failed && event.EventKind == b.matchKind
+	if shouldFail {
+		b.failed = true
+	}
+	b.mu.Unlock()
+	if shouldFail {
+		return b.err
+	}
+	return b.MemoryBus.PublishRunEvent(ctx, event)
+}
+
+func sameStringSlice(value any, want []string) bool {
+	switch typed := value.(type) {
+	case []string:
+		if len(typed) != len(want) {
+			return false
+		}
+		for index := range typed {
+			if typed[index] != want[index] {
+				return false
+			}
+		}
+		return true
+	case []any:
+		if len(typed) != len(want) {
+			return false
+		}
+		for index := range typed {
+			if typed[index] != want[index] {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func drainRunEvents(bus *eventbus.MemoryBus) {
+	for {
+		select {
+		case <-bus.Events():
+		default:
+			return
+		}
+	}
+}
+
+func drainJobs(bus *eventbus.MemoryBus) {
+	for {
+		select {
+		case <-bus.Jobs():
+		default:
+			return
+		}
+	}
+}
+
+func twoDigit(value int) string {
+	if value < 10 {
+		return "0" + string(rune('0'+value))
+	}
+	return string(rune('0'+(value/10)%10)) + string(rune('0'+value%10))
+}
+
+type failingCancelBus struct {
+	cancelErr     error
+	jobs          []eventbus.Job
+	cancellations []eventbus.CancelSignal
+	events        []domain.RunEventRecord
+}
+
+func (b *failingCancelBus) PublishJob(ctx context.Context, job eventbus.Job) error {
+	_ = ctx
+	b.jobs = append(b.jobs, job)
+	return nil
+}
+
+func (b *failingCancelBus) PublishCancel(ctx context.Context, cancel eventbus.CancelSignal) error {
+	_ = ctx
+	b.cancellations = append(b.cancellations, cancel)
+	return b.cancelErr
+}
+
+func (b *failingCancelBus) PublishRunEvent(ctx context.Context, event domain.RunEventRecord) error {
+	_ = ctx
+	b.events = append(b.events, event)
+	return nil
+}
+
+type failingJobBus struct {
+	jobErr        error
+	jobs          []eventbus.Job
+	cancellations []eventbus.CancelSignal
+	events        []domain.RunEventRecord
+}
+
+func (b *failingJobBus) PublishJob(ctx context.Context, job eventbus.Job) error {
+	_ = ctx
+	b.jobs = append(b.jobs, job)
+	return b.jobErr
+}
+
+func (b *failingJobBus) PublishCancel(ctx context.Context, cancel eventbus.CancelSignal) error {
+	_ = ctx
+	b.cancellations = append(b.cancellations, cancel)
+	return nil
+}
+
+func (b *failingJobBus) PublishRunEvent(ctx context.Context, event domain.RunEventRecord) error {
+	_ = ctx
+	b.events = append(b.events, event)
+	return nil
+}
+
+type failingRunEventBus struct {
+	eventErr      error
+	jobs          []eventbus.Job
+	cancellations []eventbus.CancelSignal
+	events        []domain.RunEventRecord
+}
+
+func (b *failingRunEventBus) PublishJob(ctx context.Context, job eventbus.Job) error {
+	_ = ctx
+	b.jobs = append(b.jobs, job)
+	return nil
+}
+
+func (b *failingRunEventBus) PublishCancel(ctx context.Context, cancel eventbus.CancelSignal) error {
+	_ = ctx
+	b.cancellations = append(b.cancellations, cancel)
+	return nil
+}
+
+func (b *failingRunEventBus) PublishRunEvent(ctx context.Context, event domain.RunEventRecord) error {
+	_ = ctx
+	b.events = append(b.events, event)
+	return b.eventErr
 }

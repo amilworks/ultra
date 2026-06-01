@@ -1,5 +1,11 @@
 import type { ApiClient } from "@/lib/api";
 import type {
+  AdminCreateOrganizationRequest,
+  AdminCreateUserRequest,
+  AdminOrganization,
+  AdminOrganizationListResponse,
+  AdminRunActionResponse,
+  AdminUserAccount,
   AdminIssueListResponse,
   AdminOverviewResponse,
   AdminRunListResponse,
@@ -24,6 +30,11 @@ export type AdminUserQuery = {
   query?: string;
 };
 
+export type AdminOrganizationQuery = {
+  limit?: number;
+  query?: string;
+};
+
 export const loadAdminOverview = (
   apiClient: ApiClient,
   query: AdminOverviewQuery = {}
@@ -42,6 +53,30 @@ export const loadAdminUsers = (
     query: query.query,
   });
 
+export const loadAdminOrganizations = (
+  apiClient: ApiClient,
+  query: AdminOrganizationQuery = {}
+): Promise<AdminOrganizationListResponse> =>
+  apiClient.listAdminOrganizations({
+    limit: query.limit ?? 250,
+    query: query.query,
+  });
+
+export const createAdminOrganization = (
+  apiClient: ApiClient,
+  payload: AdminCreateOrganizationRequest
+): Promise<AdminOrganization> => apiClient.createAdminOrganization(payload);
+
+export const createAdminUser = (
+  apiClient: ApiClient,
+  payload: AdminCreateUserRequest
+): Promise<AdminUserAccount> => apiClient.createAdminUser(payload);
+
+export const deleteAdminUser = (
+  apiClient: ApiClient,
+  userId: string
+): Promise<AdminUserAccount> => apiClient.deleteAdminUser(userId);
+
 export const loadAdminRuns = (
   apiClient: ApiClient,
   query: AdminRunQuery = {}
@@ -58,3 +93,10 @@ export const loadAdminIssues = (
   apiClient: ApiClient,
   limit = 25
 ): Promise<AdminIssueListResponse> => apiClient.listAdminIssues(limit);
+
+export const requeueAdminRun = (
+  apiClient: ApiClient,
+  runId: string,
+  reason = "admin requeue"
+): Promise<AdminRunActionResponse> =>
+  apiClient.requeueAdminRun(runId, reason);

@@ -74,6 +74,34 @@ def test_docker_sandbox_command_enforces_isolation_and_limits(tmp_path: Path):
     assert command[-3:] == ["bash", "-lc", "python analysis.py"]
 
 
+def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(
+            image="ultra-agent-sandbox:test",
+            cpus=0,
+            memory="",
+            pids_limit=0,
+            timeout_seconds=0,
+            output_limit_bytes=0,
+        ),
+    )
+
+    command = backend.build_docker_command("python train.py")
+
+    assert "--cpus" not in command
+    assert "--memory" not in command
+    assert "--pids-limit" not in command
+    assert command[-3:] == ["bash", "-lc", "python train.py"]
+
+
+def test_unlimited_output_limit_does_not_truncate():
+    output, truncated = docker._truncate_output("x" * 1_000_000, 0)
+
+    assert output == "x" * 1_000_000
+    assert truncated is False
+
+
 def test_docker_sandbox_rejects_recursive_root_globs_before_launch(tmp_path: Path):
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",

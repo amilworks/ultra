@@ -9,11 +9,11 @@ import bisque.*
 BISQUE = BQM; 
 %% Setup servers and login to Bisquik DB
 user = 'admin'; password = 'admin';
-bisque_uri = 'http://bodzio.ece.ucsb.edu:8080';
-mex_uri = 'http://bodzio.ece.ucsb.edu:8080/ds/modules/87';
+bisque_uri = 'https://bisque.example.org';
+mex_uri = 'https://bisque.example.org/ds/modules/87';
 BISQUE.initialize(bisque_uri, user, password, mex_uri);
 %% Load image
-image_uri = 'http://bodzio.ece.ucsb.edu:8080/ds/images/242';
+image_uri = 'https://bisque.example.org/ds/images/242';
 image = BISQUE.load(image_uri);
 image.getInfo();
 image_data = BISQUE.getPixels(image);
@@ -26,7 +26,7 @@ BISQUE.setPixels(image_new, uint8(image_data));
 
 %pixels = image_new.getPixels();
 %filename = 'file:///home/boguslaw/Desktop/im.raw';
-%pixels.save('http://bodzio.ece.ucsb.edu:8080');
+%pixels.save('https://bisque.example.org');
 %pixels.save(filename);
 
 

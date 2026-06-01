@@ -1,4 +1,4 @@
-.PHONY: test run tidy generate generate-openapi generate-sqlc
+.PHONY: test integration soak run migrate tidy generate generate-openapi generate-sqlc
 
 generate: generate-openapi generate-sqlc
 
@@ -11,8 +11,23 @@ generate-sqlc:
 test:
 	go test ./...
 
+integration:
+	ULTRA_CONTROL_DATABASE_URL=$${ULTRA_CONTROL_TEST_DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:55432/bisque_ultra_test} \
+		go run ./cmd/ultra-control migrate
+	ULTRA_CONTROL_TEST_DATABASE_URL=$${ULTRA_CONTROL_TEST_DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:55432/bisque_ultra_test} \
+	ULTRA_CONTROL_TEST_NATS_URL=$${ULTRA_CONTROL_TEST_NATS_URL:-nats://127.0.0.1:4222} \
+	go test ./internal/app ./internal/eventbus ./internal/store \
+		-run 'TestAppPostgresAndNATSFlowPersistsWorkerEventsAcrossRestart|TestAppPostgresAndNATSFlowPersistsThousandEventAutonomousRun|TestAppPostgresAndNATSFlowPersistsMixedToolEventAutonomousRun|TestAppPostgresAndNATSIngestsWorkerEventsPublishedWhileControlPlaneIsDown|TestAppPostgresAndNATSIdempotentRetriesPublishOneDurableJob|TestAppPostgresAndNATSHorizontalIdempotentRetriesPublishOneDurableJob|TestAppPostgresAndNATSCompletionPersistsAssistantTranscriptAcrossRestart|TestAppPostgresRunLeaseSurvivesRestartAndAllowsRecoveryAfterExpiry|TestNATSBusPublishesJobAndRunEvent|TestNATSBusDeduplicatesPublishRetriesByDeterministicMessageID|TestNATSRunEventConsumerSurvivesSubscriberShutdown|TestNATSRunEventConsumerReconcilesExistingUnsafeDefaults|TestNATSRunEventConsumerSupportsMultipleControlPlaneSubscribers|TestPostgresStoreThreadRunEventArtifactFlow|TestPostgresStoreRejectsDuplicateRunIdempotencyKey|TestPostgresStoreCompleteRunRepairsSucceededRunMissingResponseText|TestPostgresStoreClearRunLeaseEvictsAnyActiveToken|TestPostgresStoreCreateAndListOrganizations|TestPostgresStoreUpsertsAndListsWorkerHeartbeats' \
+		-count=1
+
+soak:
+	go test ./internal/runcontrol -run 'TestServiceControlPlaneSoakConcurrentIdempotentRunsAndWorkerEvents|TestServiceControlPlaneSoakHighVolumeToolEventsRemainReplayable' -count=1
+
 run:
 	go run ./cmd/ultra-control
+
+migrate:
+	go run ./cmd/ultra-control migrate
 
 tidy:
 	go mod tidy

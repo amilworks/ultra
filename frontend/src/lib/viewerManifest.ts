@@ -271,9 +271,9 @@ const inferModality = (source: UnknownRecord, originalName: string): UploadViewe
 const normalizeServiceUrls = (source: UnknownRecord, fileId: string) => {
   const fileSegment = encodeURIComponent(fileId);
   return {
-    preview: String(source.preview ?? `/v1/uploads/${fileSegment}/preview`),
+    preview: String(source.preview ?? `/v2/uploads/${fileSegment}/preview`),
     display: source.display == null ? undefined : String(source.display),
-    slice: String(source.slice ?? `/v1/uploads/${fileSegment}/slice`),
+    slice: String(source.slice ?? `/v2/uploads/${fileSegment}/slice`),
     tile: String(source.tile ?? `/v1/uploads/${fileSegment}/tiles`),
     atlas: String(source.atlas ?? `/v1/uploads/${fileSegment}/atlas`),
     scalar_volume:

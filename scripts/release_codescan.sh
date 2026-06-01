@@ -56,7 +56,7 @@ CHECK_PATTERNS=(
   '\b[a-z0-9.-]+\.internal\b'
   '/mnt/barrel-data/'
   '\bucsb-[a-z0-9-]+\b'
-  '\b(vrl-h200|nail0[0-9])\b'
+  '\b(vrl-[a-z0-9-]+|nail[0-9]+)\b'
 )
 
 status=0

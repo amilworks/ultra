@@ -116,6 +116,20 @@ const cleanDetail = (value: unknown): string | null => {
   return normalized.length > 0 ? normalized : null;
 };
 
+const statusFromV2ToolEvent = (eventType: string, payload: Record<string, unknown>): StepStatus => {
+  const status = String(payload.status || "").trim();
+  if (status) {
+    return toStepStatus(status);
+  }
+  if (eventType.endsWith(".started")) {
+    return "running";
+  }
+  if (eventType.endsWith(".failed") || eventType.endsWith(".error")) {
+    return "failed";
+  }
+  return "completed";
+};
+
 const buildStepItems = (
   runEvents: RunEvent[],
   progressEvents: ProgressEvent[]
@@ -145,6 +159,23 @@ const buildStepItems = (
     const nestedPayload = toRecord(payload.payload);
     const eventType = String(event.event_type || "").trim().toLowerCase();
     const detail = cleanDetail(payload.message);
+    if (eventType.startsWith("tool_call.")) {
+      const toolName = String(payload.tool_name ?? payload.tool ?? "").trim();
+      if (!toolName) {
+        return;
+      }
+      const invocationId = String(
+        payload.tool_call_id ?? payload.call_id ?? payload.event_id ?? `${toolName}-${index}`
+      ).trim();
+      upsertStep(`tool:${invocationId}`, {
+        id: `tool:${invocationId}`,
+        kind: "tool",
+        label: formatToolLabel(toolName),
+        detail: detail ?? cleanDetail(payload.command),
+        status: statusFromV2ToolEvent(eventType, payload),
+      });
+      return;
+    }
     if (
       eventType === "memory.retrieved" ||
       eventType === "memory.updated" ||
@@ -270,7 +301,7 @@ export function ChatRunSteps({
   const lastItem = stepItems[stepItems.length - 1] ?? null;
   const hasFailure = stepItems.some((item) => item.status === "failed");
   const triggerText = String(
-    fallbackLabel || activeItem?.label || lastItem?.label || DEFAULT_THINKING_TEXT
+    activeItem?.label || lastItem?.label || fallbackLabel || DEFAULT_THINKING_TEXT
   ).trim();
 
   return (

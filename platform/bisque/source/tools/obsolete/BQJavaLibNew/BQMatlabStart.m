@@ -8,14 +8,14 @@ try
 %% Start BQ lib
 BQ = BQMatlab; 
 %% Setup servers 
-ds_uri = 'http://dough.ece.ucsb.edu';
-cs_uri = 'http://dough.ece.ucsb.edu';
+ds_uri = 'https://bisque.example.org';
+cs_uri = 'https://bisque.example.org';
 BQ.initServers(ds_uri,cs_uri);
 %% Login to Bisquik DB
 user = 'admin'; password = 'admin';
 BQ.login(user, password);
 %% Load image
-image_uri = 'http://dough.ece.ucsb.edu/ds/images/18914';
+image_uri = 'https://bisque.example.org/ds/images/18914';
 image = BQ.loadImage([image_uri '?view=full']);
 image_data = uint8(BQ.loadImageData(image));
 %% Save Image

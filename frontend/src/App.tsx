@@ -117,9 +117,6 @@ import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
   DEFAULT_BISQUE_BROWSER_URL,
-  DEFAULT_MAX_RUNTIME_SECONDS,
-  DEFAULT_PRO_MODE_MAX_RUNTIME_SECONDS,
-  DEFAULT_MAX_TOOL_CALLS,
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { formatBytes } from "./lib/format";
@@ -129,6 +126,10 @@ import {
   type BisqueNavLinks,
 } from "./features/auth/bisqueNavigation";
 import {
+  createAdminOrganization,
+  createAdminUser,
+  deleteAdminUser,
+  loadAdminOrganizations,
   loadAdminIssues,
   loadAdminOverview,
   loadAdminRuns,
@@ -143,7 +144,18 @@ import {
   buildScientificResultGroups,
   type ScientificResultFigure,
 } from "./features/chat/scientific-results";
-import { shouldHydrateRunArtifacts } from "./features/chat/run-artifact-hydration";
+import {
+  isHydratableRunArtifactVisual,
+  rewriteArtifactMarkdownImageUrls,
+  shouldHydrateRunArtifacts,
+} from "./features/chat/run-artifact-hydration";
+import {
+  isLegacyRunLookup404Content,
+  latestRunEventSequence,
+  shouldDropHydratedLegacy404Message,
+  shouldRecoverRunResultMessage,
+} from "./features/chat/run-recovery";
+import { shouldKeepOptimisticConversationAfterHydration } from "./features/chat/stale-conversation";
 import {
   loadComposerResources,
   loadLibraryResources,
@@ -155,7 +167,10 @@ import {
 } from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
 import type {
+  AdminCreateOrganizationRequest,
+  AdminCreateUserRequest,
   AdminIssueRecord,
+  AdminOrganization,
   AdminOverviewResponse,
   AdminRunRecord,
   AdminUserSummary,
@@ -702,6 +717,42 @@ const EMPTY_UPLOADED_FILES: UploadedFileRecord[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_FAILED_UPLOAD_PREVIEW_IDS: Record<string, true> = {};
 const EMPTY_BISQUE_LINKS_BY_FILE_ID: Record<string, BisqueViewerLink> = {};
+
+const mergeRunImageArtifacts = (
+  primary: RunImageArtifact[],
+  secondary: RunImageArtifact[]
+): RunImageArtifact[] => {
+  const visualPrimary = primary.filter(isHydratableRunArtifactVisual);
+  const visualSecondary = secondary.filter(isHydratableRunArtifactVisual);
+  if (visualSecondary.length === 0) {
+    return visualPrimary;
+  }
+  const merged = new Map<string, RunImageArtifact>();
+  [...visualPrimary, ...visualSecondary].forEach((artifact) => {
+    const key = [
+      String(artifact.path || "").trim(),
+      String(artifact.downloadUrl || artifact.url || "").trim(),
+    ]
+      .filter(Boolean)
+      .join("|");
+    if (!key || merged.has(key)) {
+      return;
+    }
+    merged.set(key, artifact);
+  });
+  return Array.from(merged.values());
+};
+
+const collectConversationRunArtifacts = (messages: UiMessage[]): RunImageArtifact[] => {
+  const artifacts: RunImageArtifact[] = [];
+  messages.forEach((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.runArtifacts)) {
+      return;
+    }
+    artifacts.push(...message.runArtifacts);
+  });
+  return artifacts.length > 0 ? mergeRunImageArtifacts([], artifacts) : EMPTY_RUN_IMAGE_ARTIFACTS;
+};
 
 type ConversationScrollMemory = {
   scrollTop: number;
@@ -1548,7 +1599,12 @@ const toRunArtifacts = (value: unknown): RunImageArtifact[] => {
             ? row.linked_file_id
             : null,
     }))
-    .filter((artifact) => artifact.path.length > 0 && artifact.url.length > 0);
+    .filter(
+      (artifact) =>
+        artifact.path.length > 0 &&
+        artifact.url.length > 0 &&
+        isHydratableRunArtifactVisual(artifact)
+    );
 };
 
 const toToolResourceRows = (value: unknown): ToolResourceRow[] => {
@@ -1663,7 +1719,8 @@ const toUiMessages = (value: unknown, fallbackTime: number): UiMessage[] => {
           : undefined,
         resolvedBisqueResources: toToolResourceRows(row.resolvedBisqueResources),
       };
-    });
+    })
+    .filter((message) => !shouldDropHydratedLegacy404Message(message));
 };
 
 const removeMessageWithPairedResponse = (
@@ -1732,7 +1789,10 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     selectionImportPending: false,
     sending: hydrated ? Boolean(state.sending) : false,
     chatError:
-      hydrated && typeof state.chatError === "string" && state.chatError.trim()
+      hydrated &&
+      typeof state.chatError === "string" &&
+      state.chatError.trim() &&
+      !isLegacyRunLookup404Content(state.chatError)
         ? state.chatError
         : null,
     streamingMessageId:
@@ -2091,6 +2151,7 @@ type ConversationMessageRowProps = {
   isLastMessage: boolean;
   isStreamingAssistant: boolean;
   copiedMessageId: string | null;
+  conversationRunArtifacts: RunImageArtifact[];
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
@@ -2103,6 +2164,7 @@ const ConversationMessageRow = memo(
     isLastMessage,
     isStreamingAssistant,
     copiedMessageId,
+    conversationRunArtifacts,
     uploadedFiles,
     bisqueLinksByFileId,
     apiClient,
@@ -2115,6 +2177,14 @@ const ConversationMessageRow = memo(
     const progressEvents = message.progressEvents ?? EMPTY_PROGRESS_EVENTS;
     const runEvents = message.runEvents ?? EMPTY_RUN_EVENTS;
     const runArtifacts = message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS;
+    const artifactReferences = useMemo(
+      () => mergeRunImageArtifacts(runArtifacts, conversationRunArtifacts),
+      [conversationRunArtifacts, runArtifacts]
+    );
+    const displayContent = useMemo(
+      () => rewriteArtifactMarkdownImageUrls(message.content, artifactReferences),
+      [artifactReferences, message.content]
+    );
     const uploadPreviewUrlForFile = useCallback(
       (fileId: string) => apiClient.uploadPreviewUrl(fileId),
       [apiClient]
@@ -2569,7 +2639,7 @@ const ConversationMessageRow = memo(
                     id={message.id}
                     markdown
                   >
-                    {message.content}
+                    {displayContent}
                   </MessageContent>
                 </div>
               </details>
@@ -2579,7 +2649,7 @@ const ConversationMessageRow = memo(
                 id={message.id}
                 markdown
               >
-                {message.content}
+                {displayContent}
               </MessageContent>
             )
           )}
@@ -2726,6 +2796,7 @@ const ConversationMessageRow = memo(
     previousProps.isLastMessage === nextProps.isLastMessage &&
     previousProps.isStreamingAssistant === nextProps.isStreamingAssistant &&
     previousProps.copiedMessageId === nextProps.copiedMessageId &&
+    previousProps.conversationRunArtifacts === nextProps.conversationRunArtifacts &&
     previousProps.uploadedFiles === nextProps.uploadedFiles &&
     previousProps.bisqueLinksByFileId === nextProps.bisqueLinksByFileId &&
     previousProps.apiClient === nextProps.apiClient
@@ -2757,6 +2828,10 @@ const ConversationTranscript = memo(
     apiClient,
     actions,
   }: ConversationTranscriptProps) {
+    const conversationRunArtifacts = useMemo(
+      () => collectConversationRunArtifacts(messages),
+      [messages]
+    );
     return (
       <ChatContainerContent
         className="space-y-0 px-4 py-8 sm:px-6 sm:py-14"
@@ -2782,6 +2857,7 @@ const ConversationTranscript = memo(
               isLastMessage={index === messages.length - 1}
               isStreamingAssistant={streamingMessageId === message.id}
               copiedMessageId={copiedMessageId}
+              conversationRunArtifacts={conversationRunArtifacts}
               uploadedFiles={uploadedFiles}
               bisqueLinksByFileId={bisqueLinksByFileId}
               apiClient={apiClient}
@@ -3835,7 +3911,7 @@ const buildToolResultCards = (
   runArtifacts: RunImageArtifact[],
   uploadedFiles: UploadedFileRecord[] = [],
   buildUploadPreviewUrl: (fileId: string) => string = (fileId) =>
-    `/v1/uploads/${encodeURIComponent(fileId)}/preview`,
+    `/v2/uploads/${encodeURIComponent(fileId)}/preview`,
   options?: {
     runId?: string;
     buildArtifactDownloadUrl?: (runId: string, path: string) => string;
@@ -9072,14 +9148,6 @@ export function App() {
     DEFAULT_API_BASE_URL
   );
   const [apiKey] = useState<string>(() => DEFAULT_API_KEY);
-  const [maxToolCalls] = useLocalStorageState<number>(
-    "bisque.frontend.maxToolCalls",
-    DEFAULT_MAX_TOOL_CALLS
-  );
-  const [maxRuntimeSeconds] = useLocalStorageState<number>(
-    "bisque.frontend.maxRuntimeSeconds",
-    DEFAULT_MAX_RUNTIME_SECONDS
-  );
   const [themePreference, setThemePreference] = useLocalStorageState<ThemePreference>(
     "bisque.frontend.themePreference",
     "system"
@@ -9141,10 +9209,12 @@ export function App() {
   const [resourceDeletingById, setResourceDeletingById] = useState<Record<string, boolean>>({});
   const [pendingResourceDelete, setPendingResourceDelete] = useState<ResourceRecord | null>(null);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
+  const [adminOrganizations, setAdminOrganizations] = useState<AdminOrganization[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [adminRuns, setAdminRuns] = useState<AdminRunRecord[]>([]);
   const [adminIssues, setAdminIssues] = useState<AdminIssueRecord[]>([]);
   const [adminLoadingOverview, setAdminLoadingOverview] = useState(false);
+  const [adminLoadingOrganizations, setAdminLoadingOrganizations] = useState(false);
   const [adminLoadingUsers, setAdminLoadingUsers] = useState(false);
   const [adminLoadingRuns, setAdminLoadingRuns] = useState(false);
   const [adminLoadingIssues, setAdminLoadingIssues] = useState(false);
@@ -9153,6 +9223,11 @@ export function App() {
   const [adminRunQuery, setAdminRunQuery] = useState("");
   const [adminUserQuery, setAdminUserQuery] = useState("");
   const [adminRefreshToken, setAdminRefreshToken] = useState(0);
+  const [activeAdminRunEventRunId, setActiveAdminRunEventRunId] = useState<string | null>(null);
+  const [adminRunEventsById, setAdminRunEventsById] = useState<Record<string, RunEvent[]>>({});
+  const [adminRunEventsLoadingById, setAdminRunEventsLoadingById] = useState<
+    Record<string, boolean>
+  >({});
 
   useEffect(() => {
     if (!isPhoneView) {
@@ -9162,6 +9237,10 @@ export function App() {
   const [adminRunCancellingById, setAdminRunCancellingById] = useState<Record<string, boolean>>(
     {}
   );
+  const [adminRunRequeueingById, setAdminRunRequeueingById] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [adminUserDeletingById, setAdminUserDeletingById] = useState<Record<string, boolean>>({});
   const [adminDeletingConversationKey, setAdminDeletingConversationKey] = useState<string | null>(
     null
   );
@@ -9186,6 +9265,7 @@ export function App() {
   const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
   const hydratingConversationIdsRef = useRef<Set<string>>(new Set());
   const activeChatAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const runStreamRecoveryControllersRef = useRef<Map<string, AbortController>>(new Map());
   const stopRequestedConversationIdsRef = useRef<Set<string>>(new Set());
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
   const reuseDecisionResolverRef = useRef<((decision: ReuseDecision) => void) | null>(null);
@@ -9302,6 +9382,8 @@ export function App() {
     return () => {
       activeChatAbortControllersRef.current.forEach((controller) => controller.abort());
       activeChatAbortControllersRef.current.clear();
+      runStreamRecoveryControllersRef.current.forEach((controller) => controller.abort());
+      runStreamRecoveryControllersRef.current.clear();
       stopRequestedConversationIdsRef.current.clear();
       if (copyFeedbackTimeoutRef.current) {
         window.clearTimeout(copyFeedbackTimeoutRef.current);
@@ -9408,6 +9490,7 @@ export function App() {
         setConversationListOffset(payload.offset + payload.count);
         setConversationListHasMore(payload.has_more);
 
+        let missingRequestedConversationId: string | null = null;
         if (
           targetConversationId &&
           !restored.some((conversation) => conversation.id === targetConversationId)
@@ -9426,6 +9509,7 @@ export function App() {
               return;
             }
             if (error instanceof ApiError && error.status === 404) {
+              missingRequestedConversationId = targetConversationId;
               setUiErrorBanner(
                 "Requested chat was not found. Opened the latest available conversation instead."
               );
@@ -9446,10 +9530,15 @@ export function App() {
         }
         let mergedConversations = restored;
         setConversations((current) => {
+          const restoredIds = new Set(restored.map((conversation) => conversation.id));
           const optimisticLocals = current.filter(
             (conversation) =>
               optimisticConversationIdsRef.current.has(conversation.id) &&
-              !restored.some((candidate) => candidate.id === conversation.id)
+              shouldKeepOptimisticConversationAfterHydration({
+                conversationId: conversation.id,
+                incomingConversationIds: restoredIds,
+                missingRequestedConversationId,
+              })
           );
           mergedConversations = mergeConversationPage(optimisticLocals, restored);
           return mergedConversations;
@@ -9716,6 +9805,38 @@ export function App() {
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
+      setAdminOrganizations([]);
+      setAdminLoadingOrganizations(false);
+      return;
+    }
+    let cancelled = false;
+    setAdminLoadingOrganizations(true);
+    void loadAdminOrganizations(apiClient, { limit: 250 })
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminOrganizations(payload.organizations);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminError(normalizeApiError(error));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setAdminLoadingOrganizations(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
       setAdminUsers([]);
       setAdminLoadingUsers(false);
       return;
@@ -9767,6 +9888,9 @@ export function App() {
           return;
         }
         setAdminRuns(payload.runs);
+        setActiveAdminRunEventRunId((current) =>
+          current && payload.runs.some((run) => run.run_id === current) ? current : null
+        );
       })
       .catch((error) => {
         if (cancelled) {
@@ -10370,11 +10494,13 @@ export function App() {
     setConversationDeletingById({});
     setResourceDeletingById({});
     setAdminOverview(null);
+    setAdminOrganizations([]);
     setAdminUsers([]);
     setAdminRuns([]);
     setAdminIssues([]);
     setAdminError(null);
     setAdminRunCancellingById({});
+    setAdminRunRequeueingById({});
     setAdminDeletingConversationKey(null);
   };
 
@@ -11049,6 +11175,75 @@ export function App() {
     setAdminRefreshToken((value) => value + 1);
   };
 
+  const createAdminConsoleOrganization = async (
+    payload: AdminCreateOrganizationRequest
+  ): Promise<void> => {
+    try {
+      await createAdminOrganization(apiClient, payload);
+      setAdminError(null);
+      refreshAdminConsole();
+    } catch (error) {
+      const message = normalizeApiError(error);
+      setAdminError(message);
+      throw Object.assign(new Error(message), { cause: error });
+    }
+  };
+
+  const createAdminConsoleUser = async (payload: AdminCreateUserRequest): Promise<void> => {
+    try {
+      await createAdminUser(apiClient, payload);
+      setAdminError(null);
+      refreshAdminConsole();
+    } catch (error) {
+      const message = normalizeApiError(error);
+      setAdminError(message);
+      throw Object.assign(new Error(message), { cause: error });
+    }
+  };
+
+  const deleteAdminConsoleUser = async (userId: string): Promise<void> => {
+    const key = String(userId || "").trim();
+    if (!key) {
+      return;
+    }
+    setAdminUserDeletingById((previous) => ({ ...previous, [key]: true }));
+    try {
+      await deleteAdminUser(apiClient, key);
+      setAdminError(null);
+      refreshAdminConsole();
+    } catch (error) {
+      setAdminError(normalizeApiError(error));
+    } finally {
+      setAdminUserDeletingById((previous) => {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
+  const inspectAdminRunEvents = async (runId: string): Promise<void> => {
+    const key = String(runId || "").trim();
+    if (!key) {
+      return;
+    }
+    setActiveAdminRunEventRunId(key);
+    setAdminRunEventsLoadingById((previous) => ({ ...previous, [key]: true }));
+    try {
+      const payload = await listRunEvents(apiClient, key, 200);
+      setAdminRunEventsById((previous) => ({ ...previous, [key]: payload.events }));
+      setAdminError(null);
+    } catch (error) {
+      setAdminError(normalizeApiError(error));
+    } finally {
+      setAdminRunEventsLoadingById((previous) => {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
   const openAdminPanel = (): void => {
     if (!authIsAdmin) {
       return;
@@ -11074,6 +11269,27 @@ export function App() {
       setAdminError(normalizeApiError(error));
     } finally {
       setAdminRunCancellingById((previous) => {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
+  const requeueAdminRun = async (runId: string): Promise<void> => {
+    const key = String(runId || "").trim();
+    if (!key) {
+      return;
+    }
+    setAdminRunRequeueingById((previous) => ({ ...previous, [key]: true }));
+    try {
+      await apiClient.requeueAdminRun(key, "admin requeue");
+      setAdminError(null);
+      refreshAdminConsole();
+    } catch (error) {
+      setAdminError(normalizeApiError(error));
+    } finally {
+      setAdminRunRequeueingById((previous) => {
         const next = { ...previous };
         delete next[key];
         return next;
@@ -11892,18 +12108,19 @@ export function App() {
           })
         )
       ).filter((row): row is Record<string, unknown> => row !== null);
-      const imageArtifacts = artifactResponse.artifacts.filter((artifact) => {
-        const mimeType = artifact.mime_type?.toLowerCase() ?? "";
-        if (!(mimeType.startsWith("image/") || isImageArtifactPath(artifact.path))) {
-          return false;
-        }
-        return Math.max(0, Number(artifact.size_bytes) || 0) > 0;
-      });
-      if (imageArtifacts.length === 0) {
+      const durableArtifacts = artifactResponse.artifacts.filter(
+        (artifact) =>
+          Math.max(0, Number(artifact.size_bytes) || 0) > 0 &&
+          isHydratableRunArtifactVisual({
+            path: artifact.path,
+            mime_type: artifact.mime_type,
+          })
+      );
+      if (durableArtifacts.length === 0) {
         return;
       }
 
-      const selected = prioritizeHydratedImageArtifacts(imageArtifacts);
+      const selected = prioritizeHydratedImageArtifacts(durableArtifacts);
 
       updateConversation(conversationId, (conversation) => {
         const uploadedPreviewLookup = buildUploadedArtifactPreviewLookup(
@@ -12074,28 +12291,39 @@ export function App() {
 
   const runRecoveryTargets = useMemo(() => {
     if (authStatus !== "authenticated" || !conversationsHydrated) {
-      return [] as Array<{ conversationId: string; messageId: string; runId: string }>;
+      return [] as Array<{
+        conversationId: string;
+        messageId: string;
+        runId: string;
+        afterSequence: number;
+        key: string;
+      }>;
     }
-    const targets: Array<{ conversationId: string; messageId: string; runId: string }> = [];
+    const targets: Array<{
+      conversationId: string;
+      messageId: string;
+      runId: string;
+      afterSequence: number;
+      key: string;
+    }> = [];
     conversations.forEach((conversation) => {
       const candidate = [...conversation.messages]
         .reverse()
-        .find((message) => {
-          if (message.role !== "assistant" || !message.runId) {
-            return false;
-          }
-          if (conversation.streamingMessageId === message.id) {
-            return !message.liveStream;
-          }
-          return message.content.trim().length === 0;
-        });
+        .find((message) =>
+          shouldRecoverRunResultMessage(message, {
+            isStreamingMessage: conversation.streamingMessageId === message.id,
+          })
+        );
       if (!candidate?.runId) {
         return;
       }
+      const key = `${conversation.id}:${candidate.id}:${candidate.runId}`;
       targets.push({
         conversationId: conversation.id,
         messageId: candidate.id,
         runId: candidate.runId,
+        afterSequence: latestRunEventSequence(candidate.runEvents ?? []),
+        key,
       });
     });
     return targets;
@@ -12112,11 +12340,112 @@ export function App() {
           return;
         }
         try {
+          if (runStreamRecoveryControllersRef.current.has(target.key)) {
+            continue;
+          }
           const payload = await apiClient.getRunResult(target.runId);
           if (cancelled) {
             return;
           }
           if (payload.status === "pending" || payload.status === "running") {
+            const controller = new AbortController();
+            runStreamRecoveryControllersRef.current.set(target.key, controller);
+            activeChatAbortControllersRef.current.set(target.conversationId, controller);
+            updateConversation(target.conversationId, (conversation) => ({
+              ...conversation,
+              sending: true,
+              chatError: null,
+              streamingMessageId: target.messageId,
+            }));
+            void apiClient
+              .resumeRunStream(target.runId, {
+                afterSequence: target.afterSequence,
+                signal: controller.signal,
+                onRunEvent: (runEvent) => {
+                  updateConversation(target.conversationId, (conversation) => ({
+                    ...conversation,
+                    messages: conversation.messages.map((message) =>
+                      message.id === target.messageId
+                        ? {
+                            ...message,
+                            runEvents: appendUniqueRunEvent(message.runEvents ?? [], runEvent),
+                          }
+                        : message
+                    ),
+                  }));
+                },
+                onToken: (delta) => {
+                  updateConversation(target.conversationId, (conversation) => ({
+                    ...conversation,
+                    messages: conversation.messages.map((message) =>
+                      message.id === target.messageId
+                        ? {
+                            ...message,
+                            content: `${message.content ?? ""}${delta}`,
+                          }
+                        : message
+                    ),
+                  }));
+                },
+              })
+              .then((response) => {
+                if (controller.signal.aborted) {
+                  return;
+                }
+                const recoveredText =
+                  response.response_text?.trim() || "No response text returned.";
+                updateConversation(target.conversationId, (conversation) => ({
+                  ...conversation,
+                  sending: false,
+                  chatError: null,
+                  streamingMessageId:
+                    conversation.streamingMessageId === target.messageId
+                      ? null
+                      : conversation.streamingMessageId,
+                  messages: conversation.messages.map((message) =>
+                    message.id === target.messageId
+                      ? {
+                          ...message,
+                          content: recoveredText,
+                          runId: response.run_id || message.runId,
+                          durationSeconds:
+                            response.duration_seconds ?? message.durationSeconds,
+                          progressEvents:
+                            response.progress_events ?? message.progressEvents ?? [],
+                          responseMetadata:
+                            response.metadata ?? message.responseMetadata ?? null,
+                          liveStream: undefined,
+                        }
+                      : message
+                  ),
+                }));
+                hydrateRunDetails(target.conversationId, target.messageId, response.run_id);
+              })
+              .catch((error) => {
+                if (controller.signal.aborted) {
+                  return;
+                }
+                updateConversation(target.conversationId, (conversation) => ({
+                  ...conversation,
+                  sending: false,
+                  streamingMessageId:
+                    conversation.streamingMessageId === target.messageId
+                      ? null
+                      : conversation.streamingMessageId,
+                  chatError:
+                    conversation.chatError ||
+                    `Run ${target.runId.slice(0, 8)} stream recovery failed: ${normalizeApiError(error)}`,
+                }));
+              })
+              .finally(() => {
+                const activeController = runStreamRecoveryControllersRef.current.get(target.key);
+                if (activeController === controller) {
+                  runStreamRecoveryControllersRef.current.delete(target.key);
+                }
+                if (activeChatAbortControllersRef.current.get(target.conversationId) === controller) {
+                  activeChatAbortControllersRef.current.delete(target.conversationId);
+                }
+              });
             continue;
           }
           if (payload.status !== "succeeded" || !payload.result) {
@@ -12625,6 +12954,7 @@ export function App() {
     };
 
     const conversationId = conversation.id;
+    const runIdempotencyKey = `${conversationId}:${userMessage.id}`;
     stopRequestedConversationIdsRef.current.delete(conversationId);
     activeChatAbortControllersRef.current.delete(conversationId);
     const nextMessages = [...conversation.messages, userMessage];
@@ -12818,18 +13148,6 @@ export function App() {
           },
         ],
       }));
-      const workflowHintId = composerWorkflowPreset?.workflowHint?.id ?? null;
-      const requestedMaxRuntimeSeconds = Number(maxRuntimeSeconds);
-      const effectiveMaxRuntimeSeconds =
-        Number.isFinite(requestedMaxRuntimeSeconds) && requestedMaxRuntimeSeconds > 0
-          ? workflowHintId === "pro_mode" &&
-            requestedMaxRuntimeSeconds === DEFAULT_MAX_RUNTIME_SECONDS
-            ? DEFAULT_PRO_MODE_MAX_RUNTIME_SECONDS
-            : requestedMaxRuntimeSeconds
-          : workflowHintId === "pro_mode"
-            ? DEFAULT_PRO_MODE_MAX_RUNTIME_SECONDS
-            : DEFAULT_MAX_RUNTIME_SECONDS;
-
       const chatRequest = {
         messages: chatMessages,
         uploaded_files: [],
@@ -12843,10 +13161,7 @@ export function App() {
         debug:
           Boolean(import.meta.env.DEV) &&
           composerWorkflowPreset?.workflowHint?.id === "pro_mode",
-        budgets: {
-          max_tool_calls: Math.max(1, Math.min(64, Number(maxToolCalls) || 6)),
-          max_runtime_seconds: Math.max(1, Math.min(86400, effectiveMaxRuntimeSeconds)),
-        },
+        idempotency_key: runIdempotencyKey,
       };
       chatRequestForRetry = chatRequest;
 
@@ -12937,6 +13252,8 @@ export function App() {
           updatedAt: Date.now(),
           chatError: null,
           sending: false,
+          streamingMessageId:
+            current.streamingMessageId === messageId ? null : current.streamingMessageId,
           stagedUploadFileIds:
             consumedUploadFileIds.size > 0
               ? current.stagedUploadFileIds.filter(
@@ -12956,6 +13273,7 @@ export function App() {
                 progressEvents: response.progress_events ?? [],
                 runEvents: item.runEvents ?? [],
                 responseMetadata: response.metadata ?? item.responseMetadata ?? null,
+                liveStream: undefined,
                 resolvedBisqueResources: mergeBisqueResourceRows([
                   ...(item.resolvedBisqueResources ?? []),
                   ...mergedResponseBisqueRows,
@@ -13664,16 +13982,23 @@ export function App() {
             >
               <LazyAdminConsole
                 overview={adminOverview}
+                organizations={adminOrganizations}
                 users={adminUsers}
                 runs={adminRuns}
                 issues={adminIssues}
                 loadingOverview={adminLoadingOverview}
+                loadingOrganizations={adminLoadingOrganizations}
                 loadingUsers={adminLoadingUsers}
                 loadingRuns={adminLoadingRuns}
                 loadingIssues={adminLoadingIssues}
                 error={adminError}
                 runCancellingById={adminRunCancellingById}
+                runRequeueingById={adminRunRequeueingById}
+                userDeletingById={adminUserDeletingById}
                 deletingConversationKey={adminDeletingConversationKey}
+                activeRunEventRunId={activeAdminRunEventRunId}
+                runEventsById={adminRunEventsById}
+                runEventsLoadingById={adminRunEventsLoadingById}
                 runStatusFilter={adminRunStatusFilter}
                 runQuery={adminRunQuery}
                 userQuery={adminUserQuery}
@@ -13681,14 +14006,26 @@ export function App() {
                 onRunQueryChange={setAdminRunQuery}
                 onUserQueryChange={setAdminUserQuery}
                 onRefreshAll={refreshAdminConsole}
+                onRefreshOrganizations={refreshAdminConsole}
                 onRefreshUsers={refreshAdminConsole}
                 onRefreshRuns={refreshAdminConsole}
                 onRefreshIssues={refreshAdminConsole}
+                onCreateOrganization={createAdminConsoleOrganization}
+                onCreateUser={createAdminConsoleUser}
+                onDeleteUser={(userId: string) => {
+                  void deleteAdminConsoleUser(userId);
+                }}
                 onCancelRun={(runId: string) => {
                   void cancelAdminRun(runId);
                 }}
+                onRequeueRun={(runId: string) => {
+                  void requeueAdminRun(runId);
+                }}
                 onDeleteConversation={(conversationId: string, userId: string) => {
                   void deleteAdminConversation(conversationId, userId);
+                }}
+                onInspectRunEvents={(runId: string) => {
+                  void inspectAdminRunEvents(runId);
                 }}
               />
             </Suspense>

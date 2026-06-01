@@ -511,7 +511,7 @@ public class BQImage extends BQObject{
 					"&channels=" + ch + "&depth=" + d + "&type=" + type + "&userPerm=" + perm +
 					"&endian=" + System.getProperties().getProperty("sun.cpu.endian") +
 					"&format=raw";
-			String url = "http://bodzio.ece.ucsb.edu:8080/";
+			String url = "https://bisque.example.org/";
 			//URL server = new URL(url + "/upload_raw_image" + urlQuery); //was '/bisquik/upload_raw_image'
 			URL server = new URL(serverUri + "/client_service/upload_raw_image" + urlQuery); //was '/bisquik/upload_raw_image'  
 			//System.out.println(serverUri + "/upload_raw_image" + urlQuery);

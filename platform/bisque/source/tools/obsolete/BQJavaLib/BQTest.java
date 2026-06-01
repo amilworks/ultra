@@ -32,7 +32,7 @@ public class BQTest{
 		BQGObject roi = new BQGObject();
 		roi.type = "ROI";
 		roi.name = "My ROI";
-		
+
 		BQGObject circle = new BQGObject();
 		circle.type = "circle";
 		circle.name = "cancer cell";
@@ -44,7 +44,7 @@ public class BQTest{
 		vcl.add(vc1); vcl.add(vc2);
 		circle.tags.add(tc);
 		circle.vertices = vcl;
-		
+
 		BQGObject rect = new BQGObject();
 		rect.type = "rectangle";
 		rect.name = "ROI";
@@ -56,10 +56,10 @@ public class BQTest{
 		vrl.add(vr1); vrl.add(vr2);
 		rect.tags.add(tr);
 		rect.vertices = vrl;
-		
+
 		roi.gobjects.add(rect);
-		roi.gobjects.add(circle);		
-		
+		roi.gobjects.add(circle);
+
 		return roi;
 	}
 	public BQImage testCreate_Image(){
@@ -74,20 +74,20 @@ public class BQTest{
 	}
     public void testParseXML_GObject(){
 		//BQAuthorization.setAuthorization("kgk","testme");
-		//String url = "http://loup.ece.ucsb.edu:8080/ds/images/100187/gobjects?view=full,canonical";		
+		//String url = "https://bisque.example.org/ds/images/100187/gobjects?view=full,canonical";
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/116/gobjects?view=full,canonical";
+		String url = "https://bisque.example.org/ds/images/116/gobjects?view=full,canonical";
 		BQImage image = new BQImage(url);
 		image.load();
 		Iterator<BQGObject> gi = image.gobjects.iterator();
 		while ( gi.hasNext() ){
 			BQGObject go = gi.next();
-			System.out.println("gobject: type=" + go.type + ", uri="+ go.uri);	
+			System.out.println("gobject: type=" + go.type + ", uri="+ go.uri);
 		}
 	}
 	public void testParseXML_Image(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/601";
+		String url = "https://bisque.example.org/ds/images/601";
 		BQDataService ds = new BQDataService();
 		BQImage image = (BQImage)ds.load(url);
 		System.out.println("Image: 	src="		+ image.src			+ "," +
@@ -98,11 +98,11 @@ public class BQTest{
 									"ch="		+ image.ch			+ "," +
 									"owner_id="	+ image.owner_id	+ "," +
 									"perm="		+ image.perm		+ "," +
-									"ts="		+ image.ts);	
+									"ts="		+ image.ts);
 	}
 	public void testParseXML_ImageSrc(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/124";
+		String url = "https://bisque.example.org/ds/images/124";
 		BQDataService ds = new BQDataService();
 		BQImage image = (BQImage)ds.load(url);
 		System.out.println("Image: 	src="		+ image.src			+ "," +
@@ -113,8 +113,8 @@ public class BQTest{
 									"ch="		+ image.ch			+ "," +
 									"owner_id="	+ image.owner_id	+ "," +
 									"perm="		+ image.perm		+ "," +
-									"ts="		+ image.ts);	
-		
+									"ts="		+ image.ts);
+
 		image.getInfo();
 		System.out.println("Image: 	src="		+ image.src			+ "," +
 									"d="		+ image.d			+ "," +
@@ -122,37 +122,37 @@ public class BQTest{
 									"xr="		+ image.xr			+ "," +
 									"yr="		+ image.yr			+ "," +
 									"zr="		+ image.zr			+ "," +
-									"e="		+ image.e);	
+									"e="		+ image.e);
 	}
 	public void testGenXML_Image(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/108/gobjects";
+		String url = "https://bisque.example.org/ds/images/108/gobjects";
 		BQTest testBQ = new BQTest();
 		//BQImage image = testBQ.testCreate_Image();
-		//BQDataService ds = new BQDataService("http://bodzio.ece.ucsb.edu:8080/ds/images/108/tags");
+		//BQDataService ds = new BQDataService("https://bisque.example.org/ds/images/108/tags");
 		//BQTag tr = testBQ.testCreate_Tag();
-		//ds.save(tr);		
+		//ds.save(tr);
 		BQDataService ds = new BQDataService(url);
 		BQGObject rect = testBQ.testCreate_GObject();
 		ds.save(rect);
 	}
 	public void testSaveFile(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/112";
+		String url = "https://bisque.example.org/ds/images/112";
 		BQDataService ds = new BQDataService();
 		BQImage image = (BQImage)ds.load(url);
-		image.saveToFile("/home/boguslaw/Desktop/");	
+		image.saveToFile("/home/boguslaw/Desktop/");
 	}
 	public void testSearch(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080";
+		String url = "https://bisque.example.org";
 		BQDataService ds = new BQDataService(url);
 		ArrayList<BQObject> s = ds.search("");
-		//image.saveToFile("/home/boguslaw/Desktop/");	
+		//image.saveToFile("/home/boguslaw/Desktop/");
 	}
 	public void testFindTag(){
 		BQAuthorization.setAuthorization("admin","admin");
-		String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/104?view=full";
+		String url = "https://bisque.example.org/ds/images/104?view=full";
 		BQDataService ds = new BQDataService();
 		BQImage image = (BQImage)ds.load(url);
 		System.out.println(image.tags.size());
@@ -178,7 +178,7 @@ public class BQTest{
 	}
     public void testParseXML_MEX(){
         BQAuthorization.setAuthorization("admin","admin");
-        String url = "http://bodzio.ece.ucsb.edu:8080/ds/mex/8139?view=full";
+        String url = "https://bisque.example.org/ds/mex/8139?view=full";
         BQDataService ds = new BQDataService();
         BQMEX mex = (BQMEX)ds.load(url);
         System.out.println("Mex:     uri="      + mex.uri         + "," +
@@ -190,8 +190,8 @@ public class BQTest{
     }
     public void testBQImagePixels(){
         BQAuthorization.setAuthorization("admin","admin");
-        String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/104";
-        //String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/13017";
+        String url = "https://bisque.example.org/ds/images/104";
+        //String url = "https://bisque.example.org/ds/images/13017";
         BQDataService ds = new BQDataService();
         BQImage image = (BQImage)ds.load(url);
         BQImagePixels pixels = image.getPixels();
@@ -220,9 +220,9 @@ public class BQTest{
     }
     public void testJAI(){
         //BQJAI bm = new BQJAI();
-        //bm.createRGBTiledImage(); 
+        //bm.createRGBTiledImage();
         //bm.readImageFromURL("");
-        //bm.readRGBTiledImage("rgbpattern.tif"); 
+        //bm.readRGBTiledImage("rgbpattern.tif");
 
     }
     public static void main(String args[]){

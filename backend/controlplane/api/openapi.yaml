@@ -33,6 +33,134 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthSessionResponse"
+  /v1/auth/guest:
+    post:
+      operationId: continueAsGuest
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string }
+                affiliation: { type: string }
+      responses:
+        "200":
+          description: Local guest auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v1/auth/login:
+    post:
+      operationId: loginBisque
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Local BisQue-compatible auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v1/auth/logout:
+    post:
+      operationId: logoutBisque
+      responses:
+        "200":
+          description: Cleared local auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/health:
+    get:
+      operationId: getV2Health
+      responses:
+        "200":
+          description: Health response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v2/config/public:
+    get:
+      operationId: getV2PublicConfig
+      responses:
+        "200":
+          description: Public config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicConfigResponse"
+  /v2/auth/session:
+    get:
+      operationId: getV2AuthSession
+      responses:
+        "200":
+          description: Auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/auth/guest:
+    post:
+      operationId: continueAsV2Guest
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string }
+                affiliation: { type: string }
+      responses:
+        "200":
+          description: Local guest auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/auth/login:
+    post:
+      operationId: loginV2Bisque
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Local BisQue-compatible auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/auth/logout:
+    post:
+      operationId: logoutV2Bisque
+      responses:
+        "200":
+          description: Cleared local auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
   /v2/threads:
     get:
       operationId: listThreads
@@ -114,6 +242,11 @@ paths:
       operationId: createRun
       parameters:
         - $ref: "#/components/parameters/ThreadID"
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+          description: Reuses the existing run for the same thread, user, and key instead of dispatching duplicate work.
       requestBody:
         required: true
         content:
@@ -130,6 +263,200 @@ paths:
             text/event-stream:
               schema:
                 type: string
+  /v2/uploads:
+    post:
+      operationId: uploadFiles
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "200":
+          description: Uploaded files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadFilesResponse"
+  /v2/uploads/{file_id}/preview:
+    get:
+      operationId: getUploadPreview
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Upload preview bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /v2/uploads/{file_id}/viewer:
+    get:
+      operationId: getUploadViewer
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Upload viewer metadata
+          content:
+            application/json:
+              schema:
+                type: object
+  /v2/uploads/{file_id}/display:
+    get:
+      operationId: getUploadDisplay
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Upload display bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /v2/uploads/{file_id}/slice:
+    get:
+      operationId: getUploadSlice
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: axis
+          in: query
+          schema: { type: string }
+        - name: z
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: y
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: x
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: c
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: t
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Upload slice bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /v2/uploads/{file_id}/caption:
+    get:
+      operationId: getUploadCaption
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Upload caption
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_id, caption, source]
+                properties:
+                  file_id: { type: string }
+                  caption: { type: string }
+                  source:
+                    type: string
+                    enum: [fallback, llm, cache]
+  /v2/uploads/from-bisque:
+    post:
+      operationId: importV2BisqueResources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resources:
+                  type: array
+                  items: { type: string }
+      responses:
+        "501":
+          description: BisQue resource import is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/resources:
+    get:
+      operationId: listResources
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: kind
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Resource list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceListResponse"
+  /v2/resources/{file_id}:
+    get:
+      operationId: getResource
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceResponse"
+    delete:
+      operationId: deleteResource
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Deleted resource
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, file_id]
+                properties:
+                  deleted: { type: boolean }
+                  file_id: { type: string }
+  /v2/resources/{file_id}/thumbnail:
+    get:
+      operationId: getResourceThumbnail
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Resource thumbnail bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
   /v2/runs:
     get:
       operationId: listRuns
@@ -201,6 +528,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2RunRecord"
+  /v2/runs/{run_id}/lease:
+    post:
+      operationId: acquireRunLease
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Acquired run lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunLeaseRecord"
+        "409":
+          description: Run is already leased or terminal
+    patch:
+      operationId: renewRunLease
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Renewed run lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunLeaseRecord"
+        "409":
+          description: Lease token is stale or invalid
+    delete:
+      operationId: releaseRunLease
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Released run lease
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released: { type: boolean }
+        "409":
+          description: Lease token is stale or invalid
   /v2/runs/{run_id}/events:
     get:
       operationId: listRunEvents
@@ -209,6 +597,10 @@ paths:
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+        - name: after_sequence
+          in: query
+          description: Return events with sequence numbers greater than this cursor. Use 0 to page from the beginning of a long run.
+          schema: { type: integer, minimum: 0 }
         - name: stream
           in: query
           schema: { type: boolean, default: false }
@@ -237,6 +629,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ArtifactListResponse"
+  /v2/runs/{run_id}/artifacts/download:
+    get:
+      operationId: downloadRunArtifactByPath
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: Run-relative artifact path. Path traversal and absolute paths are rejected.
+      responses:
+        "200":
+          description: Artifact file bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Missing or unsafe artifact path
+        "404":
+          description: Artifact path not found
   /v2/artifacts/{artifact_id}:
     get:
       operationId: getArtifact
@@ -252,6 +666,682 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ArtifactResponse"
+  /v2/artifacts/{artifact_id}/download:
+    get:
+      operationId: downloadArtifact
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Artifact file bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /v2/workers/heartbeat:
+    post:
+      operationId: postV2WorkerHeartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2WorkerHeartbeatRequest"
+      responses:
+        "200":
+          description: Worker heartbeat accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2WorkerHeartbeatRecord"
+        "400":
+          description: Missing or invalid worker heartbeat
+  /v2/admin/overview:
+    get:
+      operationId: getV2AdminOverview
+      parameters:
+        - name: top_users
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 8 }
+        - name: issue_limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 12 }
+      responses:
+        "200":
+          description: Local admin overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminOverviewResponse"
+  /v2/admin/orgs:
+    get:
+      operationId: listV2AdminOrganizations
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Local admin organizations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminOrganizationListResponse"
+    post:
+      operationId: createV2AdminOrganization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2AdminCreateOrganizationRequest"
+      responses:
+        "201":
+          description: Created admin-managed organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminOrganization"
+  /v2/admin/users:
+    get:
+      operationId: listV2AdminUsers
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Local admin users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminUserListResponse"
+    post:
+      operationId: createV2AdminUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2AdminCreateUserRequest"
+      responses:
+        "201":
+          description: Created admin-managed user account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminUserAccount"
+  /v2/admin/users/{user_id}:
+    delete:
+      operationId: deleteV2AdminUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Soft-disabled admin-managed user account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminUserAccount"
+  /v2/admin/runs:
+    get:
+      operationId: listV2AdminRuns
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: user_id
+          in: query
+          schema: { type: string }
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Local admin runs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminRunListResponse"
+  /v2/admin/issues:
+    get:
+      operationId: listV2AdminIssues
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 25 }
+      responses:
+        "200":
+          description: Local admin issues
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminIssueListResponse"
+  /v2/admin/runs/{run_id}/cancel:
+    post:
+      operationId: cancelV2AdminRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Admin run cancellation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminRunActionResponse"
+  /v2/admin/runs/{run_id}/requeue:
+    post:
+      operationId: requeueV2AdminRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Admin run recovery dispatch result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminRunActionResponse"
+        "409":
+          description: Run is terminal and cannot be requeued
+  /v2/admin/conversations/{conversation_id}:
+    delete:
+      operationId: deleteV2AdminConversation
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: user_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "501":
+          description: Admin conversation deletion is not configured in the Go control plane yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/models:
+    get:
+      operationId: listV2TrainingModels
+      responses:
+        "200":
+          description: Training model descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingModelsResponse"
+  /v2/training/prairie/status:
+    get:
+      operationId: getV2PrairieStatus
+      responses:
+        "200":
+          description: Prairie training status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2PrairieStatusResponse"
+  /v2/training/prairie/retrain-requests:
+    get:
+      operationId: listV2PrairieRetrainRequests
+      responses:
+        "200":
+          description: Prairie retrain requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2PrairieRetrainListResponse"
+  /v2/training/prairie/sync:
+    post:
+      operationId: syncV2PrairieActiveLearning
+      responses:
+        "501":
+          description: Prairie active-learning sync is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/prairie/benchmark/run:
+    post:
+      operationId: runV2PrairieBenchmark
+      responses:
+        "501":
+          description: Prairie benchmark jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/prairie/retrain-request:
+    post:
+      operationId: requestV2PrairieRetrain
+      responses:
+        "501":
+          description: Prairie retraining jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/datasets:
+    get:
+      operationId: listV2TrainingDatasets
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training datasets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingDatasetListResponse"
+    post:
+      operationId: createV2TrainingDataset
+      responses:
+        "501":
+          description: Training dataset creation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/datasets/{dataset_id}:
+    get:
+      operationId: getV2TrainingDataset
+      parameters:
+        - name: dataset_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training datasets are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/datasets/{dataset_id}/items:
+    post:
+      operationId: assignV2TrainingDatasetItems
+      parameters:
+        - name: dataset_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training dataset item assignment is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/jobs:
+    post:
+      operationId: createV2TrainingJob
+      responses:
+        "501":
+          description: Training jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/jobs/{job_id}:
+    get:
+      operationId: getV2TrainingJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/jobs/{job_id}/control:
+    post:
+      operationId: controlV2TrainingJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training job control is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/preflight:
+    post:
+      operationId: previewV2TrainingJob
+      responses:
+        "501":
+          description: Training preflight is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/inference/jobs:
+    post:
+      operationId: createV2InferenceJob
+      responses:
+        "501":
+          description: Standalone inference jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/inference/jobs/{job_id}/result:
+    get:
+      operationId: getV2InferenceJobResult
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Standalone inference jobs are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/segment/sam3/interactive:
+    post:
+      operationId: runV2Sam3InteractiveSegmentation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "501":
+          description: SAM3 interactive segmentation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/model-health:
+    get:
+      operationId: getV2ModelHealth
+      responses:
+        "200":
+          description: Model health list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ModelHealthResponse"
+  /v2/admin/model-health:
+    get:
+      operationId: getV2AdminModelHealth
+      responses:
+        "200":
+          description: Admin model health list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ModelHealthResponse"
+  /v2/training/domains:
+    get:
+      operationId: listV2TrainingDomains
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training domains
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingDomainListResponse"
+    post:
+      operationId: createV2TrainingDomain
+      responses:
+        "501":
+          description: Training domain creation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/domains/{domain_id}/lineages:
+    get:
+      operationId: listV2TrainingDomainLineages
+      parameters:
+        - name: domain_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training lineages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingLineageListResponse"
+  /v2/training/lineages/{lineage_id}/fork:
+    post:
+      operationId: forkV2TrainingLineage
+      parameters:
+        - name: lineage_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training lineage forks are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/lineages/{lineage_id}/versions:
+    get:
+      operationId: listV2TrainingLineageVersions
+      parameters:
+        - name: lineage_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training lineage model versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingModelVersionListResponse"
+  /v2/training/update-proposals/preview:
+    post:
+      operationId: previewV2TrainingUpdateProposal
+      responses:
+        "501":
+          description: Training update proposals are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/update-proposals:
+    get:
+      operationId: listV2TrainingUpdateProposals
+      parameters:
+        - name: lineage_id
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training update proposals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingUpdateProposalListResponse"
+    post:
+      operationId: createV2TrainingUpdateProposal
+      responses:
+        "501":
+          description: Training update proposals are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/update-proposals/{proposal_id}/approve:
+    post:
+      operationId: approveV2TrainingUpdateProposal
+      parameters:
+        - name: proposal_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training update proposal decisions are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/update-proposals/{proposal_id}/reject:
+    post:
+      operationId: rejectV2TrainingUpdateProposal
+      parameters:
+        - name: proposal_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training update proposal decisions are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/model-versions/{version_id}/promote:
+    post:
+      operationId: promoteV2TrainingModelVersion
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training model promotion is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/model-versions/{version_id}/rollback:
+    post:
+      operationId: rollbackV2TrainingModelVersion
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training model rollback is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/merge-requests:
+    get:
+      operationId: listV2TrainingMergeRequests
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200":
+          description: Training merge requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingMergeRequestListResponse"
+    post:
+      operationId: createV2TrainingMergeRequest
+      responses:
+        "501":
+          description: Training merge requests are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/merge-requests/{merge_id}/approve:
+    post:
+      operationId: approveV2TrainingMergeRequest
+      parameters:
+        - name: merge_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training merge request decisions are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/training/merge-requests/{merge_id}/reject:
+    post:
+      operationId: rejectV2TrainingMergeRequest
+      parameters:
+        - name: merge_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "501":
+          description: Training merge request decisions are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
 components:
   parameters:
     ThreadID:
@@ -261,6 +1351,11 @@ components:
       schema: { type: string }
     RunID:
       name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+    FileID:
+      name: file_id
       in: path
       required: true
       schema: { type: string }
@@ -277,14 +1372,507 @@ components:
     PublicConfigResponse:
       type: object
       additionalProperties: true
+      properties:
+        app_name: { type: string }
+        app_version: { type: string }
+        admin_enabled: { type: boolean }
+        features:
+          type: object
+          additionalProperties: { type: boolean }
     AuthSessionResponse:
       type: object
       required: [authenticated, user]
       properties:
         authenticated: { type: boolean }
+        username: { type: string, nullable: true }
+        mode: { type: string, nullable: true }
+        is_admin: { type: boolean, nullable: true }
+        guest_profile:
+          nullable: true
+          $ref: "#/components/schemas/JsonObject"
         user:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
+    V2NotConfiguredResponse:
+      type: object
+      required: [error, status, service]
+      properties:
+        error: { type: string }
+        status: { type: string, enum: [not_configured] }
+        service: { type: string }
+    V2AdminPlatformKpis:
+      type: object
+      additionalProperties: true
+      properties:
+        total_users: { type: integer }
+        active_users_24h: { type: integer }
+        total_conversations: { type: integer }
+        conversations_started_24h: { type: integer }
+        total_messages: { type: integer }
+        messages_last_24h: { type: integer }
+        user_messages_last_24h: { type: integer }
+        assistant_messages_last_24h: { type: integer }
+        total_runs: { type: integer }
+        runs_last_24h: { type: integer }
+        success_rate_last_24h: { type: number }
+        running_runs: { type: integer }
+        stale_running_runs: { type: integer }
+        failed_runs_24h: { type: integer }
+        total_uploads: { type: integer }
+        soft_deleted_uploads: { type: integer }
+        total_storage_bytes: { type: integer, format: int64 }
+        avg_messages_per_conversation: { type: number }
+    V2AdminUsageBucket:
+      type: object
+      additionalProperties: true
+      properties:
+        bucket_start: { type: string }
+        runs_total: { type: integer }
+        runs_succeeded: { type: integer }
+        runs_failed: { type: integer }
+        uploads: { type: integer }
+        new_users: { type: integer }
+    V2AdminToolUsageRecord:
+      type: object
+      additionalProperties: true
+      properties:
+        tool_name: { type: string }
+        count: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+    V2AdminRuntimeSummary:
+      type: object
+      additionalProperties: true
+      properties:
+        app_version: { type: string }
+        store_backend: { type: string }
+        dispatch_mode: { type: string }
+        job_transport: { type: string }
+        event_transport: { type: string }
+        stub_worker_enabled: { type: boolean }
+        nats_configured: { type: boolean }
+        nats_stream: { type: string }
+        nats_jobs_subject: { type: string }
+        nats_rarespot_jobs_subject: { type: string }
+        nats_events_subject: { type: string }
+        nats_cancel_subject: { type: string }
+        nats_event_consumer: { type: string }
+        artifact_root: { type: string }
+        upload_root: { type: string }
+        run_recovery_enabled: { type: boolean }
+        run_recovery_interval_seconds: { type: number }
+        run_recovery_batch_limit: { type: integer }
+    V2AdminQueueConsumerDiagnostic:
+      type: object
+      additionalProperties: true
+      properties:
+        name: { type: string }
+        role: { type: string }
+        subject: { type: string }
+        active: { type: boolean }
+        ack_wait_seconds: { type: number }
+        max_deliver: { type: integer }
+        pending_messages: { type: integer, format: int64 }
+        in_flight_messages: { type: integer }
+        redelivered_messages: { type: integer }
+        waiting_pull_requests: { type: integer }
+        delivered_stream_sequence: { type: integer, format: int64 }
+        ack_floor_stream_sequence: { type: integer, format: int64 }
+        error: { type: string }
+    V2AdminQueueDiagnostics:
+      type: object
+      additionalProperties: true
+      properties:
+        available: { type: boolean }
+        mode: { type: string }
+        stream: { type: string }
+        stream_subjects:
+          type: array
+          items: { type: string }
+        stream_messages: { type: integer, format: int64 }
+        stream_bytes: { type: integer, format: int64 }
+        first_sequence: { type: integer, format: int64 }
+        last_sequence: { type: integer, format: int64 }
+        consumer_count: { type: integer }
+        consumers:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminQueueConsumerDiagnostic"
+        error: { type: string }
+    V2AdminUserSummary:
+      type: object
+      additionalProperties: true
+      properties:
+        user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        org_id: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+        conversations: { type: integer }
+        messages: { type: integer }
+        runs_total: { type: integer }
+        runs_running: { type: integer }
+        runs_failed: { type: integer }
+        runs_succeeded: { type: integer }
+        uploads: { type: integer }
+        storage_bytes: { type: integer, format: int64 }
+        last_activity_at: { type: string, nullable: true }
+    V2AdminOrganization:
+      type: object
+      required: [org_id, name, created_at, updated_at, metadata]
+      properties:
+        org_id: { type: string }
+        name: { type: string }
+        status: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminOrganizationListResponse:
+      type: object
+      required: [count, organizations]
+      properties:
+        count: { type: integer }
+        organizations:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminOrganization"
+    V2AdminCreateOrganizationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        org_id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminCreateUserRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        user_id: { type: string }
+        email: { type: string }
+        display_name: { type: string }
+        role: { type: string }
+        status: { type: string }
+        org_id: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminUserAccount:
+      type: object
+      required: [user_id, created_at, updated_at, metadata]
+      properties:
+        user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        org_id: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminRunRecord:
+      type: object
+      additionalProperties: true
+      properties:
+        run_id: { type: string }
+        user_id: { type: string, nullable: true }
+        conversation_id: { type: string, nullable: true }
+        goal: { type: string }
+        status: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+        error: { type: string, nullable: true }
+        duration_seconds: { type: number, nullable: true }
+        tool_names:
+          type: array
+          items: { type: string }
+        last_event_kind: { type: string, nullable: true }
+        last_event_at: { type: string, nullable: true }
+        last_event_sequence: { type: integer, format: int64, nullable: true }
+        last_activity_age_seconds: { type: number, nullable: true }
+        event_count: { type: integer }
+        message_delta_count: { type: integer }
+        tool_call_count: { type: integer }
+        artifact_count: { type: integer }
+        heartbeat_count: { type: integer }
+        last_tool_name: { type: string, nullable: true }
+        last_tool_at: { type: string, nullable: true }
+        first_delta_latency_seconds: { type: number, nullable: true }
+        first_tool_latency_seconds: { type: number, nullable: true }
+        first_artifact_latency_seconds: { type: number, nullable: true }
+        lease_worker_id: { type: string, nullable: true }
+        lease_expires_at: { type: string, nullable: true }
+        lease_active: { type: boolean }
+        lease_expired: { type: boolean }
+        lease_seconds_remaining: { type: number, nullable: true }
+        lease_last_renewed_at: { type: string, nullable: true }
+        lease_last_renewed_age_seconds: { type: number, nullable: true }
+        stale: { type: boolean }
+        stale_reason: { type: string, nullable: true }
+    V2AdminIssueRecord:
+      type: object
+      additionalProperties: true
+      properties:
+        issue_type: { type: string }
+        severity: { type: string }
+        user_id: { type: string, nullable: true }
+        run_id: { type: string, nullable: true }
+        upload_id: { type: string, nullable: true }
+        conversation_id: { type: string, nullable: true }
+        message: { type: string }
+        occurred_at: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2WorkerHeartbeatRequest:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id: { type: string }
+        worker_kind: { type: string }
+        status: { type: string }
+        current_run_id: { type: string, nullable: true }
+        hostname: { type: string, nullable: true }
+        version: { type: string, nullable: true }
+        started_at: { type: string, nullable: true }
+        last_heartbeat_at: { type: string, nullable: true }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2WorkerHeartbeatRecord:
+      type: object
+      required: [worker_id, worker_kind, status, started_at, last_heartbeat_at, updated_at, metadata]
+      properties:
+        worker_id: { type: string }
+        worker_kind: { type: string }
+        status: { type: string }
+        current_run_id: { type: string, nullable: true }
+        hostname: { type: string, nullable: true }
+        version: { type: string, nullable: true }
+        started_at: { type: string }
+        last_heartbeat_at: { type: string }
+        updated_at: { type: string }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminWorkerRecord:
+      type: object
+      required: [worker_id, worker_kind, status, started_at, last_heartbeat_at, updated_at, active, stale, metadata]
+      properties:
+        worker_id: { type: string }
+        worker_kind: { type: string }
+        status: { type: string }
+        current_run_id: { type: string, nullable: true }
+        hostname: { type: string, nullable: true }
+        version: { type: string, nullable: true }
+        started_at: { type: string }
+        last_heartbeat_at: { type: string }
+        updated_at: { type: string }
+        heartbeat_age_seconds: { type: number, nullable: true }
+        active: { type: boolean }
+        stale: { type: boolean }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2AdminOverviewResponse:
+      type: object
+      required: [generated_at, runtime, queue, kpis, usage_last_24h, tool_usage_7d, workers, top_users, recent_issues]
+      properties:
+        generated_at: { type: string }
+        runtime:
+          $ref: "#/components/schemas/V2AdminRuntimeSummary"
+        queue:
+          $ref: "#/components/schemas/V2AdminQueueDiagnostics"
+        kpis:
+          $ref: "#/components/schemas/V2AdminPlatformKpis"
+        usage_last_24h:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminUsageBucket"
+        tool_usage_7d:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminToolUsageRecord"
+        workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminWorkerRecord"
+        top_users:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminUserSummary"
+        recent_issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminUserListResponse:
+      type: object
+      required: [count, users]
+      properties:
+        count: { type: integer }
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminUserSummary"
+    V2AdminRunListResponse:
+      type: object
+      required: [count, runs]
+      properties:
+        count: { type: integer }
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminRunRecord"
+    V2AdminIssueListResponse:
+      type: object
+      required: [count, issues]
+      properties:
+        count: { type: integer }
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminRunActionResponse:
+      type: object
+      required: [run_id, previous_status, status, updated]
+      properties:
+        run_id: { type: string }
+        previous_status: { type: string }
+        status: { type: string }
+        updated: { type: boolean }
+    V2TrainingModelRecord:
+      type: object
+      required: [key, name, framework, task_type, description, supports_training, supports_finetune, supports_inference, dimensions, default_config]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        framework: { type: string }
+        task_type: { type: string }
+        description: { type: string }
+        supports_training: { type: boolean }
+        supports_finetune: { type: boolean }
+        supports_inference: { type: boolean }
+        dimensions:
+          type: array
+          items: { type: string }
+        default_config:
+          $ref: "#/components/schemas/JsonObject"
+    V2TrainingModelsResponse:
+      type: object
+      required: [count, models]
+      properties:
+        count: { type: integer }
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2TrainingModelRecord"
+    V2PrairieStatusResponse:
+      type: object
+      required: [dataset_name, model_health, reviewed_images, unreviewed_images, retrain_gate, retrain_gate_reasons]
+      additionalProperties: true
+      properties:
+        dataset_name: { type: string }
+        dataset_id: { type: string, nullable: true }
+        last_sync_at: { type: string, nullable: true }
+        next_sync_at: { type: string, nullable: true }
+        active_model_version: { type: string, nullable: true }
+        model_health: { type: string }
+        reviewed_images: { type: integer }
+        unreviewed_images: { type: integer }
+        class_counts:
+          $ref: "#/components/schemas/JsonObject"
+        unsupported_class_counts:
+          $ref: "#/components/schemas/JsonObject"
+        detection_counts:
+          $ref: "#/components/schemas/JsonObject"
+        latest_metrics:
+          $ref: "#/components/schemas/JsonObject"
+        benchmark_baseline:
+          $ref: "#/components/schemas/JsonObject"
+        benchmark_latest_candidate:
+          $ref: "#/components/schemas/JsonObject"
+        last_benchmark_at: { type: string, nullable: true }
+        benchmark_ready: { type: boolean }
+        canonical_benchmark_ready: { type: boolean }
+        promotion_benchmark_ready: { type: boolean }
+        retrain_gate: { type: boolean }
+        retrain_gate_reasons:
+          type: array
+          items: { type: string }
+        retrain_gate_counts:
+          $ref: "#/components/schemas/JsonObject"
+    V2PrairieRetrainListResponse:
+      type: object
+      required: [count, requests]
+      properties:
+        count: { type: integer }
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingDatasetListResponse:
+      type: object
+      required: [count, datasets]
+      properties:
+        count: { type: integer }
+        datasets:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingDomainListResponse:
+      type: object
+      required: [count, domains]
+      properties:
+        count: { type: integer }
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingLineageListResponse:
+      type: object
+      required: [count, lineages]
+      properties:
+        count: { type: integer }
+        lineages:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingModelVersionListResponse:
+      type: object
+      required: [count, versions]
+      properties:
+        count: { type: integer }
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingUpdateProposalListResponse:
+      type: object
+      required: [count, proposals]
+      properties:
+        count: { type: integer }
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2TrainingMergeRequestListResponse:
+      type: object
+      required: [count, merge_requests]
+      properties:
+        count: { type: integer }
+        merge_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+    V2ModelHealthResponse:
+      type: object
+      required: [count, models]
+      properties:
+        count: { type: integer }
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
     V2ThreadMessage:
       type: object
       required: [role, content]
@@ -398,6 +1986,10 @@ components:
         benchmark:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
+        idempotency_key:
+          type: string
+          nullable: true
+          description: Body fallback for Idempotency-Key.
         metadata:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
@@ -416,6 +2008,71 @@ components:
         metadata:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
+    V2UploadedFileRecord:
+      type: object
+      required: [file_id, original_name, size_bytes, sha256, created_at]
+      properties:
+        file_id: { type: string }
+        original_name: { type: string }
+        content_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        created_at: { type: string }
+        preview_url: { type: string, nullable: true }
+        principal:
+          nullable: true
+          $ref: "#/components/schemas/V2PrincipalRecord"
+    V2UploadFilesResponse:
+      type: object
+      required: [file_count, uploaded]
+      properties:
+        file_count: { type: integer }
+        uploaded:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2ResourceRecord:
+      type: object
+      required: [file_id, original_name, size_bytes, sha256, created_at, source_type, resource_kind, has_thumbnail]
+      properties:
+        file_id: { type: string }
+        original_name: { type: string }
+        content_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        created_at: { type: string }
+        source_type: { type: string }
+        resource_kind: { type: string }
+        source_uri: { type: string, nullable: true }
+        has_thumbnail: { type: boolean }
+        thumbnail_url: { type: string, nullable: true }
+        preview_url: { type: string, nullable: true }
+        cache_ready: { type: boolean, nullable: true }
+        staged_locally: { type: boolean, nullable: true }
+        principal:
+          nullable: true
+          $ref: "#/components/schemas/V2PrincipalRecord"
+    V2PrincipalRecord:
+      type: object
+      properties:
+        user_id: { type: string, nullable: true }
+        org_id: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+    V2ResourceListResponse:
+      type: object
+      required: [count, resources]
+      properties:
+        count: { type: integer }
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceRecord"
+    V2ResourceResponse:
+      type: object
+      required: [resource]
+      properties:
+        resource:
+          $ref: "#/components/schemas/V2ResourceRecord"
     V2RunRecord:
       type: object
       required: [run_id, goal, status, workflow_kind, created_at, updated_at, metadata]
@@ -456,6 +2113,33 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2RunRecord"
+    V2RunLeaseRequest:
+      type: object
+      properties:
+        worker_id:
+          type: string
+          description: Stable worker identity used when acquiring a lease.
+        lease_token:
+          type: string
+          description: Opaque token returned by acquire and required for renew/release.
+        ttl_seconds:
+          type: number
+          minimum: 1
+          description: Desired lease duration in seconds.
+        lease_ttl_seconds:
+          type: number
+          minimum: 1
+          description: Backward-compatible alias for ttl_seconds.
+    V2RunLeaseRecord:
+      type: object
+      required: [run_id, worker_id, lease_token, lease_expires_at, created_at, updated_at]
+      properties:
+        run_id: { type: string }
+        worker_id: { type: string }
+        lease_token: { type: string }
+        lease_expires_at: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
     V2GraphEventRecord:
       type: object
       required: [run_id, event_kind, payload]

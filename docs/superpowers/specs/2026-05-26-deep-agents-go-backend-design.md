@@ -459,12 +459,12 @@ Go should also enforce polling and concurrency limits externally.
 
 ## Sandbox Design
 
-Reuse and upgrade the previous sandbox from:
+Reuse and upgrade the previous sandbox implementation:
 
 ```text
-/Users/macbook/Documents/ultra_agent/src/ultra_agent/code_execution
-/Users/macbook/Documents/ultra_agent/docker/sandbox.Dockerfile
-/Users/macbook/Documents/ultra_agent/tests/test_code_execution.py
+ultra_agent/src/ultra_agent/code_execution
+ultra_agent/docker/sandbox.Dockerfile
+ultra_agent/tests/test_code_execution.py
 ```
 
 The existing implementation already provides:

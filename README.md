@@ -181,6 +181,30 @@ When this succeeds, you should have:
 
 ## Step 5: Start the API and Frontend
 
+For the production-like V2 stack, use the control stack launcher:
+
+```bash
+make restart-control-stack
+```
+
+That starts the Go control plane, local Postgres, NATS JetStream, the Deep Agents worker, the RareSpot worker, and the React frontend. It is the path to use when validating durable users, long autonomous runs, refresh/reconnect behavior, and artifact hydration from past chats.
+
+Check the stack with:
+
+```bash
+make status-control-stack
+```
+
+Stop it with:
+
+```bash
+make stop-control-stack
+```
+
+The status output should report `store_backend=postgres` and `dispatch_mode=nats_jetstream`. If it reports the in-memory store, user/admin state and past-chat hydration are not production-representative.
+
+### Legacy Dev Helper
+
 Use the helper script:
 
 ```bash
@@ -340,6 +364,24 @@ pnpm --dir frontend test:smoke
 ```
 
 `./scripts/release_codescan.sh` is the public-release hygiene pass. It scans first-party repo surfaces for secrets, internal-style hostnames, operator-specific storage roots, and other values that should stay in private runbooks instead of the public tree.
+
+For production autonomous-run durability, use the dedicated gate:
+
+```bash
+make autonomy-gate
+```
+
+This runs the Go control-plane soak test, the live Postgres + NATS integration gate, the Python Deep Agents worker transport tests, deterministic Deep Agents autonomy-quality/routing tests, and the frontend autonomous-chat recovery slice. Together they cover leases, durable worker heartbeats, ack extension, NAK redelivery, cancellation, terminal-event handling, live-trace quality scoring, paper/RareSpot preload routing, refresh-safe stream recovery, stale-conversation recovery, V2 idempotency, and artifact hydration from past chats.
+
+In the production control-plane path, Postgres is the source of truth for users, organizations, threads, messages, runs, run events, artifacts, idempotency keys, worker heartbeats, and Go-owned run leases. NATS JetStream is the durable job/event/cancel transport. The Go control plane also sweeps expired worker leases and requeues the affected non-terminal runs, which keeps long autonomous chats recoverable across worker failure, browser refresh, and control-plane reconnects.
+
+When a full local Go + NATS + Python worker + model stack is already running, run the opt-in live autonomy smoke:
+
+```bash
+make autonomy-live-smoke
+```
+
+This sends a real two-turn coding task through V2, requires durable code/plot artifacts with verified downloads, and checks that the follow-up uses prior context without corrupting the persisted thread transcript. It is intentionally separate from CI because it depends on a live model and worker stack.
 
 ## The Shortest Path to a Working System
 

@@ -374,8 +374,8 @@ public class BQMatlab{
     }
     public Object getMyPixels(){
         BQAuthorization.setAuthorization("admin","admin");
-        String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/104";
-        //String url = "http://bodzio.ece.ucsb.edu:8080/ds/images/13017";
+        String url = "https://bisque.example.org/ds/images/104";
+        //String url = "https://bisque.example.org/ds/images/13017";
         BQDataService ds = new BQDataService();
         BQImage image = (BQImage)ds.load(url);
         BQImagePixels pixels = image.getPixels();

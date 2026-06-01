@@ -16,14 +16,14 @@ describe("bisqueNavigation", () => {
   });
 
   it("accepts the production client_service URL without duplicating the path", () => {
-    expect(buildBisqueNavLinks("https://bisque2.ece.ucsb.edu/client_service/")).toEqual({
-      home: "https://bisque2.ece.ucsb.edu/client_service/",
+    expect(buildBisqueNavLinks("https://bisque.example.org/client_service/")).toEqual({
+      home: "https://bisque.example.org/client_service/",
       datasets:
-        "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/dataset",
+        "https://bisque.example.org/client_service/browser?resource=/data_service/dataset",
       images:
-        "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/image",
+        "https://bisque.example.org/client_service/browser?resource=/data_service/image",
       tables:
-        "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/table",
+        "https://bisque.example.org/client_service/browser?resource=/data_service/table",
     });
   });
 

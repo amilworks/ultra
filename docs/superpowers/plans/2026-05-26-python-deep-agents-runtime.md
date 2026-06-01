@@ -75,10 +75,10 @@ from ultra_deepagents.context import AgentRunContext
 
 
 def test_runtime_settings_load_vllm_defaults(monkeypatch):
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://vrl-h200.ece.ucsb.edu:9393/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8003/v1")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek_v4")
     settings = RuntimeSettings.from_env()
-    assert settings.openai_base_url == "http://vrl-h200.ece.ucsb.edu:9393/v1"
+    assert settings.openai_base_url == "http://127.0.0.1:8003/v1"
     assert settings.openai_model == "deepseek_v4"
     assert settings.openai_api_key == "EMPTY"
     assert settings.sandbox_network == "none"
@@ -243,7 +243,7 @@ deepagents-test:
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q
 
 deepagents-smoke:
-	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://vrl-h200.ece.ucsb.edu:9393/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke
+	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://127.0.0.1:8003/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke
 ```
 
 Append `.env.example` entries:
@@ -303,7 +303,7 @@ Expected: FAIL because `code_execution` package does not exist.
 
 - [x] **Step 3: Port the previous sandbox**
 
-Port these files from `/Users/macbook/Documents/ultra_agent/src/ultra_agent/code_execution` with imports changed to `ultra_deepagents` and behavior preserved by tests:
+Port these files from the previous `ultra_agent/code_execution` sandbox package with imports changed to `ultra_deepagents` and behavior preserved by tests:
 
 ```text
 cleanup.py
@@ -349,12 +349,12 @@ from ultra_deepagents.model import build_chat_model
 
 def test_build_chat_model_uses_openai_compatible_base_url():
     settings = RuntimeSettings(
-        openai_base_url="http://vrl-h200.ece.ucsb.edu:9393/v1",
+        openai_base_url="http://127.0.0.1:8003/v1",
         openai_model="deepseek_v4",
         openai_api_key="EMPTY",
     )
     model = build_chat_model(settings)
-    assert model.openai_api_base == "http://vrl-h200.ece.ucsb.edu:9393/v1"
+    assert model.openai_api_base == "http://127.0.0.1:8003/v1"
     assert model.model_name == "deepseek_v4"
 ```
 
@@ -378,7 +378,7 @@ Run:
 
 ```bash
 cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest tests/test_model.py -q
-cd backend/deepagents_runtime && OPENAI_BASE_URL=http://vrl-h200.ece.ucsb.edu:9393/v1 OPENAI_MODEL=deepseek_v4 uv run --python 3.11 python -m ultra_deepagents.smoke
+cd backend/deepagents_runtime && OPENAI_BASE_URL=http://127.0.0.1:8003/v1 OPENAI_MODEL=deepseek_v4 uv run --python 3.11 python -m ultra_deepagents.smoke
 ```
 
 Expected: test PASS; live smoke prints a non-empty response or a clear connection/auth error.
@@ -518,7 +518,7 @@ make control-test
 - [x] **Step 3: Run optional live vLLM smoke**
 
 ```bash
-OPENAI_BASE_URL=http://vrl-h200.ece.ucsb.edu:9393/v1 OPENAI_MODEL=deepseek_v4 make deepagents-smoke
+OPENAI_BASE_URL=http://127.0.0.1:8003/v1 OPENAI_MODEL=deepseek_v4 make deepagents-smoke
 ```
 
 Expected: non-empty model response or a precise connection/auth/tool-calling error recorded in the final report.

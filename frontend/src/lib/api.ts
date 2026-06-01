@@ -1,11 +1,17 @@
 import type {
   AdminConversationActionResponse,
+  AdminCreateOrganizationRequest,
+  AdminCreateUserRequest,
   AdminIssueListResponse,
+  AdminOrganization,
+  AdminOrganizationListResponse,
   AdminOverviewResponse,
   AdminRunActionResponse,
   AdminRunListResponse,
+  AdminUserAccount,
   AdminUserListResponse,
   AnalysisHistoryResponse,
+  ArtifactRecord,
   ArtifactListResponse,
   BisqueAuthLoginRequest,
   BisqueAuthSessionResponse,
@@ -31,6 +37,7 @@ import type {
   PrairieRetrainRequest,
   PrairieStatusResponse,
   PrairieSyncResponse,
+  ProgressEvent,
   ResourceListResponse,
   ResourceComputationLookupRequest,
   ResourceComputationLookupResponse,
@@ -82,16 +89,6 @@ import type {
   UploadViewerHistogramResponse,
   UploadViewerInfo,
   UploadFilesResponse,
-  V3ApprovalResolveRequest,
-  V3ApprovalResolveResponse,
-  V3ArtifactListResponse,
-  V3RunCreateRequest,
-  V3RunEventListResponse,
-  V3RunRecord,
-  V3SessionCreateRequest,
-  V3SessionListResponse,
-  V3SessionMessageListResponse,
-  V3SessionRecord,
 } from "../types";
 import { normalizeUploadViewerInfo } from "./viewerManifest";
 
@@ -109,6 +106,10 @@ export type ChatStreamHandlers = {
 
 export type ChatStreamOptions = ChatStreamHandlers & {
   signal?: AbortSignal;
+};
+
+export type RunStreamOptions = ChatStreamOptions & {
+  afterSequence?: number;
 };
 
 export class ApiError extends Error {
@@ -146,47 +147,217 @@ const buildUrl = (baseUrl: string, path: string, params?: Record<string, string>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-const normalizeChatResponsePayload = (
-  value: unknown,
-  fallback?: {
-    runId?: string | null;
-    model?: string | null;
-    responseText?: string | null;
-    durationSeconds?: number | null;
-  }
-): ChatResponse | null => {
-  const root = isRecord(value)
-    ? isRecord(value.response)
-      ? value.response
-      : isRecord(value.result) && isRecord(value.result.response)
-        ? value.result.response
-        : value
-    : null;
-  if (!root) {
-    return null;
-  }
+const V2_CHAT_THREAD_MAP_STORAGE_KEY = "bisque-ultra:v2-chat-thread-map";
+const V2_CONVERSATION_STATE_METADATA_KEY = "frontend_state";
 
-  const rawResponseText =
-    root.response_text ?? root.content ?? root.output_text ?? fallback?.responseText ?? "";
-  const runId = String(root.run_id ?? fallback?.runId ?? "").trim();
-  const model = String(root.model ?? fallback?.model ?? "").trim();
-  const durationRaw = root.duration_seconds ?? fallback?.durationSeconds ?? 0;
-  const durationSeconds = Number.isFinite(Number(durationRaw)) ? Number(durationRaw) : 0;
-  const progressEvents = Array.isArray(root.progress_events) ? root.progress_events : [];
-  const benchmark = isRecord(root.benchmark) ? root.benchmark : null;
-  const metadata = isRecord(root.metadata) ? root.metadata : null;
+const asPlainString = (value: unknown): string => String(value ?? "");
 
-  if (!runId && !model && String(rawResponseText || "").trim().length === 0) {
-    return null;
+const asTrimmedString = (value: unknown): string => String(value ?? "").trim();
+
+const asOptionalString = (value: unknown): string | null => {
+  const text = asTrimmedString(value);
+  return text.length > 0 ? text : null;
+};
+
+const asStringArray = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value
+        .map((item) => asTrimmedString(item))
+        .filter((item) => item.length > 0)
+    : [];
+
+const mergeStringArrays = (...values: unknown[]): string[] => {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  values.forEach((value) => {
+    asStringArray(value).forEach((item) => {
+      if (seen.has(item)) {
+        return;
+      }
+      seen.add(item);
+      merged.push(item);
+    });
+  });
+  return merged;
+};
+
+const asFiniteNumber = (value: unknown, fallback = 0): number => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const asMillis = (value: unknown, fallback: number): number => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
   }
+  const parsed = Date.parse(asPlainString(value));
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 
+const v2ThreadMetadata = (thread: Record<string, unknown>): Record<string, unknown> =>
+  isRecord(thread.metadata) ? thread.metadata : {};
+
+const v2ThreadConversationId = (thread: Record<string, unknown>): string => {
+  const metadata = v2ThreadMetadata(thread);
+  return asOptionalString(metadata.conversation_id) ?? asTrimmedString(thread.thread_id);
+};
+
+const v2ThreadToConversationRecord = (
+  thread: Record<string, unknown>,
+  includeState: boolean
+): ConversationRecord => {
+  const now = Date.now();
+  const metadata = v2ThreadMetadata(thread);
+  const conversationId = v2ThreadConversationId(thread);
+  const state = includeState && isRecord(metadata[V2_CONVERSATION_STATE_METADATA_KEY])
+    ? metadata[V2_CONVERSATION_STATE_METADATA_KEY]
+    : {};
+  const createdAt = asMillis(metadata.created_at_ms, asMillis(thread.created_at, now));
+  const updatedAt = asMillis(metadata.updated_at_ms, asMillis(thread.updated_at, createdAt));
   return {
-    run_id: runId,
-    model,
-    response_text: String(rawResponseText || ""),
-    duration_seconds: durationSeconds,
-    progress_events: progressEvents,
-    benchmark,
+    conversation_id: conversationId,
+    title: asOptionalString(thread.title) ?? "New conversation",
+    created_at_ms: createdAt,
+    updated_at_ms: updatedAt,
+    preview: asOptionalString(metadata.preview) ?? asOptionalString(thread.summary) ?? "",
+    message_count: Math.max(0, Math.floor(asFiniteNumber(metadata.message_count, 0))),
+    preferred_panel: "chat",
+    running: Boolean(metadata.running),
+    state,
+  };
+};
+
+const v2ConversationMetadataFromRecord = (record: ConversationRecord): Record<string, unknown> => ({
+  conversation_id: record.conversation_id,
+  created_at_ms: record.created_at_ms,
+  updated_at_ms: record.updated_at_ms,
+  preview: record.preview,
+  message_count: record.message_count,
+  preferred_panel: record.preferred_panel,
+  running: record.running,
+  [V2_CONVERSATION_STATE_METADATA_KEY]: record.state ?? {},
+});
+
+const lastUserMessageContent = (request: ChatRequest): string => {
+  for (let idx = request.messages.length - 1; idx >= 0; idx -= 1) {
+    const message = request.messages[idx];
+    if (message.role === "user") {
+      return asTrimmedString(message.content);
+    }
+  }
+  return "";
+};
+
+const chatTitleFromRequest = (request: ChatRequest): string => {
+  const raw = asTrimmedString(request.goal) || lastUserMessageContent(request) || "New conversation";
+  return raw.length > 80 ? `${raw.slice(0, 77).trimEnd()}...` : raw;
+};
+
+const chatTitleFromMessages = (request: ChatTitleRequest): string => {
+  const maxWords =
+    Number.isFinite(Number(request.max_words)) && Number(request.max_words) > 0
+      ? Math.floor(Number(request.max_words))
+      : 4;
+  let raw = "";
+  for (let idx = request.messages.length - 1; idx >= 0; idx -= 1) {
+    const message = request.messages[idx];
+    if (message.role === "user") {
+      raw = asTrimmedString(message.content);
+      break;
+    }
+  }
+  const words = raw.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const title = words.slice(0, maxWords).join(" ").trim();
+  return title || "New conversation";
+};
+
+const normalizeV2RunEvent = (event: Record<string, unknown>): RunEvent => {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const eventType = asTrimmedString(event.event_kind) || asTrimmedString(event.event_type) || "run_event";
+  const sequence = asFiniteNumber(event.sequence, 0);
+  return {
+    event_type: eventType,
+    level: asOptionalString(event.level) ?? undefined,
+    payload: {
+      ...payload,
+      event_id: event.event_id,
+      sequence,
+      event_kind: eventType,
+      run_id: event.run_id,
+      thread_id: event.thread_id,
+      node_name: event.node_name,
+      task_id: event.task_id,
+      checkpoint_id: event.checkpoint_id,
+      scope_id: event.scope_id,
+      agent_role: event.agent_role,
+      message: event.message,
+    },
+    ts: asOptionalString(event.ts) ?? undefined,
+  };
+};
+
+const progressEventFromV2RunEvent = (event: Record<string, unknown>): ProgressEvent => {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const eventType = asTrimmedString(event.event_kind) || asTrimmedString(event.event_type) || "run_event";
+  return {
+    ...payload,
+    event: eventType,
+    level: asOptionalString(event.level) ?? undefined,
+    message: asOptionalString(event.message) ?? asOptionalString(payload.message) ?? undefined,
+    ts: asOptionalString(event.ts) ?? undefined,
+  };
+};
+
+const isV2TerminalEventKind = (eventKind: string): boolean =>
+  eventKind === "run.completed" || eventKind === "run.failed" || eventKind === "run.canceled";
+
+const normalizeRunResultStatus = (
+  status: unknown
+): RunResultResponse["status"] => {
+  const normalized = asTrimmedString(status).toLowerCase();
+  if (normalized === "queued") {
+    return "pending";
+  }
+  if (
+    normalized === "pending" ||
+    normalized === "running" ||
+    normalized === "succeeded" ||
+    normalized === "failed" ||
+    normalized === "canceled"
+  ) {
+    return normalized;
+  }
+  return "pending";
+};
+
+const v2DeltaFromRunEvent = (event: Record<string, unknown>): string => {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  return asPlainString(payload.delta ?? payload.text ?? event.message);
+};
+
+const responseTextFromV2TerminalEvent = (event: Record<string, unknown>): string => {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  return asTrimmedString(payload.response_text ?? payload.text ?? payload.message ?? event.message);
+};
+
+const normalizeV2RunResponse = (
+  run: Record<string, unknown>,
+  fallback: {
+    runId: string;
+    responseText: string;
+    progressEvents: ProgressEvent[];
+    durationSeconds?: number | null;
+    metadata?: Record<string, unknown> | null;
+  }
+): ChatResponse => {
+  const metadata = isRecord(run.metadata) ? run.metadata : fallback.metadata;
+  return {
+    run_id: asTrimmedString(run.run_id) || fallback.runId,
+    model: asTrimmedString(run.model) || "deep_agents",
+    response_text: asTrimmedString(run.response_text) || fallback.responseText,
+    duration_seconds: asFiniteNumber(run.duration_seconds, fallback.durationSeconds ?? 0),
+    progress_events: fallback.progressEvents,
+    benchmark: isRecord(run.benchmark) ? run.benchmark : null,
     metadata,
   };
 };
@@ -205,6 +376,8 @@ async function parseError(response: Response): Promise<never> {
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
+  private v2ThreadIdsByConversation: Map<string, string> | null = null;
+  private readonly v2ArtifactIdsByRunPath = new Map<string, string>();
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl;
@@ -219,8 +392,505 @@ export class ApiClient {
     return headers;
   }
 
+  private browserStorage(): Storage | null {
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        return window.localStorage;
+      }
+      if (typeof localStorage !== "undefined") {
+        return localStorage;
+      }
+    } catch {
+      // Storage can be unavailable in private browsing or during tests.
+    }
+    return null;
+  }
+
+  private v2ThreadMap(): Map<string, string> {
+    if (this.v2ThreadIdsByConversation) {
+      return this.v2ThreadIdsByConversation;
+    }
+    const map = new Map<string, string>();
+    const storage = this.browserStorage();
+    if (storage) {
+      try {
+        const parsed = JSON.parse(storage.getItem(V2_CHAT_THREAD_MAP_STORAGE_KEY) ?? "{}");
+        if (isRecord(parsed)) {
+          Object.entries(parsed).forEach(([key, value]) => {
+            const threadId = asOptionalString(value);
+            if (threadId) {
+              map.set(key, threadId);
+            }
+          });
+        }
+      } catch {
+        // A corrupt cache should not block chat.
+      }
+    }
+    this.v2ThreadIdsByConversation = map;
+    return map;
+  }
+
+  private rememberV2Thread(conversationId: string, threadId: string): void {
+    const conversationKey = asTrimmedString(conversationId);
+    const resolvedThreadId = asTrimmedString(threadId);
+    if (!conversationKey || !resolvedThreadId) {
+      return;
+    }
+    const map = this.v2ThreadMap();
+    map.set(conversationKey, resolvedThreadId);
+    const storage = this.browserStorage();
+    if (!storage) {
+      return;
+    }
+    try {
+      storage.setItem(
+        V2_CHAT_THREAD_MAP_STORAGE_KEY,
+        JSON.stringify(Object.fromEntries(map.entries()))
+      );
+    } catch {
+      // Non-fatal; the current in-memory map still works for this session.
+    }
+  }
+
+  private forgetV2Thread(conversationId: string): void {
+    const conversationKey = asTrimmedString(conversationId);
+    if (!conversationKey) {
+      return;
+    }
+    const map = this.v2ThreadMap();
+    map.delete(conversationKey);
+    const storage = this.browserStorage();
+    if (!storage) {
+      return;
+    }
+    try {
+      storage.setItem(
+        V2_CHAT_THREAD_MAP_STORAGE_KEY,
+        JSON.stringify(Object.fromEntries(map.entries()))
+      );
+    } catch {
+      // Non-fatal; a stale persisted cache can be overwritten on the next success.
+    }
+  }
+
+  private async getExistingV2ThreadID(threadId: string): Promise<string | null> {
+    try {
+      const thread = await this.fetchJson<Record<string, unknown>>(
+        `/v2/threads/${encodeURIComponent(threadId)}`,
+        { method: "GET" }
+      );
+      return asTrimmedString(thread.thread_id) || threadId;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private conversationIdFromRequest(request: ChatRequest): string {
+    return asTrimmedString(request.conversation_id) || `local-${Date.now().toString(36)}`;
+  }
+
+  private async listV2Conversations(
+    limit: number,
+    offset: number,
+    includeState: boolean
+  ): Promise<ConversationListResponse> {
+    const requestedLimit = Math.max(1, Math.floor(Number(limit) || 25));
+    const requestedOffset = Math.max(0, Math.floor(Number(offset) || 0));
+    const payload = await this.fetchJson<Record<string, unknown>>(
+      "/v2/threads",
+      { method: "GET" },
+      {
+        limit: String(requestedLimit),
+        offset: String(requestedOffset),
+      }
+    );
+    const threads = Array.isArray(payload.threads)
+      ? payload.threads.filter(isRecord)
+      : [];
+    const conversations = threads.map((thread) => {
+      const record = v2ThreadToConversationRecord(thread, includeState);
+      const threadId = asTrimmedString(thread.thread_id);
+      if (record.conversation_id && threadId) {
+        this.rememberV2Thread(record.conversation_id, threadId);
+      }
+      return record;
+    });
+    const totalCount = Math.max(
+      conversations.length,
+      Math.floor(asFiniteNumber(payload.total_count ?? payload.count, conversations.length))
+    );
+    return {
+      count: conversations.length,
+      total_count: totalCount,
+      limit: requestedLimit,
+      offset: requestedOffset,
+      has_more: requestedOffset + conversations.length < totalCount,
+      conversations,
+    };
+  }
+
+  private async getV2Conversation(conversationId: string): Promise<ConversationRecord> {
+    const normalizedConversationId = asTrimmedString(conversationId);
+    const knownThreadId = this.v2ThreadMap().get(normalizedConversationId);
+    const candidateThreadId = knownThreadId || (
+      normalizedConversationId.startsWith("thread_") ? normalizedConversationId : ""
+    );
+    if (candidateThreadId) {
+      const thread = await this.fetchJson<Record<string, unknown>>(
+        `/v2/threads/${encodeURIComponent(candidateThreadId)}`,
+        { method: "GET" }
+      );
+      const record = v2ThreadToConversationRecord(thread, true);
+      this.rememberV2Thread(record.conversation_id, asTrimmedString(thread.thread_id));
+      return this.hydrateV2ConversationRecord(thread, record);
+    }
+
+    const payload = await this.fetchJson<Record<string, unknown>>(
+      "/v2/threads",
+      { method: "GET" },
+      {
+        limit: "1000",
+        offset: "0",
+      }
+    );
+    const foundThread = Array.isArray(payload.threads)
+      ? payload.threads.filter(isRecord).find(
+          (thread) => v2ThreadConversationId(thread) === normalizedConversationId
+        )
+      : null;
+    if (!foundThread) {
+      throw new ApiError("Conversation was not found", 404, null);
+    }
+    const record = v2ThreadToConversationRecord(foundThread, true);
+    this.rememberV2Thread(record.conversation_id, asTrimmedString(foundThread.thread_id));
+    return this.hydrateV2ConversationRecord(foundThread, record);
+  }
+
+  private async hydrateV2ConversationRecord(
+    thread: Record<string, unknown>,
+    record: ConversationRecord
+  ): Promise<ConversationRecord> {
+    if (Object.keys(record.state ?? {}).length > 0) {
+      return record;
+    }
+
+    const threadId = asTrimmedString(thread.thread_id);
+    const messages: Array<Record<string, unknown>> = [];
+    if (threadId) {
+      try {
+        const payload = await this.fetchJson<Record<string, unknown>>(
+          `/v2/threads/${encodeURIComponent(threadId)}/messages`,
+          { method: "GET" }
+        );
+        if (Array.isArray(payload.messages)) {
+          messages.push(...payload.messages.filter(isRecord));
+        }
+      } catch {
+        // A V2 thread without message hydration should still open instead of spinning forever.
+      }
+    }
+
+    const stateMessages: Array<Record<string, unknown>> = messages.map((message, index) => ({
+      id: asOptionalString(message.message_id) ?? `${threadId || record.conversation_id}-message-${index}`,
+      role: asOptionalString(message.role) ?? "user",
+      content: asPlainString(message.content),
+      createdAt: asMillis(message.created_at, record.updated_at_ms),
+      runId: asOptionalString(message.run_id) ?? undefined,
+    }));
+
+    const latestRunId = asOptionalString(thread.latest_run_id);
+    if (latestRunId && !stateMessages.some((message) => message.role === "assistant" && message.runId === latestRunId)) {
+      try {
+        const run = await this.fetchJson<Record<string, unknown>>(
+          `/v2/runs/${encodeURIComponent(latestRunId)}`,
+          { method: "GET" }
+        );
+        const responseText = asOptionalString(run.response_text);
+        const runStatus = asOptionalString(run.status);
+        const isActiveRun =
+          runStatus === "queued" ||
+          runStatus === "pending" ||
+          runStatus === "running";
+        if (responseText || isActiveRun) {
+          stateMessages.push({
+            id: `${latestRunId}-assistant`,
+            role: "assistant",
+            content: responseText ?? "",
+            createdAt: asMillis(run.completed_at, asMillis(run.updated_at, record.updated_at_ms)),
+            runId: latestRunId,
+            responseMetadata: isRecord(run.metadata) ? run.metadata : null,
+          });
+        }
+      } catch {
+        // Keep the user-turn reconstruction if the latest run record is unavailable.
+      }
+    }
+
+    const preview = record.preview || asOptionalString(
+      [...stateMessages].reverse().find((message) => message.role === "user")?.content
+    ) || "";
+    return {
+      ...record,
+      preview,
+      message_count: stateMessages.length || record.message_count,
+      state: {
+        preferredPanel: "chat",
+        prompt: "",
+        messages: stateMessages,
+        uploadedFiles: [],
+        stagedUploadFileIds: [],
+        activeSelectionContext: null,
+        failedUploadPreviewIds: {},
+        bisqueLinksByFileId: {},
+        composerWorkflowPreset: null,
+        selectionImportPending: false,
+        sending: false,
+        chatError: null,
+        streamingMessageId: null,
+      },
+    };
+  }
+
+  private async upsertV2Conversation(record: ConversationRecord): Promise<ConversationRecord> {
+    const conversationId = asTrimmedString(record.conversation_id);
+    const threadId = this.v2ThreadMap().get(conversationId);
+    const metadata = v2ConversationMetadataFromRecord(record);
+
+    if (threadId) {
+      const response = await fetch(
+        buildUrl(this.baseUrl, `/v2/threads/${encodeURIComponent(threadId)}`),
+        {
+          method: "PUT",
+          headers: this.headers({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            title: record.title,
+            metadata,
+          }),
+          credentials: "include",
+        }
+      );
+      if (response.ok) {
+        const thread = (await response.json()) as Record<string, unknown>;
+        const updated = v2ThreadToConversationRecord(thread, true);
+        this.rememberV2Thread(updated.conversation_id, asTrimmedString(thread.thread_id));
+        return updated;
+      }
+      if (response.status !== 404 && response.status !== 405) {
+        return parseError(response);
+      }
+      return record;
+    }
+
+    const created = await this.fetchJson<Record<string, unknown>>("/v2/threads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: record.title,
+        metadata,
+      }),
+    });
+    const createdThreadId = asTrimmedString(created.thread_id);
+    if (createdThreadId) {
+      this.rememberV2Thread(conversationId, createdThreadId);
+    }
+    return v2ThreadToConversationRecord(created, true);
+  }
+
+  private async deleteV2Conversation(
+    conversationId: string
+  ): Promise<{ deleted: boolean; conversation_id: string }> {
+    const normalizedConversationId = asTrimmedString(conversationId);
+    const knownThreadId = this.v2ThreadMap().get(normalizedConversationId);
+    let threadId =
+      knownThreadId ||
+      (normalizedConversationId.startsWith("thread_") ? normalizedConversationId : "");
+
+    if (!threadId) {
+      const payload = await this.fetchJson<Record<string, unknown>>(
+        "/v2/threads",
+        { method: "GET" },
+        {
+          limit: "1000",
+          offset: "0",
+        }
+      );
+      const foundThread = Array.isArray(payload.threads)
+        ? payload.threads.filter(isRecord).find(
+            (thread) => v2ThreadConversationId(thread) === normalizedConversationId
+          )
+        : null;
+      threadId = foundThread ? asTrimmedString(foundThread.thread_id) : "";
+    }
+
+    if (!threadId) {
+      throw new ApiError("Conversation was not found", 404, null);
+    }
+
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/threads/${encodeURIComponent(threadId)}`), {
+      method: "DELETE",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok && response.status !== 404) {
+      return parseError(response);
+    }
+    this.forgetV2Thread(normalizedConversationId);
+    return {
+      deleted: true,
+      conversation_id: normalizedConversationId,
+    };
+  }
+
+  private v2ArtifactKey(runId: string, path: string): string {
+    return `${runId}\n${path}`;
+  }
+
+  private rememberV2Artifact(runId: string, artifactId: string, paths: Array<unknown>): void {
+    const resolvedRunId = asTrimmedString(runId);
+    const resolvedArtifactId = asTrimmedString(artifactId);
+    if (!resolvedRunId || !resolvedArtifactId) {
+      return;
+    }
+    paths
+      .map((path) => asTrimmedString(path))
+      .filter((path) => path.length > 0)
+      .forEach((path) => {
+        this.v2ArtifactIdsByRunPath.set(this.v2ArtifactKey(resolvedRunId, path), resolvedArtifactId);
+      });
+  }
+
+  private rememberV2ArtifactEvent(event: Record<string, unknown>): void {
+    const payload = isRecord(event.payload) ? event.payload : {};
+    this.rememberV2Artifact(asTrimmedString(event.run_id), asTrimmedString(payload.artifact_id), [
+      payload.path,
+      payload.relative_path,
+      payload.source_path,
+      payload.preview_path,
+    ]);
+  }
+
+  private async fetchJson<T>(
+    path: string,
+    init: RequestInit = {},
+    params?: Record<string, string>
+  ): Promise<T> {
+    const initHeaders = Object.fromEntries(new Headers(init.headers).entries());
+    const response = await fetch(buildUrl(this.baseUrl, path, params), {
+      ...init,
+      headers: this.headers(initHeaders),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as T;
+  }
+
+  private async ensureV2Thread(request: ChatRequest, conversationId: string): Promise<string> {
+    const existing = this.v2ThreadMap().get(conversationId);
+    if (existing) {
+      const existingThreadId = await this.getExistingV2ThreadID(existing);
+      if (existingThreadId) {
+        this.rememberV2Thread(conversationId, existingThreadId);
+        return existingThreadId;
+      }
+      this.forgetV2Thread(conversationId);
+    }
+
+    if (conversationId.startsWith("thread_")) {
+      const threadId = await this.getExistingV2ThreadID(conversationId);
+      if (threadId) {
+        this.rememberV2Thread(conversationId, threadId);
+        return threadId;
+      }
+    }
+
+    const created = await this.fetchJson<Record<string, unknown>>("/v2/threads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: chatTitleFromRequest(request),
+        metadata: {
+          conversation_id: conversationId,
+          frontend_bridge: "v2-chat",
+        },
+      }),
+    });
+    const threadId = asTrimmedString(created.thread_id);
+    if (!threadId) {
+      throw new ApiError("V2 thread creation did not return a thread id", 502, created);
+    }
+    this.rememberV2Thread(conversationId, threadId);
+    return threadId;
+  }
+
+  private async createV2Run(
+    threadId: string,
+    request: ChatRequest,
+    idempotencyKey: string | null,
+    signal?: AbortSignal
+  ): Promise<Record<string, unknown>> {
+    return this.fetchJson<Record<string, unknown>>(
+      `/v2/threads/${encodeURIComponent(threadId)}/runs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+        },
+        body: JSON.stringify(this.buildV2RunRequest(request)),
+        signal,
+      }
+    );
+  }
+
+  private buildV2RunRequest(request: ChatRequest): Record<string, unknown> {
+    const selectionContext = isRecord(request.selection_context) ? request.selection_context : {};
+    return {
+      goal: asOptionalString(request.goal) ?? lastUserMessageContent(request),
+      messages: request.messages.map((message) => ({
+        role: message.role,
+        content: asPlainString(message.content),
+      })),
+      file_ids: request.file_ids ?? [],
+      resource_uris: mergeStringArrays(request.resource_uris, selectionContext.resource_uris),
+      dataset_uris: mergeStringArrays(request.dataset_uris, selectionContext.dataset_uris),
+      selected_tool_names: request.selected_tool_names ?? [],
+      knowledge_context: request.knowledge_context ?? null,
+      selection_context: request.selection_context ?? null,
+      workflow_hint: request.workflow_hint ?? null,
+      reasoning_mode: request.reasoning_mode ?? "auto",
+      budgets: request.budgets ?? null,
+      benchmark: request.benchmark ?? null,
+      idempotency_key: asOptionalString(request.idempotency_key),
+      metadata: {
+        conversation_id: request.conversation_id ?? null,
+        uploaded_files: request.uploaded_files ?? [],
+        frontend_bridge: "v2-chat",
+      },
+    };
+  }
+
+  private async getV2Run(runId: string): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.fetchJson<Record<string, unknown>>(
+        `/v2/runs/${encodeURIComponent(runId)}`,
+        { method: "GET" }
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async health(): Promise<{ status: string; ts: string }> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/health"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/health"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -232,7 +902,7 @@ export class ApiClient {
   }
 
   async getPublicConfig(): Promise<PublicConfigResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/config/public"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/config/public"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -263,7 +933,7 @@ export class ApiClient {
       top_users: String(Math.max(1, Number(options?.topUsers) || 8)),
       issue_limit: String(Math.max(1, Number(options?.issueLimit) || 12)),
     };
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/admin/overview", params), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/overview", params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -285,7 +955,7 @@ export class ApiClient {
     if (query) {
       params.q = query;
     }
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/admin/users", params), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/users", params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -294,6 +964,71 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as AdminUserListResponse;
+  }
+
+  async listAdminOrganizations(options?: {
+    limit?: number;
+    query?: string;
+  }): Promise<AdminOrganizationListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Number(options?.limit) || 200)),
+    };
+    const query = String(options?.query || "").trim();
+    if (query) {
+      params.q = query;
+    }
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/orgs", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminOrganizationListResponse;
+  }
+
+  async createAdminOrganization(
+    payload: AdminCreateOrganizationRequest
+  ): Promise<AdminOrganization> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/orgs"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminOrganization;
+  }
+
+  async createAdminUser(payload: AdminCreateUserRequest): Promise<AdminUserAccount> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/users"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminUserAccount;
+  }
+
+  async deleteAdminUser(userId: string): Promise<AdminUserAccount> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/admin/users/${encodeURIComponent(userId)}`),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminUserAccount;
   }
 
   async listAdminRuns(options?: {
@@ -319,7 +1054,7 @@ export class ApiClient {
     if (query) {
       params.q = query;
     }
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/admin/runs", params), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/runs", params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -332,7 +1067,7 @@ export class ApiClient {
 
   async listAdminIssues(limit = 25): Promise<AdminIssueListResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, "/v1/admin/issues", {
+      buildUrl(this.baseUrl, "/v2/admin/issues", {
         limit: String(Math.max(1, Number(limit) || 25)),
       }),
       {
@@ -349,11 +1084,27 @@ export class ApiClient {
 
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/admin/runs/${encodeURIComponent(runId)}/cancel`),
+      buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/cancel`),
       {
         method: "POST",
         headers: this.headers(),
         credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminRunActionResponse;
+  }
+
+  async requeueAdminRun(runId: string, reason = "admin requeue"): Promise<AdminRunActionResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/requeue`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        credentials: "include",
+        body: JSON.stringify({ reason }),
       }
     );
     if (!response.ok) {
@@ -367,7 +1118,7 @@ export class ApiClient {
     userId: string
   ): Promise<AdminConversationActionResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/admin/conversations/${encodeURIComponent(conversationId)}`, {
+      buildUrl(this.baseUrl, `/v2/admin/conversations/${encodeURIComponent(conversationId)}`, {
         user_id: userId,
       }),
       {
@@ -383,7 +1134,7 @@ export class ApiClient {
   }
 
   async listTrainingModels(): Promise<TrainingModelsResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/models"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/models"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -395,7 +1146,7 @@ export class ApiClient {
   }
 
   async syncPrairieActiveLearningDataset(): Promise<PrairieSyncResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/prairie/sync"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/sync"), {
       method: "POST",
       headers: this.headers(),
       credentials: "include",
@@ -407,7 +1158,7 @@ export class ApiClient {
   }
 
   async getPrairieActiveLearningStatus(): Promise<PrairieStatusResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/prairie/status"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/status"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -421,7 +1172,7 @@ export class ApiClient {
   async runPrairieBenchmark(
     request?: PrairieBenchmarkRunRequest
   ): Promise<PrairieBenchmarkRunResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/prairie/benchmark/run"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/benchmark/run"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request ?? { mode: "canonical_only" }),
@@ -434,7 +1185,7 @@ export class ApiClient {
   }
 
   async requestPrairieRetrain(request: PrairieRetrainRequest): Promise<TrainingJobResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/prairie/retrain-request"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/retrain-request"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -447,7 +1198,7 @@ export class ApiClient {
   }
 
   async listPrairieRetrainRequests(): Promise<PrairieRetrainListResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/prairie/retrain-requests"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/retrain-requests"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -461,7 +1212,7 @@ export class ApiClient {
   async createTrainingDataset(
     request: TrainingDatasetCreateRequest
   ): Promise<TrainingDatasetResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/datasets"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/datasets"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -481,7 +1232,7 @@ export class ApiClient {
     const response = await fetch(
       buildUrl(
         this.baseUrl,
-        "/v1/training/datasets",
+        "/v2/training/datasets",
         Object.keys(params).length > 0 ? params : undefined
       ),
       {
@@ -498,7 +1249,7 @@ export class ApiClient {
 
   async getTrainingDataset(datasetId: string): Promise<TrainingDatasetResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/datasets/${encodeURIComponent(datasetId)}`),
+      buildUrl(this.baseUrl, `/v2/training/datasets/${encodeURIComponent(datasetId)}`),
       {
         method: "GET",
         headers: this.headers(),
@@ -516,7 +1267,7 @@ export class ApiClient {
     request: TrainingDatasetItemsRequest
   ): Promise<TrainingDatasetResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/datasets/${encodeURIComponent(datasetId)}/items`),
+      buildUrl(this.baseUrl, `/v2/training/datasets/${encodeURIComponent(datasetId)}/items`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -531,7 +1282,7 @@ export class ApiClient {
   }
 
   async createTrainingJob(request: TrainingJobCreateRequest): Promise<TrainingJobResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/jobs"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/jobs"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -546,7 +1297,7 @@ export class ApiClient {
   async previewTrainingJob(
     request: TrainingPreflightRequest
   ): Promise<TrainingPreflightResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/preflight"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/preflight"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -560,7 +1311,7 @@ export class ApiClient {
 
   async getTrainingJob(jobId: string): Promise<TrainingJobResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/jobs/${encodeURIComponent(jobId)}`),
+      buildUrl(this.baseUrl, `/v2/training/jobs/${encodeURIComponent(jobId)}`),
       {
         method: "GET",
         headers: this.headers(),
@@ -578,7 +1329,7 @@ export class ApiClient {
     request: TrainingJobControlRequest
   ): Promise<TrainingJobResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/jobs/${encodeURIComponent(jobId)}/control`),
+      buildUrl(this.baseUrl, `/v2/training/jobs/${encodeURIComponent(jobId)}/control`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -593,7 +1344,7 @@ export class ApiClient {
   }
 
   async createInferenceJob(request: InferenceJobCreateRequest): Promise<TrainingJobResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/inference/jobs"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/inference/jobs"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -607,7 +1358,7 @@ export class ApiClient {
 
   async getInferenceJobResult(jobId: string): Promise<TrainingJobResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/inference/jobs/${encodeURIComponent(jobId)}/result`),
+      buildUrl(this.baseUrl, `/v2/inference/jobs/${encodeURIComponent(jobId)}/result`),
       {
         method: "GET",
         headers: this.headers(),
@@ -621,7 +1372,7 @@ export class ApiClient {
   }
 
   async getModelHealth(): Promise<ModelHealthResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/model-health"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/model-health"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -633,7 +1384,7 @@ export class ApiClient {
   }
 
   async getAdminModelHealth(): Promise<ModelHealthResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/admin/model-health"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/model-health"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -647,7 +1398,7 @@ export class ApiClient {
   async createTrainingDomain(
     request: TrainingDomainCreateRequest
   ): Promise<TrainingDomainRecord> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/domains"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/domains"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -661,7 +1412,7 @@ export class ApiClient {
 
   async listTrainingDomains(limit = 200): Promise<TrainingDomainListResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, "/v1/training/domains", { limit: String(limit) }),
+      buildUrl(this.baseUrl, "/v2/training/domains", { limit: String(limit) }),
       {
         method: "GET",
         headers: this.headers(),
@@ -685,7 +1436,7 @@ export class ApiClient {
     const response = await fetch(
       buildUrl(
         this.baseUrl,
-        `/v1/training/domains/${encodeURIComponent(domainId)}/lineages`,
+        `/v2/training/domains/${encodeURIComponent(domainId)}/lineages`,
         Object.keys(params).length > 0 ? params : undefined
       ),
       {
@@ -705,7 +1456,7 @@ export class ApiClient {
     request: TrainingForkLineageRequest
   ): Promise<TrainingLineageRecord> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/lineages/${encodeURIComponent(lineageId)}/fork`),
+      buildUrl(this.baseUrl, `/v2/training/lineages/${encodeURIComponent(lineageId)}/fork`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -730,7 +1481,7 @@ export class ApiClient {
     const response = await fetch(
       buildUrl(
         this.baseUrl,
-        `/v1/training/lineages/${encodeURIComponent(lineageId)}/versions`,
+        `/v2/training/lineages/${encodeURIComponent(lineageId)}/versions`,
         Object.keys(params).length > 0 ? params : undefined
       ),
       {
@@ -748,7 +1499,7 @@ export class ApiClient {
   async previewTrainingUpdateProposal(
     request: TrainingUpdateProposalPreviewRequest
   ): Promise<TrainingUpdateProposalPreviewResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/update-proposals/preview"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/update-proposals/preview"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -778,7 +1529,7 @@ export class ApiClient {
     const response = await fetch(
       buildUrl(
         this.baseUrl,
-        "/v1/training/update-proposals",
+        "/v2/training/update-proposals",
         Object.keys(params).length > 0 ? params : undefined
       ),
       {
@@ -798,7 +1549,7 @@ export class ApiClient {
     request: TrainingUpdateProposalDecisionRequest
   ): Promise<TrainingUpdateProposalResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/update-proposals/${encodeURIComponent(proposalId)}/approve`),
+      buildUrl(this.baseUrl, `/v2/training/update-proposals/${encodeURIComponent(proposalId)}/approve`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -817,7 +1568,7 @@ export class ApiClient {
     request: TrainingUpdateProposalDecisionRequest
   ): Promise<TrainingUpdateProposalResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/update-proposals/${encodeURIComponent(proposalId)}/reject`),
+      buildUrl(this.baseUrl, `/v2/training/update-proposals/${encodeURIComponent(proposalId)}/reject`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -836,7 +1587,7 @@ export class ApiClient {
     request: TrainingVersionPromoteRequest
   ): Promise<TrainingModelVersionResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/model-versions/${encodeURIComponent(versionId)}/promote`),
+      buildUrl(this.baseUrl, `/v2/training/model-versions/${encodeURIComponent(versionId)}/promote`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -855,7 +1606,7 @@ export class ApiClient {
     request: TrainingVersionRollbackRequest
   ): Promise<TrainingModelVersionResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/model-versions/${encodeURIComponent(versionId)}/rollback`),
+      buildUrl(this.baseUrl, `/v2/training/model-versions/${encodeURIComponent(versionId)}/rollback`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -872,7 +1623,7 @@ export class ApiClient {
   async createTrainingMergeRequest(
     request: TrainingMergeRequestCreateRequest
   ): Promise<TrainingMergeRequestResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/training/merge-requests"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/merge-requests"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -889,7 +1640,7 @@ export class ApiClient {
     request: TrainingMergeRequestDecisionRequest
   ): Promise<TrainingMergeRequestResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/merge-requests/${encodeURIComponent(mergeId)}/approve`),
+      buildUrl(this.baseUrl, `/v2/training/merge-requests/${encodeURIComponent(mergeId)}/approve`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -908,7 +1659,7 @@ export class ApiClient {
     request: TrainingMergeRequestDecisionRequest
   ): Promise<TrainingMergeRequestResponse> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/training/merge-requests/${encodeURIComponent(mergeId)}/reject`),
+      buildUrl(this.baseUrl, `/v2/training/merge-requests/${encodeURIComponent(mergeId)}/reject`),
       {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
@@ -936,7 +1687,7 @@ export class ApiClient {
     const response = await fetch(
       buildUrl(
         this.baseUrl,
-        "/v1/training/merge-requests",
+        "/v2/training/merge-requests",
         Object.keys(params).length > 0 ? params : undefined
       ),
       {
@@ -952,7 +1703,7 @@ export class ApiClient {
   }
 
   async getBisqueSession(): Promise<BisqueAuthSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/auth/session"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/session"), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -964,7 +1715,7 @@ export class ApiClient {
   }
 
   async loginBisque(payload: BisqueAuthLoginRequest): Promise<BisqueAuthSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/auth/login"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/login"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
@@ -977,7 +1728,7 @@ export class ApiClient {
   }
 
   async logoutBisque(): Promise<BisqueAuthSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/auth/logout"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/logout"), {
       method: "POST",
       headers: this.headers(),
       credentials: "include",
@@ -989,7 +1740,7 @@ export class ApiClient {
   }
 
   async continueAsGuest(payload: BisqueGuestAuthRequest): Promise<BisqueAuthSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/auth/guest"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/guest"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
@@ -1002,95 +1753,163 @@ export class ApiClient {
   }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/chat"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    const payload = await response.json();
-    const normalized = normalizeChatResponsePayload(payload);
-    if (!normalized) {
-      throw new ApiError("Chat response did not include a valid completion payload", 502, payload);
-    }
-    return normalized;
+    return this.chatStream(request);
   }
 
   async chatTitle(request: ChatTitleRequest): Promise<ChatTitleResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/chat/title"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ChatTitleResponse;
+    return {
+      title: chatTitleFromMessages(request),
+      model: "frontend-local",
+      strategy: "fallback",
+    };
   }
 
   async chatStream(request: ChatRequest, options?: ChatStreamOptions): Promise<ChatResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/chat/stream"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-      signal: options?.signal,
-    });
-    if (!response.ok) {
-      if (response.status === 404 || response.status === 405 || response.status === 501) {
-        const fallback = await this.chat(request);
-        options?.onDone?.(fallback);
-        return fallback;
+    const conversationId = this.conversationIdFromRequest(request);
+    let threadId = await this.ensureV2Thread(request, conversationId);
+    const idempotencyKey = asOptionalString(request.idempotency_key);
+    let createdRun: Record<string, unknown>;
+    try {
+      createdRun = await this.createV2Run(threadId, request, idempotencyKey, options?.signal);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) {
+        throw error;
       }
+      this.forgetV2Thread(conversationId);
+      const recoveredThreadId = await this.ensureV2Thread(request, conversationId);
+      if (recoveredThreadId === threadId) {
+        throw error;
+      }
+      threadId = recoveredThreadId;
+      createdRun = await this.createV2Run(threadId, request, idempotencyKey, options?.signal);
+    }
+    const runId = asTrimmedString(createdRun.run_id);
+    if (!runId) {
+      throw new ApiError("V2 run creation did not return a run id", 502, createdRun);
+    }
+    options?.onRunStarted?.({
+      runId,
+      model: asOptionalString(createdRun.model) ?? "deep_agents",
+    });
+
+    return this.consumeV2RunEventStream(runId, createdRun, options);
+  }
+
+  async resumeRunStream(runId: string, options?: RunStreamOptions): Promise<ChatResponse> {
+    const normalizedRunId = asTrimmedString(runId);
+    if (!normalizedRunId) {
+      throw new ApiError("Run stream resume requires a run id", 400, null);
+    }
+    return this.consumeV2RunEventStream(normalizedRunId, { run_id: normalizedRunId }, options);
+  }
+
+  private async consumeV2RunEventStream(
+    runId: string,
+    fallbackRun: Record<string, unknown>,
+    options?: RunStreamOptions
+  ): Promise<ChatResponse> {
+    const streamParams: Record<string, string> = { stream: "true" };
+    const afterSequence = Math.max(0, Math.floor(Number(options?.afterSequence ?? 0)));
+    streamParams.after_sequence = String(afterSequence);
+
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/runs/${encodeURIComponent(runId)}/events`, streamParams),
+      {
+        method: "GET",
+        headers: this.headers({ Accept: "text/event-stream" }),
+        credentials: "include",
+        signal: options?.signal,
+      }
+    );
+    if (!response.ok) {
       return parseError(response);
     }
     if (!response.body) {
-      throw new ApiError("Stream response did not include a readable body", 502, null);
+      throw new ApiError("Run event stream did not include a readable body", 502, null);
     }
-    options?.onRunStarted?.({
-      runId: String(response.headers.get("X-Run-Id") ?? "").trim(),
-      model: String(response.headers.get("X-Model") ?? "").trim() || null,
-    });
-    const headerRunId = String(response.headers.get("X-Run-Id") ?? "").trim();
-    const headerModel = String(response.headers.get("X-Model") ?? "").trim();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    const progressEvents: ProgressEvent[] = [];
     let buffer = "";
-    let completedPayload: ChatResponse | null = null;
-    let terminalEventSeen = false;
     let streamedText = "";
+    let terminalEventSeen = false;
+    let terminalStatus: "succeeded" | "failed" | "canceled" | null = null;
+    let terminalDetail: unknown = null;
+    let terminalResponseText = "";
+
+    const handleStreamEvent = (eventName: string, payload: unknown): void => {
+      if (eventName === "heartbeat") {
+        return;
+      }
+      if (eventName === "token" && isRecord(payload)) {
+        const delta = asPlainString(payload.delta);
+        if (delta) {
+          streamedText += delta;
+          options?.onToken?.(delta);
+        }
+        return;
+      }
+      if (eventName === "error") {
+        terminalEventSeen = true;
+        terminalStatus = "failed";
+        terminalDetail = payload;
+        return;
+      }
+      if (eventName !== "run_event" || !isRecord(payload)) {
+        return;
+      }
+
+      const eventKind =
+        asTrimmedString(payload.event_kind) || asTrimmedString(payload.event_type) || "run_event";
+      if (eventKind === "artifact.created") {
+        this.rememberV2ArtifactEvent(payload);
+      }
+
+      const normalized = normalizeV2RunEvent(payload);
+      progressEvents.push(progressEventFromV2RunEvent(payload));
+      options?.onRunEvent?.(normalized);
+
+      if (eventKind === "message.delta") {
+        const delta = v2DeltaFromRunEvent(payload);
+        if (delta) {
+          streamedText += delta;
+          options?.onToken?.(delta);
+        }
+      }
+
+      if (!isV2TerminalEventKind(eventKind)) {
+        return;
+      }
+      terminalEventSeen = true;
+      terminalResponseText = responseTextFromV2TerminalEvent(payload);
+      terminalStatus =
+        eventKind === "run.completed" ? "succeeded" : eventKind === "run.canceled" ? "canceled" : "failed";
+      terminalDetail = isRecord(payload.payload) ? payload.payload : payload;
+    };
 
     const parseEventBlock = (rawBlock: string): void => {
       const block = rawBlock.trim();
       if (!block) {
         return;
       }
-
       let eventName = "message";
       const dataLines: string[] = [];
-
       block.split("\n").forEach((line) => {
         if (line.startsWith(":")) {
           return;
         }
         if (line.startsWith("event:")) {
-          eventName = line.slice("event:".length).trim();
+          eventName = line.slice("event:".length).trim() || "message";
           return;
         }
         if (line.startsWith("data:")) {
           dataLines.push(line.slice("data:".length).trimStart());
         }
       });
-
       if (dataLines.length === 0) {
         return;
       }
-
       const rawData = dataLines.join("\n");
       let payload: unknown = rawData;
       try {
@@ -1098,54 +1917,7 @@ export class ApiClient {
       } catch {
         // keep raw text payload
       }
-
-      if (eventName === "token" && payload && typeof payload === "object") {
-        const delta = String((payload as Record<string, unknown>).delta ?? "");
-        if (delta) {
-          streamedText += delta;
-          options?.onToken?.(delta);
-        }
-        return;
-      }
-
-      if (eventName === "done") {
-        const normalized = normalizeChatResponsePayload(payload, {
-          runId: headerRunId || null,
-          model: headerModel || null,
-          responseText: streamedText || null,
-          durationSeconds: 0,
-        });
-        if (!normalized) {
-          return;
-        }
-        completedPayload = normalized;
-        terminalEventSeen = true;
-        options?.onDone?.(normalized);
-        return;
-      }
-
-      if (eventName === "run_event" && payload && typeof payload === "object") {
-        options?.onRunEvent?.(payload as RunEvent);
-        return;
-      }
-
-      if (eventName === "error") {
-        const detail =
-          payload && typeof payload === "object"
-            ? (payload as Record<string, unknown>).detail ?? payload
-            : payload;
-        const statusRaw =
-          payload && typeof payload === "object"
-            ? (payload as Record<string, unknown>).status_code
-            : null;
-        const statusCode =
-          typeof statusRaw === "number"
-            ? statusRaw
-            : typeof statusRaw === "string" && /^\d+$/.test(statusRaw)
-              ? Number(statusRaw)
-              : 500;
-        throw new ApiError(`Stream failed with status ${statusCode}`, statusCode, detail);
-      }
+      handleStreamEvent(eventName, payload);
     };
 
     try {
@@ -1171,7 +1943,6 @@ export class ApiClient {
           break;
         }
       }
-
       if (!terminalEventSeen) {
         buffer += decoder.decode().replace(/\r\n/g, "\n");
       }
@@ -1189,22 +1960,23 @@ export class ApiClient {
       reader.releaseLock();
     }
 
-    if (!completedPayload && streamedText.trim().length > 0) {
-      completedPayload = {
-        run_id: headerRunId,
-        model: headerModel,
-        response_text: streamedText,
-        duration_seconds: 0,
-        progress_events: [],
-        benchmark: null,
-        metadata: null,
-      };
-      options?.onDone?.(completedPayload);
+    if (terminalStatus === "failed") {
+      throw new ApiError("Run failed", 500, terminalDetail);
+    }
+    if (terminalStatus === "canceled") {
+      throw new ApiError("Run canceled", 499, terminalDetail);
     }
 
-    if (!completedPayload) {
-      throw new ApiError("Stream ended before a completion payload was received", 502, null);
-    }
+    const finalRun = await this.getV2Run(runId);
+    const responseText =
+      terminalResponseText || asTrimmedString(finalRun?.response_text) || streamedText;
+    const completedPayload = normalizeV2RunResponse(finalRun ?? fallbackRun, {
+      runId,
+      responseText,
+      progressEvents,
+      metadata: isRecord(terminalDetail) ? terminalDetail : null,
+    });
+    options?.onDone?.(completedPayload);
     return completedPayload;
   }
 
@@ -1212,27 +1984,10 @@ export class ApiClient {
     if (files.length === 0) {
       return { file_count: 0, uploaded: [] };
     }
-    try {
-      const uploaded = [];
-      for (const file of files) {
-        const row = await this.uploadFileResumable(file);
-        uploaded.push(row);
-      }
-      return {
-        file_count: uploaded.length,
-        uploaded,
-      };
-    } catch (error) {
-      if (!(error instanceof ApiError) || ![404, 405, 501].includes(error.status)) {
-        throw error;
-      }
-    }
-
-    // Fallback path for servers without resumable endpoints.
     const payload = new FormData();
     files.forEach((file) => payload.append("files", file, file.name));
 
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/uploads"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/uploads"), {
       method: "POST",
       headers: this.headers(),
       body: payload,
@@ -1421,7 +2176,7 @@ export class ApiClient {
   }
 
   async importBisqueResources(resources: string[]): Promise<BisqueImportResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/uploads/from-bisque"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/uploads/from-bisque"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify({ resources }),
@@ -1456,7 +2211,7 @@ export class ApiClient {
     if (source) {
       params.source = source;
     }
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/resources", params), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resources", params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -1484,7 +2239,7 @@ export class ApiClient {
 
   async deleteResource(fileId: string): Promise<{ deleted: boolean; file_id: string }> {
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/resources/${encodeURIComponent(fileId)}`),
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId)}`),
       {
         method: "DELETE",
         headers: this.headers(),
@@ -1499,12 +2254,12 @@ export class ApiClient {
 
   resourceThumbnailUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
-    return buildUrl(this.baseUrl, `/v1/resources/${safeFileId}/thumbnail`);
+    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
   }
 
   uploadPreviewUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/preview`);
+    return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/preview`);
   }
 
   uploadDisplayUrl(fileId: string, explicitPath?: string | null): string {
@@ -1512,7 +2267,7 @@ export class ApiClient {
     const path =
       explicitPath && String(explicitPath).trim()
         ? String(explicitPath)
-        : `/v1/uploads/${safeFileId}/display`;
+        : `/v2/uploads/${safeFileId}/display`;
     return buildUrl(this.baseUrl, path);
   }
 
@@ -1577,7 +2332,7 @@ export class ApiClient {
     if (typeof indices?.fullResolution === "boolean") {
       params.full_resolution = indices.fullResolution ? "true" : "false";
     }
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/slice`, params);
+    return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/slice`, params);
   }
 
   async getUploadScalarVolume(
@@ -1725,7 +2480,7 @@ export class ApiClient {
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let response: Response;
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/viewer`), {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/viewer`), {
         method: "GET",
         headers: this.headers(),
         signal: controller.signal,
@@ -1982,7 +2737,7 @@ export class ApiClient {
     const timeoutId = window.setTimeout(() => controller.abort(), 18000);
     let response: Response;
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/caption`), {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/caption`), {
         method: "GET",
         headers: this.headers(),
         signal: controller.signal,
@@ -2005,7 +2760,7 @@ export class ApiClient {
   async sam3InteractiveSegment(
     request: Sam3InteractiveRequest
   ): Promise<Sam3InteractiveResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/segment/sam3/interactive"), {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/segment/sam3/interactive"), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -2018,7 +2773,7 @@ export class ApiClient {
   }
 
   async getRun(runId: string): Promise<RunResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, `/v1/runs/${runId}`), {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/runs/${runId}`), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -2030,15 +2785,26 @@ export class ApiClient {
   }
 
   async getRunResult(runId: string): Promise<RunResultResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, `/v1/runs/${runId}/result`), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
+    const v2Run = await this.getV2Run(runId);
+    if (!v2Run) {
+      throw new ApiError("Run was not found", 404, null);
     }
-    return (await response.json()) as RunResultResponse;
+
+    const status = normalizeRunResultStatus(v2Run.status);
+    const result =
+      status === "succeeded"
+        ? normalizeV2RunResponse(v2Run, {
+            runId,
+            responseText: "",
+            progressEvents: [],
+          })
+        : null;
+
+    return {
+      run_id: asTrimmedString(v2Run.run_id) || runId,
+      status,
+      result,
+    };
   }
 
   async getAnalysisHistory(limit = 5, query?: string): Promise<AnalysisHistoryResponse> {
@@ -2078,121 +2844,135 @@ export class ApiClient {
     offset = 0,
     includeState = false
   ): Promise<ConversationListResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, "/v1/conversations", {
-        limit: String(limit),
-        offset: String(offset),
-        include_state: includeState ? "true" : "false",
-      }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ConversationListResponse;
+    return this.listV2Conversations(limit, offset, includeState);
   }
 
   async getConversation(conversationId: string): Promise<ConversationRecord> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/conversations/${encodeURIComponent(conversationId)}`),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ConversationRecord;
+    return this.getV2Conversation(conversationId);
   }
 
   async upsertConversation(record: ConversationRecord): Promise<ConversationRecord> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/conversations/${encodeURIComponent(record.conversation_id)}`),
-      {
-        method: "PUT",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(record),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ConversationRecord;
+    return this.upsertV2Conversation(record);
   }
 
   async deleteConversation(conversationId: string): Promise<{ deleted: boolean; conversation_id: string }> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/conversations/${encodeURIComponent(conversationId)}`),
-      {
-        method: "DELETE",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as { deleted: boolean; conversation_id: string };
+    return this.deleteV2Conversation(conversationId);
   }
 
   async searchConversations(query: string, limit = 50): Promise<ConversationSearchResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, "/v1/conversations/search", {
-        q: query,
-        limit: String(limit),
-      }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
+    const normalizedQuery = asTrimmedString(query);
+    const needle = normalizedQuery.toLowerCase();
+    const conversations = await this.listV2Conversations(limit, 0, true);
+    const matches = conversations.conversations.filter((conversation) => {
+      if (!needle) {
+        return true;
       }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ConversationSearchResponse;
+      const searchable = [
+        conversation.title,
+        conversation.preview,
+        conversation.conversation_id,
+        JSON.stringify(conversation.state ?? {}),
+      ]
+        .join("\n")
+        .toLowerCase();
+      return searchable.includes(needle);
+    });
+    return {
+      query: normalizedQuery,
+      count: matches.length,
+      matches,
+    };
   }
 
   async getRunEvents(runId: string, limit = 200): Promise<RunEventsResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/runs/${runId}/events`, { limit: String(limit) }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
+    const requestedLimit = Math.max(1, Math.floor(asFiniteNumber(limit, 200)));
+    const events: RunEvent[] = [];
+    let resolvedRunId = runId;
+    let afterSequence = 0;
+    while (true) {
+      const payload = await this.fetchJson<Record<string, unknown>>(
+        `/v2/runs/${encodeURIComponent(runId)}/events`,
+        { method: "GET" },
+        {
+          limit: String(requestedLimit),
+          after_sequence: String(afterSequence),
+        }
+      );
+      resolvedRunId = asTrimmedString(payload.run_id) || resolvedRunId;
+      const rawEvents = Array.isArray(payload.events) ? payload.events.filter(isRecord) : [];
+      events.push(...rawEvents.map((event) => normalizeV2RunEvent(event)));
+      const nextAfterSequence = rawEvents.reduce((current, event) => {
+        const sequence = Math.floor(asFiniteNumber(event.sequence, 0));
+        return sequence > current ? sequence : current;
+      }, afterSequence);
+      if (rawEvents.length < requestedLimit || nextAfterSequence <= afterSequence) {
+        break;
       }
-    );
-    if (!response.ok) {
-      return parseError(response);
+      afterSequence = nextAfterSequence;
     }
-    return (await response.json()) as RunEventsResponse;
+    return {
+      run_id: resolvedRunId,
+      events,
+    };
   }
 
   async listArtifacts(runId: string, limit = 500): Promise<ArtifactListResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/artifacts/${runId}`, { limit: String(limit) }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
+    const payload = await this.fetchJson<Record<string, unknown>>(
+      `/v2/runs/${encodeURIComponent(runId)}/artifacts`,
+      { method: "GET" },
+      { limit: String(limit) }
     );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ArtifactListResponse;
+    const artifacts = Array.isArray(payload.artifacts)
+      ? payload.artifacts
+          .map((artifact): ArtifactRecord | null => {
+            if (!isRecord(artifact)) {
+              return null;
+            }
+            const path =
+              asOptionalString(artifact.path) ??
+              asOptionalString(artifact.relative_path) ??
+              asOptionalString(artifact.source_path) ??
+              asOptionalString(artifact.preview_path) ??
+              asTrimmedString(artifact.artifact_id);
+            const artifactId = asTrimmedString(artifact.artifact_id);
+            this.rememberV2Artifact(runId, artifactId, [
+              artifact.path,
+              artifact.relative_path,
+              artifact.source_path,
+              artifact.preview_path,
+              path,
+            ]);
+            return {
+              path,
+              size_bytes: asFiniteNumber(artifact.size_bytes, 0),
+              mime_type: asOptionalString(artifact.mime_type),
+              modified_at:
+                asOptionalString(artifact.updated_at) ??
+                asOptionalString(artifact.created_at) ??
+                new Date(0).toISOString(),
+              source_path: asOptionalString(artifact.source_path),
+              title: asOptionalString(artifact.title),
+              result_group_id: asOptionalString(artifact.result_group_id),
+            } satisfies ArtifactRecord;
+          })
+          .filter((artifact): artifact is ArtifactRecord => artifact !== null)
+      : [];
+    return {
+      run_id: asTrimmedString(payload.run_id) || runId,
+      root: "",
+      artifact_count: asFiniteNumber(payload.count, artifacts.length),
+      artifacts,
+    };
   }
 
   artifactDownloadUrl(runId: string, path: string): string {
-    const params: Record<string, string> = { path };
-    return buildUrl(this.baseUrl, `/v1/artifacts/${runId}/download`, params);
+    const artifactId = this.v2ArtifactIdsByRunPath.get(this.v2ArtifactKey(runId, path));
+    if (artifactId) {
+      return buildUrl(this.baseUrl, `/v2/artifacts/${encodeURIComponent(artifactId)}/download`);
+    }
+    return buildUrl(this.baseUrl, `/v2/runs/${encodeURIComponent(runId)}/artifacts/download`, {
+      path,
+    });
   }
 
   async createReproReport(req: ReproReportRequest): Promise<ReproReportResponse> {
@@ -2208,144 +2988,6 @@ export class ApiClient {
     return (await response.json()) as ReproReportResponse;
   }
 
-  async createV3Session(req: V3SessionCreateRequest): Promise<V3SessionRecord> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v3/sessions"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(req),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3SessionRecord;
-  }
-
-  async listV3Sessions(limit = 100): Promise<V3SessionListResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v3/sessions", { limit: String(limit) }), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3SessionListResponse;
-  }
-
-  async getV3Session(sessionId: string): Promise<V3SessionRecord> {
-    const response = await fetch(buildUrl(this.baseUrl, `/v3/sessions/${encodeURIComponent(sessionId)}`), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3SessionRecord;
-  }
-
-  async getV3SessionMessages(sessionId: string, limit = 500): Promise<V3SessionMessageListResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v3/sessions/${encodeURIComponent(sessionId)}/messages`, {
-        limit: String(limit),
-      }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3SessionMessageListResponse;
-  }
-
-  async createV3Run(sessionId: string, req: V3RunCreateRequest): Promise<V3RunRecord> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v3/sessions/${encodeURIComponent(sessionId)}/runs`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(req),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3RunRecord;
-  }
-
-  async getV3Run(runId: string): Promise<V3RunRecord> {
-    const response = await fetch(buildUrl(this.baseUrl, `/v3/runs/${encodeURIComponent(runId)}`), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3RunRecord;
-  }
-
-  async getV3RunEvents(runId: string, limit = 500): Promise<V3RunEventListResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v3/runs/${encodeURIComponent(runId)}/events`, {
-        limit: String(limit),
-      }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3RunEventListResponse;
-  }
-
-  async getV3RunArtifacts(runId: string, limit = 500): Promise<V3ArtifactListResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v3/runs/${encodeURIComponent(runId)}/artifacts`, {
-        limit: String(limit),
-      }),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3ArtifactListResponse;
-  }
-
-  async resolveV3Approval(
-    runId: string,
-    approvalId: string,
-    req: V3ApprovalResolveRequest
-  ): Promise<V3ApprovalResolveResponse> {
-    const response = await fetch(
-      buildUrl(
-        this.baseUrl,
-        `/v3/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`
-      ),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(req),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as V3ApprovalResolveResponse;
-  }
 }
 
 export * from "./api-v2";

@@ -29,6 +29,15 @@ type ControlArtifact struct {
 	Metadata      []byte             `json:"metadata"`
 }
 
+type ControlOrganization struct {
+	OrgID     string             `json:"org_id"`
+	Name      string             `json:"name"`
+	Status    string             `json:"status"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	Metadata  []byte             `json:"metadata"`
+}
+
 type ControlRun struct {
 	RunID           string             `json:"run_id"`
 	ThreadID        string             `json:"thread_id"`
@@ -72,6 +81,15 @@ type ControlRunEvent struct {
 	Payload        []byte             `json:"payload"`
 }
 
+type ControlRunLease struct {
+	RunID          string             `json:"run_id"`
+	WorkerID       string             `json:"worker_id"`
+	LeaseToken     string             `json:"lease_token"`
+	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ControlThread struct {
 	ThreadID     string             `json:"thread_id"`
 	UserID       string             `json:"user_id"`
@@ -93,4 +111,29 @@ type ControlThreadMessage struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	Metadata  []byte             `json:"metadata"`
 	RunID     pgtype.Text        `json:"run_id"`
+}
+
+type ControlUser struct {
+	UserID      string             `json:"user_id"`
+	Email       pgtype.Text        `json:"email"`
+	DisplayName pgtype.Text        `json:"display_name"`
+	Role        string             `json:"role"`
+	Status      string             `json:"status"`
+	OrgID       pgtype.Text        `json:"org_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlWorkerHeartbeat struct {
+	WorkerID        string             `json:"worker_id"`
+	WorkerKind      string             `json:"worker_kind"`
+	Status          string             `json:"status"`
+	CurrentRunID    pgtype.Text        `json:"current_run_id"`
+	Hostname        pgtype.Text        `json:"hostname"`
+	Version         pgtype.Text        `json:"version"`
+	StartedAt       pgtype.Timestamptz `json:"started_at"`
+	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	Metadata        []byte             `json:"metadata"`
 }

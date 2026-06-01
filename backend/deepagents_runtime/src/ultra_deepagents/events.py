@@ -91,6 +91,30 @@ def normalize_subagent_status(
     ).to_dict()
 
 
+def normalize_subagent_message_delta(
+    context: AgentRunContext,
+    name: str,
+    text: str,
+    *,
+    task_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_payload = {"text": text, "source": name}
+    event_payload.update(_json_safe_payload(payload))
+    return RunEvent(
+        run_id=context.run_id,
+        thread_id=context.thread_id,
+        event_kind="subagent.message.delta",
+        event_type="subagent_message",
+        node_name=name,
+        task_id=task_id,
+        agent_role=name,
+        level="info",
+        message=text,
+        payload=event_payload,
+    ).to_dict()
+
+
 def normalize_artifact_created(
     context: AgentRunContext,
     *,

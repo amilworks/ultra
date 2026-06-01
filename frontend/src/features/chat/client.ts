@@ -3,10 +3,6 @@ import type {
   ArtifactListResponse,
   ConversationListResponse,
   RunEventsResponse,
-  V3RunCreateRequest,
-  V3RunRecord,
-  V3SessionCreateRequest,
-  V3SessionRecord,
 } from "@/types";
 
 export type ConversationPageQuery = {
@@ -36,14 +32,3 @@ export const listRunArtifacts = (
   runId: string,
   limit = 500
 ): Promise<ArtifactListResponse> => apiClient.listArtifacts(runId, limit);
-
-export const createScientistSession = (
-  apiClient: ApiClient,
-  request: V3SessionCreateRequest
-): Promise<V3SessionRecord> => apiClient.createV3Session(request);
-
-export const createScientistRun = (
-  apiClient: ApiClient,
-  sessionId: string,
-  request: V3RunCreateRequest
-): Promise<V3RunRecord> => apiClient.createV3Run(sessionId, request);

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { Fragment, type FormEvent, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -8,7 +8,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { AlertTriangle, RefreshCw, Shield, StopCircle, Trash2, Users } from "lucide-react";
+import { AlertTriangle, RefreshCw, RotateCcw, Shield, StopCircle, Trash2, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,24 +23,36 @@ import {
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
 import type {
+  AdminCreateOrganizationRequest,
+  AdminCreateUserRequest,
   AdminIssueRecord,
+  AdminOrganization,
+  AdminQueueConsumerDiagnostic,
   AdminOverviewResponse,
   AdminRunRecord,
   AdminUserSummary,
+  RunEvent,
 } from "../types";
 
 type AdminConsoleProps = {
   overview: AdminOverviewResponse | null;
+  organizations: AdminOrganization[];
   users: AdminUserSummary[];
   runs: AdminRunRecord[];
   issues: AdminIssueRecord[];
   loadingOverview: boolean;
+  loadingOrganizations: boolean;
   loadingUsers: boolean;
   loadingRuns: boolean;
   loadingIssues: boolean;
   error: string | null;
   runCancellingById: Record<string, boolean>;
+  runRequeueingById?: Record<string, boolean>;
+  userDeletingById?: Record<string, boolean>;
   deletingConversationKey: string | null;
+  activeRunEventRunId: string | null;
+  runEventsById: Record<string, RunEvent[]>;
+  runEventsLoadingById: Record<string, boolean>;
   runStatusFilter: string;
   runQuery: string;
   userQuery: string;
@@ -48,17 +60,23 @@ type AdminConsoleProps = {
   onRunQueryChange: (value: string) => void;
   onUserQueryChange: (value: string) => void;
   onRefreshAll: () => void;
+  onRefreshOrganizations: () => void;
   onRefreshUsers: () => void;
   onRefreshRuns: () => void;
   onRefreshIssues: () => void;
+  onCreateOrganization: (payload: AdminCreateOrganizationRequest) => Promise<void> | void;
+  onCreateUser: (payload: AdminCreateUserRequest) => Promise<void> | void;
+  onDeleteUser: (userId: string) => Promise<void> | void;
   onCancelRun: (runId: string) => void;
+  onRequeueRun?: (runId: string) => void;
   onDeleteConversation: (conversationId: string, userId: string) => void;
+  onInspectRunEvents: (runId: string) => void;
 };
 
 const statusOptions = [
   { value: "", label: "All statuses" },
   { value: "running", label: "Running" },
-  { value: "pending", label: "Pending" },
+  { value: "queued", label: "Queued" },
   { value: "failed", label: "Failed" },
   { value: "succeeded", label: "Succeeded" },
   { value: "canceled", label: "Canceled" },
@@ -87,6 +105,22 @@ const formatClock = (iso: string): string => {
 
 const formatCount = (value: number | null | undefined): string =>
   countFormatter.format(Number.isFinite(Number(value)) ? Number(value) : 0);
+
+const isWorkerQueueConsumer = (consumer: AdminQueueConsumerDiagnostic): boolean => {
+  const role = (consumer.role ?? "").toLowerCase();
+  const name = consumer.name.toLowerCase();
+  const subject = (consumer.subject ?? "").toLowerCase();
+  if (role === "event_ingest" || name.includes("event-ingest")) {
+    return false;
+  }
+  return (
+    role === "deepagents" ||
+    role === "rarespot" ||
+    role.includes("worker") ||
+    name.includes("worker") ||
+    subject.endsWith(".jobs")
+  );
+};
 
 const formatDateTime = (iso: string | null | undefined): string => {
   if (!iso) {
@@ -118,6 +152,97 @@ const formatDuration = (seconds: number | null | undefined): string => {
   return `${(value / 3600).toFixed(1)}h`;
 };
 
+const formatSilentAge = (seconds: number | null | undefined): string => {
+  const value = Number(seconds ?? 0);
+  if (!Number.isFinite(value) || value < 0) {
+    return "—";
+  }
+  if (value < 60) {
+    return `${value.toFixed(0)}s silent`;
+  }
+  if (value < 3600) {
+    return `${(value / 60).toFixed(1)}m silent`;
+  }
+  return `${(value / 3600).toFixed(1)}h silent`;
+};
+
+const pluralUnit = (count: number, singular: string): string =>
+  `${formatCount(count)} ${singular}${count === 1 ? "" : "s"}`;
+
+const formatRunEventSummary = (run: AdminRunRecord): string => {
+  const deltaCount = Math.max(0, Number(run.message_delta_count ?? 0));
+  const toolCount = Math.max(0, Number(run.tool_call_count ?? 0));
+  const artifactCount = Math.max(0, Number(run.artifact_count ?? 0));
+  const heartbeatCount = Math.max(0, Number(run.heartbeat_count ?? 0));
+  return [
+    pluralUnit(deltaCount, "delta"),
+    pluralUnit(toolCount, "tool"),
+    pluralUnit(artifactCount, "artifact"),
+    pluralUnit(heartbeatCount, "heartbeat"),
+  ].join(" • ");
+};
+
+const formatRunLeaseSummary = (run: AdminRunRecord): string | null => {
+  const workerId = String(run.lease_worker_id ?? "").trim();
+  if (!workerId) {
+    return null;
+  }
+  if (run.lease_expired) {
+    return `Lease expired: ${workerId}`;
+  }
+  if (run.lease_active && run.lease_seconds_remaining !== null && run.lease_seconds_remaining !== undefined) {
+    return `Lease: ${workerId} (${formatDuration(run.lease_seconds_remaining)} left)`;
+  }
+  return `Lease: ${workerId}`;
+};
+
+const isRecoverableRunStatus = (status: string): boolean => {
+  const normalized = status.toLowerCase();
+  return (
+    normalized === "queued" ||
+    normalized === "pending" ||
+    normalized === "running" ||
+    normalized === "waiting_for_input" ||
+    normalized === "waiting_for_task"
+  );
+};
+
+const formatQueueConsumerSummary = (
+  pending: number | null | undefined,
+  inFlight: number | null | undefined,
+  redelivered: number | null | undefined
+): string =>
+  [
+    `${formatCount(pending)} pending`,
+    `${formatCount(inFlight)} in-flight`,
+    `${formatCount(redelivered)} redelivered`,
+  ].join(" • ");
+
+const runEventPayload = (event: RunEvent): Record<string, unknown> =>
+  event.payload && typeof event.payload === "object" ? event.payload : {};
+
+const runEventSequence = (event: RunEvent): number | null => {
+  const value = Number(runEventPayload(event).sequence);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+};
+
+const runEventLabel = (event: RunEvent): string => {
+  const kind = String(runEventPayload(event).event_kind ?? event.event_type ?? "run_event");
+  const sequence = runEventSequence(event);
+  return sequence ? `${kind} #${sequence}` : kind;
+};
+
+const runEventDetail = (event: RunEvent): string => {
+  const payload = runEventPayload(event);
+  for (const key of ["message", "delta", "stage", "tool_name", "artifact_id"]) {
+    const value = String(payload[key] ?? "").trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "No event detail";
+};
+
 const runStatusBadgeClass = (status: string): string => {
   const normalized = status.toLowerCase();
   if (normalized === "running" || normalized === "pending") {
@@ -145,16 +270,23 @@ const issueSeverityBadgeClass = (severity: string): string => {
 
 export function AdminConsole({
   overview,
+  organizations,
   users,
   runs,
   issues,
   loadingOverview,
+  loadingOrganizations,
   loadingUsers,
   loadingRuns,
   loadingIssues,
   error,
   runCancellingById,
+  runRequeueingById = {},
+  userDeletingById = {},
   deletingConversationKey,
+  activeRunEventRunId,
+  runEventsById,
+  runEventsLoadingById,
   runStatusFilter,
   runQuery,
   userQuery,
@@ -162,12 +294,28 @@ export function AdminConsole({
   onRunQueryChange,
   onUserQueryChange,
   onRefreshAll,
+  onRefreshOrganizations,
   onRefreshUsers,
   onRefreshRuns,
   onRefreshIssues,
+  onCreateOrganization,
+  onCreateUser,
+  onDeleteUser,
   onCancelRun,
+  onRequeueRun,
   onDeleteConversation,
+  onInspectRunEvents,
 }: AdminConsoleProps) {
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserRole, setNewUserRole] = useState("researcher");
+  const [newUserOrg, setNewUserOrg] = useState("local-org");
+  const [newOrgID, setNewOrgID] = useState("");
+  const [newOrgName, setNewOrgName] = useState("");
+  const [creatingOrganization, setCreatingOrganization] = useState(false);
+  const [createOrganizationError, setCreateOrganizationError] = useState<string | null>(null);
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
   const usageSeries = useMemo(
     () =>
       (overview?.usage_last_24h ?? []).map((row) => ({
@@ -176,6 +324,60 @@ export function AdminConsole({
       })),
     [overview]
   );
+
+  const submitNewUser = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const email = newUserEmail.trim();
+    const displayName = newUserName.trim();
+    if (!email) {
+      setCreateUserError("Email is required.");
+      return;
+    }
+    setCreatingUser(true);
+    setCreateUserError(null);
+    try {
+      await onCreateUser({
+        email,
+        display_name: displayName,
+        role: newUserRole.trim() || "researcher",
+        org_id: newUserOrg.trim() || "local-org",
+      });
+      setNewUserEmail("");
+      setNewUserName("");
+      setNewUserRole("researcher");
+      setNewUserOrg("local-org");
+    } catch (error) {
+      setCreateUserError(error instanceof Error ? error.message : "Unable to create user.");
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+  const submitNewOrganization = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const orgID = newOrgID.trim();
+    const name = newOrgName.trim();
+    if (!orgID && !name) {
+      setCreateOrganizationError("Organization name or ID is required.");
+      return;
+    }
+    setCreatingOrganization(true);
+    setCreateOrganizationError(null);
+    try {
+      await onCreateOrganization({
+        org_id: orgID,
+        name,
+        status: "active",
+      });
+      setNewOrgID("");
+      setNewOrgName("");
+    } catch (error) {
+      setCreateOrganizationError(
+        error instanceof Error ? error.message : "Unable to create organization."
+      );
+    } finally {
+      setCreatingOrganization(false);
+    }
+  };
   const toolSeries = useMemo(
     () =>
       (overview?.tool_usage_7d ?? []).map((row) => ({
@@ -186,10 +388,38 @@ export function AdminConsole({
     [overview]
   );
   const kpis = overview?.kpis;
+  const queue = overview?.queue;
+  const workers = overview?.workers ?? [];
+  const activeWorkerCount = workers.filter((worker) => worker.active && !worker.stale).length;
+  const activeWorkerConsumerCount =
+    queue?.consumers?.filter((consumer) => consumer.active && isWorkerQueueConsumer(consumer)).length ?? 0;
   const activeUserShare =
     kpis && kpis.total_users > 0 ? (kpis.active_users_24h / kpis.total_users) * 100 : 0;
   const messagesPerActiveUser =
     kpis && kpis.active_users_24h > 0 ? kpis.messages_last_24h / kpis.active_users_24h : 0;
+  const runtime = overview?.runtime;
+  const organizationOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const records = organizations.filter((org) => {
+      const id = org.org_id.trim();
+      if (!id || seen.has(id)) {
+        return false;
+      }
+      seen.add(id);
+      return true;
+    });
+    if (!seen.has("local-org")) {
+      records.unshift({
+        org_id: "local-org",
+        name: "Local Organization",
+        status: "active",
+        created_at: "",
+        updated_at: "",
+        metadata: {},
+      });
+    }
+    return records;
+  }, [organizations]);
 
   return (
     <section className="admin-console mx-auto flex-1 overflow-y-auto px-3 py-6 sm:px-6 sm:py-8">
@@ -220,6 +450,185 @@ export function AdminConsole({
         </div>
 
         {error ? <p className="admin-error-banner">{error}</p> : null}
+
+        <Card className="admin-runtime-card">
+          <CardHeader>
+            <div className="admin-card-title-row">
+              <div>
+                <CardTitle>Runtime</CardTitle>
+                <CardDescription>Control-plane storage, worker dispatch, and NATS subjects.</CardDescription>
+              </div>
+              <Badge variant="outline" className={runtime?.nats_configured ? "admin-runtime-good" : "admin-runtime-warn"}>
+                {runtime?.nats_configured ? "NATS JetStream" : "Local stub"}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="admin-runtime-grid">
+            <div>
+              <span>Dispatch</span>
+              <strong>{loadingOverview ? "…" : runtime?.dispatch_mode ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Worker</span>
+              <strong>
+                {loadingOverview
+                  ? "…"
+                  : runtime?.stub_worker_enabled
+                    ? "stub worker"
+                    : "external workers"}
+              </strong>
+            </div>
+            <div>
+              <span>Store</span>
+              <strong>{loadingOverview ? "…" : runtime?.store_backend ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Jobs</span>
+              <strong>{loadingOverview ? "…" : runtime?.nats_jobs_subject ?? runtime?.job_transport ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Events</span>
+              <strong>{loadingOverview ? "…" : runtime?.nats_events_subject ?? runtime?.event_transport ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Cancel</span>
+              <strong>{loadingOverview ? "…" : runtime?.nats_cancel_subject ?? "not configured"}</strong>
+            </div>
+            <div>
+              <span>Recovery</span>
+              <strong>
+                {loadingOverview
+                  ? "…"
+                  : runtime?.run_recovery_enabled
+                    ? `auto every ${formatDuration(runtime.run_recovery_interval_seconds)}`
+                    : "disabled"}
+              </strong>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="admin-runtime-card">
+          <CardHeader>
+            <div className="admin-card-title-row">
+              <div>
+                <CardTitle>Workers</CardTitle>
+                <CardDescription>Durable Deep Agents and tool-worker liveness heartbeats.</CardDescription>
+              </div>
+              <Badge
+                variant="outline"
+                className={
+                  activeWorkerCount > 0 || activeWorkerConsumerCount > 0
+                    ? "admin-runtime-good"
+                    : "admin-runtime-warn"
+                }
+              >
+                {loadingOverview
+                  ? "…"
+                  : activeWorkerCount > 0
+                    ? `${formatCount(activeWorkerCount)} active`
+                    : activeWorkerConsumerCount > 0
+                      ? `${formatCount(activeWorkerConsumerCount)} consumer${activeWorkerConsumerCount === 1 ? "" : "s"} active`
+                      : "0 active"}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="admin-queue-panel">
+            {!loadingOverview && workers.length ? (
+              <div className="admin-queue-consumer-list">
+                {workers.map((worker) => (
+                  <article key={worker.worker_id} className="admin-queue-consumer">
+                    <div className="admin-queue-consumer-heading">
+                      <div>
+                        <strong>{worker.worker_id}</strong>
+                        <span>
+                          {worker.worker_kind || "worker"} • {worker.hostname || "host unknown"}
+                        </span>
+                      </div>
+                      <Badge variant="outline" className={worker.active && !worker.stale ? "admin-runtime-good" : "admin-runtime-warn"}>
+                        {worker.stale ? "stale" : worker.status || "unknown"}
+                      </Badge>
+                    </div>
+                    <p>
+                      {worker.current_run_id ? `Running ${worker.current_run_id}` : "Idle"} • heartbeat{" "}
+                      {formatDuration(worker.heartbeat_age_seconds)} ago
+                    </p>
+                    {worker.version ? <p>Version: {worker.version}</p> : null}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="admin-kpi-footnote">
+                {loadingOverview
+                  ? "Loading worker heartbeats…"
+                  : activeWorkerConsumerCount > 0
+                    ? `No app-level worker heartbeats yet. ${formatCount(activeWorkerConsumerCount)} active NATS worker consumer${activeWorkerConsumerCount === 1 ? "" : "s"} ${activeWorkerConsumerCount === 1 ? "is" : "are"} ready to pull jobs.`
+                    : "No worker heartbeats yet."}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="admin-runtime-card">
+          <CardHeader>
+            <div className="admin-card-title-row">
+              <div>
+                <CardTitle>Queue Health</CardTitle>
+                <CardDescription>JetStream stream depth, worker consumers, and redelivery pressure.</CardDescription>
+              </div>
+              <Badge variant="outline" className={queue?.available ? "admin-runtime-good" : "admin-runtime-warn"}>
+                {queue?.available ? "Connected" : "Unavailable"}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="admin-queue-panel">
+            <div className="admin-runtime-grid">
+              <div>
+                <span>Stream</span>
+                <strong>{loadingOverview ? "…" : queue?.stream ?? "not configured"}</strong>
+              </div>
+              <div>
+                <span>Messages</span>
+                <strong>{loadingOverview ? "…" : formatCount(queue?.stream_messages ?? 0)}</strong>
+              </div>
+              <div>
+                <span>Consumers</span>
+                <strong>{loadingOverview ? "…" : formatCount(queue?.consumer_count ?? 0)}</strong>
+              </div>
+              <div>
+                <span>Last sequence</span>
+                <strong>{loadingOverview ? "…" : formatCount(queue?.last_sequence ?? 0)}</strong>
+              </div>
+            </div>
+            {!loadingOverview && queue?.error ? (
+              <p className="admin-queue-error">{queue.error}</p>
+            ) : null}
+            {!loadingOverview && queue?.consumers?.length ? (
+              <div className="admin-queue-consumer-list">
+                {queue.consumers.map((consumer) => (
+                  <article key={`${consumer.role || "consumer"}-${consumer.name}`} className="admin-queue-consumer">
+                    <div className="admin-queue-consumer-heading">
+                      <div>
+                        <strong>{consumer.name}</strong>
+                        <span>{consumer.role || "consumer"} • {consumer.subject || "subject unknown"}</span>
+                      </div>
+                      <Badge variant="outline" className={consumer.active ? "admin-runtime-good" : "admin-runtime-warn"}>
+                        {consumer.active ? "active" : "missing"}
+                      </Badge>
+                    </div>
+                    <p>
+                      {formatQueueConsumerSummary(
+                        consumer.pending_messages,
+                        consumer.in_flight_messages,
+                        consumer.redelivered_messages
+                      )}
+                    </p>
+                    {consumer.error ? <p className="admin-queue-error">{consumer.error}</p> : null}
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
 
         <div className="admin-kpi-grid">
           <Card className="admin-kpi-card">
@@ -315,6 +724,22 @@ export function AdminConsole({
           </Card>
           <Card className="admin-kpi-card">
             <CardHeader>
+              <CardDescription>Stale runs</CardDescription>
+              <CardTitle className="admin-kpi-value">
+                {loadingOverview ? "…" : formatCount(kpis?.stale_running_runs ?? 0)}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="admin-kpi-stack">
+              <p className="admin-kpi-footnote">
+                Running with no worker event for 5m+.
+              </p>
+              <p className="admin-kpi-footnote">
+                Use run events before canceling compute.
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="admin-kpi-card">
+            <CardHeader>
               <CardDescription>Uploads</CardDescription>
               <CardTitle className="admin-kpi-value">
                 {loadingOverview ? "…" : formatCount(kpis?.total_uploads ?? 0)}
@@ -394,9 +819,80 @@ export function AdminConsole({
               <Input
                 value={userQuery}
                 onChange={(event) => onUserQueryChange(event.target.value)}
-                placeholder="Filter by user id"
+                placeholder="Filter by user, email, role, or org"
                 className="admin-filter-input"
               />
+              <div className="admin-card-title-row">
+                <span className="admin-section-label">Organizations</span>
+                <Button type="button" variant="ghost" size="sm" onClick={onRefreshOrganizations}>
+                  <RefreshCw className={cn("size-4", loadingOrganizations && "animate-spin")} />
+                </Button>
+              </div>
+              <form className="admin-create-org-form" onSubmit={submitNewOrganization}>
+                <Input
+                  value={newOrgID}
+                  onChange={(event) => setNewOrgID(event.target.value)}
+                  placeholder="org-id"
+                  aria-label="New org id"
+                  className="admin-filter-input"
+                />
+                <Input
+                  value={newOrgName}
+                  onChange={(event) => setNewOrgName(event.target.value)}
+                  placeholder="Organization name"
+                  aria-label="New org name"
+                  className="admin-filter-input"
+                />
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={creatingOrganization || loadingOrganizations}
+                >
+                  {creatingOrganization ? "Creating…" : "Create org"}
+                </Button>
+              </form>
+              {createOrganizationError ? (
+                <p className="admin-error-text">{createOrganizationError}</p>
+              ) : null}
+              <form className="admin-create-user-form" onSubmit={submitNewUser}>
+                <Input
+                  value={newUserEmail}
+                  onChange={(event) => setNewUserEmail(event.target.value)}
+                  placeholder="email@institution.edu"
+                  aria-label="New user email"
+                  className="admin-filter-input"
+                />
+                <Input
+                  value={newUserName}
+                  onChange={(event) => setNewUserName(event.target.value)}
+                  placeholder="Display name"
+                  aria-label="New user display name"
+                  className="admin-filter-input"
+                />
+                <Input
+                  value={newUserRole}
+                  onChange={(event) => setNewUserRole(event.target.value)}
+                  placeholder="Role"
+                  aria-label="New user role"
+                  className="admin-filter-input"
+                />
+                <select
+                  value={newUserOrg}
+                  onChange={(event) => setNewUserOrg(event.target.value)}
+                  aria-label="New user org"
+                  className="admin-filter-input"
+                >
+                  {organizationOptions.map((org) => (
+                    <option key={org.org_id} value={org.org_id}>
+                      {org.name ? `${org.name} (${org.org_id})` : org.org_id}
+                    </option>
+                  ))}
+                </select>
+                <Button type="submit" size="sm" disabled={creatingUser || loadingUsers}>
+                  {creatingUser ? "Creating…" : "Create user"}
+                </Button>
+              </form>
+              {createUserError ? <p className="admin-error-text">{createUserError}</p> : null}
             </CardHeader>
             <CardContent className="admin-table-wrap">
               {loadingUsers ? <p className="admin-empty">Loading users…</p> : null}
@@ -408,24 +904,56 @@ export function AdminConsole({
                   <thead>
                     <tr>
                       <th>User</th>
+                      <th>Role</th>
+                      <th>Status</th>
                       <th>Runs</th>
                       <th>Failed</th>
                       <th>Uploads</th>
                       <th>Storage</th>
                       <th>Last Activity</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map((row) => (
-                      <tr key={row.user_id}>
-                        <td className="font-mono text-xs">{row.user_id}</td>
-                        <td>{row.runs_total}</td>
-                        <td>{row.runs_failed}</td>
-                        <td>{row.uploads}</td>
-                        <td>{formatBytes(row.storage_bytes)}</td>
-                        <td>{formatDateTime(row.last_activity_at)}</td>
-                      </tr>
-                    ))}
+                    {users.map((row) => {
+                      const disabled = String(row.status || "").toLowerCase() === "disabled";
+                      const deleting = Boolean(userDeletingById[row.user_id]);
+                      return (
+                        <tr key={row.user_id}>
+                          <td>
+                            <div className="admin-user-cell">
+                              <span className="font-mono text-xs">{row.user_id}</span>
+                              {row.display_name ? <span>{row.display_name}</span> : null}
+                              {row.email ? <span className="admin-user-email">{row.email}</span> : null}
+                            </div>
+                          </td>
+                          <td>
+                            <Badge variant="outline">{row.role || "observed"}</Badge>
+                          </td>
+                          <td>
+                            <Badge variant="outline">{row.status || "observed"}</Badge>
+                          </td>
+                          <td>{row.runs_total}</td>
+                          <td>{row.runs_failed}</td>
+                          <td>{row.uploads}</td>
+                          <td>{formatBytes(row.storage_bytes)}</td>
+                          <td>{formatDateTime(row.last_activity_at)}</td>
+                          <td>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`Deactivate user ${row.user_id}`}
+                              disabled={disabled || deleting}
+                              onClick={() => onDeleteUser(row.user_id)}
+                            >
+                              <Trash2 className="size-4" />
+                              {deleting ? "Deactivating…" : disabled ? "Disabled" : "Deactivate"}
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : null}
@@ -530,75 +1058,155 @@ export function AdminConsole({
                 </thead>
                 <tbody>
                   {runs.map((row) => {
-                    const isRunning =
-                      row.status.toLowerCase() === "running" ||
-                      row.status.toLowerCase() === "pending";
+                    const isRecoverable = isRecoverableRunStatus(row.status);
+                    const canRequeue = row.stale && isRecoverable && Boolean(onRequeueRun);
                     const conversationKey = `${row.user_id || ""}:${row.conversation_id || ""}`;
+                    const eventsOpen = activeRunEventRunId === row.run_id;
+                    const runEvents = runEventsById[row.run_id] ?? [];
+                    const runEventsLoading = Boolean(runEventsLoadingById[row.run_id]);
+                    const runLeaseSummary = formatRunLeaseSummary(row);
                     return (
-                      <tr key={row.run_id}>
-                        <td>
-                          <div className="admin-run-id-cell">
-                            <span className="font-mono text-xs">{row.run_id}</span>
-                            <span className="admin-goal-preview" title={row.goal}>
-                              {row.goal}
-                            </span>
-                          </div>
-                        </td>
-                        <td>
-                          <Badge variant="outline" className={runStatusBadgeClass(row.status)}>
-                            {row.status}
-                          </Badge>
-                        </td>
-                        <td className="font-mono text-xs">{row.user_id || "—"}</td>
-                        <td>{formatDateTime(row.updated_at)}</td>
-                        <td>{formatDuration(row.duration_seconds)}</td>
-                        <td>
-                          <div className="admin-run-tools">
-                            {row.tool_names.length > 0
-                              ? row.tool_names.map((tool) => (
-                                  <Badge key={`${row.run_id}-${tool}`} variant="outline">
-                                    {tool}
+                      <Fragment key={row.run_id}>
+                        <tr>
+                          <td>
+                            <div className="admin-run-id-cell">
+                              <span className="font-mono text-xs">{row.run_id}</span>
+                              <span className="admin-goal-preview" title={row.goal}>
+                                {row.goal}
+                              </span>
+                              {row.stale && row.stale_reason ? (
+                                <span className="admin-run-stale-reason">{row.stale_reason}</span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="admin-run-status-cell">
+                              <div className="admin-run-status-badges">
+                                <Badge variant="outline" className={runStatusBadgeClass(row.status)}>
+                                  {row.status}
+                                </Badge>
+                                {row.stale ? (
+                                  <Badge variant="outline" className="admin-stale-badge">
+                                    Stale
                                   </Badge>
-                                ))
-                              : "—"}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="admin-run-actions">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              disabled={!isRunning || Boolean(runCancellingById[row.run_id])}
-                              onClick={() => onCancelRun(row.run_id)}
-                            >
-                              <StopCircle className="size-4" />
-                              {runCancellingById[row.run_id] ? "Canceling…" : "Cancel"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              disabled={
-                                !row.user_id ||
-                                !row.conversation_id ||
-                                deletingConversationKey === conversationKey
-                              }
-                              onClick={() => {
-                                if (!row.user_id || !row.conversation_id) {
-                                  return;
+                                ) : null}
+                              </div>
+                              <div className="admin-run-event-meta">
+                                <span>
+                                  {row.last_event_kind
+                                    ? `${row.last_event_kind}${row.last_event_sequence ? ` #${row.last_event_sequence}` : ""}`
+                                    : row.event_count > 0
+                                      ? `${row.event_count} events`
+                                      : "No worker events"}
+                                </span>
+                                {row.last_activity_age_seconds !== null &&
+                                row.last_activity_age_seconds !== undefined ? (
+                                  <span>{formatSilentAge(row.last_activity_age_seconds)}</span>
+                                ) : null}
+                                <span>{formatRunEventSummary(row)}</span>
+                                {runLeaseSummary ? <span>{runLeaseSummary}</span> : null}
+                                {row.last_tool_name ? <span>Last tool: {row.last_tool_name}</span> : null}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="font-mono text-xs">{row.user_id || "—"}</td>
+                          <td>{formatDateTime(row.updated_at)}</td>
+                          <td>{formatDuration(row.duration_seconds)}</td>
+                          <td>
+                            <div className="admin-run-tools">
+                              {row.tool_names.length > 0
+                                ? row.tool_names.map((tool) => (
+                                    <Badge key={`${row.run_id}-${tool}`} variant="outline">
+                                      {tool}
+                                    </Badge>
+                                  ))
+                                : "—"}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="admin-run-actions">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => onInspectRunEvents(row.run_id)}
+                              >
+                                Events
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={!isRecoverable || Boolean(runCancellingById[row.run_id])}
+                                onClick={() => onCancelRun(row.run_id)}
+                              >
+                                <StopCircle className="size-4" />
+                                {runCancellingById[row.run_id] ? "Canceling…" : "Cancel"}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={!canRequeue || Boolean(runRequeueingById[row.run_id])}
+                                onClick={() => onRequeueRun?.(row.run_id)}
+                              >
+                                <RotateCcw className="size-4" />
+                                {runRequeueingById[row.run_id] ? "Requeueing…" : "Requeue"}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={
+                                  !row.user_id ||
+                                  !row.conversation_id ||
+                                  deletingConversationKey === conversationKey
                                 }
-                                onDeleteConversation(row.conversation_id, row.user_id);
-                              }}
-                            >
-                              <Trash2 className="size-4" />
-                              {deletingConversationKey === conversationKey
-                                ? "Deleting…"
-                                : "Delete chat"}
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
+                                onClick={() => {
+                                  if (!row.user_id || !row.conversation_id) {
+                                    return;
+                                  }
+                                  onDeleteConversation(row.conversation_id, row.user_id);
+                                }}
+                              >
+                                <Trash2 className="size-4" />
+                                {deletingConversationKey === conversationKey
+                                  ? "Deleting…"
+                                  : "Delete chat"}
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                        {eventsOpen ? (
+                          <tr className="admin-run-events-row">
+                            <td colSpan={7}>
+                              <div className="admin-run-events-panel">
+                                <div className="admin-run-events-header">
+                                  <span>Run Event Timeline</span>
+                                  <span>{runEventsLoading ? "Loading events…" : `${runEvents.length} events`}</span>
+                                </div>
+                                {runEventsLoading ? <p className="admin-empty">Loading run events…</p> : null}
+                                {!runEventsLoading && runEvents.length === 0 ? (
+                                  <p className="admin-empty">No run events recorded yet.</p>
+                                ) : null}
+                                {!runEventsLoading && runEvents.length > 0 ? (
+                                  <ol className="admin-run-events-list">
+                                    {runEvents.slice(-12).map((event, index) => (
+                                      <li key={`${row.run_id}-${runEventLabel(event)}-${index}`}>
+                                        <div className="admin-run-event-line">
+                                          <span className="admin-run-event-kind">{runEventLabel(event)}</span>
+                                          <span className="admin-run-event-time">{formatDateTime(event.ts)}</span>
+                                        </div>
+                                        <p>{runEventDetail(event)}</p>
+                                      </li>
+                                    ))}
+                                  </ol>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>

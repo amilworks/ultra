@@ -87,7 +87,7 @@ public class BQBisqueJ_ implements PlugIn{
 		IJ.showMessage("About BQBisqueJ",
 		"Copyright (C) 2008 Boguslaw Obara\n" +
 		"http://boguslawobara.net\n" +
-		"Email: obara@ece.ucsb.edu\n"+
+		"Email: user@example.org\n"+
 		"Please send bug reports and wishes to the above email address.\n"
 		);
 	}
@@ -117,7 +117,7 @@ public class GUI {
 	Label searchLabel = new Label("Search");
 	TextField userTF = new TextField("admin");
 	TextField passTF = new TextField("admin");
-	TextField serverTF = new TextField("http://bodzio.ece.ucsb.edu:8080");
+	TextField serverTF = new TextField("https://bisque.example.org");
 	TextField searchTF = new TextField("search criteria");
 	Color labelBG = new Color(0, 0, 0);
 	Font labelFont = new Font("Monospaced", Font.PLAIN, 12);

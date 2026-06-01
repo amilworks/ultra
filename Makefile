@@ -1,4 +1,4 @@
-.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality control-test control-run control-tidy control-generate deepagents-test deepagents-smoke
+.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
@@ -64,6 +64,15 @@ stop-dev: ## Stop local backend and frontend dev servers
 
 status-dev: ## Check local backend and frontend dev server health
 	./scripts/restart_dev.sh status
+
+restart-control-stack: ## Restart production-like Go + NATS + Postgres + worker + frontend stack
+	./scripts/restart_control_stack.sh restart
+
+stop-control-stack: ## Stop production-like Go control stack
+	./scripts/restart_control_stack.sh stop
+
+status-control-stack: ## Inspect production-like Go control stack durability and worker health
+	./scripts/restart_control_stack.sh status
 
 test: ## Run tests with pytest
 	uv run pytest
@@ -141,6 +150,9 @@ migrate-run-store-postgres: ## Migrate SQLite run-store to Postgres (set SQLITE_
 		./.venv/bin/python scripts/migrate_run_store_to_postgres.py --sqlite-path "$$SQLITE_PATH" --postgres-dsn "$$POSTGRES_DSN" $$TRUNCATE_FLAG; \
 	fi
 
+control-migrate: ## Apply the Go control-plane Postgres schema
+	cd backend/controlplane && go run ./cmd/ultra-control migrate
+
 test-cov: ## Run tests with coverage report
 	uv run pytest --cov=src --cov-report=html --cov-report=term
 
@@ -191,6 +203,12 @@ codeexec-image: ## Build Python sandbox image for execute_python_job
 control-test: ## Run Go control plane tests
 	$(MAKE) -C backend/controlplane test
 
+control-integration: ## Run Go control plane Postgres + NATS integration gate
+	$(MAKE) -C backend/controlplane integration
+
+control-soak: ## Run deterministic Go control-plane autonomous-run soak gate
+	$(MAKE) -C backend/controlplane soak
+
 control-run: ## Run Go control plane API
 	$(MAKE) -C backend/controlplane run
 
@@ -203,5 +221,44 @@ control-generate: ## Regenerate Go control plane OpenAPI and sqlc code
 deepagents-test: ## Run Python Deep Agents runtime tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q
 
+deepagents-worker-test: ## Run Deep Agents worker transport, lease, and redelivery tests
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py tests/test_rarespot_worker.py
+
+deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and routing tests
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \
+		tests/test_live_trace.py \
+		tests/test_prompt_cases.py \
+		tests/test_runner_paper_preload.py \
+		tests/test_runner_rarespot_preload.py
+
 deepagents-smoke: ## Probe the configured Python Deep Agents vLLM model endpoint
-	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://vrl-h200.ece.ucsb.edu:9393/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke
+	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://127.0.0.1:8003/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke
+
+frontend-autonomy-test: ## Run frontend autonomous-chat recovery and artifact hydration tests
+	pnpm --dir frontend exec vitest run \
+		src/features/chat/run-artifact-hydration.test.ts \
+		src/features/chat/run-stream-recovery-app.test.ts \
+		src/features/chat/chat-submit-terminal.test.ts \
+		src/features/chat/run-recovery.test.ts \
+		src/features/chat/stale-conversation.test.ts \
+		src/lib/api.test.ts
+
+autonomy-live-smoke: ## Run opt-in live two-turn tool-autonomy trace against a running stack
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
+		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
+		--title "Autonomy live smoke" \
+		--prompt "Start by calling tool_capability_manifest. Then use Python to create a small matplotlib figure showing y = x^2 for x = 0..5, save the code and plot as durable outputs, and briefly explain what the plot demonstrates." \
+		--followup "Start by calling tool_capability_manifest. Using the prior code/artifacts, modify the analysis to plot y = x^3 for x = 0..5, save updated code and plot, and explain what changed." \
+		--timeout $${ULTRA_LIVE_TRACE_TIMEOUT_SECONDS:-600} \
+		--poll-interval $${ULTRA_LIVE_TRACE_POLL_INTERVAL_SECONDS:-1} \
+		--http-timeout $${ULTRA_LIVE_TRACE_HTTP_TIMEOUT_SECONDS:-15} \
+		--verify-downloads \
+		--require-downloads \
+		--min-artifacts 2 \
+		--min-response-chars 50 \
+		--require-tool-autonomy-quality \
+		--require-tool-capability-quality \
+		--capability-matrix \
+		--require-thread-quality
+
+autonomy-gate: control-soak control-integration deepagents-worker-test deepagents-autonomy-test frontend-autonomy-test ## Run production autonomy durability gates

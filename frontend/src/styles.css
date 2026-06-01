@@ -1887,6 +1887,104 @@ body {
   gap: 0.85rem;
 }
 
+.admin-runtime-card {
+  margin-bottom: 0.85rem;
+}
+
+.admin-runtime-good {
+  border-color: color-mix(in oklab, var(--chart-2) 42%, var(--border) 58%);
+  background: color-mix(in oklab, var(--chart-2) 12%, var(--background) 88%);
+  color: var(--text-main);
+}
+
+.admin-runtime-warn {
+  border-color: color-mix(in oklab, var(--chart-4) 42%, var(--border) 58%);
+  background: color-mix(in oklab, var(--chart-4) 12%, var(--background) 88%);
+  color: var(--text-main);
+}
+
+.admin-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem 0.9rem;
+}
+
+.admin-runtime-grid div {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.admin-runtime-grid span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.admin-runtime-grid strong {
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.admin-queue-panel {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.admin-queue-consumer-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.admin-queue-consumer {
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  padding: 0.6rem 0.7rem;
+  background: color-mix(in oklab, var(--bg-panel) 64%, transparent);
+}
+
+.admin-queue-consumer-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.admin-queue-consumer-heading div {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.admin-queue-consumer-heading strong {
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-queue-consumer-heading span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-queue-consumer p {
+  margin: 0.45rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.admin-queue-error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .admin-kpi-value {
   font-variant-numeric: tabular-nums;
 }
@@ -1930,6 +2028,43 @@ body {
   margin-top: 0.35rem;
 }
 
+.admin-filter-input:is(select) {
+  min-height: 2.25rem;
+  border: 1px solid hsl(var(--input));
+  border-radius: 0.5rem;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  padding: 0 0.65rem;
+  font-size: 0.875rem;
+}
+
+.admin-section-label {
+  margin-top: 0.65rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.admin-create-user-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.35fr) minmax(130px, 1fr) minmax(90px, 0.65fr) minmax(90px, 0.65fr) auto;
+  gap: 0.45rem;
+  align-items: end;
+}
+
+.admin-create-org-form {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.8fr) minmax(180px, 1.35fr) auto;
+  gap: 0.45rem;
+  align-items: end;
+}
+
+.admin-error-text {
+  margin: 0.35rem 0 0;
+  color: var(--color-destructive);
+  font-size: 0.78rem;
+}
+
 .admin-table-wrap {
   overflow: auto;
 }
@@ -1962,6 +2097,18 @@ body {
   font-size: 0.8rem;
   color: var(--text-main);
   vertical-align: top;
+}
+
+.admin-user-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+  min-width: 0;
+}
+
+.admin-user-email {
+  color: var(--text-muted);
+  font-size: 0.74rem;
 }
 
 .admin-issue-item {
@@ -2021,6 +2168,107 @@ body {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.admin-run-stale-reason {
+  color: var(--destructive);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.admin-run-status-cell {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 145px;
+}
+
+.admin-run-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.admin-stale-badge {
+  border-color: color-mix(in oklab, var(--destructive) 45%, var(--border) 55%);
+  background: color-mix(in oklab, var(--destructive) 10%, var(--background) 90%);
+  color: var(--destructive);
+}
+
+.admin-run-event-meta {
+  display: grid;
+  gap: 0.16rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.admin-run-events-row td {
+  background: color-mix(in oklab, var(--bg-panel) 94%, transparent);
+  padding-top: 0;
+}
+
+.admin-run-events-panel {
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  padding: 0.65rem 0.75rem;
+  background: color-mix(in oklab, var(--background) 88%, var(--bg-panel) 12%);
+}
+
+.admin-run-events-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.admin-run-events-header span:last-child {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.admin-run-events-list {
+  list-style: none;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.admin-run-events-list li {
+  border-left: 2px solid color-mix(in oklab, var(--primary) 35%, var(--line) 65%);
+  padding-left: 0.55rem;
+}
+
+.admin-run-event-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.admin-run-event-kind {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.73rem;
+  color: var(--text-main);
+}
+
+.admin-run-event-time {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.admin-run-events-list p {
+  margin: 0.12rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .admin-run-tools {

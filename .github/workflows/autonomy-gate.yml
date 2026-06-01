@@ -1,0 +1,111 @@
+name: Autonomy Gate
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+      - "feature/**"
+    paths:
+      - "backend/controlplane/**"
+      - "backend/deepagents_runtime/**"
+      - "backend/deepagents_runtime/tests/test_live_trace.py"
+      - "backend/deepagents_runtime/tests/test_prompt_cases.py"
+      - "backend/deepagents_runtime/tests/test_runner_paper_preload.py"
+      - "backend/deepagents_runtime/tests/test_runner_rarespot_preload.py"
+      - "frontend/package.json"
+      - "frontend/pnpm-lock.yaml"
+      - "frontend/src/App.tsx"
+      - "frontend/src/features/chat/**"
+      - "frontend/src/lib/api.ts"
+      - "frontend/src/lib/api.test.ts"
+      - "Makefile"
+      - "README.md"
+      - ".github/workflows/autonomy-gate.yml"
+  pull_request:
+    paths:
+      - "backend/controlplane/**"
+      - "backend/deepagents_runtime/**"
+      - "backend/deepagents_runtime/tests/test_live_trace.py"
+      - "backend/deepagents_runtime/tests/test_prompt_cases.py"
+      - "backend/deepagents_runtime/tests/test_runner_paper_preload.py"
+      - "backend/deepagents_runtime/tests/test_runner_rarespot_preload.py"
+      - "frontend/package.json"
+      - "frontend/pnpm-lock.yaml"
+      - "frontend/src/App.tsx"
+      - "frontend/src/features/chat/**"
+      - "frontend/src/lib/api.ts"
+      - "frontend/src/lib/api.test.ts"
+      - "Makefile"
+      - "README.md"
+      - ".github/workflows/autonomy-gate.yml"
+
+concurrency:
+  group: autonomy-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  autonomy-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: bisque_ultra_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bisque_ultra_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: backend/controlplane/go.sum
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Start NATS JetStream
+        run: |
+          docker run -d --name ultra-autonomy-nats -p 4222:4222 nats:2-alpine -js
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 4222; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ultra-autonomy-nats || true
+          exit 1
+
+      - name: Run autonomy gate
+        env:
+          ULTRA_CONTROL_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/bisque_ultra_test
+          ULTRA_CONTROL_TEST_NATS_URL: nats://127.0.0.1:4222
+        run: make autonomy-gate

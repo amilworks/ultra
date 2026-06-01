@@ -36,7 +36,7 @@ public class BQThumbnail{
 		System.out.println("BQThumbnail class:");
 		System.out.println("---------------------------------------------");
 		System.out.println("BQAuthorization.setAuthorization('user name','password')");
-		System.out.println("image = BQThumbnail.getImage('http://bodzio.ece.ucsb.edu:8080/images/106')");
+		System.out.println("image = BQThumbnail.getImage('https://bisque.example.org/images/106')");
 		System.out.println("---------------------------------------------");
 	}
 	public Object getData(String urlImage, int width, int height){

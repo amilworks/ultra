@@ -44,7 +44,7 @@ public class BQ{
             System.out.println(uri + name + pass + module_id);
             //cs.initialize_services();
             //ds = (BQDataService)cs.get_service("data_service");
-            ds = new BQDataService("http://bodzio.ece.ucsb.edu:8080/ds");
+            ds = new BQDataService("https://bisque.example.org/ds");
             //ms = cs.get_service ("module_service");
         }
         mex = cs.begin_session(module_id);

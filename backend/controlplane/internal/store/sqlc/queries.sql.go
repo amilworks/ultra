@@ -12,8 +12,11 @@ import (
 )
 
 const appendRunEvent = `-- name: AppendRunEvent :one
-INSERT INTO control_run_events (event_id, sequence_number, run_id, thread_id, event_kind, ts, message, payload)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO control_run_events (
+  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 `
 
@@ -23,6 +26,13 @@ type AppendRunEventParams struct {
 	RunID          string             `json:"run_id"`
 	ThreadID       pgtype.Text        `json:"thread_id"`
 	EventKind      string             `json:"event_kind"`
+	EventType      pgtype.Text        `json:"event_type"`
+	NodeName       pgtype.Text        `json:"node_name"`
+	TaskID         pgtype.Text        `json:"task_id"`
+	CheckpointID   pgtype.Text        `json:"checkpoint_id"`
+	ScopeID        pgtype.Text        `json:"scope_id"`
+	AgentRole      pgtype.Text        `json:"agent_role"`
+	Level          pgtype.Text        `json:"level"`
 	Ts             pgtype.Timestamptz `json:"ts"`
 	Message        pgtype.Text        `json:"message"`
 	Payload        []byte             `json:"payload"`
@@ -35,6 +45,13 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 		arg.RunID,
 		arg.ThreadID,
 		arg.EventKind,
+		arg.EventType,
+		arg.NodeName,
+		arg.TaskID,
+		arg.CheckpointID,
+		arg.ScopeID,
+		arg.AgentRole,
+		arg.Level,
 		arg.Ts,
 		arg.Message,
 		arg.Payload,
@@ -61,25 +78,34 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 }
 
 const createArtifact = `-- name: CreateArtifact :one
-INSERT INTO control_artifacts (artifact_id, run_id, thread_id, kind, path, title, mime_type, size_bytes, sha256, storage_uri, created_at, updated_at, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+INSERT INTO control_artifacts (
+  artifact_id, run_id, thread_id, kind, path, source_path, preview_path, title,
+  result_group_id, mime_type, size_bytes, sha256, storage_uri, tool_name, category,
+  created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 RETURNING artifact_id, run_id, thread_id, kind, path, source_path, preview_path, title, result_group_id, mime_type, size_bytes, sha256, storage_uri, tool_name, category, created_at, updated_at, metadata
 `
 
 type CreateArtifactParams struct {
-	ArtifactID string             `json:"artifact_id"`
-	RunID      string             `json:"run_id"`
-	ThreadID   pgtype.Text        `json:"thread_id"`
-	Kind       string             `json:"kind"`
-	Path       pgtype.Text        `json:"path"`
-	Title      pgtype.Text        `json:"title"`
-	MimeType   pgtype.Text        `json:"mime_type"`
-	SizeBytes  pgtype.Int8        `json:"size_bytes"`
-	Sha256     pgtype.Text        `json:"sha256"`
-	StorageUri pgtype.Text        `json:"storage_uri"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
-	Metadata   []byte             `json:"metadata"`
+	ArtifactID    string             `json:"artifact_id"`
+	RunID         string             `json:"run_id"`
+	ThreadID      pgtype.Text        `json:"thread_id"`
+	Kind          string             `json:"kind"`
+	Path          pgtype.Text        `json:"path"`
+	SourcePath    pgtype.Text        `json:"source_path"`
+	PreviewPath   pgtype.Text        `json:"preview_path"`
+	Title         pgtype.Text        `json:"title"`
+	ResultGroupID pgtype.Text        `json:"result_group_id"`
+	MimeType      pgtype.Text        `json:"mime_type"`
+	SizeBytes     pgtype.Int8        `json:"size_bytes"`
+	Sha256        pgtype.Text        `json:"sha256"`
+	StorageUri    pgtype.Text        `json:"storage_uri"`
+	ToolName      pgtype.Text        `json:"tool_name"`
+	Category      pgtype.Text        `json:"category"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	Metadata      []byte             `json:"metadata"`
 }
 
 func (q *Queries) CreateArtifact(ctx context.Context, arg CreateArtifactParams) (ControlArtifact, error) {
@@ -89,11 +115,16 @@ func (q *Queries) CreateArtifact(ctx context.Context, arg CreateArtifactParams) 
 		arg.ThreadID,
 		arg.Kind,
 		arg.Path,
+		arg.SourcePath,
+		arg.PreviewPath,
 		arg.Title,
+		arg.ResultGroupID,
 		arg.MimeType,
 		arg.SizeBytes,
 		arg.Sha256,
 		arg.StorageUri,
+		arg.ToolName,
+		arg.Category,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.Metadata,
@@ -294,6 +325,33 @@ func (q *Queries) GetRun(ctx context.Context, runID string) (ControlRun, error) 
 	return i, err
 }
 
+const getRunEvent = `-- name: GetRunEvent :one
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE event_id = $1
+`
+
+func (q *Queries) GetRunEvent(ctx context.Context, eventID string) (ControlRunEvent, error) {
+	row := q.db.QueryRow(ctx, getRunEvent, eventID)
+	var i ControlRunEvent
+	err := row.Scan(
+		&i.EventID,
+		&i.SequenceNumber,
+		&i.RunID,
+		&i.ThreadID,
+		&i.EventKind,
+		&i.EventType,
+		&i.NodeName,
+		&i.TaskID,
+		&i.CheckpointID,
+		&i.ScopeID,
+		&i.AgentRole,
+		&i.Level,
+		&i.Ts,
+		&i.Message,
+		&i.Payload,
+	)
+	return i, err
+}
+
 const getThread = `-- name: GetThread :one
 SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads WHERE thread_id = $1
 `
@@ -418,6 +476,56 @@ type ListRunEventsParams struct {
 
 func (q *Queries) ListRunEvents(ctx context.Context, arg ListRunEventsParams) ([]ControlRunEvent, error) {
 	rows, err := q.db.Query(ctx, listRunEvents, arg.RunID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlRunEvent
+	for rows.Next() {
+		var i ControlRunEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.SequenceNumber,
+			&i.RunID,
+			&i.ThreadID,
+			&i.EventKind,
+			&i.EventType,
+			&i.NodeName,
+			&i.TaskID,
+			&i.CheckpointID,
+			&i.ScopeID,
+			&i.AgentRole,
+			&i.Level,
+			&i.Ts,
+			&i.Message,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunEventsAfter = `-- name: ListRunEventsAfter :many
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM control_run_events
+WHERE run_id = $1 AND sequence_number > $2
+ORDER BY sequence_number ASC
+LIMIT $3
+`
+
+type ListRunEventsAfterParams struct {
+	RunID          string `json:"run_id"`
+	SequenceNumber int64  `json:"sequence_number"`
+	Limit          int32  `json:"limit"`
+}
+
+func (q *Queries) ListRunEventsAfter(ctx context.Context, arg ListRunEventsAfterParams) ([]ControlRunEvent, error) {
+	rows, err := q.db.Query(ctx, listRunEventsAfter, arg.RunID, arg.SequenceNumber, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -617,6 +725,7 @@ SET status = $2,
     started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN $5 ELSE started_at END,
     completed_at = CASE WHEN $2 IN ('succeeded', 'failed', 'canceled') THEN $5 ELSE completed_at END
 WHERE run_id = $1
+  AND status NOT IN ('succeeded', 'failed', 'canceled')
 RETURNING run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata
 `
 

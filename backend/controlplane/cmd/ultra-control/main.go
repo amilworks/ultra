@@ -20,10 +20,32 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	switch controlCommand(os.Args) {
+	case "migrate":
+		if err := app.MigratePostgres(ctx, cfg); err != nil {
+			logger.Error("control-plane migration failed", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("control-plane migration completed")
+		return
+	case "serve":
+	default:
+		logger.Error("unknown command", "command", os.Args[1])
+		os.Exit(2)
+	}
+
 	application, err := app.New(cfg)
 	if err != nil {
 		logger.Error("application setup failed", "error", err)
 		os.Exit(1)
+	}
+	defer application.Close()
+
+	if application.Start != nil {
+		if err := application.Start(ctx); err != nil {
+			logger.Error("application background setup failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	server := &http.Server{
@@ -35,18 +57,20 @@ func main() {
 	}
 
 	errs := make(chan error, 1)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case job := <-application.Bus.Jobs():
-				if err := application.Worker.RunJob(ctx, job); err != nil && !errors.Is(err, context.Canceled) {
-					logger.Error("worker job failed", "run_id", job.RunID, "error", err)
+	if application.JobSource != nil && application.Worker != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job := <-application.JobSource:
+					if err := application.Worker.RunJob(ctx, job); err != nil && !errors.Is(err, context.Canceled) {
+						logger.Error("worker job failed", "run_id", job.RunID, "error", err)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 	go func() {
 		logger.Info("starting control plane", "addr", cfg.HTTPAddr)
 		errs <- server.ListenAndServe()
@@ -68,4 +92,11 @@ func main() {
 		logger.Error("shutdown failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func controlCommand(args []string) string {
+	if len(args) < 2 {
+		return "serve"
+	}
+	return args[1]
 }

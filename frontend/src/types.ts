@@ -79,22 +79,6 @@ export type KnowledgeContext = {
   pack_ids?: string[];
 };
 
-export type V3MemoryPolicy = {
-  mode?: "off" | "conservative";
-  session_summary?: boolean;
-  user_memory?: boolean;
-  project_notebook?: boolean;
-};
-
-export type V3KnowledgeScope = {
-  mode?: "default" | "project_notebook";
-  project_id?: string | null;
-  namespaces?: string[];
-  include_curated_packs?: boolean;
-  include_uploads?: boolean;
-  include_project_notes?: boolean;
-};
-
 export type SelectionContext = {
   context_id?: string | null;
   source?: string | null;
@@ -122,8 +106,9 @@ export type ChatRequest = {
   workflow_hint?: ChatWorkflowHint | null;
   reasoning_mode?: "auto" | "fast" | "deep";
   debug?: boolean;
-  budgets: ToolBudget;
+  budgets?: ToolBudget | null;
   benchmark?: ChatBenchmarkConfig | null;
+  idempotency_key?: string | null;
 };
 
 export type ChatTitleRequest = {
@@ -889,6 +874,7 @@ export type AdminPlatformKpis = {
   runs_last_24h: number;
   success_rate_last_24h: number;
   running_runs: number;
+  stale_running_runs: number;
   failed_runs_24h: number;
   total_uploads: number;
   soft_deleted_uploads: number;
@@ -912,8 +898,81 @@ export type AdminToolUsageRecord = {
   failed: number;
 };
 
+export type AdminRuntimeSummary = {
+  app_version?: string;
+  store_backend: string;
+  dispatch_mode: string;
+  job_transport: string;
+  event_transport: string;
+  stub_worker_enabled: boolean;
+  nats_configured: boolean;
+  nats_stream?: string;
+  nats_jobs_subject?: string;
+  nats_rarespot_jobs_subject?: string;
+  nats_events_subject?: string;
+  nats_cancel_subject?: string;
+  nats_event_consumer?: string;
+  artifact_root?: string;
+  upload_root?: string;
+  run_recovery_enabled?: boolean;
+  run_recovery_interval_seconds?: number;
+  run_recovery_batch_limit?: number;
+};
+
+export type AdminQueueConsumerDiagnostic = {
+  name: string;
+  role?: string;
+  subject?: string;
+  active: boolean;
+  ack_wait_seconds?: number;
+  max_deliver?: number;
+  pending_messages: number;
+  in_flight_messages: number;
+  redelivered_messages: number;
+  waiting_pull_requests: number;
+  delivered_stream_sequence?: number;
+  ack_floor_stream_sequence?: number;
+  error?: string;
+};
+
+export type AdminQueueDiagnostics = {
+  available: boolean;
+  mode: string;
+  stream?: string;
+  stream_subjects?: string[];
+  stream_messages: number;
+  stream_bytes: number;
+  first_sequence: number;
+  last_sequence: number;
+  consumer_count: number;
+  consumers: AdminQueueConsumerDiagnostic[];
+  error?: string;
+};
+
+export type AdminWorkerRecord = {
+  worker_id: string;
+  worker_kind: string;
+  status: string;
+  current_run_id?: string | null;
+  hostname?: string | null;
+  version?: string | null;
+  started_at: string;
+  last_heartbeat_at: string;
+  updated_at: string;
+  heartbeat_age_seconds?: number | null;
+  active: boolean;
+  stale: boolean;
+  metadata: Record<string, unknown>;
+};
+
 export type AdminUserSummary = {
   user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  role?: string | null;
+  status?: string | null;
+  org_id?: string | null;
+  created_at?: string | null;
   conversations: number;
   messages: number;
   runs_total: number;
@@ -936,6 +995,29 @@ export type AdminRunRecord = {
   error?: string | null;
   duration_seconds?: number | null;
   tool_names: string[];
+  last_event_kind?: string | null;
+  last_event_at?: string | null;
+  last_event_sequence?: number | null;
+  last_activity_age_seconds?: number | null;
+  event_count: number;
+  message_delta_count: number;
+  tool_call_count: number;
+  artifact_count: number;
+  heartbeat_count: number;
+  last_tool_name?: string | null;
+  last_tool_at?: string | null;
+  first_delta_latency_seconds?: number | null;
+  first_tool_latency_seconds?: number | null;
+  first_artifact_latency_seconds?: number | null;
+  lease_worker_id?: string | null;
+  lease_expires_at?: string | null;
+  lease_active?: boolean;
+  lease_expired?: boolean;
+  lease_seconds_remaining?: number | null;
+  lease_last_renewed_at?: string | null;
+  lease_last_renewed_age_seconds?: number | null;
+  stale: boolean;
+  stale_reason?: string | null;
 };
 
 export type AdminIssueRecord = {
@@ -952,9 +1034,12 @@ export type AdminIssueRecord = {
 
 export type AdminOverviewResponse = {
   generated_at: string;
+  runtime: AdminRuntimeSummary;
+  queue: AdminQueueDiagnostics;
   kpis: AdminPlatformKpis;
   usage_last_24h: AdminUsageBucket[];
   tool_usage_7d: AdminToolUsageRecord[];
+  workers: AdminWorkerRecord[];
   top_users: AdminUserSummary[];
   recent_issues: AdminIssueRecord[];
 };
@@ -962,6 +1047,49 @@ export type AdminOverviewResponse = {
 export type AdminUserListResponse = {
   count: number;
   users: AdminUserSummary[];
+};
+
+export type AdminOrganization = {
+  org_id: string;
+  name: string;
+  status?: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+};
+
+export type AdminOrganizationListResponse = {
+  count: number;
+  organizations: AdminOrganization[];
+};
+
+export type AdminCreateOrganizationRequest = {
+  org_id?: string;
+  name?: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type AdminCreateUserRequest = {
+  user_id?: string;
+  email?: string;
+  display_name?: string;
+  role?: string;
+  status?: string;
+  org_id?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type AdminUserAccount = {
+  user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  role?: string | null;
+  status?: string | null;
+  org_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
 };
 
 export type AdminRunListResponse = {
@@ -1603,6 +1731,9 @@ export type Sam3InteractiveResponse = {
 };
 
 export type PublicConfigResponse = {
+  app_name?: string | null;
+  app_version?: string | null;
+  features?: Record<string, boolean>;
   bisque_root?: string | null;
   bisque_browser_url?: string | null;
   bisque_auth_enabled?: boolean;
@@ -1639,165 +1770,6 @@ export type BisqueGuestAuthRequest = {
   name: string;
   email: string;
   affiliation: string;
-};
-
-export type V3AttachmentRecord = {
-  kind: "file_id" | "resource_uri" | "dataset_uri";
-  value: string;
-  name?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type V3SessionCreateRequest = {
-  title?: string | null;
-  status?: string;
-  summary?: string | null;
-  memory_policy?: V3MemoryPolicy;
-  knowledge_scope?: V3KnowledgeScope;
-  metadata?: Record<string, unknown>;
-};
-
-export type V3SessionRecord = {
-  session_id: string;
-  user_id?: string | null;
-  title: string;
-  status: string;
-  summary?: string | null;
-  memory_policy: V3MemoryPolicy;
-  knowledge_scope: V3KnowledgeScope;
-  metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type V3SessionListResponse = {
-  count: number;
-  sessions: V3SessionRecord[];
-};
-
-export type V3MessageInput = {
-  role: ChatRole;
-  content: string;
-  attachments?: V3AttachmentRecord[];
-  metadata?: Record<string, unknown>;
-};
-
-export type V3MessageRecord = {
-  message_id: string;
-  session_id: string;
-  role: ChatRole;
-  content: string;
-  attachments: V3AttachmentRecord[];
-  run_id?: string | null;
-  metadata: Record<string, unknown>;
-  created_at: string;
-};
-
-export type V3SessionMessageListResponse = {
-  session_id: string;
-  count: number;
-  messages: V3MessageRecord[];
-};
-
-export type V3RunCreateRequest = {
-  goal?: string | null;
-  messages: V3MessageInput[];
-  file_ids?: string[];
-  resource_uris?: string[];
-  dataset_uris?: string[];
-  selected_tool_names?: string[];
-  knowledge_context?: KnowledgeContext | null;
-  selection_context?: SelectionContext | null;
-  workflow_hint?: ChatWorkflowHint | null;
-  reasoning_mode?: "auto" | "fast" | "deep";
-  debug?: boolean;
-  budgets?: ToolBudget;
-  metadata?: Record<string, unknown>;
-};
-
-export type V3RunRecord = {
-  run_id: string;
-  session_id: string;
-  user_id?: string | null;
-  workflow_name: string;
-  status: string;
-  current_step?: string | null;
-  checkpoint_state: Record<string, unknown>;
-  budget_state: Record<string, unknown>;
-  response_text?: string | null;
-  trace_group_id?: string | null;
-  metrics: Record<string, unknown>;
-  error?: string | null;
-  metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type V3RunEventRecord = {
-  event_id: string;
-  run_id: string;
-  session_id?: string | null;
-  user_id?: string | null;
-  event_kind: string;
-  event_type: string;
-  agent_name?: string | null;
-  tool_name?: string | null;
-  level?: string | null;
-  payload: Record<string, unknown>;
-  created_at: string;
-};
-
-export type V3RunEventListResponse = {
-  run_id: string;
-  count: number;
-  events: V3RunEventRecord[];
-};
-
-export type V3ArtifactRecord = {
-  artifact_id: string;
-  run_id: string;
-  session_id?: string | null;
-  user_id?: string | null;
-  kind: string;
-  title?: string | null;
-  path?: string | null;
-  source_path?: string | null;
-  preview_path?: string | null;
-  result_group_id?: string | null;
-  metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type V3ArtifactListResponse = {
-  run_id: string;
-  count: number;
-  artifacts: V3ArtifactRecord[];
-};
-
-export type V3ApprovalRecord = {
-  approval_id: string;
-  run_id: string;
-  session_id?: string | null;
-  user_id?: string | null;
-  action_type: string;
-  tool_name?: string | null;
-  status: string;
-  request_payload: Record<string, unknown>;
-  resolution: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type V3ApprovalResolveRequest = {
-  decision: "approve" | "reject";
-  note?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type V3ApprovalResolveResponse = {
-  approval: V3ApprovalRecord;
-  run: V3RunRecord;
 };
 
 export * from "./types-v2";

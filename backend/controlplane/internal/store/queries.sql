@@ -44,15 +44,22 @@ SET status = $2,
     started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN $5 ELSE started_at END,
     completed_at = CASE WHEN $2 IN ('succeeded', 'failed', 'canceled') THEN $5 ELSE completed_at END
 WHERE run_id = $1
+  AND status NOT IN ('succeeded', 'failed', 'canceled')
 RETURNING *;
 
 -- name: NextRunEventSequence :one
 SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence FROM control_run_events WHERE run_id = $1;
 
 -- name: AppendRunEvent :one
-INSERT INTO control_run_events (event_id, sequence_number, run_id, thread_id, event_kind, ts, message, payload)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO control_run_events (
+  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING *;
+
+-- name: GetRunEvent :one
+SELECT * FROM control_run_events WHERE event_id = $1;
 
 -- name: ListRunEvents :many
 SELECT *
@@ -61,9 +68,20 @@ FROM (
 ) recent_events
 ORDER BY sequence_number ASC;
 
+-- name: ListRunEventsAfter :many
+SELECT *
+FROM control_run_events
+WHERE run_id = $1 AND sequence_number > $2
+ORDER BY sequence_number ASC
+LIMIT $3;
+
 -- name: CreateArtifact :one
-INSERT INTO control_artifacts (artifact_id, run_id, thread_id, kind, path, title, mime_type, size_bytes, sha256, storage_uri, created_at, updated_at, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+INSERT INTO control_artifacts (
+  artifact_id, run_id, thread_id, kind, path, source_path, preview_path, title,
+  result_group_id, mime_type, size_bytes, sha256, storage_uri, tool_name, category,
+  created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 RETURNING *;
 
 -- name: ListRunArtifacts :many

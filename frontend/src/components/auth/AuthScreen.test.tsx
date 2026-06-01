@@ -7,7 +7,7 @@ describe("AuthScreen", () => {
   it("uses an upbeat typewriter hero instead of account-connection copy", () => {
     const { container } = render(
       <AuthScreen
-        bisqueRoot="https://bisque2.ece.ucsb.edu"
+        bisqueRoot="https://bisque.example.org"
         loading={false}
         onAuthenticate={vi.fn()}
         onContinueGuest={vi.fn()}

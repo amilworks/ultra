@@ -2,7 +2,7 @@ import http from "node:http";
 
 const port = Number(process.env.MOCK_API_PORT || "8000");
 const guestCookieName = "bisque_ultra_session";
-const bisqueRoot = "https://bisque2.ece.ucsb.edu";
+const bisqueRoot = "https://bisque.example.org";
 
 const navLinks = {
   home: `${bisqueRoot}/client_service/`,

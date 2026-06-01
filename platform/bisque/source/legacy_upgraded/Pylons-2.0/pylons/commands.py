@@ -18,8 +18,8 @@ Commands available:
 Example usage::
 
     ~/sample$ paster controller account
-    Creating /Users/ben/sample/sample/controllers/account.py
-    Creating /Users/ben/sample/sample/tests/functional/test_account.py
+    Creating /home/example/sample/sample/controllers/account.py
+    Creating /home/example/sample/sample/tests/functional/test_account.py
     ~/sample$
 
 .. admonition:: How it Works

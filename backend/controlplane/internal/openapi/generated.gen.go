@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -20,12 +21,53 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
+
+// Defines values for V2NotConfiguredResponseStatus.
+const (
+	NotConfigured V2NotConfiguredResponseStatus = "not_configured"
+)
+
+// Valid indicates whether the value is a known member of the V2NotConfiguredResponseStatus enum.
+func (e V2NotConfiguredResponseStatus) Valid() bool {
+	switch e {
+	case NotConfigured:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetUploadCaption200JSONResponseBodySource.
+const (
+	Cache    GetUploadCaption200JSONResponseBodySource = "cache"
+	Fallback GetUploadCaption200JSONResponseBodySource = "fallback"
+	Llm      GetUploadCaption200JSONResponseBodySource = "llm"
+)
+
+// Valid indicates whether the value is a known member of the GetUploadCaption200JSONResponseBodySource enum.
+func (e GetUploadCaption200JSONResponseBodySource) Valid() bool {
+	switch e {
+	case Cache:
+		return true
+	case Fallback:
+		return true
+	case Llm:
+		return true
+	default:
+		return false
+	}
+}
 
 // AuthSessionResponse defines model for AuthSessionResponse.
 type AuthSessionResponse struct {
-	Authenticated bool       `json:"authenticated"`
-	User          JsonObject `json:"user"`
+	Authenticated bool        `json:"authenticated"`
+	GuestProfile  *JsonObject `json:"guest_profile,omitempty"`
+	IsAdmin       *bool       `json:"is_admin,omitempty"`
+	Mode          *string     `json:"mode,omitempty"`
+	User          JsonObject  `json:"user"`
+	Username      *string     `json:"username,omitempty"`
 }
 
 // HealthResponse defines model for HealthResponse.
@@ -38,7 +80,290 @@ type HealthResponse struct {
 type JsonObject map[string]interface{}
 
 // PublicConfigResponse defines model for PublicConfigResponse.
-type PublicConfigResponse map[string]interface{}
+type PublicConfigResponse struct {
+	AdminEnabled         *bool                  `json:"admin_enabled,omitempty"`
+	AppName              *string                `json:"app_name,omitempty"`
+	AppVersion           *string                `json:"app_version,omitempty"`
+	Features             *map[string]bool       `json:"features,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AdminCreateOrganizationRequest defines model for V2AdminCreateOrganizationRequest.
+type V2AdminCreateOrganizationRequest struct {
+	Metadata *JsonObject `json:"metadata,omitempty"`
+	Name     *string     `json:"name,omitempty"`
+	OrgId    *string     `json:"org_id,omitempty"`
+	Status   *string     `json:"status,omitempty"`
+}
+
+// V2AdminCreateUserRequest defines model for V2AdminCreateUserRequest.
+type V2AdminCreateUserRequest struct {
+	DisplayName *string     `json:"display_name,omitempty"`
+	Email       *string     `json:"email,omitempty"`
+	Metadata    *JsonObject `json:"metadata,omitempty"`
+	OrgId       *string     `json:"org_id,omitempty"`
+	Role        *string     `json:"role,omitempty"`
+	Status      *string     `json:"status,omitempty"`
+	UserId      *string     `json:"user_id,omitempty"`
+}
+
+// V2AdminIssueListResponse defines model for V2AdminIssueListResponse.
+type V2AdminIssueListResponse struct {
+	Count  int                  `json:"count"`
+	Issues []V2AdminIssueRecord `json:"issues"`
+}
+
+// V2AdminIssueRecord defines model for V2AdminIssueRecord.
+type V2AdminIssueRecord struct {
+	ConversationId       *string                `json:"conversation_id,omitempty"`
+	IssueType            *string                `json:"issue_type,omitempty"`
+	Message              *string                `json:"message,omitempty"`
+	Metadata             *JsonObject            `json:"metadata,omitempty"`
+	OccurredAt           *string                `json:"occurred_at,omitempty"`
+	RunId                *string                `json:"run_id,omitempty"`
+	Severity             *string                `json:"severity,omitempty"`
+	UploadId             *string                `json:"upload_id,omitempty"`
+	UserId               *string                `json:"user_id,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AdminOrganization defines model for V2AdminOrganization.
+type V2AdminOrganization struct {
+	CreatedAt string     `json:"created_at"`
+	Metadata  JsonObject `json:"metadata"`
+	Name      string     `json:"name"`
+	OrgId     string     `json:"org_id"`
+	Status    *string    `json:"status,omitempty"`
+	UpdatedAt string     `json:"updated_at"`
+}
+
+// V2AdminOrganizationListResponse defines model for V2AdminOrganizationListResponse.
+type V2AdminOrganizationListResponse struct {
+	Count         int                   `json:"count"`
+	Organizations []V2AdminOrganization `json:"organizations"`
+}
+
+// V2AdminOverviewResponse defines model for V2AdminOverviewResponse.
+type V2AdminOverviewResponse struct {
+	GeneratedAt  string                   `json:"generated_at"`
+	Kpis         V2AdminPlatformKpis      `json:"kpis"`
+	Queue        V2AdminQueueDiagnostics  `json:"queue"`
+	RecentIssues []V2AdminIssueRecord     `json:"recent_issues"`
+	Runtime      V2AdminRuntimeSummary    `json:"runtime"`
+	ToolUsage7d  []V2AdminToolUsageRecord `json:"tool_usage_7d"`
+	TopUsers     []V2AdminUserSummary     `json:"top_users"`
+	UsageLast24h []V2AdminUsageBucket     `json:"usage_last_24h"`
+	Workers      []V2AdminWorkerRecord    `json:"workers"`
+}
+
+// V2AdminPlatformKpis defines model for V2AdminPlatformKpis.
+type V2AdminPlatformKpis struct {
+	ActiveUsers24h             *int                   `json:"active_users_24h,omitempty"`
+	AssistantMessagesLast24h   *int                   `json:"assistant_messages_last_24h,omitempty"`
+	AvgMessagesPerConversation *float32               `json:"avg_messages_per_conversation,omitempty"`
+	ConversationsStarted24h    *int                   `json:"conversations_started_24h,omitempty"`
+	FailedRuns24h              *int                   `json:"failed_runs_24h,omitempty"`
+	MessagesLast24h            *int                   `json:"messages_last_24h,omitempty"`
+	RunningRuns                *int                   `json:"running_runs,omitempty"`
+	RunsLast24h                *int                   `json:"runs_last_24h,omitempty"`
+	SoftDeletedUploads         *int                   `json:"soft_deleted_uploads,omitempty"`
+	StaleRunningRuns           *int                   `json:"stale_running_runs,omitempty"`
+	SuccessRateLast24h         *float32               `json:"success_rate_last_24h,omitempty"`
+	TotalConversations         *int                   `json:"total_conversations,omitempty"`
+	TotalMessages              *int                   `json:"total_messages,omitempty"`
+	TotalRuns                  *int                   `json:"total_runs,omitempty"`
+	TotalStorageBytes          *int64                 `json:"total_storage_bytes,omitempty"`
+	TotalUploads               *int                   `json:"total_uploads,omitempty"`
+	TotalUsers                 *int                   `json:"total_users,omitempty"`
+	UserMessagesLast24h        *int                   `json:"user_messages_last_24h,omitempty"`
+	AdditionalProperties       map[string]interface{} `json:"-"`
+}
+
+// V2AdminQueueConsumerDiagnostic defines model for V2AdminQueueConsumerDiagnostic.
+type V2AdminQueueConsumerDiagnostic struct {
+	AckFloorStreamSequence  *int64                 `json:"ack_floor_stream_sequence,omitempty"`
+	AckWaitSeconds          *float32               `json:"ack_wait_seconds,omitempty"`
+	Active                  *bool                  `json:"active,omitempty"`
+	DeliveredStreamSequence *int64                 `json:"delivered_stream_sequence,omitempty"`
+	Error                   *string                `json:"error,omitempty"`
+	InFlightMessages        *int                   `json:"in_flight_messages,omitempty"`
+	MaxDeliver              *int                   `json:"max_deliver,omitempty"`
+	Name                    *string                `json:"name,omitempty"`
+	PendingMessages         *int64                 `json:"pending_messages,omitempty"`
+	RedeliveredMessages     *int                   `json:"redelivered_messages,omitempty"`
+	Role                    *string                `json:"role,omitempty"`
+	Subject                 *string                `json:"subject,omitempty"`
+	WaitingPullRequests     *int                   `json:"waiting_pull_requests,omitempty"`
+	AdditionalProperties    map[string]interface{} `json:"-"`
+}
+
+// V2AdminQueueDiagnostics defines model for V2AdminQueueDiagnostics.
+type V2AdminQueueDiagnostics struct {
+	Available            *bool                             `json:"available,omitempty"`
+	ConsumerCount        *int                              `json:"consumer_count,omitempty"`
+	Consumers            *[]V2AdminQueueConsumerDiagnostic `json:"consumers,omitempty"`
+	Error                *string                           `json:"error,omitempty"`
+	FirstSequence        *int64                            `json:"first_sequence,omitempty"`
+	LastSequence         *int64                            `json:"last_sequence,omitempty"`
+	Mode                 *string                           `json:"mode,omitempty"`
+	Stream               *string                           `json:"stream,omitempty"`
+	StreamBytes          *int64                            `json:"stream_bytes,omitempty"`
+	StreamMessages       *int64                            `json:"stream_messages,omitempty"`
+	StreamSubjects       *[]string                         `json:"stream_subjects,omitempty"`
+	AdditionalProperties map[string]interface{}            `json:"-"`
+}
+
+// V2AdminRunActionResponse defines model for V2AdminRunActionResponse.
+type V2AdminRunActionResponse struct {
+	PreviousStatus string `json:"previous_status"`
+	RunId          string `json:"run_id"`
+	Status         string `json:"status"`
+	Updated        bool   `json:"updated"`
+}
+
+// V2AdminRunListResponse defines model for V2AdminRunListResponse.
+type V2AdminRunListResponse struct {
+	Count int                `json:"count"`
+	Runs  []V2AdminRunRecord `json:"runs"`
+}
+
+// V2AdminRunRecord defines model for V2AdminRunRecord.
+type V2AdminRunRecord struct {
+	ArtifactCount               *int                   `json:"artifact_count,omitempty"`
+	ConversationId              *string                `json:"conversation_id,omitempty"`
+	CreatedAt                   *string                `json:"created_at,omitempty"`
+	DurationSeconds             *float32               `json:"duration_seconds,omitempty"`
+	Error                       *string                `json:"error,omitempty"`
+	EventCount                  *int                   `json:"event_count,omitempty"`
+	FirstArtifactLatencySeconds *float32               `json:"first_artifact_latency_seconds,omitempty"`
+	FirstDeltaLatencySeconds    *float32               `json:"first_delta_latency_seconds,omitempty"`
+	FirstToolLatencySeconds     *float32               `json:"first_tool_latency_seconds,omitempty"`
+	Goal                        *string                `json:"goal,omitempty"`
+	HeartbeatCount              *int                   `json:"heartbeat_count,omitempty"`
+	LastActivityAgeSeconds      *float32               `json:"last_activity_age_seconds,omitempty"`
+	LastEventAt                 *string                `json:"last_event_at,omitempty"`
+	LastEventKind               *string                `json:"last_event_kind,omitempty"`
+	LastEventSequence           *int64                 `json:"last_event_sequence,omitempty"`
+	LastToolAt                  *string                `json:"last_tool_at,omitempty"`
+	LastToolName                *string                `json:"last_tool_name,omitempty"`
+	LeaseActive                 *bool                  `json:"lease_active,omitempty"`
+	LeaseExpired                *bool                  `json:"lease_expired,omitempty"`
+	LeaseExpiresAt              *string                `json:"lease_expires_at,omitempty"`
+	LeaseLastRenewedAgeSeconds  *float32               `json:"lease_last_renewed_age_seconds,omitempty"`
+	LeaseLastRenewedAt          *string                `json:"lease_last_renewed_at,omitempty"`
+	LeaseSecondsRemaining       *float32               `json:"lease_seconds_remaining,omitempty"`
+	LeaseWorkerId               *string                `json:"lease_worker_id,omitempty"`
+	MessageDeltaCount           *int                   `json:"message_delta_count,omitempty"`
+	RunId                       *string                `json:"run_id,omitempty"`
+	Stale                       *bool                  `json:"stale,omitempty"`
+	StaleReason                 *string                `json:"stale_reason,omitempty"`
+	Status                      *string                `json:"status,omitempty"`
+	ToolCallCount               *int                   `json:"tool_call_count,omitempty"`
+	ToolNames                   *[]string              `json:"tool_names,omitempty"`
+	UpdatedAt                   *string                `json:"updated_at,omitempty"`
+	UserId                      *string                `json:"user_id,omitempty"`
+	AdditionalProperties        map[string]interface{} `json:"-"`
+}
+
+// V2AdminRuntimeSummary defines model for V2AdminRuntimeSummary.
+type V2AdminRuntimeSummary struct {
+	AppVersion                 *string                `json:"app_version,omitempty"`
+	ArtifactRoot               *string                `json:"artifact_root,omitempty"`
+	DispatchMode               *string                `json:"dispatch_mode,omitempty"`
+	EventTransport             *string                `json:"event_transport,omitempty"`
+	JobTransport               *string                `json:"job_transport,omitempty"`
+	NatsCancelSubject          *string                `json:"nats_cancel_subject,omitempty"`
+	NatsConfigured             *bool                  `json:"nats_configured,omitempty"`
+	NatsEventConsumer          *string                `json:"nats_event_consumer,omitempty"`
+	NatsEventsSubject          *string                `json:"nats_events_subject,omitempty"`
+	NatsJobsSubject            *string                `json:"nats_jobs_subject,omitempty"`
+	NatsRarespotJobsSubject    *string                `json:"nats_rarespot_jobs_subject,omitempty"`
+	NatsStream                 *string                `json:"nats_stream,omitempty"`
+	RunRecoveryBatchLimit      *int                   `json:"run_recovery_batch_limit,omitempty"`
+	RunRecoveryEnabled         *bool                  `json:"run_recovery_enabled,omitempty"`
+	RunRecoveryIntervalSeconds *float32               `json:"run_recovery_interval_seconds,omitempty"`
+	StoreBackend               *string                `json:"store_backend,omitempty"`
+	StubWorkerEnabled          *bool                  `json:"stub_worker_enabled,omitempty"`
+	UploadRoot                 *string                `json:"upload_root,omitempty"`
+	AdditionalProperties       map[string]interface{} `json:"-"`
+}
+
+// V2AdminToolUsageRecord defines model for V2AdminToolUsageRecord.
+type V2AdminToolUsageRecord struct {
+	Count                *int                   `json:"count,omitempty"`
+	Failed               *int                   `json:"failed,omitempty"`
+	Succeeded            *int                   `json:"succeeded,omitempty"`
+	ToolName             *string                `json:"tool_name,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AdminUsageBucket defines model for V2AdminUsageBucket.
+type V2AdminUsageBucket struct {
+	BucketStart          *string                `json:"bucket_start,omitempty"`
+	NewUsers             *int                   `json:"new_users,omitempty"`
+	RunsFailed           *int                   `json:"runs_failed,omitempty"`
+	RunsSucceeded        *int                   `json:"runs_succeeded,omitempty"`
+	RunsTotal            *int                   `json:"runs_total,omitempty"`
+	Uploads              *int                   `json:"uploads,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AdminUserAccount defines model for V2AdminUserAccount.
+type V2AdminUserAccount struct {
+	CreatedAt   string     `json:"created_at"`
+	DisplayName *string    `json:"display_name,omitempty"`
+	Email       *string    `json:"email,omitempty"`
+	Metadata    JsonObject `json:"metadata"`
+	OrgId       *string    `json:"org_id,omitempty"`
+	Role        *string    `json:"role,omitempty"`
+	Status      *string    `json:"status,omitempty"`
+	UpdatedAt   string     `json:"updated_at"`
+	UserId      string     `json:"user_id"`
+}
+
+// V2AdminUserListResponse defines model for V2AdminUserListResponse.
+type V2AdminUserListResponse struct {
+	Count int                  `json:"count"`
+	Users []V2AdminUserSummary `json:"users"`
+}
+
+// V2AdminUserSummary defines model for V2AdminUserSummary.
+type V2AdminUserSummary struct {
+	Conversations        *int                   `json:"conversations,omitempty"`
+	CreatedAt            *string                `json:"created_at,omitempty"`
+	DisplayName          *string                `json:"display_name,omitempty"`
+	Email                *string                `json:"email,omitempty"`
+	LastActivityAt       *string                `json:"last_activity_at,omitempty"`
+	Messages             *int                   `json:"messages,omitempty"`
+	OrgId                *string                `json:"org_id,omitempty"`
+	Role                 *string                `json:"role,omitempty"`
+	RunsFailed           *int                   `json:"runs_failed,omitempty"`
+	RunsRunning          *int                   `json:"runs_running,omitempty"`
+	RunsSucceeded        *int                   `json:"runs_succeeded,omitempty"`
+	RunsTotal            *int                   `json:"runs_total,omitempty"`
+	Status               *string                `json:"status,omitempty"`
+	StorageBytes         *int64                 `json:"storage_bytes,omitempty"`
+	Uploads              *int                   `json:"uploads,omitempty"`
+	UserId               *string                `json:"user_id,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AdminWorkerRecord defines model for V2AdminWorkerRecord.
+type V2AdminWorkerRecord struct {
+	Active              bool       `json:"active"`
+	CurrentRunId        *string    `json:"current_run_id,omitempty"`
+	HeartbeatAgeSeconds *float32   `json:"heartbeat_age_seconds,omitempty"`
+	Hostname            *string    `json:"hostname,omitempty"`
+	LastHeartbeatAt     string     `json:"last_heartbeat_at"`
+	Metadata            JsonObject `json:"metadata"`
+	Stale               bool       `json:"stale"`
+	StartedAt           string     `json:"started_at"`
+	Status              string     `json:"status"`
+	UpdatedAt           string     `json:"updated_at"`
+	Version             *string    `json:"version,omitempty"`
+	WorkerId            string     `json:"worker_id"`
+	WorkerKind          string     `json:"worker_kind"`
+}
 
 // V2ArtifactListResponse defines model for V2ArtifactListResponse.
 type V2ArtifactListResponse struct {
@@ -92,6 +417,91 @@ type V2GraphEventRecord struct {
 	Ts           *string    `json:"ts,omitempty"`
 }
 
+// V2ModelHealthResponse defines model for V2ModelHealthResponse.
+type V2ModelHealthResponse struct {
+	Count  int          `json:"count"`
+	Models []JsonObject `json:"models"`
+}
+
+// V2NotConfiguredResponse defines model for V2NotConfiguredResponse.
+type V2NotConfiguredResponse struct {
+	Error   string                        `json:"error"`
+	Service string                        `json:"service"`
+	Status  V2NotConfiguredResponseStatus `json:"status"`
+}
+
+// V2NotConfiguredResponseStatus defines model for V2NotConfiguredResponse.Status.
+type V2NotConfiguredResponseStatus string
+
+// V2PrairieRetrainListResponse defines model for V2PrairieRetrainListResponse.
+type V2PrairieRetrainListResponse struct {
+	Count    int          `json:"count"`
+	Requests []JsonObject `json:"requests"`
+}
+
+// V2PrairieStatusResponse defines model for V2PrairieStatusResponse.
+type V2PrairieStatusResponse struct {
+	ActiveModelVersion       *string                `json:"active_model_version,omitempty"`
+	BenchmarkBaseline        *JsonObject            `json:"benchmark_baseline,omitempty"`
+	BenchmarkLatestCandidate *JsonObject            `json:"benchmark_latest_candidate,omitempty"`
+	BenchmarkReady           *bool                  `json:"benchmark_ready,omitempty"`
+	CanonicalBenchmarkReady  *bool                  `json:"canonical_benchmark_ready,omitempty"`
+	ClassCounts              *JsonObject            `json:"class_counts,omitempty"`
+	DatasetId                *string                `json:"dataset_id,omitempty"`
+	DatasetName              string                 `json:"dataset_name"`
+	DetectionCounts          *JsonObject            `json:"detection_counts,omitempty"`
+	LastBenchmarkAt          *string                `json:"last_benchmark_at,omitempty"`
+	LastSyncAt               *string                `json:"last_sync_at,omitempty"`
+	LatestMetrics            *JsonObject            `json:"latest_metrics,omitempty"`
+	ModelHealth              string                 `json:"model_health"`
+	NextSyncAt               *string                `json:"next_sync_at,omitempty"`
+	PromotionBenchmarkReady  *bool                  `json:"promotion_benchmark_ready,omitempty"`
+	RetrainGate              bool                   `json:"retrain_gate"`
+	RetrainGateCounts        *JsonObject            `json:"retrain_gate_counts,omitempty"`
+	RetrainGateReasons       []string               `json:"retrain_gate_reasons"`
+	ReviewedImages           int                    `json:"reviewed_images"`
+	UnreviewedImages         int                    `json:"unreviewed_images"`
+	UnsupportedClassCounts   *JsonObject            `json:"unsupported_class_counts,omitempty"`
+	AdditionalProperties     map[string]interface{} `json:"-"`
+}
+
+// V2PrincipalRecord defines model for V2PrincipalRecord.
+type V2PrincipalRecord struct {
+	OrgId  *string `json:"org_id,omitempty"`
+	Role   *string `json:"role,omitempty"`
+	UserId *string `json:"user_id,omitempty"`
+}
+
+// V2ResourceListResponse defines model for V2ResourceListResponse.
+type V2ResourceListResponse struct {
+	Count     int                `json:"count"`
+	Resources []V2ResourceRecord `json:"resources"`
+}
+
+// V2ResourceRecord defines model for V2ResourceRecord.
+type V2ResourceRecord struct {
+	CacheReady    *bool              `json:"cache_ready,omitempty"`
+	ContentType   *string            `json:"content_type,omitempty"`
+	CreatedAt     string             `json:"created_at"`
+	FileId        string             `json:"file_id"`
+	HasThumbnail  bool               `json:"has_thumbnail"`
+	OriginalName  string             `json:"original_name"`
+	PreviewUrl    *string            `json:"preview_url,omitempty"`
+	Principal     *V2PrincipalRecord `json:"principal,omitempty"`
+	ResourceKind  string             `json:"resource_kind"`
+	Sha256        string             `json:"sha256"`
+	SizeBytes     int64              `json:"size_bytes"`
+	SourceType    string             `json:"source_type"`
+	SourceUri     *string            `json:"source_uri,omitempty"`
+	StagedLocally *bool              `json:"staged_locally,omitempty"`
+	ThumbnailUrl  *string            `json:"thumbnail_url,omitempty"`
+}
+
+// V2ResourceResponse defines model for V2ResourceResponse.
+type V2ResourceResponse struct {
+	Resource V2ResourceRecord `json:"resource"`
+}
+
 // V2RunBudget defines model for V2RunBudget.
 type V2RunBudget struct {
 	MaxRuntimeSeconds    *int                   `json:"max_runtime_seconds,omitempty"`
@@ -107,11 +517,14 @@ type V2RunCancelRequest struct {
 
 // V2RunCreateRequest defines model for V2RunCreateRequest.
 type V2RunCreateRequest struct {
-	Benchmark         *JsonObject       `json:"benchmark,omitempty"`
-	Budgets           *V2RunBudget      `json:"budgets,omitempty"`
-	DatasetUris       *[]string         `json:"dataset_uris,omitempty"`
-	FileIds           *[]string         `json:"file_ids,omitempty"`
-	Goal              *string           `json:"goal,omitempty"`
+	Benchmark   *JsonObject  `json:"benchmark,omitempty"`
+	Budgets     *V2RunBudget `json:"budgets,omitempty"`
+	DatasetUris *[]string    `json:"dataset_uris,omitempty"`
+	FileIds     *[]string    `json:"file_ids,omitempty"`
+	Goal        *string      `json:"goal,omitempty"`
+
+	// IdempotencyKey Body fallback for Idempotency-Key.
+	IdempotencyKey    *string           `json:"idempotency_key,omitempty"`
 	KnowledgeContext  *JsonObject       `json:"knowledge_context,omitempty"`
 	Messages          []V2ThreadMessage `json:"messages"`
 	Metadata          *JsonObject       `json:"metadata,omitempty"`
@@ -127,6 +540,31 @@ type V2RunEventsResponse struct {
 	Count  int                  `json:"count"`
 	Events []V2GraphEventRecord `json:"events"`
 	RunId  string               `json:"run_id"`
+}
+
+// V2RunLeaseRecord defines model for V2RunLeaseRecord.
+type V2RunLeaseRecord struct {
+	CreatedAt      string `json:"created_at"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+	LeaseToken     string `json:"lease_token"`
+	RunId          string `json:"run_id"`
+	UpdatedAt      string `json:"updated_at"`
+	WorkerId       string `json:"worker_id"`
+}
+
+// V2RunLeaseRequest defines model for V2RunLeaseRequest.
+type V2RunLeaseRequest struct {
+	// LeaseToken Opaque token returned by acquire and required for renew/release.
+	LeaseToken *string `json:"lease_token,omitempty"`
+
+	// LeaseTtlSeconds Backward-compatible alias for ttl_seconds.
+	LeaseTtlSeconds *float32 `json:"lease_ttl_seconds,omitempty"`
+
+	// TtlSeconds Desired lease duration in seconds.
+	TtlSeconds *float32 `json:"ttl_seconds,omitempty"`
+
+	// WorkerId Stable worker identity used when acquiring a lease.
+	WorkerId *string `json:"worker_id,omitempty"`
 }
 
 // V2RunListResponse defines model for V2RunListResponse.
@@ -221,11 +659,191 @@ type V2ThreadUpsertRequest struct {
 	Title    *string            `json:"title,omitempty"`
 }
 
+// V2TrainingDatasetListResponse defines model for V2TrainingDatasetListResponse.
+type V2TrainingDatasetListResponse struct {
+	Count    int          `json:"count"`
+	Datasets []JsonObject `json:"datasets"`
+}
+
+// V2TrainingDomainListResponse defines model for V2TrainingDomainListResponse.
+type V2TrainingDomainListResponse struct {
+	Count   int          `json:"count"`
+	Domains []JsonObject `json:"domains"`
+}
+
+// V2TrainingLineageListResponse defines model for V2TrainingLineageListResponse.
+type V2TrainingLineageListResponse struct {
+	Count    int          `json:"count"`
+	Lineages []JsonObject `json:"lineages"`
+}
+
+// V2TrainingMergeRequestListResponse defines model for V2TrainingMergeRequestListResponse.
+type V2TrainingMergeRequestListResponse struct {
+	Count         int          `json:"count"`
+	MergeRequests []JsonObject `json:"merge_requests"`
+}
+
+// V2TrainingModelRecord defines model for V2TrainingModelRecord.
+type V2TrainingModelRecord struct {
+	DefaultConfig     JsonObject `json:"default_config"`
+	Description       string     `json:"description"`
+	Dimensions        []string   `json:"dimensions"`
+	Framework         string     `json:"framework"`
+	Key               string     `json:"key"`
+	Name              string     `json:"name"`
+	SupportsFinetune  bool       `json:"supports_finetune"`
+	SupportsInference bool       `json:"supports_inference"`
+	SupportsTraining  bool       `json:"supports_training"`
+	TaskType          string     `json:"task_type"`
+}
+
+// V2TrainingModelVersionListResponse defines model for V2TrainingModelVersionListResponse.
+type V2TrainingModelVersionListResponse struct {
+	Count    int          `json:"count"`
+	Versions []JsonObject `json:"versions"`
+}
+
+// V2TrainingModelsResponse defines model for V2TrainingModelsResponse.
+type V2TrainingModelsResponse struct {
+	Count  int                     `json:"count"`
+	Models []V2TrainingModelRecord `json:"models"`
+}
+
+// V2TrainingUpdateProposalListResponse defines model for V2TrainingUpdateProposalListResponse.
+type V2TrainingUpdateProposalListResponse struct {
+	Count     int          `json:"count"`
+	Proposals []JsonObject `json:"proposals"`
+}
+
+// V2UploadFilesResponse defines model for V2UploadFilesResponse.
+type V2UploadFilesResponse struct {
+	FileCount int                    `json:"file_count"`
+	Uploaded  []V2UploadedFileRecord `json:"uploaded"`
+}
+
+// V2UploadedFileRecord defines model for V2UploadedFileRecord.
+type V2UploadedFileRecord struct {
+	ContentType  *string            `json:"content_type,omitempty"`
+	CreatedAt    string             `json:"created_at"`
+	FileId       string             `json:"file_id"`
+	OriginalName string             `json:"original_name"`
+	PreviewUrl   *string            `json:"preview_url,omitempty"`
+	Principal    *V2PrincipalRecord `json:"principal,omitempty"`
+	Sha256       string             `json:"sha256"`
+	SizeBytes    int64              `json:"size_bytes"`
+}
+
+// V2WorkerHeartbeatRecord defines model for V2WorkerHeartbeatRecord.
+type V2WorkerHeartbeatRecord struct {
+	CurrentRunId    *string    `json:"current_run_id,omitempty"`
+	Hostname        *string    `json:"hostname,omitempty"`
+	LastHeartbeatAt string     `json:"last_heartbeat_at"`
+	Metadata        JsonObject `json:"metadata"`
+	StartedAt       string     `json:"started_at"`
+	Status          string     `json:"status"`
+	UpdatedAt       string     `json:"updated_at"`
+	Version         *string    `json:"version,omitempty"`
+	WorkerId        string     `json:"worker_id"`
+	WorkerKind      string     `json:"worker_kind"`
+}
+
+// V2WorkerHeartbeatRequest defines model for V2WorkerHeartbeatRequest.
+type V2WorkerHeartbeatRequest struct {
+	CurrentRunId    *string     `json:"current_run_id,omitempty"`
+	Hostname        *string     `json:"hostname,omitempty"`
+	LastHeartbeatAt *string     `json:"last_heartbeat_at,omitempty"`
+	Metadata        *JsonObject `json:"metadata,omitempty"`
+	StartedAt       *string     `json:"started_at,omitempty"`
+	Status          *string     `json:"status,omitempty"`
+	Version         *string     `json:"version,omitempty"`
+	WorkerId        string      `json:"worker_id"`
+	WorkerKind      *string     `json:"worker_kind,omitempty"`
+}
+
+// FileID defines model for FileID.
+type FileID = string
+
 // RunID defines model for RunID.
 type RunID = string
 
 // ThreadID defines model for ThreadID.
 type ThreadID = string
+
+// ContinueAsGuestJSONBody defines parameters for ContinueAsGuest.
+type ContinueAsGuestJSONBody struct {
+	Affiliation *string `json:"affiliation,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	Name        *string `json:"name,omitempty"`
+}
+
+// LoginBisqueJSONBody defines parameters for LoginBisque.
+type LoginBisqueJSONBody struct {
+	Password *string `json:"password,omitempty"`
+	Username *string `json:"username,omitempty"`
+}
+
+// DeleteV2AdminConversationParams defines parameters for DeleteV2AdminConversation.
+type DeleteV2AdminConversationParams struct {
+	UserId *string `form:"user_id,omitempty" json:"user_id,omitempty"`
+}
+
+// ListV2AdminIssuesParams defines parameters for ListV2AdminIssues.
+type ListV2AdminIssuesParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2AdminOrganizationsParams defines parameters for ListV2AdminOrganizations.
+type ListV2AdminOrganizationsParams struct {
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Q     *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
+// GetV2AdminOverviewParams defines parameters for GetV2AdminOverview.
+type GetV2AdminOverviewParams struct {
+	TopUsers   *int `form:"top_users,omitempty" json:"top_users,omitempty"`
+	IssueLimit *int `form:"issue_limit,omitempty" json:"issue_limit,omitempty"`
+}
+
+// ListV2AdminRunsParams defines parameters for ListV2AdminRuns.
+type ListV2AdminRunsParams struct {
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+	UserId *string `form:"user_id,omitempty" json:"user_id,omitempty"`
+	Q      *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
+// RequeueV2AdminRunJSONBody defines parameters for RequeueV2AdminRun.
+type RequeueV2AdminRunJSONBody struct {
+	Reason *string `json:"reason,omitempty"`
+}
+
+// ListV2AdminUsersParams defines parameters for ListV2AdminUsers.
+type ListV2AdminUsersParams struct {
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Q     *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
+// ContinueAsV2GuestJSONBody defines parameters for ContinueAsV2Guest.
+type ContinueAsV2GuestJSONBody struct {
+	Affiliation *string `json:"affiliation,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	Name        *string `json:"name,omitempty"`
+}
+
+// LoginV2BisqueJSONBody defines parameters for LoginV2Bisque.
+type LoginV2BisqueJSONBody struct {
+	Password *string `json:"password,omitempty"`
+	Username *string `json:"username,omitempty"`
+}
+
+// ListResourcesParams defines parameters for ListResources.
+type ListResourcesParams struct {
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Q      *string `form:"q,omitempty" json:"q,omitempty"`
+	Kind   *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
 
 // ListRunsParams defines parameters for ListRuns.
 type ListRunsParams struct {
@@ -240,11 +858,23 @@ type ListRunArtifactsParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// DownloadRunArtifactByPathParams defines parameters for DownloadRunArtifactByPath.
+type DownloadRunArtifactByPathParams struct {
+	// Path Run-relative artifact path. Path traversal and absolute paths are rejected.
+	Path string `form:"path" json:"path"`
+}
+
 // ListRunEventsParams defines parameters for ListRunEvents.
 type ListRunEventsParams struct {
-	Limit  *int  `form:"limit,omitempty" json:"limit,omitempty"`
-	Stream *bool `form:"stream,omitempty" json:"stream,omitempty"`
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// AfterSequence Return events with sequence numbers greater than this cursor. Use 0 to page from the beginning of a long run.
+	AfterSequence *int  `form:"after_sequence,omitempty" json:"after_sequence,omitempty"`
+	Stream        *bool `form:"stream,omitempty" json:"stream,omitempty"`
 }
+
+// RunV2Sam3InteractiveSegmentationJSONBody defines parameters for RunV2Sam3InteractiveSegmentation.
+type RunV2Sam3InteractiveSegmentationJSONBody = map[string]interface{}
 
 // ListThreadsParams defines parameters for ListThreads.
 type ListThreadsParams struct {
@@ -253,11 +883,106 @@ type ListThreadsParams struct {
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 }
 
+// CreateRunParams defines parameters for CreateRun.
+type CreateRunParams struct {
+	// IdempotencyKey Reuses the existing run for the same thread, user, and key instead of dispatching duplicate work.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// ListV2TrainingDatasetsParams defines parameters for ListV2TrainingDatasets.
+type ListV2TrainingDatasetsParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2TrainingDomainsParams defines parameters for ListV2TrainingDomains.
+type ListV2TrainingDomainsParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2TrainingDomainLineagesParams defines parameters for ListV2TrainingDomainLineages.
+type ListV2TrainingDomainLineagesParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2TrainingLineageVersionsParams defines parameters for ListV2TrainingLineageVersions.
+type ListV2TrainingLineageVersionsParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2TrainingMergeRequestsParams defines parameters for ListV2TrainingMergeRequests.
+type ListV2TrainingMergeRequestsParams struct {
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListV2TrainingUpdateProposalsParams defines parameters for ListV2TrainingUpdateProposals.
+type ListV2TrainingUpdateProposalsParams struct {
+	LineageId *string `form:"lineage_id,omitempty" json:"lineage_id,omitempty"`
+	Status    *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit     *int    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// UploadFilesMultipartBody defines parameters for UploadFiles.
+type UploadFilesMultipartBody struct {
+	Files []openapi_types.File `json:"files"`
+}
+
+// ImportV2BisqueResourcesJSONBody defines parameters for ImportV2BisqueResources.
+type ImportV2BisqueResourcesJSONBody struct {
+	Resources *[]string `json:"resources,omitempty"`
+}
+
+// GetUploadCaption200JSONResponseBodySource defines parameters for GetUploadCaption.
+type GetUploadCaption200JSONResponseBodySource string
+
+// GetUploadSliceParams defines parameters for GetUploadSlice.
+type GetUploadSliceParams struct {
+	Axis *string `form:"axis,omitempty" json:"axis,omitempty"`
+	Z    *int    `form:"z,omitempty" json:"z,omitempty"`
+	Y    *int    `form:"y,omitempty" json:"y,omitempty"`
+	X    *int    `form:"x,omitempty" json:"x,omitempty"`
+	C    *int    `form:"c,omitempty" json:"c,omitempty"`
+	T    *int    `form:"t,omitempty" json:"t,omitempty"`
+}
+
+// ContinueAsGuestJSONRequestBody defines body for ContinueAsGuest for application/json ContentType.
+type ContinueAsGuestJSONRequestBody ContinueAsGuestJSONBody
+
+// LoginBisqueJSONRequestBody defines body for LoginBisque for application/json ContentType.
+type LoginBisqueJSONRequestBody LoginBisqueJSONBody
+
+// CreateV2AdminOrganizationJSONRequestBody defines body for CreateV2AdminOrganization for application/json ContentType.
+type CreateV2AdminOrganizationJSONRequestBody = V2AdminCreateOrganizationRequest
+
+// RequeueV2AdminRunJSONRequestBody defines body for RequeueV2AdminRun for application/json ContentType.
+type RequeueV2AdminRunJSONRequestBody RequeueV2AdminRunJSONBody
+
+// CreateV2AdminUserJSONRequestBody defines body for CreateV2AdminUser for application/json ContentType.
+type CreateV2AdminUserJSONRequestBody = V2AdminCreateUserRequest
+
+// ContinueAsV2GuestJSONRequestBody defines body for ContinueAsV2Guest for application/json ContentType.
+type ContinueAsV2GuestJSONRequestBody ContinueAsV2GuestJSONBody
+
+// LoginV2BisqueJSONRequestBody defines body for LoginV2Bisque for application/json ContentType.
+type LoginV2BisqueJSONRequestBody LoginV2BisqueJSONBody
+
 // CancelRunJSONRequestBody defines body for CancelRun for application/json ContentType.
 type CancelRunJSONRequestBody = V2RunCancelRequest
 
+// ReleaseRunLeaseJSONRequestBody defines body for ReleaseRunLease for application/json ContentType.
+type ReleaseRunLeaseJSONRequestBody = V2RunLeaseRequest
+
+// RenewRunLeaseJSONRequestBody defines body for RenewRunLease for application/json ContentType.
+type RenewRunLeaseJSONRequestBody = V2RunLeaseRequest
+
+// AcquireRunLeaseJSONRequestBody defines body for AcquireRunLease for application/json ContentType.
+type AcquireRunLeaseJSONRequestBody = V2RunLeaseRequest
+
 // ResumeRunJSONRequestBody defines body for ResumeRun for application/json ContentType.
 type ResumeRunJSONRequestBody = V2RunResumeRequest
+
+// RunV2Sam3InteractiveSegmentationJSONRequestBody defines body for RunV2Sam3InteractiveSegmentation for application/json ContentType.
+type RunV2Sam3InteractiveSegmentationJSONRequestBody = RunV2Sam3InteractiveSegmentationJSONBody
 
 // CreateThreadJSONRequestBody defines body for CreateThread for application/json ContentType.
 type CreateThreadJSONRequestBody = V2ThreadCreateRequest
@@ -267,6 +992,2883 @@ type UpsertThreadJSONRequestBody = V2ThreadUpsertRequest
 
 // CreateRunJSONRequestBody defines body for CreateRun for application/json ContentType.
 type CreateRunJSONRequestBody = V2RunCreateRequest
+
+// UploadFilesMultipartRequestBody defines body for UploadFiles for multipart/form-data ContentType.
+type UploadFilesMultipartRequestBody UploadFilesMultipartBody
+
+// ImportV2BisqueResourcesJSONRequestBody defines body for ImportV2BisqueResources for application/json ContentType.
+type ImportV2BisqueResourcesJSONRequestBody ImportV2BisqueResourcesJSONBody
+
+// PostV2WorkerHeartbeatJSONRequestBody defines body for PostV2WorkerHeartbeat for application/json ContentType.
+type PostV2WorkerHeartbeatJSONRequestBody = V2WorkerHeartbeatRequest
+
+// Getter for additional properties for PublicConfigResponse. Returns the specified
+// element and whether it was found
+func (a PublicConfigResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for PublicConfigResponse
+func (a *PublicConfigResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for PublicConfigResponse to handle AdditionalProperties
+func (a *PublicConfigResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["admin_enabled"]; found {
+		err = json.Unmarshal(raw, &a.AdminEnabled)
+		if err != nil {
+			return fmt.Errorf("error reading 'admin_enabled': %w", err)
+		}
+		delete(object, "admin_enabled")
+	}
+
+	if raw, found := object["app_name"]; found {
+		err = json.Unmarshal(raw, &a.AppName)
+		if err != nil {
+			return fmt.Errorf("error reading 'app_name': %w", err)
+		}
+		delete(object, "app_name")
+	}
+
+	if raw, found := object["app_version"]; found {
+		err = json.Unmarshal(raw, &a.AppVersion)
+		if err != nil {
+			return fmt.Errorf("error reading 'app_version': %w", err)
+		}
+		delete(object, "app_version")
+	}
+
+	if raw, found := object["features"]; found {
+		err = json.Unmarshal(raw, &a.Features)
+		if err != nil {
+			return fmt.Errorf("error reading 'features': %w", err)
+		}
+		delete(object, "features")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for PublicConfigResponse to handle AdditionalProperties
+func (a PublicConfigResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.AdminEnabled != nil {
+		object["admin_enabled"], err = json.Marshal(a.AdminEnabled)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'admin_enabled': %w", err)
+		}
+	}
+
+	if a.AppName != nil {
+		object["app_name"], err = json.Marshal(a.AppName)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'app_name': %w", err)
+		}
+	}
+
+	if a.AppVersion != nil {
+		object["app_version"], err = json.Marshal(a.AppVersion)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'app_version': %w", err)
+		}
+	}
+
+	if a.Features != nil {
+		object["features"], err = json.Marshal(a.Features)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'features': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminIssueRecord. Returns the specified
+// element and whether it was found
+func (a V2AdminIssueRecord) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminIssueRecord
+func (a *V2AdminIssueRecord) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminIssueRecord to handle AdditionalProperties
+func (a *V2AdminIssueRecord) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["conversation_id"]; found {
+		err = json.Unmarshal(raw, &a.ConversationId)
+		if err != nil {
+			return fmt.Errorf("error reading 'conversation_id': %w", err)
+		}
+		delete(object, "conversation_id")
+	}
+
+	if raw, found := object["issue_type"]; found {
+		err = json.Unmarshal(raw, &a.IssueType)
+		if err != nil {
+			return fmt.Errorf("error reading 'issue_type': %w", err)
+		}
+		delete(object, "issue_type")
+	}
+
+	if raw, found := object["message"]; found {
+		err = json.Unmarshal(raw, &a.Message)
+		if err != nil {
+			return fmt.Errorf("error reading 'message': %w", err)
+		}
+		delete(object, "message")
+	}
+
+	if raw, found := object["metadata"]; found {
+		err = json.Unmarshal(raw, &a.Metadata)
+		if err != nil {
+			return fmt.Errorf("error reading 'metadata': %w", err)
+		}
+		delete(object, "metadata")
+	}
+
+	if raw, found := object["occurred_at"]; found {
+		err = json.Unmarshal(raw, &a.OccurredAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'occurred_at': %w", err)
+		}
+		delete(object, "occurred_at")
+	}
+
+	if raw, found := object["run_id"]; found {
+		err = json.Unmarshal(raw, &a.RunId)
+		if err != nil {
+			return fmt.Errorf("error reading 'run_id': %w", err)
+		}
+		delete(object, "run_id")
+	}
+
+	if raw, found := object["severity"]; found {
+		err = json.Unmarshal(raw, &a.Severity)
+		if err != nil {
+			return fmt.Errorf("error reading 'severity': %w", err)
+		}
+		delete(object, "severity")
+	}
+
+	if raw, found := object["upload_id"]; found {
+		err = json.Unmarshal(raw, &a.UploadId)
+		if err != nil {
+			return fmt.Errorf("error reading 'upload_id': %w", err)
+		}
+		delete(object, "upload_id")
+	}
+
+	if raw, found := object["user_id"]; found {
+		err = json.Unmarshal(raw, &a.UserId)
+		if err != nil {
+			return fmt.Errorf("error reading 'user_id': %w", err)
+		}
+		delete(object, "user_id")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminIssueRecord to handle AdditionalProperties
+func (a V2AdminIssueRecord) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ConversationId != nil {
+		object["conversation_id"], err = json.Marshal(a.ConversationId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'conversation_id': %w", err)
+		}
+	}
+
+	if a.IssueType != nil {
+		object["issue_type"], err = json.Marshal(a.IssueType)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'issue_type': %w", err)
+		}
+	}
+
+	if a.Message != nil {
+		object["message"], err = json.Marshal(a.Message)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'message': %w", err)
+		}
+	}
+
+	if a.Metadata != nil {
+		object["metadata"], err = json.Marshal(a.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'metadata': %w", err)
+		}
+	}
+
+	if a.OccurredAt != nil {
+		object["occurred_at"], err = json.Marshal(a.OccurredAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'occurred_at': %w", err)
+		}
+	}
+
+	if a.RunId != nil {
+		object["run_id"], err = json.Marshal(a.RunId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'run_id': %w", err)
+		}
+	}
+
+	if a.Severity != nil {
+		object["severity"], err = json.Marshal(a.Severity)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'severity': %w", err)
+		}
+	}
+
+	if a.UploadId != nil {
+		object["upload_id"], err = json.Marshal(a.UploadId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'upload_id': %w", err)
+		}
+	}
+
+	if a.UserId != nil {
+		object["user_id"], err = json.Marshal(a.UserId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'user_id': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminPlatformKpis. Returns the specified
+// element and whether it was found
+func (a V2AdminPlatformKpis) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminPlatformKpis
+func (a *V2AdminPlatformKpis) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminPlatformKpis to handle AdditionalProperties
+func (a *V2AdminPlatformKpis) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["active_users_24h"]; found {
+		err = json.Unmarshal(raw, &a.ActiveUsers24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'active_users_24h': %w", err)
+		}
+		delete(object, "active_users_24h")
+	}
+
+	if raw, found := object["assistant_messages_last_24h"]; found {
+		err = json.Unmarshal(raw, &a.AssistantMessagesLast24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'assistant_messages_last_24h': %w", err)
+		}
+		delete(object, "assistant_messages_last_24h")
+	}
+
+	if raw, found := object["avg_messages_per_conversation"]; found {
+		err = json.Unmarshal(raw, &a.AvgMessagesPerConversation)
+		if err != nil {
+			return fmt.Errorf("error reading 'avg_messages_per_conversation': %w", err)
+		}
+		delete(object, "avg_messages_per_conversation")
+	}
+
+	if raw, found := object["conversations_started_24h"]; found {
+		err = json.Unmarshal(raw, &a.ConversationsStarted24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'conversations_started_24h': %w", err)
+		}
+		delete(object, "conversations_started_24h")
+	}
+
+	if raw, found := object["failed_runs_24h"]; found {
+		err = json.Unmarshal(raw, &a.FailedRuns24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'failed_runs_24h': %w", err)
+		}
+		delete(object, "failed_runs_24h")
+	}
+
+	if raw, found := object["messages_last_24h"]; found {
+		err = json.Unmarshal(raw, &a.MessagesLast24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages_last_24h': %w", err)
+		}
+		delete(object, "messages_last_24h")
+	}
+
+	if raw, found := object["running_runs"]; found {
+		err = json.Unmarshal(raw, &a.RunningRuns)
+		if err != nil {
+			return fmt.Errorf("error reading 'running_runs': %w", err)
+		}
+		delete(object, "running_runs")
+	}
+
+	if raw, found := object["runs_last_24h"]; found {
+		err = json.Unmarshal(raw, &a.RunsLast24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_last_24h': %w", err)
+		}
+		delete(object, "runs_last_24h")
+	}
+
+	if raw, found := object["soft_deleted_uploads"]; found {
+		err = json.Unmarshal(raw, &a.SoftDeletedUploads)
+		if err != nil {
+			return fmt.Errorf("error reading 'soft_deleted_uploads': %w", err)
+		}
+		delete(object, "soft_deleted_uploads")
+	}
+
+	if raw, found := object["stale_running_runs"]; found {
+		err = json.Unmarshal(raw, &a.StaleRunningRuns)
+		if err != nil {
+			return fmt.Errorf("error reading 'stale_running_runs': %w", err)
+		}
+		delete(object, "stale_running_runs")
+	}
+
+	if raw, found := object["success_rate_last_24h"]; found {
+		err = json.Unmarshal(raw, &a.SuccessRateLast24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'success_rate_last_24h': %w", err)
+		}
+		delete(object, "success_rate_last_24h")
+	}
+
+	if raw, found := object["total_conversations"]; found {
+		err = json.Unmarshal(raw, &a.TotalConversations)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_conversations': %w", err)
+		}
+		delete(object, "total_conversations")
+	}
+
+	if raw, found := object["total_messages"]; found {
+		err = json.Unmarshal(raw, &a.TotalMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_messages': %w", err)
+		}
+		delete(object, "total_messages")
+	}
+
+	if raw, found := object["total_runs"]; found {
+		err = json.Unmarshal(raw, &a.TotalRuns)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_runs': %w", err)
+		}
+		delete(object, "total_runs")
+	}
+
+	if raw, found := object["total_storage_bytes"]; found {
+		err = json.Unmarshal(raw, &a.TotalStorageBytes)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_storage_bytes': %w", err)
+		}
+		delete(object, "total_storage_bytes")
+	}
+
+	if raw, found := object["total_uploads"]; found {
+		err = json.Unmarshal(raw, &a.TotalUploads)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_uploads': %w", err)
+		}
+		delete(object, "total_uploads")
+	}
+
+	if raw, found := object["total_users"]; found {
+		err = json.Unmarshal(raw, &a.TotalUsers)
+		if err != nil {
+			return fmt.Errorf("error reading 'total_users': %w", err)
+		}
+		delete(object, "total_users")
+	}
+
+	if raw, found := object["user_messages_last_24h"]; found {
+		err = json.Unmarshal(raw, &a.UserMessagesLast24h)
+		if err != nil {
+			return fmt.Errorf("error reading 'user_messages_last_24h': %w", err)
+		}
+		delete(object, "user_messages_last_24h")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminPlatformKpis to handle AdditionalProperties
+func (a V2AdminPlatformKpis) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ActiveUsers24h != nil {
+		object["active_users_24h"], err = json.Marshal(a.ActiveUsers24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'active_users_24h': %w", err)
+		}
+	}
+
+	if a.AssistantMessagesLast24h != nil {
+		object["assistant_messages_last_24h"], err = json.Marshal(a.AssistantMessagesLast24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'assistant_messages_last_24h': %w", err)
+		}
+	}
+
+	if a.AvgMessagesPerConversation != nil {
+		object["avg_messages_per_conversation"], err = json.Marshal(a.AvgMessagesPerConversation)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'avg_messages_per_conversation': %w", err)
+		}
+	}
+
+	if a.ConversationsStarted24h != nil {
+		object["conversations_started_24h"], err = json.Marshal(a.ConversationsStarted24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'conversations_started_24h': %w", err)
+		}
+	}
+
+	if a.FailedRuns24h != nil {
+		object["failed_runs_24h"], err = json.Marshal(a.FailedRuns24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'failed_runs_24h': %w", err)
+		}
+	}
+
+	if a.MessagesLast24h != nil {
+		object["messages_last_24h"], err = json.Marshal(a.MessagesLast24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages_last_24h': %w", err)
+		}
+	}
+
+	if a.RunningRuns != nil {
+		object["running_runs"], err = json.Marshal(a.RunningRuns)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'running_runs': %w", err)
+		}
+	}
+
+	if a.RunsLast24h != nil {
+		object["runs_last_24h"], err = json.Marshal(a.RunsLast24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_last_24h': %w", err)
+		}
+	}
+
+	if a.SoftDeletedUploads != nil {
+		object["soft_deleted_uploads"], err = json.Marshal(a.SoftDeletedUploads)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'soft_deleted_uploads': %w", err)
+		}
+	}
+
+	if a.StaleRunningRuns != nil {
+		object["stale_running_runs"], err = json.Marshal(a.StaleRunningRuns)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stale_running_runs': %w", err)
+		}
+	}
+
+	if a.SuccessRateLast24h != nil {
+		object["success_rate_last_24h"], err = json.Marshal(a.SuccessRateLast24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'success_rate_last_24h': %w", err)
+		}
+	}
+
+	if a.TotalConversations != nil {
+		object["total_conversations"], err = json.Marshal(a.TotalConversations)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_conversations': %w", err)
+		}
+	}
+
+	if a.TotalMessages != nil {
+		object["total_messages"], err = json.Marshal(a.TotalMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_messages': %w", err)
+		}
+	}
+
+	if a.TotalRuns != nil {
+		object["total_runs"], err = json.Marshal(a.TotalRuns)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_runs': %w", err)
+		}
+	}
+
+	if a.TotalStorageBytes != nil {
+		object["total_storage_bytes"], err = json.Marshal(a.TotalStorageBytes)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_storage_bytes': %w", err)
+		}
+	}
+
+	if a.TotalUploads != nil {
+		object["total_uploads"], err = json.Marshal(a.TotalUploads)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_uploads': %w", err)
+		}
+	}
+
+	if a.TotalUsers != nil {
+		object["total_users"], err = json.Marshal(a.TotalUsers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'total_users': %w", err)
+		}
+	}
+
+	if a.UserMessagesLast24h != nil {
+		object["user_messages_last_24h"], err = json.Marshal(a.UserMessagesLast24h)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'user_messages_last_24h': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminQueueConsumerDiagnostic. Returns the specified
+// element and whether it was found
+func (a V2AdminQueueConsumerDiagnostic) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminQueueConsumerDiagnostic
+func (a *V2AdminQueueConsumerDiagnostic) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminQueueConsumerDiagnostic to handle AdditionalProperties
+func (a *V2AdminQueueConsumerDiagnostic) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["ack_floor_stream_sequence"]; found {
+		err = json.Unmarshal(raw, &a.AckFloorStreamSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'ack_floor_stream_sequence': %w", err)
+		}
+		delete(object, "ack_floor_stream_sequence")
+	}
+
+	if raw, found := object["ack_wait_seconds"]; found {
+		err = json.Unmarshal(raw, &a.AckWaitSeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'ack_wait_seconds': %w", err)
+		}
+		delete(object, "ack_wait_seconds")
+	}
+
+	if raw, found := object["active"]; found {
+		err = json.Unmarshal(raw, &a.Active)
+		if err != nil {
+			return fmt.Errorf("error reading 'active': %w", err)
+		}
+		delete(object, "active")
+	}
+
+	if raw, found := object["delivered_stream_sequence"]; found {
+		err = json.Unmarshal(raw, &a.DeliveredStreamSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'delivered_stream_sequence': %w", err)
+		}
+		delete(object, "delivered_stream_sequence")
+	}
+
+	if raw, found := object["error"]; found {
+		err = json.Unmarshal(raw, &a.Error)
+		if err != nil {
+			return fmt.Errorf("error reading 'error': %w", err)
+		}
+		delete(object, "error")
+	}
+
+	if raw, found := object["in_flight_messages"]; found {
+		err = json.Unmarshal(raw, &a.InFlightMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'in_flight_messages': %w", err)
+		}
+		delete(object, "in_flight_messages")
+	}
+
+	if raw, found := object["max_deliver"]; found {
+		err = json.Unmarshal(raw, &a.MaxDeliver)
+		if err != nil {
+			return fmt.Errorf("error reading 'max_deliver': %w", err)
+		}
+		delete(object, "max_deliver")
+	}
+
+	if raw, found := object["name"]; found {
+		err = json.Unmarshal(raw, &a.Name)
+		if err != nil {
+			return fmt.Errorf("error reading 'name': %w", err)
+		}
+		delete(object, "name")
+	}
+
+	if raw, found := object["pending_messages"]; found {
+		err = json.Unmarshal(raw, &a.PendingMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'pending_messages': %w", err)
+		}
+		delete(object, "pending_messages")
+	}
+
+	if raw, found := object["redelivered_messages"]; found {
+		err = json.Unmarshal(raw, &a.RedeliveredMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'redelivered_messages': %w", err)
+		}
+		delete(object, "redelivered_messages")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if raw, found := object["subject"]; found {
+		err = json.Unmarshal(raw, &a.Subject)
+		if err != nil {
+			return fmt.Errorf("error reading 'subject': %w", err)
+		}
+		delete(object, "subject")
+	}
+
+	if raw, found := object["waiting_pull_requests"]; found {
+		err = json.Unmarshal(raw, &a.WaitingPullRequests)
+		if err != nil {
+			return fmt.Errorf("error reading 'waiting_pull_requests': %w", err)
+		}
+		delete(object, "waiting_pull_requests")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminQueueConsumerDiagnostic to handle AdditionalProperties
+func (a V2AdminQueueConsumerDiagnostic) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.AckFloorStreamSequence != nil {
+		object["ack_floor_stream_sequence"], err = json.Marshal(a.AckFloorStreamSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'ack_floor_stream_sequence': %w", err)
+		}
+	}
+
+	if a.AckWaitSeconds != nil {
+		object["ack_wait_seconds"], err = json.Marshal(a.AckWaitSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'ack_wait_seconds': %w", err)
+		}
+	}
+
+	if a.Active != nil {
+		object["active"], err = json.Marshal(a.Active)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'active': %w", err)
+		}
+	}
+
+	if a.DeliveredStreamSequence != nil {
+		object["delivered_stream_sequence"], err = json.Marshal(a.DeliveredStreamSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'delivered_stream_sequence': %w", err)
+		}
+	}
+
+	if a.Error != nil {
+		object["error"], err = json.Marshal(a.Error)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'error': %w", err)
+		}
+	}
+
+	if a.InFlightMessages != nil {
+		object["in_flight_messages"], err = json.Marshal(a.InFlightMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'in_flight_messages': %w", err)
+		}
+	}
+
+	if a.MaxDeliver != nil {
+		object["max_deliver"], err = json.Marshal(a.MaxDeliver)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'max_deliver': %w", err)
+		}
+	}
+
+	if a.Name != nil {
+		object["name"], err = json.Marshal(a.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'name': %w", err)
+		}
+	}
+
+	if a.PendingMessages != nil {
+		object["pending_messages"], err = json.Marshal(a.PendingMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'pending_messages': %w", err)
+		}
+	}
+
+	if a.RedeliveredMessages != nil {
+		object["redelivered_messages"], err = json.Marshal(a.RedeliveredMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'redelivered_messages': %w", err)
+		}
+	}
+
+	if a.Role != nil {
+		object["role"], err = json.Marshal(a.Role)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'role': %w", err)
+		}
+	}
+
+	if a.Subject != nil {
+		object["subject"], err = json.Marshal(a.Subject)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'subject': %w", err)
+		}
+	}
+
+	if a.WaitingPullRequests != nil {
+		object["waiting_pull_requests"], err = json.Marshal(a.WaitingPullRequests)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'waiting_pull_requests': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminQueueDiagnostics. Returns the specified
+// element and whether it was found
+func (a V2AdminQueueDiagnostics) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminQueueDiagnostics
+func (a *V2AdminQueueDiagnostics) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminQueueDiagnostics to handle AdditionalProperties
+func (a *V2AdminQueueDiagnostics) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["available"]; found {
+		err = json.Unmarshal(raw, &a.Available)
+		if err != nil {
+			return fmt.Errorf("error reading 'available': %w", err)
+		}
+		delete(object, "available")
+	}
+
+	if raw, found := object["consumer_count"]; found {
+		err = json.Unmarshal(raw, &a.ConsumerCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'consumer_count': %w", err)
+		}
+		delete(object, "consumer_count")
+	}
+
+	if raw, found := object["consumers"]; found {
+		err = json.Unmarshal(raw, &a.Consumers)
+		if err != nil {
+			return fmt.Errorf("error reading 'consumers': %w", err)
+		}
+		delete(object, "consumers")
+	}
+
+	if raw, found := object["error"]; found {
+		err = json.Unmarshal(raw, &a.Error)
+		if err != nil {
+			return fmt.Errorf("error reading 'error': %w", err)
+		}
+		delete(object, "error")
+	}
+
+	if raw, found := object["first_sequence"]; found {
+		err = json.Unmarshal(raw, &a.FirstSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'first_sequence': %w", err)
+		}
+		delete(object, "first_sequence")
+	}
+
+	if raw, found := object["last_sequence"]; found {
+		err = json.Unmarshal(raw, &a.LastSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_sequence': %w", err)
+		}
+		delete(object, "last_sequence")
+	}
+
+	if raw, found := object["mode"]; found {
+		err = json.Unmarshal(raw, &a.Mode)
+		if err != nil {
+			return fmt.Errorf("error reading 'mode': %w", err)
+		}
+		delete(object, "mode")
+	}
+
+	if raw, found := object["stream"]; found {
+		err = json.Unmarshal(raw, &a.Stream)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream': %w", err)
+		}
+		delete(object, "stream")
+	}
+
+	if raw, found := object["stream_bytes"]; found {
+		err = json.Unmarshal(raw, &a.StreamBytes)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream_bytes': %w", err)
+		}
+		delete(object, "stream_bytes")
+	}
+
+	if raw, found := object["stream_messages"]; found {
+		err = json.Unmarshal(raw, &a.StreamMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream_messages': %w", err)
+		}
+		delete(object, "stream_messages")
+	}
+
+	if raw, found := object["stream_subjects"]; found {
+		err = json.Unmarshal(raw, &a.StreamSubjects)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream_subjects': %w", err)
+		}
+		delete(object, "stream_subjects")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminQueueDiagnostics to handle AdditionalProperties
+func (a V2AdminQueueDiagnostics) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Available != nil {
+		object["available"], err = json.Marshal(a.Available)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'available': %w", err)
+		}
+	}
+
+	if a.ConsumerCount != nil {
+		object["consumer_count"], err = json.Marshal(a.ConsumerCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'consumer_count': %w", err)
+		}
+	}
+
+	if a.Consumers != nil {
+		object["consumers"], err = json.Marshal(a.Consumers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'consumers': %w", err)
+		}
+	}
+
+	if a.Error != nil {
+		object["error"], err = json.Marshal(a.Error)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'error': %w", err)
+		}
+	}
+
+	if a.FirstSequence != nil {
+		object["first_sequence"], err = json.Marshal(a.FirstSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'first_sequence': %w", err)
+		}
+	}
+
+	if a.LastSequence != nil {
+		object["last_sequence"], err = json.Marshal(a.LastSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_sequence': %w", err)
+		}
+	}
+
+	if a.Mode != nil {
+		object["mode"], err = json.Marshal(a.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'mode': %w", err)
+		}
+	}
+
+	if a.Stream != nil {
+		object["stream"], err = json.Marshal(a.Stream)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream': %w", err)
+		}
+	}
+
+	if a.StreamBytes != nil {
+		object["stream_bytes"], err = json.Marshal(a.StreamBytes)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream_bytes': %w", err)
+		}
+	}
+
+	if a.StreamMessages != nil {
+		object["stream_messages"], err = json.Marshal(a.StreamMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream_messages': %w", err)
+		}
+	}
+
+	if a.StreamSubjects != nil {
+		object["stream_subjects"], err = json.Marshal(a.StreamSubjects)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream_subjects': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminRunRecord. Returns the specified
+// element and whether it was found
+func (a V2AdminRunRecord) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminRunRecord
+func (a *V2AdminRunRecord) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminRunRecord to handle AdditionalProperties
+func (a *V2AdminRunRecord) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["artifact_count"]; found {
+		err = json.Unmarshal(raw, &a.ArtifactCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'artifact_count': %w", err)
+		}
+		delete(object, "artifact_count")
+	}
+
+	if raw, found := object["conversation_id"]; found {
+		err = json.Unmarshal(raw, &a.ConversationId)
+		if err != nil {
+			return fmt.Errorf("error reading 'conversation_id': %w", err)
+		}
+		delete(object, "conversation_id")
+	}
+
+	if raw, found := object["created_at"]; found {
+		err = json.Unmarshal(raw, &a.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'created_at': %w", err)
+		}
+		delete(object, "created_at")
+	}
+
+	if raw, found := object["duration_seconds"]; found {
+		err = json.Unmarshal(raw, &a.DurationSeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'duration_seconds': %w", err)
+		}
+		delete(object, "duration_seconds")
+	}
+
+	if raw, found := object["error"]; found {
+		err = json.Unmarshal(raw, &a.Error)
+		if err != nil {
+			return fmt.Errorf("error reading 'error': %w", err)
+		}
+		delete(object, "error")
+	}
+
+	if raw, found := object["event_count"]; found {
+		err = json.Unmarshal(raw, &a.EventCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'event_count': %w", err)
+		}
+		delete(object, "event_count")
+	}
+
+	if raw, found := object["first_artifact_latency_seconds"]; found {
+		err = json.Unmarshal(raw, &a.FirstArtifactLatencySeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'first_artifact_latency_seconds': %w", err)
+		}
+		delete(object, "first_artifact_latency_seconds")
+	}
+
+	if raw, found := object["first_delta_latency_seconds"]; found {
+		err = json.Unmarshal(raw, &a.FirstDeltaLatencySeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'first_delta_latency_seconds': %w", err)
+		}
+		delete(object, "first_delta_latency_seconds")
+	}
+
+	if raw, found := object["first_tool_latency_seconds"]; found {
+		err = json.Unmarshal(raw, &a.FirstToolLatencySeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'first_tool_latency_seconds': %w", err)
+		}
+		delete(object, "first_tool_latency_seconds")
+	}
+
+	if raw, found := object["goal"]; found {
+		err = json.Unmarshal(raw, &a.Goal)
+		if err != nil {
+			return fmt.Errorf("error reading 'goal': %w", err)
+		}
+		delete(object, "goal")
+	}
+
+	if raw, found := object["heartbeat_count"]; found {
+		err = json.Unmarshal(raw, &a.HeartbeatCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'heartbeat_count': %w", err)
+		}
+		delete(object, "heartbeat_count")
+	}
+
+	if raw, found := object["last_activity_age_seconds"]; found {
+		err = json.Unmarshal(raw, &a.LastActivityAgeSeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_activity_age_seconds': %w", err)
+		}
+		delete(object, "last_activity_age_seconds")
+	}
+
+	if raw, found := object["last_event_at"]; found {
+		err = json.Unmarshal(raw, &a.LastEventAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_event_at': %w", err)
+		}
+		delete(object, "last_event_at")
+	}
+
+	if raw, found := object["last_event_kind"]; found {
+		err = json.Unmarshal(raw, &a.LastEventKind)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_event_kind': %w", err)
+		}
+		delete(object, "last_event_kind")
+	}
+
+	if raw, found := object["last_event_sequence"]; found {
+		err = json.Unmarshal(raw, &a.LastEventSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_event_sequence': %w", err)
+		}
+		delete(object, "last_event_sequence")
+	}
+
+	if raw, found := object["last_tool_at"]; found {
+		err = json.Unmarshal(raw, &a.LastToolAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_tool_at': %w", err)
+		}
+		delete(object, "last_tool_at")
+	}
+
+	if raw, found := object["last_tool_name"]; found {
+		err = json.Unmarshal(raw, &a.LastToolName)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_tool_name': %w", err)
+		}
+		delete(object, "last_tool_name")
+	}
+
+	if raw, found := object["lease_active"]; found {
+		err = json.Unmarshal(raw, &a.LeaseActive)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_active': %w", err)
+		}
+		delete(object, "lease_active")
+	}
+
+	if raw, found := object["lease_expired"]; found {
+		err = json.Unmarshal(raw, &a.LeaseExpired)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_expired': %w", err)
+		}
+		delete(object, "lease_expired")
+	}
+
+	if raw, found := object["lease_expires_at"]; found {
+		err = json.Unmarshal(raw, &a.LeaseExpiresAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_expires_at': %w", err)
+		}
+		delete(object, "lease_expires_at")
+	}
+
+	if raw, found := object["lease_last_renewed_age_seconds"]; found {
+		err = json.Unmarshal(raw, &a.LeaseLastRenewedAgeSeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_last_renewed_age_seconds': %w", err)
+		}
+		delete(object, "lease_last_renewed_age_seconds")
+	}
+
+	if raw, found := object["lease_last_renewed_at"]; found {
+		err = json.Unmarshal(raw, &a.LeaseLastRenewedAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_last_renewed_at': %w", err)
+		}
+		delete(object, "lease_last_renewed_at")
+	}
+
+	if raw, found := object["lease_seconds_remaining"]; found {
+		err = json.Unmarshal(raw, &a.LeaseSecondsRemaining)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_seconds_remaining': %w", err)
+		}
+		delete(object, "lease_seconds_remaining")
+	}
+
+	if raw, found := object["lease_worker_id"]; found {
+		err = json.Unmarshal(raw, &a.LeaseWorkerId)
+		if err != nil {
+			return fmt.Errorf("error reading 'lease_worker_id': %w", err)
+		}
+		delete(object, "lease_worker_id")
+	}
+
+	if raw, found := object["message_delta_count"]; found {
+		err = json.Unmarshal(raw, &a.MessageDeltaCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'message_delta_count': %w", err)
+		}
+		delete(object, "message_delta_count")
+	}
+
+	if raw, found := object["run_id"]; found {
+		err = json.Unmarshal(raw, &a.RunId)
+		if err != nil {
+			return fmt.Errorf("error reading 'run_id': %w", err)
+		}
+		delete(object, "run_id")
+	}
+
+	if raw, found := object["stale"]; found {
+		err = json.Unmarshal(raw, &a.Stale)
+		if err != nil {
+			return fmt.Errorf("error reading 'stale': %w", err)
+		}
+		delete(object, "stale")
+	}
+
+	if raw, found := object["stale_reason"]; found {
+		err = json.Unmarshal(raw, &a.StaleReason)
+		if err != nil {
+			return fmt.Errorf("error reading 'stale_reason': %w", err)
+		}
+		delete(object, "stale_reason")
+	}
+
+	if raw, found := object["status"]; found {
+		err = json.Unmarshal(raw, &a.Status)
+		if err != nil {
+			return fmt.Errorf("error reading 'status': %w", err)
+		}
+		delete(object, "status")
+	}
+
+	if raw, found := object["tool_call_count"]; found {
+		err = json.Unmarshal(raw, &a.ToolCallCount)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_call_count': %w", err)
+		}
+		delete(object, "tool_call_count")
+	}
+
+	if raw, found := object["tool_names"]; found {
+		err = json.Unmarshal(raw, &a.ToolNames)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_names': %w", err)
+		}
+		delete(object, "tool_names")
+	}
+
+	if raw, found := object["updated_at"]; found {
+		err = json.Unmarshal(raw, &a.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'updated_at': %w", err)
+		}
+		delete(object, "updated_at")
+	}
+
+	if raw, found := object["user_id"]; found {
+		err = json.Unmarshal(raw, &a.UserId)
+		if err != nil {
+			return fmt.Errorf("error reading 'user_id': %w", err)
+		}
+		delete(object, "user_id")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminRunRecord to handle AdditionalProperties
+func (a V2AdminRunRecord) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ArtifactCount != nil {
+		object["artifact_count"], err = json.Marshal(a.ArtifactCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'artifact_count': %w", err)
+		}
+	}
+
+	if a.ConversationId != nil {
+		object["conversation_id"], err = json.Marshal(a.ConversationId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'conversation_id': %w", err)
+		}
+	}
+
+	if a.CreatedAt != nil {
+		object["created_at"], err = json.Marshal(a.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'created_at': %w", err)
+		}
+	}
+
+	if a.DurationSeconds != nil {
+		object["duration_seconds"], err = json.Marshal(a.DurationSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'duration_seconds': %w", err)
+		}
+	}
+
+	if a.Error != nil {
+		object["error"], err = json.Marshal(a.Error)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'error': %w", err)
+		}
+	}
+
+	if a.EventCount != nil {
+		object["event_count"], err = json.Marshal(a.EventCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'event_count': %w", err)
+		}
+	}
+
+	if a.FirstArtifactLatencySeconds != nil {
+		object["first_artifact_latency_seconds"], err = json.Marshal(a.FirstArtifactLatencySeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'first_artifact_latency_seconds': %w", err)
+		}
+	}
+
+	if a.FirstDeltaLatencySeconds != nil {
+		object["first_delta_latency_seconds"], err = json.Marshal(a.FirstDeltaLatencySeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'first_delta_latency_seconds': %w", err)
+		}
+	}
+
+	if a.FirstToolLatencySeconds != nil {
+		object["first_tool_latency_seconds"], err = json.Marshal(a.FirstToolLatencySeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'first_tool_latency_seconds': %w", err)
+		}
+	}
+
+	if a.Goal != nil {
+		object["goal"], err = json.Marshal(a.Goal)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'goal': %w", err)
+		}
+	}
+
+	if a.HeartbeatCount != nil {
+		object["heartbeat_count"], err = json.Marshal(a.HeartbeatCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'heartbeat_count': %w", err)
+		}
+	}
+
+	if a.LastActivityAgeSeconds != nil {
+		object["last_activity_age_seconds"], err = json.Marshal(a.LastActivityAgeSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_activity_age_seconds': %w", err)
+		}
+	}
+
+	if a.LastEventAt != nil {
+		object["last_event_at"], err = json.Marshal(a.LastEventAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_event_at': %w", err)
+		}
+	}
+
+	if a.LastEventKind != nil {
+		object["last_event_kind"], err = json.Marshal(a.LastEventKind)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_event_kind': %w", err)
+		}
+	}
+
+	if a.LastEventSequence != nil {
+		object["last_event_sequence"], err = json.Marshal(a.LastEventSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_event_sequence': %w", err)
+		}
+	}
+
+	if a.LastToolAt != nil {
+		object["last_tool_at"], err = json.Marshal(a.LastToolAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_tool_at': %w", err)
+		}
+	}
+
+	if a.LastToolName != nil {
+		object["last_tool_name"], err = json.Marshal(a.LastToolName)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_tool_name': %w", err)
+		}
+	}
+
+	if a.LeaseActive != nil {
+		object["lease_active"], err = json.Marshal(a.LeaseActive)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_active': %w", err)
+		}
+	}
+
+	if a.LeaseExpired != nil {
+		object["lease_expired"], err = json.Marshal(a.LeaseExpired)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_expired': %w", err)
+		}
+	}
+
+	if a.LeaseExpiresAt != nil {
+		object["lease_expires_at"], err = json.Marshal(a.LeaseExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_expires_at': %w", err)
+		}
+	}
+
+	if a.LeaseLastRenewedAgeSeconds != nil {
+		object["lease_last_renewed_age_seconds"], err = json.Marshal(a.LeaseLastRenewedAgeSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_last_renewed_age_seconds': %w", err)
+		}
+	}
+
+	if a.LeaseLastRenewedAt != nil {
+		object["lease_last_renewed_at"], err = json.Marshal(a.LeaseLastRenewedAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_last_renewed_at': %w", err)
+		}
+	}
+
+	if a.LeaseSecondsRemaining != nil {
+		object["lease_seconds_remaining"], err = json.Marshal(a.LeaseSecondsRemaining)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_seconds_remaining': %w", err)
+		}
+	}
+
+	if a.LeaseWorkerId != nil {
+		object["lease_worker_id"], err = json.Marshal(a.LeaseWorkerId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'lease_worker_id': %w", err)
+		}
+	}
+
+	if a.MessageDeltaCount != nil {
+		object["message_delta_count"], err = json.Marshal(a.MessageDeltaCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'message_delta_count': %w", err)
+		}
+	}
+
+	if a.RunId != nil {
+		object["run_id"], err = json.Marshal(a.RunId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'run_id': %w", err)
+		}
+	}
+
+	if a.Stale != nil {
+		object["stale"], err = json.Marshal(a.Stale)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stale': %w", err)
+		}
+	}
+
+	if a.StaleReason != nil {
+		object["stale_reason"], err = json.Marshal(a.StaleReason)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stale_reason': %w", err)
+		}
+	}
+
+	if a.Status != nil {
+		object["status"], err = json.Marshal(a.Status)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'status': %w", err)
+		}
+	}
+
+	if a.ToolCallCount != nil {
+		object["tool_call_count"], err = json.Marshal(a.ToolCallCount)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_call_count': %w", err)
+		}
+	}
+
+	if a.ToolNames != nil {
+		object["tool_names"], err = json.Marshal(a.ToolNames)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_names': %w", err)
+		}
+	}
+
+	if a.UpdatedAt != nil {
+		object["updated_at"], err = json.Marshal(a.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'updated_at': %w", err)
+		}
+	}
+
+	if a.UserId != nil {
+		object["user_id"], err = json.Marshal(a.UserId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'user_id': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminRuntimeSummary. Returns the specified
+// element and whether it was found
+func (a V2AdminRuntimeSummary) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminRuntimeSummary
+func (a *V2AdminRuntimeSummary) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminRuntimeSummary to handle AdditionalProperties
+func (a *V2AdminRuntimeSummary) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["app_version"]; found {
+		err = json.Unmarshal(raw, &a.AppVersion)
+		if err != nil {
+			return fmt.Errorf("error reading 'app_version': %w", err)
+		}
+		delete(object, "app_version")
+	}
+
+	if raw, found := object["artifact_root"]; found {
+		err = json.Unmarshal(raw, &a.ArtifactRoot)
+		if err != nil {
+			return fmt.Errorf("error reading 'artifact_root': %w", err)
+		}
+		delete(object, "artifact_root")
+	}
+
+	if raw, found := object["dispatch_mode"]; found {
+		err = json.Unmarshal(raw, &a.DispatchMode)
+		if err != nil {
+			return fmt.Errorf("error reading 'dispatch_mode': %w", err)
+		}
+		delete(object, "dispatch_mode")
+	}
+
+	if raw, found := object["event_transport"]; found {
+		err = json.Unmarshal(raw, &a.EventTransport)
+		if err != nil {
+			return fmt.Errorf("error reading 'event_transport': %w", err)
+		}
+		delete(object, "event_transport")
+	}
+
+	if raw, found := object["job_transport"]; found {
+		err = json.Unmarshal(raw, &a.JobTransport)
+		if err != nil {
+			return fmt.Errorf("error reading 'job_transport': %w", err)
+		}
+		delete(object, "job_transport")
+	}
+
+	if raw, found := object["nats_cancel_subject"]; found {
+		err = json.Unmarshal(raw, &a.NatsCancelSubject)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_cancel_subject': %w", err)
+		}
+		delete(object, "nats_cancel_subject")
+	}
+
+	if raw, found := object["nats_configured"]; found {
+		err = json.Unmarshal(raw, &a.NatsConfigured)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_configured': %w", err)
+		}
+		delete(object, "nats_configured")
+	}
+
+	if raw, found := object["nats_event_consumer"]; found {
+		err = json.Unmarshal(raw, &a.NatsEventConsumer)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_event_consumer': %w", err)
+		}
+		delete(object, "nats_event_consumer")
+	}
+
+	if raw, found := object["nats_events_subject"]; found {
+		err = json.Unmarshal(raw, &a.NatsEventsSubject)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_events_subject': %w", err)
+		}
+		delete(object, "nats_events_subject")
+	}
+
+	if raw, found := object["nats_jobs_subject"]; found {
+		err = json.Unmarshal(raw, &a.NatsJobsSubject)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_jobs_subject': %w", err)
+		}
+		delete(object, "nats_jobs_subject")
+	}
+
+	if raw, found := object["nats_rarespot_jobs_subject"]; found {
+		err = json.Unmarshal(raw, &a.NatsRarespotJobsSubject)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_rarespot_jobs_subject': %w", err)
+		}
+		delete(object, "nats_rarespot_jobs_subject")
+	}
+
+	if raw, found := object["nats_stream"]; found {
+		err = json.Unmarshal(raw, &a.NatsStream)
+		if err != nil {
+			return fmt.Errorf("error reading 'nats_stream': %w", err)
+		}
+		delete(object, "nats_stream")
+	}
+
+	if raw, found := object["run_recovery_batch_limit"]; found {
+		err = json.Unmarshal(raw, &a.RunRecoveryBatchLimit)
+		if err != nil {
+			return fmt.Errorf("error reading 'run_recovery_batch_limit': %w", err)
+		}
+		delete(object, "run_recovery_batch_limit")
+	}
+
+	if raw, found := object["run_recovery_enabled"]; found {
+		err = json.Unmarshal(raw, &a.RunRecoveryEnabled)
+		if err != nil {
+			return fmt.Errorf("error reading 'run_recovery_enabled': %w", err)
+		}
+		delete(object, "run_recovery_enabled")
+	}
+
+	if raw, found := object["run_recovery_interval_seconds"]; found {
+		err = json.Unmarshal(raw, &a.RunRecoveryIntervalSeconds)
+		if err != nil {
+			return fmt.Errorf("error reading 'run_recovery_interval_seconds': %w", err)
+		}
+		delete(object, "run_recovery_interval_seconds")
+	}
+
+	if raw, found := object["store_backend"]; found {
+		err = json.Unmarshal(raw, &a.StoreBackend)
+		if err != nil {
+			return fmt.Errorf("error reading 'store_backend': %w", err)
+		}
+		delete(object, "store_backend")
+	}
+
+	if raw, found := object["stub_worker_enabled"]; found {
+		err = json.Unmarshal(raw, &a.StubWorkerEnabled)
+		if err != nil {
+			return fmt.Errorf("error reading 'stub_worker_enabled': %w", err)
+		}
+		delete(object, "stub_worker_enabled")
+	}
+
+	if raw, found := object["upload_root"]; found {
+		err = json.Unmarshal(raw, &a.UploadRoot)
+		if err != nil {
+			return fmt.Errorf("error reading 'upload_root': %w", err)
+		}
+		delete(object, "upload_root")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminRuntimeSummary to handle AdditionalProperties
+func (a V2AdminRuntimeSummary) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.AppVersion != nil {
+		object["app_version"], err = json.Marshal(a.AppVersion)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'app_version': %w", err)
+		}
+	}
+
+	if a.ArtifactRoot != nil {
+		object["artifact_root"], err = json.Marshal(a.ArtifactRoot)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'artifact_root': %w", err)
+		}
+	}
+
+	if a.DispatchMode != nil {
+		object["dispatch_mode"], err = json.Marshal(a.DispatchMode)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'dispatch_mode': %w", err)
+		}
+	}
+
+	if a.EventTransport != nil {
+		object["event_transport"], err = json.Marshal(a.EventTransport)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'event_transport': %w", err)
+		}
+	}
+
+	if a.JobTransport != nil {
+		object["job_transport"], err = json.Marshal(a.JobTransport)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'job_transport': %w", err)
+		}
+	}
+
+	if a.NatsCancelSubject != nil {
+		object["nats_cancel_subject"], err = json.Marshal(a.NatsCancelSubject)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_cancel_subject': %w", err)
+		}
+	}
+
+	if a.NatsConfigured != nil {
+		object["nats_configured"], err = json.Marshal(a.NatsConfigured)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_configured': %w", err)
+		}
+	}
+
+	if a.NatsEventConsumer != nil {
+		object["nats_event_consumer"], err = json.Marshal(a.NatsEventConsumer)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_event_consumer': %w", err)
+		}
+	}
+
+	if a.NatsEventsSubject != nil {
+		object["nats_events_subject"], err = json.Marshal(a.NatsEventsSubject)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_events_subject': %w", err)
+		}
+	}
+
+	if a.NatsJobsSubject != nil {
+		object["nats_jobs_subject"], err = json.Marshal(a.NatsJobsSubject)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_jobs_subject': %w", err)
+		}
+	}
+
+	if a.NatsRarespotJobsSubject != nil {
+		object["nats_rarespot_jobs_subject"], err = json.Marshal(a.NatsRarespotJobsSubject)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_rarespot_jobs_subject': %w", err)
+		}
+	}
+
+	if a.NatsStream != nil {
+		object["nats_stream"], err = json.Marshal(a.NatsStream)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'nats_stream': %w", err)
+		}
+	}
+
+	if a.RunRecoveryBatchLimit != nil {
+		object["run_recovery_batch_limit"], err = json.Marshal(a.RunRecoveryBatchLimit)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'run_recovery_batch_limit': %w", err)
+		}
+	}
+
+	if a.RunRecoveryEnabled != nil {
+		object["run_recovery_enabled"], err = json.Marshal(a.RunRecoveryEnabled)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'run_recovery_enabled': %w", err)
+		}
+	}
+
+	if a.RunRecoveryIntervalSeconds != nil {
+		object["run_recovery_interval_seconds"], err = json.Marshal(a.RunRecoveryIntervalSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'run_recovery_interval_seconds': %w", err)
+		}
+	}
+
+	if a.StoreBackend != nil {
+		object["store_backend"], err = json.Marshal(a.StoreBackend)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'store_backend': %w", err)
+		}
+	}
+
+	if a.StubWorkerEnabled != nil {
+		object["stub_worker_enabled"], err = json.Marshal(a.StubWorkerEnabled)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stub_worker_enabled': %w", err)
+		}
+	}
+
+	if a.UploadRoot != nil {
+		object["upload_root"], err = json.Marshal(a.UploadRoot)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'upload_root': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminToolUsageRecord. Returns the specified
+// element and whether it was found
+func (a V2AdminToolUsageRecord) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminToolUsageRecord
+func (a *V2AdminToolUsageRecord) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminToolUsageRecord to handle AdditionalProperties
+func (a *V2AdminToolUsageRecord) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["count"]; found {
+		err = json.Unmarshal(raw, &a.Count)
+		if err != nil {
+			return fmt.Errorf("error reading 'count': %w", err)
+		}
+		delete(object, "count")
+	}
+
+	if raw, found := object["failed"]; found {
+		err = json.Unmarshal(raw, &a.Failed)
+		if err != nil {
+			return fmt.Errorf("error reading 'failed': %w", err)
+		}
+		delete(object, "failed")
+	}
+
+	if raw, found := object["succeeded"]; found {
+		err = json.Unmarshal(raw, &a.Succeeded)
+		if err != nil {
+			return fmt.Errorf("error reading 'succeeded': %w", err)
+		}
+		delete(object, "succeeded")
+	}
+
+	if raw, found := object["tool_name"]; found {
+		err = json.Unmarshal(raw, &a.ToolName)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_name': %w", err)
+		}
+		delete(object, "tool_name")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminToolUsageRecord to handle AdditionalProperties
+func (a V2AdminToolUsageRecord) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Count != nil {
+		object["count"], err = json.Marshal(a.Count)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'count': %w", err)
+		}
+	}
+
+	if a.Failed != nil {
+		object["failed"], err = json.Marshal(a.Failed)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'failed': %w", err)
+		}
+	}
+
+	if a.Succeeded != nil {
+		object["succeeded"], err = json.Marshal(a.Succeeded)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'succeeded': %w", err)
+		}
+	}
+
+	if a.ToolName != nil {
+		object["tool_name"], err = json.Marshal(a.ToolName)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_name': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminUsageBucket. Returns the specified
+// element and whether it was found
+func (a V2AdminUsageBucket) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminUsageBucket
+func (a *V2AdminUsageBucket) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminUsageBucket to handle AdditionalProperties
+func (a *V2AdminUsageBucket) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["bucket_start"]; found {
+		err = json.Unmarshal(raw, &a.BucketStart)
+		if err != nil {
+			return fmt.Errorf("error reading 'bucket_start': %w", err)
+		}
+		delete(object, "bucket_start")
+	}
+
+	if raw, found := object["new_users"]; found {
+		err = json.Unmarshal(raw, &a.NewUsers)
+		if err != nil {
+			return fmt.Errorf("error reading 'new_users': %w", err)
+		}
+		delete(object, "new_users")
+	}
+
+	if raw, found := object["runs_failed"]; found {
+		err = json.Unmarshal(raw, &a.RunsFailed)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_failed': %w", err)
+		}
+		delete(object, "runs_failed")
+	}
+
+	if raw, found := object["runs_succeeded"]; found {
+		err = json.Unmarshal(raw, &a.RunsSucceeded)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_succeeded': %w", err)
+		}
+		delete(object, "runs_succeeded")
+	}
+
+	if raw, found := object["runs_total"]; found {
+		err = json.Unmarshal(raw, &a.RunsTotal)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_total': %w", err)
+		}
+		delete(object, "runs_total")
+	}
+
+	if raw, found := object["uploads"]; found {
+		err = json.Unmarshal(raw, &a.Uploads)
+		if err != nil {
+			return fmt.Errorf("error reading 'uploads': %w", err)
+		}
+		delete(object, "uploads")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminUsageBucket to handle AdditionalProperties
+func (a V2AdminUsageBucket) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.BucketStart != nil {
+		object["bucket_start"], err = json.Marshal(a.BucketStart)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'bucket_start': %w", err)
+		}
+	}
+
+	if a.NewUsers != nil {
+		object["new_users"], err = json.Marshal(a.NewUsers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'new_users': %w", err)
+		}
+	}
+
+	if a.RunsFailed != nil {
+		object["runs_failed"], err = json.Marshal(a.RunsFailed)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_failed': %w", err)
+		}
+	}
+
+	if a.RunsSucceeded != nil {
+		object["runs_succeeded"], err = json.Marshal(a.RunsSucceeded)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_succeeded': %w", err)
+		}
+	}
+
+	if a.RunsTotal != nil {
+		object["runs_total"], err = json.Marshal(a.RunsTotal)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_total': %w", err)
+		}
+	}
+
+	if a.Uploads != nil {
+		object["uploads"], err = json.Marshal(a.Uploads)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'uploads': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminUserSummary. Returns the specified
+// element and whether it was found
+func (a V2AdminUserSummary) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminUserSummary
+func (a *V2AdminUserSummary) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminUserSummary to handle AdditionalProperties
+func (a *V2AdminUserSummary) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["conversations"]; found {
+		err = json.Unmarshal(raw, &a.Conversations)
+		if err != nil {
+			return fmt.Errorf("error reading 'conversations': %w", err)
+		}
+		delete(object, "conversations")
+	}
+
+	if raw, found := object["created_at"]; found {
+		err = json.Unmarshal(raw, &a.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'created_at': %w", err)
+		}
+		delete(object, "created_at")
+	}
+
+	if raw, found := object["display_name"]; found {
+		err = json.Unmarshal(raw, &a.DisplayName)
+		if err != nil {
+			return fmt.Errorf("error reading 'display_name': %w", err)
+		}
+		delete(object, "display_name")
+	}
+
+	if raw, found := object["email"]; found {
+		err = json.Unmarshal(raw, &a.Email)
+		if err != nil {
+			return fmt.Errorf("error reading 'email': %w", err)
+		}
+		delete(object, "email")
+	}
+
+	if raw, found := object["last_activity_at"]; found {
+		err = json.Unmarshal(raw, &a.LastActivityAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_activity_at': %w", err)
+		}
+		delete(object, "last_activity_at")
+	}
+
+	if raw, found := object["messages"]; found {
+		err = json.Unmarshal(raw, &a.Messages)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages': %w", err)
+		}
+		delete(object, "messages")
+	}
+
+	if raw, found := object["org_id"]; found {
+		err = json.Unmarshal(raw, &a.OrgId)
+		if err != nil {
+			return fmt.Errorf("error reading 'org_id': %w", err)
+		}
+		delete(object, "org_id")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if raw, found := object["runs_failed"]; found {
+		err = json.Unmarshal(raw, &a.RunsFailed)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_failed': %w", err)
+		}
+		delete(object, "runs_failed")
+	}
+
+	if raw, found := object["runs_running"]; found {
+		err = json.Unmarshal(raw, &a.RunsRunning)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_running': %w", err)
+		}
+		delete(object, "runs_running")
+	}
+
+	if raw, found := object["runs_succeeded"]; found {
+		err = json.Unmarshal(raw, &a.RunsSucceeded)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_succeeded': %w", err)
+		}
+		delete(object, "runs_succeeded")
+	}
+
+	if raw, found := object["runs_total"]; found {
+		err = json.Unmarshal(raw, &a.RunsTotal)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs_total': %w", err)
+		}
+		delete(object, "runs_total")
+	}
+
+	if raw, found := object["status"]; found {
+		err = json.Unmarshal(raw, &a.Status)
+		if err != nil {
+			return fmt.Errorf("error reading 'status': %w", err)
+		}
+		delete(object, "status")
+	}
+
+	if raw, found := object["storage_bytes"]; found {
+		err = json.Unmarshal(raw, &a.StorageBytes)
+		if err != nil {
+			return fmt.Errorf("error reading 'storage_bytes': %w", err)
+		}
+		delete(object, "storage_bytes")
+	}
+
+	if raw, found := object["uploads"]; found {
+		err = json.Unmarshal(raw, &a.Uploads)
+		if err != nil {
+			return fmt.Errorf("error reading 'uploads': %w", err)
+		}
+		delete(object, "uploads")
+	}
+
+	if raw, found := object["user_id"]; found {
+		err = json.Unmarshal(raw, &a.UserId)
+		if err != nil {
+			return fmt.Errorf("error reading 'user_id': %w", err)
+		}
+		delete(object, "user_id")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminUserSummary to handle AdditionalProperties
+func (a V2AdminUserSummary) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Conversations != nil {
+		object["conversations"], err = json.Marshal(a.Conversations)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'conversations': %w", err)
+		}
+	}
+
+	if a.CreatedAt != nil {
+		object["created_at"], err = json.Marshal(a.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'created_at': %w", err)
+		}
+	}
+
+	if a.DisplayName != nil {
+		object["display_name"], err = json.Marshal(a.DisplayName)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'display_name': %w", err)
+		}
+	}
+
+	if a.Email != nil {
+		object["email"], err = json.Marshal(a.Email)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'email': %w", err)
+		}
+	}
+
+	if a.LastActivityAt != nil {
+		object["last_activity_at"], err = json.Marshal(a.LastActivityAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_activity_at': %w", err)
+		}
+	}
+
+	if a.Messages != nil {
+		object["messages"], err = json.Marshal(a.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages': %w", err)
+		}
+	}
+
+	if a.OrgId != nil {
+		object["org_id"], err = json.Marshal(a.OrgId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'org_id': %w", err)
+		}
+	}
+
+	if a.Role != nil {
+		object["role"], err = json.Marshal(a.Role)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'role': %w", err)
+		}
+	}
+
+	if a.RunsFailed != nil {
+		object["runs_failed"], err = json.Marshal(a.RunsFailed)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_failed': %w", err)
+		}
+	}
+
+	if a.RunsRunning != nil {
+		object["runs_running"], err = json.Marshal(a.RunsRunning)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_running': %w", err)
+		}
+	}
+
+	if a.RunsSucceeded != nil {
+		object["runs_succeeded"], err = json.Marshal(a.RunsSucceeded)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_succeeded': %w", err)
+		}
+	}
+
+	if a.RunsTotal != nil {
+		object["runs_total"], err = json.Marshal(a.RunsTotal)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs_total': %w", err)
+		}
+	}
+
+	if a.Status != nil {
+		object["status"], err = json.Marshal(a.Status)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'status': %w", err)
+		}
+	}
+
+	if a.StorageBytes != nil {
+		object["storage_bytes"], err = json.Marshal(a.StorageBytes)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'storage_bytes': %w", err)
+		}
+	}
+
+	if a.Uploads != nil {
+		object["uploads"], err = json.Marshal(a.Uploads)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'uploads': %w", err)
+		}
+	}
+
+	if a.UserId != nil {
+		object["user_id"], err = json.Marshal(a.UserId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'user_id': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2PrairieStatusResponse. Returns the specified
+// element and whether it was found
+func (a V2PrairieStatusResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2PrairieStatusResponse
+func (a *V2PrairieStatusResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2PrairieStatusResponse to handle AdditionalProperties
+func (a *V2PrairieStatusResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["active_model_version"]; found {
+		err = json.Unmarshal(raw, &a.ActiveModelVersion)
+		if err != nil {
+			return fmt.Errorf("error reading 'active_model_version': %w", err)
+		}
+		delete(object, "active_model_version")
+	}
+
+	if raw, found := object["benchmark_baseline"]; found {
+		err = json.Unmarshal(raw, &a.BenchmarkBaseline)
+		if err != nil {
+			return fmt.Errorf("error reading 'benchmark_baseline': %w", err)
+		}
+		delete(object, "benchmark_baseline")
+	}
+
+	if raw, found := object["benchmark_latest_candidate"]; found {
+		err = json.Unmarshal(raw, &a.BenchmarkLatestCandidate)
+		if err != nil {
+			return fmt.Errorf("error reading 'benchmark_latest_candidate': %w", err)
+		}
+		delete(object, "benchmark_latest_candidate")
+	}
+
+	if raw, found := object["benchmark_ready"]; found {
+		err = json.Unmarshal(raw, &a.BenchmarkReady)
+		if err != nil {
+			return fmt.Errorf("error reading 'benchmark_ready': %w", err)
+		}
+		delete(object, "benchmark_ready")
+	}
+
+	if raw, found := object["canonical_benchmark_ready"]; found {
+		err = json.Unmarshal(raw, &a.CanonicalBenchmarkReady)
+		if err != nil {
+			return fmt.Errorf("error reading 'canonical_benchmark_ready': %w", err)
+		}
+		delete(object, "canonical_benchmark_ready")
+	}
+
+	if raw, found := object["class_counts"]; found {
+		err = json.Unmarshal(raw, &a.ClassCounts)
+		if err != nil {
+			return fmt.Errorf("error reading 'class_counts': %w", err)
+		}
+		delete(object, "class_counts")
+	}
+
+	if raw, found := object["dataset_id"]; found {
+		err = json.Unmarshal(raw, &a.DatasetId)
+		if err != nil {
+			return fmt.Errorf("error reading 'dataset_id': %w", err)
+		}
+		delete(object, "dataset_id")
+	}
+
+	if raw, found := object["dataset_name"]; found {
+		err = json.Unmarshal(raw, &a.DatasetName)
+		if err != nil {
+			return fmt.Errorf("error reading 'dataset_name': %w", err)
+		}
+		delete(object, "dataset_name")
+	}
+
+	if raw, found := object["detection_counts"]; found {
+		err = json.Unmarshal(raw, &a.DetectionCounts)
+		if err != nil {
+			return fmt.Errorf("error reading 'detection_counts': %w", err)
+		}
+		delete(object, "detection_counts")
+	}
+
+	if raw, found := object["last_benchmark_at"]; found {
+		err = json.Unmarshal(raw, &a.LastBenchmarkAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_benchmark_at': %w", err)
+		}
+		delete(object, "last_benchmark_at")
+	}
+
+	if raw, found := object["last_sync_at"]; found {
+		err = json.Unmarshal(raw, &a.LastSyncAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'last_sync_at': %w", err)
+		}
+		delete(object, "last_sync_at")
+	}
+
+	if raw, found := object["latest_metrics"]; found {
+		err = json.Unmarshal(raw, &a.LatestMetrics)
+		if err != nil {
+			return fmt.Errorf("error reading 'latest_metrics': %w", err)
+		}
+		delete(object, "latest_metrics")
+	}
+
+	if raw, found := object["model_health"]; found {
+		err = json.Unmarshal(raw, &a.ModelHealth)
+		if err != nil {
+			return fmt.Errorf("error reading 'model_health': %w", err)
+		}
+		delete(object, "model_health")
+	}
+
+	if raw, found := object["next_sync_at"]; found {
+		err = json.Unmarshal(raw, &a.NextSyncAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'next_sync_at': %w", err)
+		}
+		delete(object, "next_sync_at")
+	}
+
+	if raw, found := object["promotion_benchmark_ready"]; found {
+		err = json.Unmarshal(raw, &a.PromotionBenchmarkReady)
+		if err != nil {
+			return fmt.Errorf("error reading 'promotion_benchmark_ready': %w", err)
+		}
+		delete(object, "promotion_benchmark_ready")
+	}
+
+	if raw, found := object["retrain_gate"]; found {
+		err = json.Unmarshal(raw, &a.RetrainGate)
+		if err != nil {
+			return fmt.Errorf("error reading 'retrain_gate': %w", err)
+		}
+		delete(object, "retrain_gate")
+	}
+
+	if raw, found := object["retrain_gate_counts"]; found {
+		err = json.Unmarshal(raw, &a.RetrainGateCounts)
+		if err != nil {
+			return fmt.Errorf("error reading 'retrain_gate_counts': %w", err)
+		}
+		delete(object, "retrain_gate_counts")
+	}
+
+	if raw, found := object["retrain_gate_reasons"]; found {
+		err = json.Unmarshal(raw, &a.RetrainGateReasons)
+		if err != nil {
+			return fmt.Errorf("error reading 'retrain_gate_reasons': %w", err)
+		}
+		delete(object, "retrain_gate_reasons")
+	}
+
+	if raw, found := object["reviewed_images"]; found {
+		err = json.Unmarshal(raw, &a.ReviewedImages)
+		if err != nil {
+			return fmt.Errorf("error reading 'reviewed_images': %w", err)
+		}
+		delete(object, "reviewed_images")
+	}
+
+	if raw, found := object["unreviewed_images"]; found {
+		err = json.Unmarshal(raw, &a.UnreviewedImages)
+		if err != nil {
+			return fmt.Errorf("error reading 'unreviewed_images': %w", err)
+		}
+		delete(object, "unreviewed_images")
+	}
+
+	if raw, found := object["unsupported_class_counts"]; found {
+		err = json.Unmarshal(raw, &a.UnsupportedClassCounts)
+		if err != nil {
+			return fmt.Errorf("error reading 'unsupported_class_counts': %w", err)
+		}
+		delete(object, "unsupported_class_counts")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2PrairieStatusResponse to handle AdditionalProperties
+func (a V2PrairieStatusResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ActiveModelVersion != nil {
+		object["active_model_version"], err = json.Marshal(a.ActiveModelVersion)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'active_model_version': %w", err)
+		}
+	}
+
+	if a.BenchmarkBaseline != nil {
+		object["benchmark_baseline"], err = json.Marshal(a.BenchmarkBaseline)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'benchmark_baseline': %w", err)
+		}
+	}
+
+	if a.BenchmarkLatestCandidate != nil {
+		object["benchmark_latest_candidate"], err = json.Marshal(a.BenchmarkLatestCandidate)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'benchmark_latest_candidate': %w", err)
+		}
+	}
+
+	if a.BenchmarkReady != nil {
+		object["benchmark_ready"], err = json.Marshal(a.BenchmarkReady)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'benchmark_ready': %w", err)
+		}
+	}
+
+	if a.CanonicalBenchmarkReady != nil {
+		object["canonical_benchmark_ready"], err = json.Marshal(a.CanonicalBenchmarkReady)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'canonical_benchmark_ready': %w", err)
+		}
+	}
+
+	if a.ClassCounts != nil {
+		object["class_counts"], err = json.Marshal(a.ClassCounts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'class_counts': %w", err)
+		}
+	}
+
+	if a.DatasetId != nil {
+		object["dataset_id"], err = json.Marshal(a.DatasetId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'dataset_id': %w", err)
+		}
+	}
+
+	object["dataset_name"], err = json.Marshal(a.DatasetName)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'dataset_name': %w", err)
+	}
+
+	if a.DetectionCounts != nil {
+		object["detection_counts"], err = json.Marshal(a.DetectionCounts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'detection_counts': %w", err)
+		}
+	}
+
+	if a.LastBenchmarkAt != nil {
+		object["last_benchmark_at"], err = json.Marshal(a.LastBenchmarkAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_benchmark_at': %w", err)
+		}
+	}
+
+	if a.LastSyncAt != nil {
+		object["last_sync_at"], err = json.Marshal(a.LastSyncAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'last_sync_at': %w", err)
+		}
+	}
+
+	if a.LatestMetrics != nil {
+		object["latest_metrics"], err = json.Marshal(a.LatestMetrics)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'latest_metrics': %w", err)
+		}
+	}
+
+	object["model_health"], err = json.Marshal(a.ModelHealth)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model_health': %w", err)
+	}
+
+	if a.NextSyncAt != nil {
+		object["next_sync_at"], err = json.Marshal(a.NextSyncAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'next_sync_at': %w", err)
+		}
+	}
+
+	if a.PromotionBenchmarkReady != nil {
+		object["promotion_benchmark_ready"], err = json.Marshal(a.PromotionBenchmarkReady)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'promotion_benchmark_ready': %w", err)
+		}
+	}
+
+	object["retrain_gate"], err = json.Marshal(a.RetrainGate)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'retrain_gate': %w", err)
+	}
+
+	if a.RetrainGateCounts != nil {
+		object["retrain_gate_counts"], err = json.Marshal(a.RetrainGateCounts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'retrain_gate_counts': %w", err)
+		}
+	}
+
+	if a.RetrainGateReasons != nil {
+		object["retrain_gate_reasons"], err = json.Marshal(a.RetrainGateReasons)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'retrain_gate_reasons': %w", err)
+		}
+	}
+
+	object["reviewed_images"], err = json.Marshal(a.ReviewedImages)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'reviewed_images': %w", err)
+	}
+
+	object["unreviewed_images"], err = json.Marshal(a.UnreviewedImages)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'unreviewed_images': %w", err)
+	}
+
+	if a.UnsupportedClassCounts != nil {
+		object["unsupported_class_counts"], err = json.Marshal(a.UnsupportedClassCounts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'unsupported_class_counts': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // Getter for additional properties for V2RunBudget. Returns the specified
 // element and whether it was found
@@ -354,6 +3956,15 @@ func (a V2RunBudget) MarshalJSON() ([]byte, error) {
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 
+	// (POST /v1/auth/guest)
+	ContinueAsGuest(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v1/auth/login)
+	LoginBisque(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v1/auth/logout)
+	LogoutBisque(w http.ResponseWriter, r *http.Request)
+
 	// (GET /v1/auth/session)
 	GetAuthSession(w http.ResponseWriter, r *http.Request)
 
@@ -363,8 +3974,86 @@ type ServerInterface interface {
 	// (GET /v1/health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
 
+	// (DELETE /v2/admin/conversations/{conversation_id})
+	DeleteV2AdminConversation(w http.ResponseWriter, r *http.Request, conversationId string, params DeleteV2AdminConversationParams)
+
+	// (GET /v2/admin/issues)
+	ListV2AdminIssues(w http.ResponseWriter, r *http.Request, params ListV2AdminIssuesParams)
+
+	// (GET /v2/admin/model-health)
+	GetV2AdminModelHealth(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/admin/orgs)
+	ListV2AdminOrganizations(w http.ResponseWriter, r *http.Request, params ListV2AdminOrganizationsParams)
+
+	// (POST /v2/admin/orgs)
+	CreateV2AdminOrganization(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/admin/overview)
+	GetV2AdminOverview(w http.ResponseWriter, r *http.Request, params GetV2AdminOverviewParams)
+
+	// (GET /v2/admin/runs)
+	ListV2AdminRuns(w http.ResponseWriter, r *http.Request, params ListV2AdminRunsParams)
+
+	// (POST /v2/admin/runs/{run_id}/cancel)
+	CancelV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID)
+
+	// (POST /v2/admin/runs/{run_id}/requeue)
+	RequeueV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID)
+
+	// (GET /v2/admin/users)
+	ListV2AdminUsers(w http.ResponseWriter, r *http.Request, params ListV2AdminUsersParams)
+
+	// (POST /v2/admin/users)
+	CreateV2AdminUser(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /v2/admin/users/{user_id})
+	DeleteV2AdminUser(w http.ResponseWriter, r *http.Request, userId string)
+
 	// (GET /v2/artifacts/{artifact_id})
 	GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string)
+
+	// (GET /v2/artifacts/{artifact_id}/download)
+	DownloadArtifact(w http.ResponseWriter, r *http.Request, artifactId string)
+
+	// (POST /v2/auth/guest)
+	ContinueAsV2Guest(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/auth/login)
+	LoginV2Bisque(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/auth/logout)
+	LogoutV2Bisque(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/auth/session)
+	GetV2AuthSession(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/config/public)
+	GetV2PublicConfig(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/health)
+	GetV2Health(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/inference/jobs)
+	CreateV2InferenceJob(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/inference/jobs/{job_id}/result)
+	GetV2InferenceJobResult(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (GET /v2/model-health)
+	GetV2ModelHealth(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/resources)
+	ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams)
+
+	// (DELETE /v2/resources/{file_id})
+	DeleteResource(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/resources/{file_id})
+	GetResource(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/resources/{file_id}/thumbnail)
+	GetResourceThumbnail(w http.ResponseWriter, r *http.Request, fileId FileID)
 
 	// (GET /v2/runs)
 	ListRuns(w http.ResponseWriter, r *http.Request, params ListRunsParams)
@@ -375,14 +4064,29 @@ type ServerInterface interface {
 	// (GET /v2/runs/{run_id}/artifacts)
 	ListRunArtifacts(w http.ResponseWriter, r *http.Request, runId RunID, params ListRunArtifactsParams)
 
+	// (GET /v2/runs/{run_id}/artifacts/download)
+	DownloadRunArtifactByPath(w http.ResponseWriter, r *http.Request, runId RunID, params DownloadRunArtifactByPathParams)
+
 	// (POST /v2/runs/{run_id}/cancel)
 	CancelRun(w http.ResponseWriter, r *http.Request, runId RunID)
 
 	// (GET /v2/runs/{run_id}/events)
 	ListRunEvents(w http.ResponseWriter, r *http.Request, runId RunID, params ListRunEventsParams)
 
+	// (DELETE /v2/runs/{run_id}/lease)
+	ReleaseRunLease(w http.ResponseWriter, r *http.Request, runId RunID)
+
+	// (PATCH /v2/runs/{run_id}/lease)
+	RenewRunLease(w http.ResponseWriter, r *http.Request, runId RunID)
+
+	// (POST /v2/runs/{run_id}/lease)
+	AcquireRunLease(w http.ResponseWriter, r *http.Request, runId RunID)
+
 	// (POST /v2/runs/{run_id}/resume)
 	ResumeRun(w http.ResponseWriter, r *http.Request, runId RunID)
+
+	// (POST /v2/segment/sam3/interactive)
+	RunV2Sam3InteractiveSegmentation(w http.ResponseWriter, r *http.Request)
 
 	// (GET /v2/threads)
 	ListThreads(w http.ResponseWriter, r *http.Request, params ListThreadsParams)
@@ -400,12 +4104,141 @@ type ServerInterface interface {
 	ListThreadMessages(w http.ResponseWriter, r *http.Request, threadId ThreadID)
 
 	// (POST /v2/threads/{thread_id}/runs)
-	CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID)
+	CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID, params CreateRunParams)
+
+	// (GET /v2/training/datasets)
+	ListV2TrainingDatasets(w http.ResponseWriter, r *http.Request, params ListV2TrainingDatasetsParams)
+
+	// (POST /v2/training/datasets)
+	CreateV2TrainingDataset(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/datasets/{dataset_id})
+	GetV2TrainingDataset(w http.ResponseWriter, r *http.Request, datasetId string)
+
+	// (POST /v2/training/datasets/{dataset_id}/items)
+	AssignV2TrainingDatasetItems(w http.ResponseWriter, r *http.Request, datasetId string)
+
+	// (GET /v2/training/domains)
+	ListV2TrainingDomains(w http.ResponseWriter, r *http.Request, params ListV2TrainingDomainsParams)
+
+	// (POST /v2/training/domains)
+	CreateV2TrainingDomain(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/domains/{domain_id}/lineages)
+	ListV2TrainingDomainLineages(w http.ResponseWriter, r *http.Request, domainId string, params ListV2TrainingDomainLineagesParams)
+
+	// (POST /v2/training/jobs)
+	CreateV2TrainingJob(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/jobs/{job_id})
+	GetV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (POST /v2/training/jobs/{job_id}/control)
+	ControlV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (POST /v2/training/lineages/{lineage_id}/fork)
+	ForkV2TrainingLineage(w http.ResponseWriter, r *http.Request, lineageId string)
+
+	// (GET /v2/training/lineages/{lineage_id}/versions)
+	ListV2TrainingLineageVersions(w http.ResponseWriter, r *http.Request, lineageId string, params ListV2TrainingLineageVersionsParams)
+
+	// (GET /v2/training/merge-requests)
+	ListV2TrainingMergeRequests(w http.ResponseWriter, r *http.Request, params ListV2TrainingMergeRequestsParams)
+
+	// (POST /v2/training/merge-requests)
+	CreateV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/merge-requests/{merge_id}/approve)
+	ApproveV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string)
+
+	// (POST /v2/training/merge-requests/{merge_id}/reject)
+	RejectV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string)
+
+	// (POST /v2/training/model-versions/{version_id}/promote)
+	PromoteV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string)
+
+	// (POST /v2/training/model-versions/{version_id}/rollback)
+	RollbackV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string)
+
+	// (GET /v2/training/models)
+	ListV2TrainingModels(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/prairie/benchmark/run)
+	RunV2PrairieBenchmark(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/prairie/retrain-request)
+	RequestV2PrairieRetrain(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/prairie/retrain-requests)
+	ListV2PrairieRetrainRequests(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/prairie/status)
+	GetV2PrairieStatus(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/prairie/sync)
+	SyncV2PrairieActiveLearning(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/preflight)
+	PreviewV2TrainingJob(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/training/update-proposals)
+	ListV2TrainingUpdateProposals(w http.ResponseWriter, r *http.Request, params ListV2TrainingUpdateProposalsParams)
+
+	// (POST /v2/training/update-proposals)
+	CreateV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/update-proposals/preview)
+	PreviewV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/training/update-proposals/{proposal_id}/approve)
+	ApproveV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string)
+
+	// (POST /v2/training/update-proposals/{proposal_id}/reject)
+	RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string)
+
+	// (POST /v2/uploads)
+	UploadFiles(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/uploads/from-bisque)
+	ImportV2BisqueResources(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/uploads/{file_id}/caption)
+	GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/uploads/{file_id}/display)
+	GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/uploads/{file_id}/preview)
+	GetUploadPreview(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/uploads/{file_id}/slice)
+	GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams)
+
+	// (GET /v2/uploads/{file_id}/viewer)
+	GetUploadViewer(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (POST /v2/workers/heartbeat)
+	PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Request)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// (POST /v1/auth/guest)
+func (_ Unimplemented) ContinueAsGuest(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v1/auth/login)
+func (_ Unimplemented) LoginBisque(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v1/auth/logout)
+func (_ Unimplemented) LogoutBisque(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // (GET /v1/auth/session)
 func (_ Unimplemented) GetAuthSession(w http.ResponseWriter, r *http.Request) {
@@ -422,8 +4255,138 @@ func (_ Unimplemented) GetHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (DELETE /v2/admin/conversations/{conversation_id})
+func (_ Unimplemented) DeleteV2AdminConversation(w http.ResponseWriter, r *http.Request, conversationId string, params DeleteV2AdminConversationParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/issues)
+func (_ Unimplemented) ListV2AdminIssues(w http.ResponseWriter, r *http.Request, params ListV2AdminIssuesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/model-health)
+func (_ Unimplemented) GetV2AdminModelHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/orgs)
+func (_ Unimplemented) ListV2AdminOrganizations(w http.ResponseWriter, r *http.Request, params ListV2AdminOrganizationsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/admin/orgs)
+func (_ Unimplemented) CreateV2AdminOrganization(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/overview)
+func (_ Unimplemented) GetV2AdminOverview(w http.ResponseWriter, r *http.Request, params GetV2AdminOverviewParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/runs)
+func (_ Unimplemented) ListV2AdminRuns(w http.ResponseWriter, r *http.Request, params ListV2AdminRunsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/admin/runs/{run_id}/cancel)
+func (_ Unimplemented) CancelV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/admin/runs/{run_id}/requeue)
+func (_ Unimplemented) RequeueV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/admin/users)
+func (_ Unimplemented) ListV2AdminUsers(w http.ResponseWriter, r *http.Request, params ListV2AdminUsersParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/admin/users)
+func (_ Unimplemented) CreateV2AdminUser(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/admin/users/{user_id})
+func (_ Unimplemented) DeleteV2AdminUser(w http.ResponseWriter, r *http.Request, userId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/artifacts/{artifact_id})
 func (_ Unimplemented) GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/artifacts/{artifact_id}/download)
+func (_ Unimplemented) DownloadArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/auth/guest)
+func (_ Unimplemented) ContinueAsV2Guest(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/auth/login)
+func (_ Unimplemented) LoginV2Bisque(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/auth/logout)
+func (_ Unimplemented) LogoutV2Bisque(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/auth/session)
+func (_ Unimplemented) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/config/public)
+func (_ Unimplemented) GetV2PublicConfig(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/health)
+func (_ Unimplemented) GetV2Health(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/inference/jobs)
+func (_ Unimplemented) CreateV2InferenceJob(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/inference/jobs/{job_id}/result)
+func (_ Unimplemented) GetV2InferenceJobResult(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/model-health)
+func (_ Unimplemented) GetV2ModelHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resources)
+func (_ Unimplemented) ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/resources/{file_id})
+func (_ Unimplemented) DeleteResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resources/{file_id})
+func (_ Unimplemented) GetResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resources/{file_id}/thumbnail)
+func (_ Unimplemented) GetResourceThumbnail(w http.ResponseWriter, r *http.Request, fileId FileID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -442,6 +4405,11 @@ func (_ Unimplemented) ListRunArtifacts(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /v2/runs/{run_id}/artifacts/download)
+func (_ Unimplemented) DownloadRunArtifactByPath(w http.ResponseWriter, r *http.Request, runId RunID, params DownloadRunArtifactByPathParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (POST /v2/runs/{run_id}/cancel)
 func (_ Unimplemented) CancelRun(w http.ResponseWriter, r *http.Request, runId RunID) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -452,8 +4420,28 @@ func (_ Unimplemented) ListRunEvents(w http.ResponseWriter, r *http.Request, run
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (DELETE /v2/runs/{run_id}/lease)
+func (_ Unimplemented) ReleaseRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PATCH /v2/runs/{run_id}/lease)
+func (_ Unimplemented) RenewRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/runs/{run_id}/lease)
+func (_ Unimplemented) AcquireRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (POST /v2/runs/{run_id}/resume)
 func (_ Unimplemented) ResumeRun(w http.ResponseWriter, r *http.Request, runId RunID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/segment/sam3/interactive)
+func (_ Unimplemented) RunV2Sam3InteractiveSegmentation(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -483,7 +4471,197 @@ func (_ Unimplemented) ListThreadMessages(w http.ResponseWriter, r *http.Request
 }
 
 // (POST /v2/threads/{thread_id}/runs)
-func (_ Unimplemented) CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID) {
+func (_ Unimplemented) CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID, params CreateRunParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/datasets)
+func (_ Unimplemented) ListV2TrainingDatasets(w http.ResponseWriter, r *http.Request, params ListV2TrainingDatasetsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/datasets)
+func (_ Unimplemented) CreateV2TrainingDataset(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/datasets/{dataset_id})
+func (_ Unimplemented) GetV2TrainingDataset(w http.ResponseWriter, r *http.Request, datasetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/datasets/{dataset_id}/items)
+func (_ Unimplemented) AssignV2TrainingDatasetItems(w http.ResponseWriter, r *http.Request, datasetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/domains)
+func (_ Unimplemented) ListV2TrainingDomains(w http.ResponseWriter, r *http.Request, params ListV2TrainingDomainsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/domains)
+func (_ Unimplemented) CreateV2TrainingDomain(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/domains/{domain_id}/lineages)
+func (_ Unimplemented) ListV2TrainingDomainLineages(w http.ResponseWriter, r *http.Request, domainId string, params ListV2TrainingDomainLineagesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/jobs)
+func (_ Unimplemented) CreateV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/jobs/{job_id})
+func (_ Unimplemented) GetV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/jobs/{job_id}/control)
+func (_ Unimplemented) ControlV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/lineages/{lineage_id}/fork)
+func (_ Unimplemented) ForkV2TrainingLineage(w http.ResponseWriter, r *http.Request, lineageId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/lineages/{lineage_id}/versions)
+func (_ Unimplemented) ListV2TrainingLineageVersions(w http.ResponseWriter, r *http.Request, lineageId string, params ListV2TrainingLineageVersionsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/merge-requests)
+func (_ Unimplemented) ListV2TrainingMergeRequests(w http.ResponseWriter, r *http.Request, params ListV2TrainingMergeRequestsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/merge-requests)
+func (_ Unimplemented) CreateV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/merge-requests/{merge_id}/approve)
+func (_ Unimplemented) ApproveV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/merge-requests/{merge_id}/reject)
+func (_ Unimplemented) RejectV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/model-versions/{version_id}/promote)
+func (_ Unimplemented) PromoteV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/model-versions/{version_id}/rollback)
+func (_ Unimplemented) RollbackV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/models)
+func (_ Unimplemented) ListV2TrainingModels(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/prairie/benchmark/run)
+func (_ Unimplemented) RunV2PrairieBenchmark(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/prairie/retrain-request)
+func (_ Unimplemented) RequestV2PrairieRetrain(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/prairie/retrain-requests)
+func (_ Unimplemented) ListV2PrairieRetrainRequests(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/prairie/status)
+func (_ Unimplemented) GetV2PrairieStatus(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/prairie/sync)
+func (_ Unimplemented) SyncV2PrairieActiveLearning(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/preflight)
+func (_ Unimplemented) PreviewV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/training/update-proposals)
+func (_ Unimplemented) ListV2TrainingUpdateProposals(w http.ResponseWriter, r *http.Request, params ListV2TrainingUpdateProposalsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/update-proposals)
+func (_ Unimplemented) CreateV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/update-proposals/preview)
+func (_ Unimplemented) PreviewV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/update-proposals/{proposal_id}/approve)
+func (_ Unimplemented) ApproveV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/training/update-proposals/{proposal_id}/reject)
+func (_ Unimplemented) RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/uploads)
+func (_ Unimplemented) UploadFiles(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/uploads/from-bisque)
+func (_ Unimplemented) ImportV2BisqueResources(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/caption)
+func (_ Unimplemented) GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/display)
+func (_ Unimplemented) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/preview)
+func (_ Unimplemented) GetUploadPreview(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/slice)
+func (_ Unimplemented) GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/viewer)
+func (_ Unimplemented) GetUploadViewer(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/workers/heartbeat)
+func (_ Unimplemented) PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -495,6 +4673,48 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ContinueAsGuest operation middleware
+func (siw *ServerInterfaceWrapper) ContinueAsGuest(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ContinueAsGuest(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// LoginBisque operation middleware
+func (siw *ServerInterfaceWrapper) LoginBisque(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.LoginBisque(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// LogoutBisque operation middleware
+func (siw *ServerInterfaceWrapper) LogoutBisque(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.LogoutBisque(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetAuthSession operation middleware
 func (siw *ServerInterfaceWrapper) GetAuthSession(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +4758,424 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 	handler.ServeHTTP(w, r)
 }
 
+// DeleteV2AdminConversation operation middleware
+func (siw *ServerInterfaceWrapper) DeleteV2AdminConversation(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "conversation_id" -------------
+	var conversationId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "conversation_id", chi.URLParam(r, "conversation_id"), &conversationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "conversation_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteV2AdminConversationParams
+
+	// ------------- Optional query parameter "user_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "user_id", r.URL.Query(), &params.UserId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "user_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteV2AdminConversation(w, r, conversationId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2AdminIssues operation middleware
+func (siw *ServerInterfaceWrapper) ListV2AdminIssues(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2AdminIssuesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2AdminIssues(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2AdminModelHealth operation middleware
+func (siw *ServerInterfaceWrapper) GetV2AdminModelHealth(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2AdminModelHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2AdminOrganizations operation middleware
+func (siw *ServerInterfaceWrapper) ListV2AdminOrganizations(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2AdminOrganizationsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2AdminOrganizations(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2AdminOrganization operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2AdminOrganization(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2AdminOrganization(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2AdminOverview operation middleware
+func (siw *ServerInterfaceWrapper) GetV2AdminOverview(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetV2AdminOverviewParams
+
+	// ------------- Optional query parameter "top_users" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "top_users", r.URL.Query(), &params.TopUsers, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "top_users"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "top_users", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "issue_limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "issue_limit", r.URL.Query(), &params.IssueLimit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "issue_limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "issue_limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2AdminOverview(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2AdminRuns operation middleware
+func (siw *ServerInterfaceWrapper) ListV2AdminRuns(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2AdminRunsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "user_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "user_id", r.URL.Query(), &params.UserId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "user_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2AdminRuns(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CancelV2AdminRun operation middleware
+func (siw *ServerInterfaceWrapper) CancelV2AdminRun(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CancelV2AdminRun(w, r, runId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RequeueV2AdminRun operation middleware
+func (siw *ServerInterfaceWrapper) RequeueV2AdminRun(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RequeueV2AdminRun(w, r, runId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2AdminUsers operation middleware
+func (siw *ServerInterfaceWrapper) ListV2AdminUsers(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2AdminUsersParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2AdminUsers(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2AdminUser operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2AdminUser(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2AdminUser(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteV2AdminUser operation middleware
+func (siw *ServerInterfaceWrapper) DeleteV2AdminUser(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_id" -------------
+	var userId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_id", chi.URLParam(r, "user_id"), &userId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteV2AdminUser(w, r, userId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetArtifact operation middleware
 func (siw *ServerInterfaceWrapper) GetArtifact(w http.ResponseWriter, r *http.Request) {
 
@@ -555,6 +5193,320 @@ func (siw *ServerInterfaceWrapper) GetArtifact(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetArtifact(w, r, artifactId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DownloadArtifact operation middleware
+func (siw *ServerInterfaceWrapper) DownloadArtifact(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "artifact_id" -------------
+	var artifactId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "artifact_id", chi.URLParam(r, "artifact_id"), &artifactId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "artifact_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DownloadArtifact(w, r, artifactId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ContinueAsV2Guest operation middleware
+func (siw *ServerInterfaceWrapper) ContinueAsV2Guest(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ContinueAsV2Guest(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// LoginV2Bisque operation middleware
+func (siw *ServerInterfaceWrapper) LoginV2Bisque(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.LoginV2Bisque(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// LogoutV2Bisque operation middleware
+func (siw *ServerInterfaceWrapper) LogoutV2Bisque(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.LogoutV2Bisque(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2AuthSession operation middleware
+func (siw *ServerInterfaceWrapper) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2AuthSession(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2PublicConfig operation middleware
+func (siw *ServerInterfaceWrapper) GetV2PublicConfig(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2PublicConfig(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2Health operation middleware
+func (siw *ServerInterfaceWrapper) GetV2Health(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2Health(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2InferenceJob operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2InferenceJob(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2InferenceJob(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2InferenceJobResult operation middleware
+func (siw *ServerInterfaceWrapper) GetV2InferenceJobResult(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2InferenceJobResult(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2ModelHealth operation middleware
+func (siw *ServerInterfaceWrapper) GetV2ModelHealth(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2ModelHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResources operation middleware
+func (siw *ServerInterfaceWrapper) ListResources(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListResourcesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "kind" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "kind", r.URL.Query(), &params.Kind, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "kind"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "kind", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResources(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteResource operation middleware
+func (siw *ServerInterfaceWrapper) DeleteResource(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteResource(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetResource operation middleware
+func (siw *ServerInterfaceWrapper) GetResource(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetResource(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetResourceThumbnail operation middleware
+func (siw *ServerInterfaceWrapper) GetResourceThumbnail(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetResourceThumbnail(w, r, fileId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -704,6 +5656,48 @@ func (siw *ServerInterfaceWrapper) ListRunArtifacts(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// DownloadRunArtifactByPath operation middleware
+func (siw *ServerInterfaceWrapper) DownloadRunArtifactByPath(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DownloadRunArtifactByPathParams
+
+	// ------------- Required query parameter "path" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "path", r.URL.Query(), &params.Path, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "path"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "path", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DownloadRunArtifactByPath(w, r, runId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CancelRun operation middleware
 func (siw *ServerInterfaceWrapper) CancelRun(w http.ResponseWriter, r *http.Request) {
 
@@ -761,6 +5755,19 @@ func (siw *ServerInterfaceWrapper) ListRunEvents(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// ------------- Optional query parameter "after_sequence" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after_sequence", r.URL.Query(), &params.AfterSequence, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after_sequence"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after_sequence", Err: err})
+		}
+		return
+	}
+
 	// ------------- Optional query parameter "stream" -------------
 
 	err = runtime.BindQueryParameterWithOptions("form", true, false, "stream", r.URL.Query(), &params.Stream, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
@@ -776,6 +5783,84 @@ func (siw *ServerInterfaceWrapper) ListRunEvents(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListRunEvents(w, r, runId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReleaseRunLease operation middleware
+func (siw *ServerInterfaceWrapper) ReleaseRunLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReleaseRunLease(w, r, runId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RenewRunLease operation middleware
+func (siw *ServerInterfaceWrapper) RenewRunLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RenewRunLease(w, r, runId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AcquireRunLease operation middleware
+func (siw *ServerInterfaceWrapper) AcquireRunLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "run_id" -------------
+	var runId RunID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "run_id", chi.URLParam(r, "run_id"), &runId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "run_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AcquireRunLease(w, r, runId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -802,6 +5887,20 @@ func (siw *ServerInterfaceWrapper) ResumeRun(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ResumeRun(w, r, runId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RunV2Sam3InteractiveSegmentation operation middleware
+func (siw *ServerInterfaceWrapper) RunV2Sam3InteractiveSegmentation(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RunV2Sam3InteractiveSegmentation(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -977,8 +6076,1008 @@ func (siw *ServerInterfaceWrapper) CreateRun(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateRunParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CreateRun(w, r, threadId)
+		siw.Handler.CreateRun(w, r, threadId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingDatasets operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingDatasets(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingDatasetsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingDatasets(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2TrainingDataset operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2TrainingDataset(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2TrainingDataset(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2TrainingDataset operation middleware
+func (siw *ServerInterfaceWrapper) GetV2TrainingDataset(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "dataset_id" -------------
+	var datasetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "dataset_id", chi.URLParam(r, "dataset_id"), &datasetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "dataset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2TrainingDataset(w, r, datasetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AssignV2TrainingDatasetItems operation middleware
+func (siw *ServerInterfaceWrapper) AssignV2TrainingDatasetItems(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "dataset_id" -------------
+	var datasetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "dataset_id", chi.URLParam(r, "dataset_id"), &datasetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "dataset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AssignV2TrainingDatasetItems(w, r, datasetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingDomains operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingDomains(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingDomainsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingDomains(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2TrainingDomain operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2TrainingDomain(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2TrainingDomain(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingDomainLineages operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingDomainLineages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "domain_id" -------------
+	var domainId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "domain_id", chi.URLParam(r, "domain_id"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "domain_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingDomainLineagesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingDomainLineages(w, r, domainId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2TrainingJob operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2TrainingJob(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2TrainingJob operation middleware
+func (siw *ServerInterfaceWrapper) GetV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2TrainingJob(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ControlV2TrainingJob operation middleware
+func (siw *ServerInterfaceWrapper) ControlV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ControlV2TrainingJob(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ForkV2TrainingLineage operation middleware
+func (siw *ServerInterfaceWrapper) ForkV2TrainingLineage(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "lineage_id" -------------
+	var lineageId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "lineage_id", chi.URLParam(r, "lineage_id"), &lineageId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "lineage_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ForkV2TrainingLineage(w, r, lineageId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingLineageVersions operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingLineageVersions(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "lineage_id" -------------
+	var lineageId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "lineage_id", chi.URLParam(r, "lineage_id"), &lineageId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "lineage_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingLineageVersionsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingLineageVersions(w, r, lineageId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingMergeRequests operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingMergeRequests(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingMergeRequestsParams
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingMergeRequests(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2TrainingMergeRequest operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2TrainingMergeRequest(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ApproveV2TrainingMergeRequest operation middleware
+func (siw *ServerInterfaceWrapper) ApproveV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "merge_id" -------------
+	var mergeId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "merge_id", chi.URLParam(r, "merge_id"), &mergeId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "merge_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ApproveV2TrainingMergeRequest(w, r, mergeId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RejectV2TrainingMergeRequest operation middleware
+func (siw *ServerInterfaceWrapper) RejectV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "merge_id" -------------
+	var mergeId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "merge_id", chi.URLParam(r, "merge_id"), &mergeId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "merge_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RejectV2TrainingMergeRequest(w, r, mergeId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PromoteV2TrainingModelVersion operation middleware
+func (siw *ServerInterfaceWrapper) PromoteV2TrainingModelVersion(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "version_id" -------------
+	var versionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "version_id", chi.URLParam(r, "version_id"), &versionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PromoteV2TrainingModelVersion(w, r, versionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RollbackV2TrainingModelVersion operation middleware
+func (siw *ServerInterfaceWrapper) RollbackV2TrainingModelVersion(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "version_id" -------------
+	var versionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "version_id", chi.URLParam(r, "version_id"), &versionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RollbackV2TrainingModelVersion(w, r, versionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingModels operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingModels(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingModels(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RunV2PrairieBenchmark operation middleware
+func (siw *ServerInterfaceWrapper) RunV2PrairieBenchmark(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RunV2PrairieBenchmark(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RequestV2PrairieRetrain operation middleware
+func (siw *ServerInterfaceWrapper) RequestV2PrairieRetrain(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RequestV2PrairieRetrain(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2PrairieRetrainRequests operation middleware
+func (siw *ServerInterfaceWrapper) ListV2PrairieRetrainRequests(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2PrairieRetrainRequests(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2PrairieStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetV2PrairieStatus(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2PrairieStatus(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SyncV2PrairieActiveLearning operation middleware
+func (siw *ServerInterfaceWrapper) SyncV2PrairieActiveLearning(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SyncV2PrairieActiveLearning(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PreviewV2TrainingJob operation middleware
+func (siw *ServerInterfaceWrapper) PreviewV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PreviewV2TrainingJob(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2TrainingUpdateProposals operation middleware
+func (siw *ServerInterfaceWrapper) ListV2TrainingUpdateProposals(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2TrainingUpdateProposalsParams
+
+	// ------------- Optional query parameter "lineage_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "lineage_id", r.URL.Query(), &params.LineageId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "lineage_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "lineage_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2TrainingUpdateProposals(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2TrainingUpdateProposal operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2TrainingUpdateProposal(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PreviewV2TrainingUpdateProposal operation middleware
+func (siw *ServerInterfaceWrapper) PreviewV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PreviewV2TrainingUpdateProposal(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ApproveV2TrainingUpdateProposal operation middleware
+func (siw *ServerInterfaceWrapper) ApproveV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "proposal_id" -------------
+	var proposalId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "proposal_id", chi.URLParam(r, "proposal_id"), &proposalId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "proposal_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ApproveV2TrainingUpdateProposal(w, r, proposalId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RejectV2TrainingUpdateProposal operation middleware
+func (siw *ServerInterfaceWrapper) RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "proposal_id" -------------
+	var proposalId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "proposal_id", chi.URLParam(r, "proposal_id"), &proposalId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "proposal_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RejectV2TrainingUpdateProposal(w, r, proposalId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UploadFiles operation middleware
+func (siw *ServerInterfaceWrapper) UploadFiles(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UploadFiles(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ImportV2BisqueResources operation middleware
+func (siw *ServerInterfaceWrapper) ImportV2BisqueResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ImportV2BisqueResources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadCaption operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadCaption(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadCaption(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadDisplay operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadDisplay(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadDisplay(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadPreview operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadPreview(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadPreview(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadSlice operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadSlice(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetUploadSliceParams
+
+	// ------------- Optional query parameter "axis" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "axis", r.URL.Query(), &params.Axis, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "axis"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "axis", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "z" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "z", r.URL.Query(), &params.Z, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "z"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "z", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "y" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "y", r.URL.Query(), &params.Y, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "y"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "y", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "x" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "x", r.URL.Query(), &params.X, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "x"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "x", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "c" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "c", r.URL.Query(), &params.C, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "c"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "c", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "t" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "t", r.URL.Query(), &params.T, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "t"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "t", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadSlice(w, r, fileId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadViewer operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadViewer(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadViewer(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostV2WorkerHeartbeat operation middleware
+func (siw *ServerInterfaceWrapper) PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostV2WorkerHeartbeat(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1102,6 +7201,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	}
 
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v1/auth/guest", wrapper.ContinueAsGuest)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v1/auth/login", wrapper.LoginBisque)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v1/auth/logout", wrapper.LogoutBisque)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v1/auth/session", wrapper.GetAuthSession)
 	})
 	r.Group(func(r chi.Router) {
@@ -1111,7 +7219,85 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v1/health", wrapper.GetHealth)
 	})
 	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/admin/conversations/{conversation_id}", wrapper.DeleteV2AdminConversation)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/issues", wrapper.ListV2AdminIssues)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/model-health", wrapper.GetV2AdminModelHealth)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/orgs", wrapper.ListV2AdminOrganizations)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/admin/orgs", wrapper.CreateV2AdminOrganization)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/overview", wrapper.GetV2AdminOverview)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/runs", wrapper.ListV2AdminRuns)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/admin/runs/{run_id}/cancel", wrapper.CancelV2AdminRun)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/admin/runs/{run_id}/requeue", wrapper.RequeueV2AdminRun)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/admin/users", wrapper.ListV2AdminUsers)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/admin/users", wrapper.CreateV2AdminUser)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/admin/users/{user_id}", wrapper.DeleteV2AdminUser)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/artifacts/{artifact_id}", wrapper.GetArtifact)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/artifacts/{artifact_id}/download", wrapper.DownloadArtifact)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/auth/guest", wrapper.ContinueAsV2Guest)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/auth/login", wrapper.LoginV2Bisque)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/auth/logout", wrapper.LogoutV2Bisque)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/auth/session", wrapper.GetV2AuthSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/config/public", wrapper.GetV2PublicConfig)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/health", wrapper.GetV2Health)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/inference/jobs", wrapper.CreateV2InferenceJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/inference/jobs/{job_id}/result", wrapper.GetV2InferenceJobResult)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/model-health", wrapper.GetV2ModelHealth)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resources", wrapper.ListResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/resources/{file_id}", wrapper.DeleteResource)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resources/{file_id}", wrapper.GetResource)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resources/{file_id}/thumbnail", wrapper.GetResourceThumbnail)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/runs", wrapper.ListRuns)
@@ -1123,13 +7309,28 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v2/runs/{run_id}/artifacts", wrapper.ListRunArtifacts)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/runs/{run_id}/artifacts/download", wrapper.DownloadRunArtifactByPath)
+	})
+	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/runs/{run_id}/cancel", wrapper.CancelRun)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/runs/{run_id}/events", wrapper.ListRunEvents)
 	})
 	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/runs/{run_id}/lease", wrapper.ReleaseRunLease)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/runs/{run_id}/lease", wrapper.RenewRunLease)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/runs/{run_id}/lease", wrapper.AcquireRunLease)
+	})
+	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/runs/{run_id}/resume", wrapper.ResumeRun)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/segment/sam3/interactive", wrapper.RunV2Sam3InteractiveSegmentation)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/threads", wrapper.ListThreads)
@@ -1149,8 +7350,187 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/threads/{thread_id}/runs", wrapper.CreateRun)
 	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/datasets", wrapper.ListV2TrainingDatasets)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/datasets", wrapper.CreateV2TrainingDataset)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/datasets/{dataset_id}", wrapper.GetV2TrainingDataset)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/datasets/{dataset_id}/items", wrapper.AssignV2TrainingDatasetItems)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/domains", wrapper.ListV2TrainingDomains)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/domains", wrapper.CreateV2TrainingDomain)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/domains/{domain_id}/lineages", wrapper.ListV2TrainingDomainLineages)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/jobs", wrapper.CreateV2TrainingJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/jobs/{job_id}", wrapper.GetV2TrainingJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/jobs/{job_id}/control", wrapper.ControlV2TrainingJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/lineages/{lineage_id}/fork", wrapper.ForkV2TrainingLineage)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/lineages/{lineage_id}/versions", wrapper.ListV2TrainingLineageVersions)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/merge-requests", wrapper.ListV2TrainingMergeRequests)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/merge-requests", wrapper.CreateV2TrainingMergeRequest)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/merge-requests/{merge_id}/approve", wrapper.ApproveV2TrainingMergeRequest)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/merge-requests/{merge_id}/reject", wrapper.RejectV2TrainingMergeRequest)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/model-versions/{version_id}/promote", wrapper.PromoteV2TrainingModelVersion)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/model-versions/{version_id}/rollback", wrapper.RollbackV2TrainingModelVersion)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/models", wrapper.ListV2TrainingModels)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/prairie/benchmark/run", wrapper.RunV2PrairieBenchmark)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/prairie/retrain-request", wrapper.RequestV2PrairieRetrain)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/prairie/retrain-requests", wrapper.ListV2PrairieRetrainRequests)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/prairie/status", wrapper.GetV2PrairieStatus)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/prairie/sync", wrapper.SyncV2PrairieActiveLearning)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/preflight", wrapper.PreviewV2TrainingJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/training/update-proposals", wrapper.ListV2TrainingUpdateProposals)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/update-proposals", wrapper.CreateV2TrainingUpdateProposal)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/update-proposals/preview", wrapper.PreviewV2TrainingUpdateProposal)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/update-proposals/{proposal_id}/approve", wrapper.ApproveV2TrainingUpdateProposal)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/training/update-proposals/{proposal_id}/reject", wrapper.RejectV2TrainingUpdateProposal)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/uploads", wrapper.UploadFiles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/uploads/from-bisque", wrapper.ImportV2BisqueResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/caption", wrapper.GetUploadCaption)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/display", wrapper.GetUploadDisplay)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/preview", wrapper.GetUploadPreview)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/slice", wrapper.GetUploadSlice)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/viewer", wrapper.GetUploadViewer)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/workers/heartbeat", wrapper.PostV2WorkerHeartbeat)
+	})
 
 	return r
+}
+
+type ContinueAsGuestRequestObject struct {
+	Body *ContinueAsGuestJSONRequestBody
+}
+
+type ContinueAsGuestResponseObject interface {
+	VisitContinueAsGuestResponse(w http.ResponseWriter) error
+}
+
+type ContinueAsGuest200JSONResponse AuthSessionResponse
+
+func (response ContinueAsGuest200JSONResponse) VisitContinueAsGuestResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LoginBisqueRequestObject struct {
+	Body *LoginBisqueJSONRequestBody
+}
+
+type LoginBisqueResponseObject interface {
+	VisitLoginBisqueResponse(w http.ResponseWriter) error
+}
+
+type LoginBisque200JSONResponse AuthSessionResponse
+
+func (response LoginBisque200JSONResponse) VisitLoginBisqueResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LogoutBisqueRequestObject struct {
+}
+
+type LogoutBisqueResponseObject interface {
+	VisitLogoutBisqueResponse(w http.ResponseWriter) error
+}
+
+type LogoutBisque200JSONResponse AuthSessionResponse
+
+func (response LogoutBisque200JSONResponse) VisitLogoutBisqueResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type GetAuthSessionRequestObject struct {
@@ -1216,6 +7596,279 @@ func (response GetHealth200JSONResponse) VisitGetHealthResponse(w http.ResponseW
 	return err
 }
 
+type DeleteV2AdminConversationRequestObject struct {
+	ConversationId string `json:"conversation_id"`
+	Params         DeleteV2AdminConversationParams
+}
+
+type DeleteV2AdminConversationResponseObject interface {
+	VisitDeleteV2AdminConversationResponse(w http.ResponseWriter) error
+}
+
+type DeleteV2AdminConversation501JSONResponse V2NotConfiguredResponse
+
+func (response DeleteV2AdminConversation501JSONResponse) VisitDeleteV2AdminConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2AdminIssuesRequestObject struct {
+	Params ListV2AdminIssuesParams
+}
+
+type ListV2AdminIssuesResponseObject interface {
+	VisitListV2AdminIssuesResponse(w http.ResponseWriter) error
+}
+
+type ListV2AdminIssues200JSONResponse V2AdminIssueListResponse
+
+func (response ListV2AdminIssues200JSONResponse) VisitListV2AdminIssuesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2AdminModelHealthRequestObject struct {
+}
+
+type GetV2AdminModelHealthResponseObject interface {
+	VisitGetV2AdminModelHealthResponse(w http.ResponseWriter) error
+}
+
+type GetV2AdminModelHealth200JSONResponse V2ModelHealthResponse
+
+func (response GetV2AdminModelHealth200JSONResponse) VisitGetV2AdminModelHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2AdminOrganizationsRequestObject struct {
+	Params ListV2AdminOrganizationsParams
+}
+
+type ListV2AdminOrganizationsResponseObject interface {
+	VisitListV2AdminOrganizationsResponse(w http.ResponseWriter) error
+}
+
+type ListV2AdminOrganizations200JSONResponse V2AdminOrganizationListResponse
+
+func (response ListV2AdminOrganizations200JSONResponse) VisitListV2AdminOrganizationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2AdminOrganizationRequestObject struct {
+	Body *CreateV2AdminOrganizationJSONRequestBody
+}
+
+type CreateV2AdminOrganizationResponseObject interface {
+	VisitCreateV2AdminOrganizationResponse(w http.ResponseWriter) error
+}
+
+type CreateV2AdminOrganization201JSONResponse V2AdminOrganization
+
+func (response CreateV2AdminOrganization201JSONResponse) VisitCreateV2AdminOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2AdminOverviewRequestObject struct {
+	Params GetV2AdminOverviewParams
+}
+
+type GetV2AdminOverviewResponseObject interface {
+	VisitGetV2AdminOverviewResponse(w http.ResponseWriter) error
+}
+
+type GetV2AdminOverview200JSONResponse V2AdminOverviewResponse
+
+func (response GetV2AdminOverview200JSONResponse) VisitGetV2AdminOverviewResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2AdminRunsRequestObject struct {
+	Params ListV2AdminRunsParams
+}
+
+type ListV2AdminRunsResponseObject interface {
+	VisitListV2AdminRunsResponse(w http.ResponseWriter) error
+}
+
+type ListV2AdminRuns200JSONResponse V2AdminRunListResponse
+
+func (response ListV2AdminRuns200JSONResponse) VisitListV2AdminRunsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelV2AdminRunRequestObject struct {
+	RunId RunID `json:"run_id"`
+}
+
+type CancelV2AdminRunResponseObject interface {
+	VisitCancelV2AdminRunResponse(w http.ResponseWriter) error
+}
+
+type CancelV2AdminRun200JSONResponse V2AdminRunActionResponse
+
+func (response CancelV2AdminRun200JSONResponse) VisitCancelV2AdminRunResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RequeueV2AdminRunRequestObject struct {
+	RunId RunID `json:"run_id"`
+	Body  *RequeueV2AdminRunJSONRequestBody
+}
+
+type RequeueV2AdminRunResponseObject interface {
+	VisitRequeueV2AdminRunResponse(w http.ResponseWriter) error
+}
+
+type RequeueV2AdminRun200JSONResponse V2AdminRunActionResponse
+
+func (response RequeueV2AdminRun200JSONResponse) VisitRequeueV2AdminRunResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RequeueV2AdminRun409Response struct {
+}
+
+func (response RequeueV2AdminRun409Response) VisitRequeueV2AdminRunResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type ListV2AdminUsersRequestObject struct {
+	Params ListV2AdminUsersParams
+}
+
+type ListV2AdminUsersResponseObject interface {
+	VisitListV2AdminUsersResponse(w http.ResponseWriter) error
+}
+
+type ListV2AdminUsers200JSONResponse V2AdminUserListResponse
+
+func (response ListV2AdminUsers200JSONResponse) VisitListV2AdminUsersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2AdminUserRequestObject struct {
+	Body *CreateV2AdminUserJSONRequestBody
+}
+
+type CreateV2AdminUserResponseObject interface {
+	VisitCreateV2AdminUserResponse(w http.ResponseWriter) error
+}
+
+type CreateV2AdminUser201JSONResponse V2AdminUserAccount
+
+func (response CreateV2AdminUser201JSONResponse) VisitCreateV2AdminUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteV2AdminUserRequestObject struct {
+	UserId string `json:"user_id"`
+}
+
+type DeleteV2AdminUserResponseObject interface {
+	VisitDeleteV2AdminUserResponse(w http.ResponseWriter) error
+}
+
+type DeleteV2AdminUser200JSONResponse V2AdminUserAccount
+
+func (response DeleteV2AdminUser200JSONResponse) VisitDeleteV2AdminUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetArtifactRequestObject struct {
 	ArtifactId string `json:"artifact_id"`
 }
@@ -1235,6 +7888,323 @@ func (response GetArtifact200JSONResponse) VisitGetArtifactResponse(w http.Respo
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DownloadArtifactRequestObject struct {
+	ArtifactId string `json:"artifact_id"`
+}
+
+type DownloadArtifactResponseObject interface {
+	VisitDownloadArtifactResponse(w http.ResponseWriter) error
+}
+
+type DownloadArtifact200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response DownloadArtifact200ApplicationoctetStreamResponse) VisitDownloadArtifactResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type ContinueAsV2GuestRequestObject struct {
+	Body *ContinueAsV2GuestJSONRequestBody
+}
+
+type ContinueAsV2GuestResponseObject interface {
+	VisitContinueAsV2GuestResponse(w http.ResponseWriter) error
+}
+
+type ContinueAsV2Guest200JSONResponse AuthSessionResponse
+
+func (response ContinueAsV2Guest200JSONResponse) VisitContinueAsV2GuestResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LoginV2BisqueRequestObject struct {
+	Body *LoginV2BisqueJSONRequestBody
+}
+
+type LoginV2BisqueResponseObject interface {
+	VisitLoginV2BisqueResponse(w http.ResponseWriter) error
+}
+
+type LoginV2Bisque200JSONResponse AuthSessionResponse
+
+func (response LoginV2Bisque200JSONResponse) VisitLoginV2BisqueResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LogoutV2BisqueRequestObject struct {
+}
+
+type LogoutV2BisqueResponseObject interface {
+	VisitLogoutV2BisqueResponse(w http.ResponseWriter) error
+}
+
+type LogoutV2Bisque200JSONResponse AuthSessionResponse
+
+func (response LogoutV2Bisque200JSONResponse) VisitLogoutV2BisqueResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2AuthSessionRequestObject struct {
+}
+
+type GetV2AuthSessionResponseObject interface {
+	VisitGetV2AuthSessionResponse(w http.ResponseWriter) error
+}
+
+type GetV2AuthSession200JSONResponse AuthSessionResponse
+
+func (response GetV2AuthSession200JSONResponse) VisitGetV2AuthSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2PublicConfigRequestObject struct {
+}
+
+type GetV2PublicConfigResponseObject interface {
+	VisitGetV2PublicConfigResponse(w http.ResponseWriter) error
+}
+
+type GetV2PublicConfig200JSONResponse PublicConfigResponse
+
+func (response GetV2PublicConfig200JSONResponse) VisitGetV2PublicConfigResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2HealthRequestObject struct {
+}
+
+type GetV2HealthResponseObject interface {
+	VisitGetV2HealthResponse(w http.ResponseWriter) error
+}
+
+type GetV2Health200JSONResponse HealthResponse
+
+func (response GetV2Health200JSONResponse) VisitGetV2HealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2InferenceJobRequestObject struct {
+}
+
+type CreateV2InferenceJobResponseObject interface {
+	VisitCreateV2InferenceJobResponse(w http.ResponseWriter) error
+}
+
+type CreateV2InferenceJob501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2InferenceJob501JSONResponse) VisitCreateV2InferenceJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2InferenceJobResultRequestObject struct {
+	JobId string `json:"job_id"`
+}
+
+type GetV2InferenceJobResultResponseObject interface {
+	VisitGetV2InferenceJobResultResponse(w http.ResponseWriter) error
+}
+
+type GetV2InferenceJobResult501JSONResponse V2NotConfiguredResponse
+
+func (response GetV2InferenceJobResult501JSONResponse) VisitGetV2InferenceJobResultResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2ModelHealthRequestObject struct {
+}
+
+type GetV2ModelHealthResponseObject interface {
+	VisitGetV2ModelHealthResponse(w http.ResponseWriter) error
+}
+
+type GetV2ModelHealth200JSONResponse V2ModelHealthResponse
+
+func (response GetV2ModelHealth200JSONResponse) VisitGetV2ModelHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListResourcesRequestObject struct {
+	Params ListResourcesParams
+}
+
+type ListResourcesResponseObject interface {
+	VisitListResourcesResponse(w http.ResponseWriter) error
+}
+
+type ListResources200JSONResponse V2ResourceListResponse
+
+func (response ListResources200JSONResponse) VisitListResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteResourceRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type DeleteResourceResponseObject interface {
+	VisitDeleteResourceResponse(w http.ResponseWriter) error
+}
+
+type DeleteResource200JSONResponse struct {
+	Deleted bool   `json:"deleted"`
+	FileId  string `json:"file_id"`
+}
+
+func (response DeleteResource200JSONResponse) VisitDeleteResourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetResourceRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetResourceResponseObject interface {
+	VisitGetResourceResponse(w http.ResponseWriter) error
+}
+
+type GetResource200JSONResponse V2ResourceResponse
+
+func (response GetResource200JSONResponse) VisitGetResourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetResourceThumbnailRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetResourceThumbnailResponseObject interface {
+	VisitGetResourceThumbnailResponse(w http.ResponseWriter) error
+}
+
+type GetResourceThumbnail200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetResourceThumbnail200ApplicationoctetStreamResponse) VisitGetResourceThumbnailResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
 	return err
 }
 
@@ -1303,6 +8273,51 @@ func (response ListRunArtifacts200JSONResponse) VisitListRunArtifactsResponse(w 
 	w.WriteHeader(200)
 	_, err := buf.WriteTo(w)
 	return err
+}
+
+type DownloadRunArtifactByPathRequestObject struct {
+	RunId  RunID `json:"run_id"`
+	Params DownloadRunArtifactByPathParams
+}
+
+type DownloadRunArtifactByPathResponseObject interface {
+	VisitDownloadRunArtifactByPathResponse(w http.ResponseWriter) error
+}
+
+type DownloadRunArtifactByPath200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response DownloadRunArtifactByPath200ApplicationoctetStreamResponse) VisitDownloadRunArtifactByPathResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type DownloadRunArtifactByPath400Response struct {
+}
+
+func (response DownloadRunArtifactByPath400Response) VisitDownloadRunArtifactByPathResponse(w http.ResponseWriter) error {
+	w.WriteHeader(400)
+	return nil
+}
+
+type DownloadRunArtifactByPath404Response struct {
+}
+
+func (response DownloadRunArtifactByPath404Response) VisitDownloadRunArtifactByPathResponse(w http.ResponseWriter) error {
+	w.WriteHeader(404)
+	return nil
 }
 
 type CancelRunRequestObject struct {
@@ -1394,6 +8409,101 @@ func (response ListRunEvents200TexteventStreamResponse) VisitListRunEventsRespon
 	}
 }
 
+type ReleaseRunLeaseRequestObject struct {
+	RunId RunID `json:"run_id"`
+	Body  *ReleaseRunLeaseJSONRequestBody
+}
+
+type ReleaseRunLeaseResponseObject interface {
+	VisitReleaseRunLeaseResponse(w http.ResponseWriter) error
+}
+
+type ReleaseRunLease200JSONResponse struct {
+	Released bool `json:"released"`
+}
+
+func (response ReleaseRunLease200JSONResponse) VisitReleaseRunLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReleaseRunLease409Response struct {
+}
+
+func (response ReleaseRunLease409Response) VisitReleaseRunLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type RenewRunLeaseRequestObject struct {
+	RunId RunID `json:"run_id"`
+	Body  *RenewRunLeaseJSONRequestBody
+}
+
+type RenewRunLeaseResponseObject interface {
+	VisitRenewRunLeaseResponse(w http.ResponseWriter) error
+}
+
+type RenewRunLease200JSONResponse V2RunLeaseRecord
+
+func (response RenewRunLease200JSONResponse) VisitRenewRunLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RenewRunLease409Response struct {
+}
+
+func (response RenewRunLease409Response) VisitRenewRunLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type AcquireRunLeaseRequestObject struct {
+	RunId RunID `json:"run_id"`
+	Body  *AcquireRunLeaseJSONRequestBody
+}
+
+type AcquireRunLeaseResponseObject interface {
+	VisitAcquireRunLeaseResponse(w http.ResponseWriter) error
+}
+
+type AcquireRunLease200JSONResponse V2RunLeaseRecord
+
+func (response AcquireRunLease200JSONResponse) VisitAcquireRunLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AcquireRunLease409Response struct {
+}
+
+func (response AcquireRunLease409Response) VisitAcquireRunLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
 type ResumeRunRequestObject struct {
 	RunId RunID `json:"run_id"`
 	Body  *ResumeRunJSONRequestBody
@@ -1413,6 +8523,28 @@ func (response ResumeRun200JSONResponse) VisitResumeRunResponse(w http.ResponseW
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RunV2Sam3InteractiveSegmentationRequestObject struct {
+	Body *RunV2Sam3InteractiveSegmentationJSONRequestBody
+}
+
+type RunV2Sam3InteractiveSegmentationResponseObject interface {
+	VisitRunV2Sam3InteractiveSegmentationResponse(w http.ResponseWriter) error
+}
+
+type RunV2Sam3InteractiveSegmentation501JSONResponse V2NotConfiguredResponse
+
+func (response RunV2Sam3InteractiveSegmentation501JSONResponse) VisitRunV2Sam3InteractiveSegmentationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1530,6 +8662,7 @@ func (response ListThreadMessages200JSONResponse) VisitListThreadMessagesRespons
 
 type CreateRunRequestObject struct {
 	ThreadId ThreadID `json:"thread_id"`
+	Params   CreateRunParams
 	Body     *CreateRunJSONRequestBody
 }
 
@@ -1594,8 +8727,873 @@ func (response CreateRun200TexteventStreamResponse) VisitCreateRunResponse(w htt
 	}
 }
 
+type ListV2TrainingDatasetsRequestObject struct {
+	Params ListV2TrainingDatasetsParams
+}
+
+type ListV2TrainingDatasetsResponseObject interface {
+	VisitListV2TrainingDatasetsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingDatasets200JSONResponse V2TrainingDatasetListResponse
+
+func (response ListV2TrainingDatasets200JSONResponse) VisitListV2TrainingDatasetsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2TrainingDatasetRequestObject struct {
+}
+
+type CreateV2TrainingDatasetResponseObject interface {
+	VisitCreateV2TrainingDatasetResponse(w http.ResponseWriter) error
+}
+
+type CreateV2TrainingDataset501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2TrainingDataset501JSONResponse) VisitCreateV2TrainingDatasetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2TrainingDatasetRequestObject struct {
+	DatasetId string `json:"dataset_id"`
+}
+
+type GetV2TrainingDatasetResponseObject interface {
+	VisitGetV2TrainingDatasetResponse(w http.ResponseWriter) error
+}
+
+type GetV2TrainingDataset501JSONResponse V2NotConfiguredResponse
+
+func (response GetV2TrainingDataset501JSONResponse) VisitGetV2TrainingDatasetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AssignV2TrainingDatasetItemsRequestObject struct {
+	DatasetId string `json:"dataset_id"`
+}
+
+type AssignV2TrainingDatasetItemsResponseObject interface {
+	VisitAssignV2TrainingDatasetItemsResponse(w http.ResponseWriter) error
+}
+
+type AssignV2TrainingDatasetItems501JSONResponse V2NotConfiguredResponse
+
+func (response AssignV2TrainingDatasetItems501JSONResponse) VisitAssignV2TrainingDatasetItemsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingDomainsRequestObject struct {
+	Params ListV2TrainingDomainsParams
+}
+
+type ListV2TrainingDomainsResponseObject interface {
+	VisitListV2TrainingDomainsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingDomains200JSONResponse V2TrainingDomainListResponse
+
+func (response ListV2TrainingDomains200JSONResponse) VisitListV2TrainingDomainsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2TrainingDomainRequestObject struct {
+}
+
+type CreateV2TrainingDomainResponseObject interface {
+	VisitCreateV2TrainingDomainResponse(w http.ResponseWriter) error
+}
+
+type CreateV2TrainingDomain501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2TrainingDomain501JSONResponse) VisitCreateV2TrainingDomainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingDomainLineagesRequestObject struct {
+	DomainId string `json:"domain_id"`
+	Params   ListV2TrainingDomainLineagesParams
+}
+
+type ListV2TrainingDomainLineagesResponseObject interface {
+	VisitListV2TrainingDomainLineagesResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingDomainLineages200JSONResponse V2TrainingLineageListResponse
+
+func (response ListV2TrainingDomainLineages200JSONResponse) VisitListV2TrainingDomainLineagesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2TrainingJobRequestObject struct {
+}
+
+type CreateV2TrainingJobResponseObject interface {
+	VisitCreateV2TrainingJobResponse(w http.ResponseWriter) error
+}
+
+type CreateV2TrainingJob501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2TrainingJob501JSONResponse) VisitCreateV2TrainingJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2TrainingJobRequestObject struct {
+	JobId string `json:"job_id"`
+}
+
+type GetV2TrainingJobResponseObject interface {
+	VisitGetV2TrainingJobResponse(w http.ResponseWriter) error
+}
+
+type GetV2TrainingJob501JSONResponse V2NotConfiguredResponse
+
+func (response GetV2TrainingJob501JSONResponse) VisitGetV2TrainingJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ControlV2TrainingJobRequestObject struct {
+	JobId string `json:"job_id"`
+}
+
+type ControlV2TrainingJobResponseObject interface {
+	VisitControlV2TrainingJobResponse(w http.ResponseWriter) error
+}
+
+type ControlV2TrainingJob501JSONResponse V2NotConfiguredResponse
+
+func (response ControlV2TrainingJob501JSONResponse) VisitControlV2TrainingJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ForkV2TrainingLineageRequestObject struct {
+	LineageId string `json:"lineage_id"`
+}
+
+type ForkV2TrainingLineageResponseObject interface {
+	VisitForkV2TrainingLineageResponse(w http.ResponseWriter) error
+}
+
+type ForkV2TrainingLineage501JSONResponse V2NotConfiguredResponse
+
+func (response ForkV2TrainingLineage501JSONResponse) VisitForkV2TrainingLineageResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingLineageVersionsRequestObject struct {
+	LineageId string `json:"lineage_id"`
+	Params    ListV2TrainingLineageVersionsParams
+}
+
+type ListV2TrainingLineageVersionsResponseObject interface {
+	VisitListV2TrainingLineageVersionsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingLineageVersions200JSONResponse V2TrainingModelVersionListResponse
+
+func (response ListV2TrainingLineageVersions200JSONResponse) VisitListV2TrainingLineageVersionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingMergeRequestsRequestObject struct {
+	Params ListV2TrainingMergeRequestsParams
+}
+
+type ListV2TrainingMergeRequestsResponseObject interface {
+	VisitListV2TrainingMergeRequestsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingMergeRequests200JSONResponse V2TrainingMergeRequestListResponse
+
+func (response ListV2TrainingMergeRequests200JSONResponse) VisitListV2TrainingMergeRequestsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2TrainingMergeRequestRequestObject struct {
+}
+
+type CreateV2TrainingMergeRequestResponseObject interface {
+	VisitCreateV2TrainingMergeRequestResponse(w http.ResponseWriter) error
+}
+
+type CreateV2TrainingMergeRequest501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2TrainingMergeRequest501JSONResponse) VisitCreateV2TrainingMergeRequestResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveV2TrainingMergeRequestRequestObject struct {
+	MergeId string `json:"merge_id"`
+}
+
+type ApproveV2TrainingMergeRequestResponseObject interface {
+	VisitApproveV2TrainingMergeRequestResponse(w http.ResponseWriter) error
+}
+
+type ApproveV2TrainingMergeRequest501JSONResponse V2NotConfiguredResponse
+
+func (response ApproveV2TrainingMergeRequest501JSONResponse) VisitApproveV2TrainingMergeRequestResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RejectV2TrainingMergeRequestRequestObject struct {
+	MergeId string `json:"merge_id"`
+}
+
+type RejectV2TrainingMergeRequestResponseObject interface {
+	VisitRejectV2TrainingMergeRequestResponse(w http.ResponseWriter) error
+}
+
+type RejectV2TrainingMergeRequest501JSONResponse V2NotConfiguredResponse
+
+func (response RejectV2TrainingMergeRequest501JSONResponse) VisitRejectV2TrainingMergeRequestResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PromoteV2TrainingModelVersionRequestObject struct {
+	VersionId string `json:"version_id"`
+}
+
+type PromoteV2TrainingModelVersionResponseObject interface {
+	VisitPromoteV2TrainingModelVersionResponse(w http.ResponseWriter) error
+}
+
+type PromoteV2TrainingModelVersion501JSONResponse V2NotConfiguredResponse
+
+func (response PromoteV2TrainingModelVersion501JSONResponse) VisitPromoteV2TrainingModelVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RollbackV2TrainingModelVersionRequestObject struct {
+	VersionId string `json:"version_id"`
+}
+
+type RollbackV2TrainingModelVersionResponseObject interface {
+	VisitRollbackV2TrainingModelVersionResponse(w http.ResponseWriter) error
+}
+
+type RollbackV2TrainingModelVersion501JSONResponse V2NotConfiguredResponse
+
+func (response RollbackV2TrainingModelVersion501JSONResponse) VisitRollbackV2TrainingModelVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingModelsRequestObject struct {
+}
+
+type ListV2TrainingModelsResponseObject interface {
+	VisitListV2TrainingModelsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingModels200JSONResponse V2TrainingModelsResponse
+
+func (response ListV2TrainingModels200JSONResponse) VisitListV2TrainingModelsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RunV2PrairieBenchmarkRequestObject struct {
+}
+
+type RunV2PrairieBenchmarkResponseObject interface {
+	VisitRunV2PrairieBenchmarkResponse(w http.ResponseWriter) error
+}
+
+type RunV2PrairieBenchmark501JSONResponse V2NotConfiguredResponse
+
+func (response RunV2PrairieBenchmark501JSONResponse) VisitRunV2PrairieBenchmarkResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RequestV2PrairieRetrainRequestObject struct {
+}
+
+type RequestV2PrairieRetrainResponseObject interface {
+	VisitRequestV2PrairieRetrainResponse(w http.ResponseWriter) error
+}
+
+type RequestV2PrairieRetrain501JSONResponse V2NotConfiguredResponse
+
+func (response RequestV2PrairieRetrain501JSONResponse) VisitRequestV2PrairieRetrainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2PrairieRetrainRequestsRequestObject struct {
+}
+
+type ListV2PrairieRetrainRequestsResponseObject interface {
+	VisitListV2PrairieRetrainRequestsResponse(w http.ResponseWriter) error
+}
+
+type ListV2PrairieRetrainRequests200JSONResponse V2PrairieRetrainListResponse
+
+func (response ListV2PrairieRetrainRequests200JSONResponse) VisitListV2PrairieRetrainRequestsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2PrairieStatusRequestObject struct {
+}
+
+type GetV2PrairieStatusResponseObject interface {
+	VisitGetV2PrairieStatusResponse(w http.ResponseWriter) error
+}
+
+type GetV2PrairieStatus200JSONResponse V2PrairieStatusResponse
+
+func (response GetV2PrairieStatus200JSONResponse) VisitGetV2PrairieStatusResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SyncV2PrairieActiveLearningRequestObject struct {
+}
+
+type SyncV2PrairieActiveLearningResponseObject interface {
+	VisitSyncV2PrairieActiveLearningResponse(w http.ResponseWriter) error
+}
+
+type SyncV2PrairieActiveLearning501JSONResponse V2NotConfiguredResponse
+
+func (response SyncV2PrairieActiveLearning501JSONResponse) VisitSyncV2PrairieActiveLearningResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewV2TrainingJobRequestObject struct {
+}
+
+type PreviewV2TrainingJobResponseObject interface {
+	VisitPreviewV2TrainingJobResponse(w http.ResponseWriter) error
+}
+
+type PreviewV2TrainingJob501JSONResponse V2NotConfiguredResponse
+
+func (response PreviewV2TrainingJob501JSONResponse) VisitPreviewV2TrainingJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2TrainingUpdateProposalsRequestObject struct {
+	Params ListV2TrainingUpdateProposalsParams
+}
+
+type ListV2TrainingUpdateProposalsResponseObject interface {
+	VisitListV2TrainingUpdateProposalsResponse(w http.ResponseWriter) error
+}
+
+type ListV2TrainingUpdateProposals200JSONResponse V2TrainingUpdateProposalListResponse
+
+func (response ListV2TrainingUpdateProposals200JSONResponse) VisitListV2TrainingUpdateProposalsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2TrainingUpdateProposalRequestObject struct {
+}
+
+type CreateV2TrainingUpdateProposalResponseObject interface {
+	VisitCreateV2TrainingUpdateProposalResponse(w http.ResponseWriter) error
+}
+
+type CreateV2TrainingUpdateProposal501JSONResponse V2NotConfiguredResponse
+
+func (response CreateV2TrainingUpdateProposal501JSONResponse) VisitCreateV2TrainingUpdateProposalResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewV2TrainingUpdateProposalRequestObject struct {
+}
+
+type PreviewV2TrainingUpdateProposalResponseObject interface {
+	VisitPreviewV2TrainingUpdateProposalResponse(w http.ResponseWriter) error
+}
+
+type PreviewV2TrainingUpdateProposal501JSONResponse V2NotConfiguredResponse
+
+func (response PreviewV2TrainingUpdateProposal501JSONResponse) VisitPreviewV2TrainingUpdateProposalResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveV2TrainingUpdateProposalRequestObject struct {
+	ProposalId string `json:"proposal_id"`
+}
+
+type ApproveV2TrainingUpdateProposalResponseObject interface {
+	VisitApproveV2TrainingUpdateProposalResponse(w http.ResponseWriter) error
+}
+
+type ApproveV2TrainingUpdateProposal501JSONResponse V2NotConfiguredResponse
+
+func (response ApproveV2TrainingUpdateProposal501JSONResponse) VisitApproveV2TrainingUpdateProposalResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RejectV2TrainingUpdateProposalRequestObject struct {
+	ProposalId string `json:"proposal_id"`
+}
+
+type RejectV2TrainingUpdateProposalResponseObject interface {
+	VisitRejectV2TrainingUpdateProposalResponse(w http.ResponseWriter) error
+}
+
+type RejectV2TrainingUpdateProposal501JSONResponse V2NotConfiguredResponse
+
+func (response RejectV2TrainingUpdateProposal501JSONResponse) VisitRejectV2TrainingUpdateProposalResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UploadFilesRequestObject struct {
+	Body *multipart.Reader
+}
+
+type UploadFilesResponseObject interface {
+	VisitUploadFilesResponse(w http.ResponseWriter) error
+}
+
+type UploadFiles200JSONResponse V2UploadFilesResponse
+
+func (response UploadFiles200JSONResponse) VisitUploadFilesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ImportV2BisqueResourcesRequestObject struct {
+	Body *ImportV2BisqueResourcesJSONRequestBody
+}
+
+type ImportV2BisqueResourcesResponseObject interface {
+	VisitImportV2BisqueResourcesResponse(w http.ResponseWriter) error
+}
+
+type ImportV2BisqueResources501JSONResponse V2NotConfiguredResponse
+
+func (response ImportV2BisqueResources501JSONResponse) VisitImportV2BisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUploadCaptionRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetUploadCaptionResponseObject interface {
+	VisitGetUploadCaptionResponse(w http.ResponseWriter) error
+}
+
+type GetUploadCaption200JSONResponse struct {
+	Caption string                                    `json:"caption"`
+	FileId  string                                    `json:"file_id"`
+	Source  GetUploadCaption200JSONResponseBodySource `json:"source"`
+}
+
+func (response GetUploadCaption200JSONResponse) VisitGetUploadCaptionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUploadDisplayRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetUploadDisplayResponseObject interface {
+	VisitGetUploadDisplayResponse(w http.ResponseWriter) error
+}
+
+type GetUploadDisplay200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetUploadDisplay200ApplicationoctetStreamResponse) VisitGetUploadDisplayResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadPreviewRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetUploadPreviewResponseObject interface {
+	VisitGetUploadPreviewResponse(w http.ResponseWriter) error
+}
+
+type GetUploadPreview200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetUploadPreview200ApplicationoctetStreamResponse) VisitGetUploadPreviewResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadSliceRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Params GetUploadSliceParams
+}
+
+type GetUploadSliceResponseObject interface {
+	VisitGetUploadSliceResponse(w http.ResponseWriter) error
+}
+
+type GetUploadSlice200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetUploadSlice200ApplicationoctetStreamResponse) VisitGetUploadSliceResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadViewerRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetUploadViewerResponseObject interface {
+	VisitGetUploadViewerResponse(w http.ResponseWriter) error
+}
+
+type GetUploadViewer200JSONResponse map[string]interface{}
+
+func (response GetUploadViewer200JSONResponse) VisitGetUploadViewerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostV2WorkerHeartbeatRequestObject struct {
+	Body *PostV2WorkerHeartbeatJSONRequestBody
+}
+
+type PostV2WorkerHeartbeatResponseObject interface {
+	VisitPostV2WorkerHeartbeatResponse(w http.ResponseWriter) error
+}
+
+type PostV2WorkerHeartbeat200JSONResponse V2WorkerHeartbeatRecord
+
+func (response PostV2WorkerHeartbeat200JSONResponse) VisitPostV2WorkerHeartbeatResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostV2WorkerHeartbeat400Response struct {
+}
+
+func (response PostV2WorkerHeartbeat400Response) VisitPostV2WorkerHeartbeatResponse(w http.ResponseWriter) error {
+	w.WriteHeader(400)
+	return nil
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+
+	// (POST /v1/auth/guest)
+	ContinueAsGuest(ctx context.Context, request ContinueAsGuestRequestObject) (ContinueAsGuestResponseObject, error)
+
+	// (POST /v1/auth/login)
+	LoginBisque(ctx context.Context, request LoginBisqueRequestObject) (LoginBisqueResponseObject, error)
+
+	// (POST /v1/auth/logout)
+	LogoutBisque(ctx context.Context, request LogoutBisqueRequestObject) (LogoutBisqueResponseObject, error)
 
 	// (GET /v1/auth/session)
 	GetAuthSession(ctx context.Context, request GetAuthSessionRequestObject) (GetAuthSessionResponseObject, error)
@@ -1606,8 +9604,86 @@ type StrictServerInterface interface {
 	// (GET /v1/health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
 
+	// (DELETE /v2/admin/conversations/{conversation_id})
+	DeleteV2AdminConversation(ctx context.Context, request DeleteV2AdminConversationRequestObject) (DeleteV2AdminConversationResponseObject, error)
+
+	// (GET /v2/admin/issues)
+	ListV2AdminIssues(ctx context.Context, request ListV2AdminIssuesRequestObject) (ListV2AdminIssuesResponseObject, error)
+
+	// (GET /v2/admin/model-health)
+	GetV2AdminModelHealth(ctx context.Context, request GetV2AdminModelHealthRequestObject) (GetV2AdminModelHealthResponseObject, error)
+
+	// (GET /v2/admin/orgs)
+	ListV2AdminOrganizations(ctx context.Context, request ListV2AdminOrganizationsRequestObject) (ListV2AdminOrganizationsResponseObject, error)
+
+	// (POST /v2/admin/orgs)
+	CreateV2AdminOrganization(ctx context.Context, request CreateV2AdminOrganizationRequestObject) (CreateV2AdminOrganizationResponseObject, error)
+
+	// (GET /v2/admin/overview)
+	GetV2AdminOverview(ctx context.Context, request GetV2AdminOverviewRequestObject) (GetV2AdminOverviewResponseObject, error)
+
+	// (GET /v2/admin/runs)
+	ListV2AdminRuns(ctx context.Context, request ListV2AdminRunsRequestObject) (ListV2AdminRunsResponseObject, error)
+
+	// (POST /v2/admin/runs/{run_id}/cancel)
+	CancelV2AdminRun(ctx context.Context, request CancelV2AdminRunRequestObject) (CancelV2AdminRunResponseObject, error)
+
+	// (POST /v2/admin/runs/{run_id}/requeue)
+	RequeueV2AdminRun(ctx context.Context, request RequeueV2AdminRunRequestObject) (RequeueV2AdminRunResponseObject, error)
+
+	// (GET /v2/admin/users)
+	ListV2AdminUsers(ctx context.Context, request ListV2AdminUsersRequestObject) (ListV2AdminUsersResponseObject, error)
+
+	// (POST /v2/admin/users)
+	CreateV2AdminUser(ctx context.Context, request CreateV2AdminUserRequestObject) (CreateV2AdminUserResponseObject, error)
+
+	// (DELETE /v2/admin/users/{user_id})
+	DeleteV2AdminUser(ctx context.Context, request DeleteV2AdminUserRequestObject) (DeleteV2AdminUserResponseObject, error)
+
 	// (GET /v2/artifacts/{artifact_id})
 	GetArtifact(ctx context.Context, request GetArtifactRequestObject) (GetArtifactResponseObject, error)
+
+	// (GET /v2/artifacts/{artifact_id}/download)
+	DownloadArtifact(ctx context.Context, request DownloadArtifactRequestObject) (DownloadArtifactResponseObject, error)
+
+	// (POST /v2/auth/guest)
+	ContinueAsV2Guest(ctx context.Context, request ContinueAsV2GuestRequestObject) (ContinueAsV2GuestResponseObject, error)
+
+	// (POST /v2/auth/login)
+	LoginV2Bisque(ctx context.Context, request LoginV2BisqueRequestObject) (LoginV2BisqueResponseObject, error)
+
+	// (POST /v2/auth/logout)
+	LogoutV2Bisque(ctx context.Context, request LogoutV2BisqueRequestObject) (LogoutV2BisqueResponseObject, error)
+
+	// (GET /v2/auth/session)
+	GetV2AuthSession(ctx context.Context, request GetV2AuthSessionRequestObject) (GetV2AuthSessionResponseObject, error)
+
+	// (GET /v2/config/public)
+	GetV2PublicConfig(ctx context.Context, request GetV2PublicConfigRequestObject) (GetV2PublicConfigResponseObject, error)
+
+	// (GET /v2/health)
+	GetV2Health(ctx context.Context, request GetV2HealthRequestObject) (GetV2HealthResponseObject, error)
+
+	// (POST /v2/inference/jobs)
+	CreateV2InferenceJob(ctx context.Context, request CreateV2InferenceJobRequestObject) (CreateV2InferenceJobResponseObject, error)
+
+	// (GET /v2/inference/jobs/{job_id}/result)
+	GetV2InferenceJobResult(ctx context.Context, request GetV2InferenceJobResultRequestObject) (GetV2InferenceJobResultResponseObject, error)
+
+	// (GET /v2/model-health)
+	GetV2ModelHealth(ctx context.Context, request GetV2ModelHealthRequestObject) (GetV2ModelHealthResponseObject, error)
+
+	// (GET /v2/resources)
+	ListResources(ctx context.Context, request ListResourcesRequestObject) (ListResourcesResponseObject, error)
+
+	// (DELETE /v2/resources/{file_id})
+	DeleteResource(ctx context.Context, request DeleteResourceRequestObject) (DeleteResourceResponseObject, error)
+
+	// (GET /v2/resources/{file_id})
+	GetResource(ctx context.Context, request GetResourceRequestObject) (GetResourceResponseObject, error)
+
+	// (GET /v2/resources/{file_id}/thumbnail)
+	GetResourceThumbnail(ctx context.Context, request GetResourceThumbnailRequestObject) (GetResourceThumbnailResponseObject, error)
 
 	// (GET /v2/runs)
 	ListRuns(ctx context.Context, request ListRunsRequestObject) (ListRunsResponseObject, error)
@@ -1618,14 +9694,29 @@ type StrictServerInterface interface {
 	// (GET /v2/runs/{run_id}/artifacts)
 	ListRunArtifacts(ctx context.Context, request ListRunArtifactsRequestObject) (ListRunArtifactsResponseObject, error)
 
+	// (GET /v2/runs/{run_id}/artifacts/download)
+	DownloadRunArtifactByPath(ctx context.Context, request DownloadRunArtifactByPathRequestObject) (DownloadRunArtifactByPathResponseObject, error)
+
 	// (POST /v2/runs/{run_id}/cancel)
 	CancelRun(ctx context.Context, request CancelRunRequestObject) (CancelRunResponseObject, error)
 
 	// (GET /v2/runs/{run_id}/events)
 	ListRunEvents(ctx context.Context, request ListRunEventsRequestObject) (ListRunEventsResponseObject, error)
 
+	// (DELETE /v2/runs/{run_id}/lease)
+	ReleaseRunLease(ctx context.Context, request ReleaseRunLeaseRequestObject) (ReleaseRunLeaseResponseObject, error)
+
+	// (PATCH /v2/runs/{run_id}/lease)
+	RenewRunLease(ctx context.Context, request RenewRunLeaseRequestObject) (RenewRunLeaseResponseObject, error)
+
+	// (POST /v2/runs/{run_id}/lease)
+	AcquireRunLease(ctx context.Context, request AcquireRunLeaseRequestObject) (AcquireRunLeaseResponseObject, error)
+
 	// (POST /v2/runs/{run_id}/resume)
 	ResumeRun(ctx context.Context, request ResumeRunRequestObject) (ResumeRunResponseObject, error)
+
+	// (POST /v2/segment/sam3/interactive)
+	RunV2Sam3InteractiveSegmentation(ctx context.Context, request RunV2Sam3InteractiveSegmentationRequestObject) (RunV2Sam3InteractiveSegmentationResponseObject, error)
 
 	// (GET /v2/threads)
 	ListThreads(ctx context.Context, request ListThreadsRequestObject) (ListThreadsResponseObject, error)
@@ -1644,6 +9735,120 @@ type StrictServerInterface interface {
 
 	// (POST /v2/threads/{thread_id}/runs)
 	CreateRun(ctx context.Context, request CreateRunRequestObject) (CreateRunResponseObject, error)
+
+	// (GET /v2/training/datasets)
+	ListV2TrainingDatasets(ctx context.Context, request ListV2TrainingDatasetsRequestObject) (ListV2TrainingDatasetsResponseObject, error)
+
+	// (POST /v2/training/datasets)
+	CreateV2TrainingDataset(ctx context.Context, request CreateV2TrainingDatasetRequestObject) (CreateV2TrainingDatasetResponseObject, error)
+
+	// (GET /v2/training/datasets/{dataset_id})
+	GetV2TrainingDataset(ctx context.Context, request GetV2TrainingDatasetRequestObject) (GetV2TrainingDatasetResponseObject, error)
+
+	// (POST /v2/training/datasets/{dataset_id}/items)
+	AssignV2TrainingDatasetItems(ctx context.Context, request AssignV2TrainingDatasetItemsRequestObject) (AssignV2TrainingDatasetItemsResponseObject, error)
+
+	// (GET /v2/training/domains)
+	ListV2TrainingDomains(ctx context.Context, request ListV2TrainingDomainsRequestObject) (ListV2TrainingDomainsResponseObject, error)
+
+	// (POST /v2/training/domains)
+	CreateV2TrainingDomain(ctx context.Context, request CreateV2TrainingDomainRequestObject) (CreateV2TrainingDomainResponseObject, error)
+
+	// (GET /v2/training/domains/{domain_id}/lineages)
+	ListV2TrainingDomainLineages(ctx context.Context, request ListV2TrainingDomainLineagesRequestObject) (ListV2TrainingDomainLineagesResponseObject, error)
+
+	// (POST /v2/training/jobs)
+	CreateV2TrainingJob(ctx context.Context, request CreateV2TrainingJobRequestObject) (CreateV2TrainingJobResponseObject, error)
+
+	// (GET /v2/training/jobs/{job_id})
+	GetV2TrainingJob(ctx context.Context, request GetV2TrainingJobRequestObject) (GetV2TrainingJobResponseObject, error)
+
+	// (POST /v2/training/jobs/{job_id}/control)
+	ControlV2TrainingJob(ctx context.Context, request ControlV2TrainingJobRequestObject) (ControlV2TrainingJobResponseObject, error)
+
+	// (POST /v2/training/lineages/{lineage_id}/fork)
+	ForkV2TrainingLineage(ctx context.Context, request ForkV2TrainingLineageRequestObject) (ForkV2TrainingLineageResponseObject, error)
+
+	// (GET /v2/training/lineages/{lineage_id}/versions)
+	ListV2TrainingLineageVersions(ctx context.Context, request ListV2TrainingLineageVersionsRequestObject) (ListV2TrainingLineageVersionsResponseObject, error)
+
+	// (GET /v2/training/merge-requests)
+	ListV2TrainingMergeRequests(ctx context.Context, request ListV2TrainingMergeRequestsRequestObject) (ListV2TrainingMergeRequestsResponseObject, error)
+
+	// (POST /v2/training/merge-requests)
+	CreateV2TrainingMergeRequest(ctx context.Context, request CreateV2TrainingMergeRequestRequestObject) (CreateV2TrainingMergeRequestResponseObject, error)
+
+	// (POST /v2/training/merge-requests/{merge_id}/approve)
+	ApproveV2TrainingMergeRequest(ctx context.Context, request ApproveV2TrainingMergeRequestRequestObject) (ApproveV2TrainingMergeRequestResponseObject, error)
+
+	// (POST /v2/training/merge-requests/{merge_id}/reject)
+	RejectV2TrainingMergeRequest(ctx context.Context, request RejectV2TrainingMergeRequestRequestObject) (RejectV2TrainingMergeRequestResponseObject, error)
+
+	// (POST /v2/training/model-versions/{version_id}/promote)
+	PromoteV2TrainingModelVersion(ctx context.Context, request PromoteV2TrainingModelVersionRequestObject) (PromoteV2TrainingModelVersionResponseObject, error)
+
+	// (POST /v2/training/model-versions/{version_id}/rollback)
+	RollbackV2TrainingModelVersion(ctx context.Context, request RollbackV2TrainingModelVersionRequestObject) (RollbackV2TrainingModelVersionResponseObject, error)
+
+	// (GET /v2/training/models)
+	ListV2TrainingModels(ctx context.Context, request ListV2TrainingModelsRequestObject) (ListV2TrainingModelsResponseObject, error)
+
+	// (POST /v2/training/prairie/benchmark/run)
+	RunV2PrairieBenchmark(ctx context.Context, request RunV2PrairieBenchmarkRequestObject) (RunV2PrairieBenchmarkResponseObject, error)
+
+	// (POST /v2/training/prairie/retrain-request)
+	RequestV2PrairieRetrain(ctx context.Context, request RequestV2PrairieRetrainRequestObject) (RequestV2PrairieRetrainResponseObject, error)
+
+	// (GET /v2/training/prairie/retrain-requests)
+	ListV2PrairieRetrainRequests(ctx context.Context, request ListV2PrairieRetrainRequestsRequestObject) (ListV2PrairieRetrainRequestsResponseObject, error)
+
+	// (GET /v2/training/prairie/status)
+	GetV2PrairieStatus(ctx context.Context, request GetV2PrairieStatusRequestObject) (GetV2PrairieStatusResponseObject, error)
+
+	// (POST /v2/training/prairie/sync)
+	SyncV2PrairieActiveLearning(ctx context.Context, request SyncV2PrairieActiveLearningRequestObject) (SyncV2PrairieActiveLearningResponseObject, error)
+
+	// (POST /v2/training/preflight)
+	PreviewV2TrainingJob(ctx context.Context, request PreviewV2TrainingJobRequestObject) (PreviewV2TrainingJobResponseObject, error)
+
+	// (GET /v2/training/update-proposals)
+	ListV2TrainingUpdateProposals(ctx context.Context, request ListV2TrainingUpdateProposalsRequestObject) (ListV2TrainingUpdateProposalsResponseObject, error)
+
+	// (POST /v2/training/update-proposals)
+	CreateV2TrainingUpdateProposal(ctx context.Context, request CreateV2TrainingUpdateProposalRequestObject) (CreateV2TrainingUpdateProposalResponseObject, error)
+
+	// (POST /v2/training/update-proposals/preview)
+	PreviewV2TrainingUpdateProposal(ctx context.Context, request PreviewV2TrainingUpdateProposalRequestObject) (PreviewV2TrainingUpdateProposalResponseObject, error)
+
+	// (POST /v2/training/update-proposals/{proposal_id}/approve)
+	ApproveV2TrainingUpdateProposal(ctx context.Context, request ApproveV2TrainingUpdateProposalRequestObject) (ApproveV2TrainingUpdateProposalResponseObject, error)
+
+	// (POST /v2/training/update-proposals/{proposal_id}/reject)
+	RejectV2TrainingUpdateProposal(ctx context.Context, request RejectV2TrainingUpdateProposalRequestObject) (RejectV2TrainingUpdateProposalResponseObject, error)
+
+	// (POST /v2/uploads)
+	UploadFiles(ctx context.Context, request UploadFilesRequestObject) (UploadFilesResponseObject, error)
+
+	// (POST /v2/uploads/from-bisque)
+	ImportV2BisqueResources(ctx context.Context, request ImportV2BisqueResourcesRequestObject) (ImportV2BisqueResourcesResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/caption)
+	GetUploadCaption(ctx context.Context, request GetUploadCaptionRequestObject) (GetUploadCaptionResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/display)
+	GetUploadDisplay(ctx context.Context, request GetUploadDisplayRequestObject) (GetUploadDisplayResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/preview)
+	GetUploadPreview(ctx context.Context, request GetUploadPreviewRequestObject) (GetUploadPreviewResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/slice)
+	GetUploadSlice(ctx context.Context, request GetUploadSliceRequestObject) (GetUploadSliceResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/viewer)
+	GetUploadViewer(ctx context.Context, request GetUploadViewerRequestObject) (GetUploadViewerResponseObject, error)
+
+	// (POST /v2/workers/heartbeat)
+	PostV2WorkerHeartbeat(ctx context.Context, request PostV2WorkerHeartbeatRequestObject) (PostV2WorkerHeartbeatResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1673,6 +9878,98 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// ContinueAsGuest operation middleware
+func (sh *strictHandler) ContinueAsGuest(w http.ResponseWriter, r *http.Request) {
+	var request ContinueAsGuestRequestObject
+
+	var body ContinueAsGuestJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ContinueAsGuest(ctx, request.(ContinueAsGuestRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ContinueAsGuest")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ContinueAsGuestResponseObject); ok {
+		if err := validResponse.VisitContinueAsGuestResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// LoginBisque operation middleware
+func (sh *strictHandler) LoginBisque(w http.ResponseWriter, r *http.Request) {
+	var request LoginBisqueRequestObject
+
+	var body LoginBisqueJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.LoginBisque(ctx, request.(LoginBisqueRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "LoginBisque")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LoginBisqueResponseObject); ok {
+		if err := validResponse.VisitLoginBisqueResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// LogoutBisque operation middleware
+func (sh *strictHandler) LogoutBisque(w http.ResponseWriter, r *http.Request) {
+	var request LogoutBisqueRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.LogoutBisque(ctx, request.(LogoutBisqueRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "LogoutBisque")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LogoutBisqueResponseObject); ok {
+		if err := validResponse.VisitLogoutBisqueResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // GetAuthSession operation middleware
@@ -1747,6 +10044,337 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// DeleteV2AdminConversation operation middleware
+func (sh *strictHandler) DeleteV2AdminConversation(w http.ResponseWriter, r *http.Request, conversationId string, params DeleteV2AdminConversationParams) {
+	var request DeleteV2AdminConversationRequestObject
+
+	request.ConversationId = conversationId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteV2AdminConversation(ctx, request.(DeleteV2AdminConversationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteV2AdminConversation")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteV2AdminConversationResponseObject); ok {
+		if err := validResponse.VisitDeleteV2AdminConversationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2AdminIssues operation middleware
+func (sh *strictHandler) ListV2AdminIssues(w http.ResponseWriter, r *http.Request, params ListV2AdminIssuesParams) {
+	var request ListV2AdminIssuesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2AdminIssues(ctx, request.(ListV2AdminIssuesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2AdminIssues")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2AdminIssuesResponseObject); ok {
+		if err := validResponse.VisitListV2AdminIssuesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2AdminModelHealth operation middleware
+func (sh *strictHandler) GetV2AdminModelHealth(w http.ResponseWriter, r *http.Request) {
+	var request GetV2AdminModelHealthRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2AdminModelHealth(ctx, request.(GetV2AdminModelHealthRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2AdminModelHealth")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2AdminModelHealthResponseObject); ok {
+		if err := validResponse.VisitGetV2AdminModelHealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2AdminOrganizations operation middleware
+func (sh *strictHandler) ListV2AdminOrganizations(w http.ResponseWriter, r *http.Request, params ListV2AdminOrganizationsParams) {
+	var request ListV2AdminOrganizationsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2AdminOrganizations(ctx, request.(ListV2AdminOrganizationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2AdminOrganizations")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2AdminOrganizationsResponseObject); ok {
+		if err := validResponse.VisitListV2AdminOrganizationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2AdminOrganization operation middleware
+func (sh *strictHandler) CreateV2AdminOrganization(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2AdminOrganizationRequestObject
+
+	var body CreateV2AdminOrganizationJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2AdminOrganization(ctx, request.(CreateV2AdminOrganizationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2AdminOrganization")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2AdminOrganizationResponseObject); ok {
+		if err := validResponse.VisitCreateV2AdminOrganizationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2AdminOverview operation middleware
+func (sh *strictHandler) GetV2AdminOverview(w http.ResponseWriter, r *http.Request, params GetV2AdminOverviewParams) {
+	var request GetV2AdminOverviewRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2AdminOverview(ctx, request.(GetV2AdminOverviewRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2AdminOverview")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2AdminOverviewResponseObject); ok {
+		if err := validResponse.VisitGetV2AdminOverviewResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2AdminRuns operation middleware
+func (sh *strictHandler) ListV2AdminRuns(w http.ResponseWriter, r *http.Request, params ListV2AdminRunsParams) {
+	var request ListV2AdminRunsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2AdminRuns(ctx, request.(ListV2AdminRunsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2AdminRuns")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2AdminRunsResponseObject); ok {
+		if err := validResponse.VisitListV2AdminRunsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CancelV2AdminRun operation middleware
+func (sh *strictHandler) CancelV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID) {
+	var request CancelV2AdminRunRequestObject
+
+	request.RunId = runId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CancelV2AdminRun(ctx, request.(CancelV2AdminRunRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CancelV2AdminRun")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CancelV2AdminRunResponseObject); ok {
+		if err := validResponse.VisitCancelV2AdminRunResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RequeueV2AdminRun operation middleware
+func (sh *strictHandler) RequeueV2AdminRun(w http.ResponseWriter, r *http.Request, runId RunID) {
+	var request RequeueV2AdminRunRequestObject
+
+	request.RunId = runId
+
+	var body RequeueV2AdminRunJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RequeueV2AdminRun(ctx, request.(RequeueV2AdminRunRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RequeueV2AdminRun")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RequeueV2AdminRunResponseObject); ok {
+		if err := validResponse.VisitRequeueV2AdminRunResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2AdminUsers operation middleware
+func (sh *strictHandler) ListV2AdminUsers(w http.ResponseWriter, r *http.Request, params ListV2AdminUsersParams) {
+	var request ListV2AdminUsersRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2AdminUsers(ctx, request.(ListV2AdminUsersRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2AdminUsers")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2AdminUsersResponseObject); ok {
+		if err := validResponse.VisitListV2AdminUsersResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2AdminUser operation middleware
+func (sh *strictHandler) CreateV2AdminUser(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2AdminUserRequestObject
+
+	var body CreateV2AdminUserJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2AdminUser(ctx, request.(CreateV2AdminUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2AdminUser")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2AdminUserResponseObject); ok {
+		if err := validResponse.VisitCreateV2AdminUserResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteV2AdminUser operation middleware
+func (sh *strictHandler) DeleteV2AdminUser(w http.ResponseWriter, r *http.Request, userId string) {
+	var request DeleteV2AdminUserRequestObject
+
+	request.UserId = userId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteV2AdminUser(ctx, request.(DeleteV2AdminUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteV2AdminUser")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteV2AdminUserResponseObject); ok {
+		if err := validResponse.VisitDeleteV2AdminUserResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetArtifact operation middleware
 func (sh *strictHandler) GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
 	var request GetArtifactRequestObject
@@ -1766,6 +10394,374 @@ func (sh *strictHandler) GetArtifact(w http.ResponseWriter, r *http.Request, art
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetArtifactResponseObject); ok {
 		if err := validResponse.VisitGetArtifactResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DownloadArtifact operation middleware
+func (sh *strictHandler) DownloadArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
+	var request DownloadArtifactRequestObject
+
+	request.ArtifactId = artifactId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DownloadArtifact(ctx, request.(DownloadArtifactRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DownloadArtifact")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DownloadArtifactResponseObject); ok {
+		if err := validResponse.VisitDownloadArtifactResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ContinueAsV2Guest operation middleware
+func (sh *strictHandler) ContinueAsV2Guest(w http.ResponseWriter, r *http.Request) {
+	var request ContinueAsV2GuestRequestObject
+
+	var body ContinueAsV2GuestJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ContinueAsV2Guest(ctx, request.(ContinueAsV2GuestRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ContinueAsV2Guest")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ContinueAsV2GuestResponseObject); ok {
+		if err := validResponse.VisitContinueAsV2GuestResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// LoginV2Bisque operation middleware
+func (sh *strictHandler) LoginV2Bisque(w http.ResponseWriter, r *http.Request) {
+	var request LoginV2BisqueRequestObject
+
+	var body LoginV2BisqueJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.LoginV2Bisque(ctx, request.(LoginV2BisqueRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "LoginV2Bisque")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LoginV2BisqueResponseObject); ok {
+		if err := validResponse.VisitLoginV2BisqueResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// LogoutV2Bisque operation middleware
+func (sh *strictHandler) LogoutV2Bisque(w http.ResponseWriter, r *http.Request) {
+	var request LogoutV2BisqueRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.LogoutV2Bisque(ctx, request.(LogoutV2BisqueRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "LogoutV2Bisque")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LogoutV2BisqueResponseObject); ok {
+		if err := validResponse.VisitLogoutV2BisqueResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2AuthSession operation middleware
+func (sh *strictHandler) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
+	var request GetV2AuthSessionRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2AuthSession(ctx, request.(GetV2AuthSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2AuthSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2AuthSessionResponseObject); ok {
+		if err := validResponse.VisitGetV2AuthSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2PublicConfig operation middleware
+func (sh *strictHandler) GetV2PublicConfig(w http.ResponseWriter, r *http.Request) {
+	var request GetV2PublicConfigRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2PublicConfig(ctx, request.(GetV2PublicConfigRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2PublicConfig")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2PublicConfigResponseObject); ok {
+		if err := validResponse.VisitGetV2PublicConfigResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2Health operation middleware
+func (sh *strictHandler) GetV2Health(w http.ResponseWriter, r *http.Request) {
+	var request GetV2HealthRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2Health(ctx, request.(GetV2HealthRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2Health")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2HealthResponseObject); ok {
+		if err := validResponse.VisitGetV2HealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2InferenceJob operation middleware
+func (sh *strictHandler) CreateV2InferenceJob(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2InferenceJobRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2InferenceJob(ctx, request.(CreateV2InferenceJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2InferenceJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2InferenceJobResponseObject); ok {
+		if err := validResponse.VisitCreateV2InferenceJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2InferenceJobResult operation middleware
+func (sh *strictHandler) GetV2InferenceJobResult(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request GetV2InferenceJobResultRequestObject
+
+	request.JobId = jobId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2InferenceJobResult(ctx, request.(GetV2InferenceJobResultRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2InferenceJobResult")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2InferenceJobResultResponseObject); ok {
+		if err := validResponse.VisitGetV2InferenceJobResultResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2ModelHealth operation middleware
+func (sh *strictHandler) GetV2ModelHealth(w http.ResponseWriter, r *http.Request) {
+	var request GetV2ModelHealthRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2ModelHealth(ctx, request.(GetV2ModelHealthRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2ModelHealth")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2ModelHealthResponseObject); ok {
+		if err := validResponse.VisitGetV2ModelHealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListResources operation middleware
+func (sh *strictHandler) ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams) {
+	var request ListResourcesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListResources(ctx, request.(ListResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListResourcesResponseObject); ok {
+		if err := validResponse.VisitListResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteResource operation middleware
+func (sh *strictHandler) DeleteResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request DeleteResourceRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteResource(ctx, request.(DeleteResourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteResource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteResourceResponseObject); ok {
+		if err := validResponse.VisitDeleteResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetResource operation middleware
+func (sh *strictHandler) GetResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetResourceRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetResource(ctx, request.(GetResourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetResource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetResourceResponseObject); ok {
+		if err := validResponse.VisitGetResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetResourceThumbnail operation middleware
+func (sh *strictHandler) GetResourceThumbnail(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetResourceThumbnailRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetResourceThumbnail(ctx, request.(GetResourceThumbnailRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetResourceThumbnail")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetResourceThumbnailResponseObject); ok {
+		if err := validResponse.VisitGetResourceThumbnailResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -1852,6 +10848,33 @@ func (sh *strictHandler) ListRunArtifacts(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// DownloadRunArtifactByPath operation middleware
+func (sh *strictHandler) DownloadRunArtifactByPath(w http.ResponseWriter, r *http.Request, runId RunID, params DownloadRunArtifactByPathParams) {
+	var request DownloadRunArtifactByPathRequestObject
+
+	request.RunId = runId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DownloadRunArtifactByPath(ctx, request.(DownloadRunArtifactByPathRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DownloadRunArtifactByPath")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DownloadRunArtifactByPathResponseObject); ok {
+		if err := validResponse.VisitDownloadRunArtifactByPathResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // CancelRun operation middleware
 func (sh *strictHandler) CancelRun(w http.ResponseWriter, r *http.Request, runId RunID) {
 	var request CancelRunRequestObject
@@ -1915,6 +10938,105 @@ func (sh *strictHandler) ListRunEvents(w http.ResponseWriter, r *http.Request, r
 	}
 }
 
+// ReleaseRunLease operation middleware
+func (sh *strictHandler) ReleaseRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	var request ReleaseRunLeaseRequestObject
+
+	request.RunId = runId
+
+	var body ReleaseRunLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ReleaseRunLease(ctx, request.(ReleaseRunLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ReleaseRunLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ReleaseRunLeaseResponseObject); ok {
+		if err := validResponse.VisitReleaseRunLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RenewRunLease operation middleware
+func (sh *strictHandler) RenewRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	var request RenewRunLeaseRequestObject
+
+	request.RunId = runId
+
+	var body RenewRunLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RenewRunLease(ctx, request.(RenewRunLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RenewRunLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RenewRunLeaseResponseObject); ok {
+		if err := validResponse.VisitRenewRunLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AcquireRunLease operation middleware
+func (sh *strictHandler) AcquireRunLease(w http.ResponseWriter, r *http.Request, runId RunID) {
+	var request AcquireRunLeaseRequestObject
+
+	request.RunId = runId
+
+	var body AcquireRunLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AcquireRunLease(ctx, request.(AcquireRunLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AcquireRunLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AcquireRunLeaseResponseObject); ok {
+		if err := validResponse.VisitAcquireRunLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ResumeRun operation middleware
 func (sh *strictHandler) ResumeRun(w http.ResponseWriter, r *http.Request, runId RunID) {
 	var request ResumeRunRequestObject
@@ -1941,6 +11063,37 @@ func (sh *strictHandler) ResumeRun(w http.ResponseWriter, r *http.Request, runId
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ResumeRunResponseObject); ok {
 		if err := validResponse.VisitResumeRunResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RunV2Sam3InteractiveSegmentation operation middleware
+func (sh *strictHandler) RunV2Sam3InteractiveSegmentation(w http.ResponseWriter, r *http.Request) {
+	var request RunV2Sam3InteractiveSegmentationRequestObject
+
+	var body RunV2Sam3InteractiveSegmentationJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RunV2Sam3InteractiveSegmentation(ctx, request.(RunV2Sam3InteractiveSegmentationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RunV2Sam3InteractiveSegmentation")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RunV2Sam3InteractiveSegmentationResponseObject); ok {
+		if err := validResponse.VisitRunV2Sam3InteractiveSegmentationResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -2091,10 +11244,11 @@ func (sh *strictHandler) ListThreadMessages(w http.ResponseWriter, r *http.Reque
 }
 
 // CreateRun operation middleware
-func (sh *strictHandler) CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID) {
+func (sh *strictHandler) CreateRun(w http.ResponseWriter, r *http.Request, threadId ThreadID, params CreateRunParams) {
 	var request CreateRunRequestObject
 
 	request.ThreadId = threadId
+	request.Params = params
 
 	var body CreateRunJSONRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -2123,42 +11277,1100 @@ func (sh *strictHandler) CreateRun(w http.ResponseWriter, r *http.Request, threa
 	}
 }
 
+// ListV2TrainingDatasets operation middleware
+func (sh *strictHandler) ListV2TrainingDatasets(w http.ResponseWriter, r *http.Request, params ListV2TrainingDatasetsParams) {
+	var request ListV2TrainingDatasetsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingDatasets(ctx, request.(ListV2TrainingDatasetsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingDatasets")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingDatasetsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingDatasetsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2TrainingDataset operation middleware
+func (sh *strictHandler) CreateV2TrainingDataset(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2TrainingDatasetRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2TrainingDataset(ctx, request.(CreateV2TrainingDatasetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2TrainingDataset")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2TrainingDatasetResponseObject); ok {
+		if err := validResponse.VisitCreateV2TrainingDatasetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2TrainingDataset operation middleware
+func (sh *strictHandler) GetV2TrainingDataset(w http.ResponseWriter, r *http.Request, datasetId string) {
+	var request GetV2TrainingDatasetRequestObject
+
+	request.DatasetId = datasetId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2TrainingDataset(ctx, request.(GetV2TrainingDatasetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2TrainingDataset")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2TrainingDatasetResponseObject); ok {
+		if err := validResponse.VisitGetV2TrainingDatasetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AssignV2TrainingDatasetItems operation middleware
+func (sh *strictHandler) AssignV2TrainingDatasetItems(w http.ResponseWriter, r *http.Request, datasetId string) {
+	var request AssignV2TrainingDatasetItemsRequestObject
+
+	request.DatasetId = datasetId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AssignV2TrainingDatasetItems(ctx, request.(AssignV2TrainingDatasetItemsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AssignV2TrainingDatasetItems")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AssignV2TrainingDatasetItemsResponseObject); ok {
+		if err := validResponse.VisitAssignV2TrainingDatasetItemsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingDomains operation middleware
+func (sh *strictHandler) ListV2TrainingDomains(w http.ResponseWriter, r *http.Request, params ListV2TrainingDomainsParams) {
+	var request ListV2TrainingDomainsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingDomains(ctx, request.(ListV2TrainingDomainsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingDomains")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingDomainsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingDomainsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2TrainingDomain operation middleware
+func (sh *strictHandler) CreateV2TrainingDomain(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2TrainingDomainRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2TrainingDomain(ctx, request.(CreateV2TrainingDomainRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2TrainingDomain")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2TrainingDomainResponseObject); ok {
+		if err := validResponse.VisitCreateV2TrainingDomainResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingDomainLineages operation middleware
+func (sh *strictHandler) ListV2TrainingDomainLineages(w http.ResponseWriter, r *http.Request, domainId string, params ListV2TrainingDomainLineagesParams) {
+	var request ListV2TrainingDomainLineagesRequestObject
+
+	request.DomainId = domainId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingDomainLineages(ctx, request.(ListV2TrainingDomainLineagesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingDomainLineages")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingDomainLineagesResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingDomainLineagesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2TrainingJob operation middleware
+func (sh *strictHandler) CreateV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2TrainingJobRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2TrainingJob(ctx, request.(CreateV2TrainingJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2TrainingJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2TrainingJobResponseObject); ok {
+		if err := validResponse.VisitCreateV2TrainingJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2TrainingJob operation middleware
+func (sh *strictHandler) GetV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request GetV2TrainingJobRequestObject
+
+	request.JobId = jobId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2TrainingJob(ctx, request.(GetV2TrainingJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2TrainingJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2TrainingJobResponseObject); ok {
+		if err := validResponse.VisitGetV2TrainingJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ControlV2TrainingJob operation middleware
+func (sh *strictHandler) ControlV2TrainingJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request ControlV2TrainingJobRequestObject
+
+	request.JobId = jobId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ControlV2TrainingJob(ctx, request.(ControlV2TrainingJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ControlV2TrainingJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ControlV2TrainingJobResponseObject); ok {
+		if err := validResponse.VisitControlV2TrainingJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ForkV2TrainingLineage operation middleware
+func (sh *strictHandler) ForkV2TrainingLineage(w http.ResponseWriter, r *http.Request, lineageId string) {
+	var request ForkV2TrainingLineageRequestObject
+
+	request.LineageId = lineageId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ForkV2TrainingLineage(ctx, request.(ForkV2TrainingLineageRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ForkV2TrainingLineage")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ForkV2TrainingLineageResponseObject); ok {
+		if err := validResponse.VisitForkV2TrainingLineageResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingLineageVersions operation middleware
+func (sh *strictHandler) ListV2TrainingLineageVersions(w http.ResponseWriter, r *http.Request, lineageId string, params ListV2TrainingLineageVersionsParams) {
+	var request ListV2TrainingLineageVersionsRequestObject
+
+	request.LineageId = lineageId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingLineageVersions(ctx, request.(ListV2TrainingLineageVersionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingLineageVersions")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingLineageVersionsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingLineageVersionsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingMergeRequests operation middleware
+func (sh *strictHandler) ListV2TrainingMergeRequests(w http.ResponseWriter, r *http.Request, params ListV2TrainingMergeRequestsParams) {
+	var request ListV2TrainingMergeRequestsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingMergeRequests(ctx, request.(ListV2TrainingMergeRequestsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingMergeRequests")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingMergeRequestsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingMergeRequestsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2TrainingMergeRequest operation middleware
+func (sh *strictHandler) CreateV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2TrainingMergeRequestRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2TrainingMergeRequest(ctx, request.(CreateV2TrainingMergeRequestRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2TrainingMergeRequest")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2TrainingMergeRequestResponseObject); ok {
+		if err := validResponse.VisitCreateV2TrainingMergeRequestResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ApproveV2TrainingMergeRequest operation middleware
+func (sh *strictHandler) ApproveV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string) {
+	var request ApproveV2TrainingMergeRequestRequestObject
+
+	request.MergeId = mergeId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ApproveV2TrainingMergeRequest(ctx, request.(ApproveV2TrainingMergeRequestRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ApproveV2TrainingMergeRequest")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ApproveV2TrainingMergeRequestResponseObject); ok {
+		if err := validResponse.VisitApproveV2TrainingMergeRequestResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RejectV2TrainingMergeRequest operation middleware
+func (sh *strictHandler) RejectV2TrainingMergeRequest(w http.ResponseWriter, r *http.Request, mergeId string) {
+	var request RejectV2TrainingMergeRequestRequestObject
+
+	request.MergeId = mergeId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RejectV2TrainingMergeRequest(ctx, request.(RejectV2TrainingMergeRequestRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RejectV2TrainingMergeRequest")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RejectV2TrainingMergeRequestResponseObject); ok {
+		if err := validResponse.VisitRejectV2TrainingMergeRequestResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PromoteV2TrainingModelVersion operation middleware
+func (sh *strictHandler) PromoteV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string) {
+	var request PromoteV2TrainingModelVersionRequestObject
+
+	request.VersionId = versionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PromoteV2TrainingModelVersion(ctx, request.(PromoteV2TrainingModelVersionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PromoteV2TrainingModelVersion")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PromoteV2TrainingModelVersionResponseObject); ok {
+		if err := validResponse.VisitPromoteV2TrainingModelVersionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RollbackV2TrainingModelVersion operation middleware
+func (sh *strictHandler) RollbackV2TrainingModelVersion(w http.ResponseWriter, r *http.Request, versionId string) {
+	var request RollbackV2TrainingModelVersionRequestObject
+
+	request.VersionId = versionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RollbackV2TrainingModelVersion(ctx, request.(RollbackV2TrainingModelVersionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RollbackV2TrainingModelVersion")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RollbackV2TrainingModelVersionResponseObject); ok {
+		if err := validResponse.VisitRollbackV2TrainingModelVersionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingModels operation middleware
+func (sh *strictHandler) ListV2TrainingModels(w http.ResponseWriter, r *http.Request) {
+	var request ListV2TrainingModelsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingModels(ctx, request.(ListV2TrainingModelsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingModels")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingModelsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingModelsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RunV2PrairieBenchmark operation middleware
+func (sh *strictHandler) RunV2PrairieBenchmark(w http.ResponseWriter, r *http.Request) {
+	var request RunV2PrairieBenchmarkRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RunV2PrairieBenchmark(ctx, request.(RunV2PrairieBenchmarkRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RunV2PrairieBenchmark")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RunV2PrairieBenchmarkResponseObject); ok {
+		if err := validResponse.VisitRunV2PrairieBenchmarkResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RequestV2PrairieRetrain operation middleware
+func (sh *strictHandler) RequestV2PrairieRetrain(w http.ResponseWriter, r *http.Request) {
+	var request RequestV2PrairieRetrainRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RequestV2PrairieRetrain(ctx, request.(RequestV2PrairieRetrainRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RequestV2PrairieRetrain")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RequestV2PrairieRetrainResponseObject); ok {
+		if err := validResponse.VisitRequestV2PrairieRetrainResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2PrairieRetrainRequests operation middleware
+func (sh *strictHandler) ListV2PrairieRetrainRequests(w http.ResponseWriter, r *http.Request) {
+	var request ListV2PrairieRetrainRequestsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2PrairieRetrainRequests(ctx, request.(ListV2PrairieRetrainRequestsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2PrairieRetrainRequests")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2PrairieRetrainRequestsResponseObject); ok {
+		if err := validResponse.VisitListV2PrairieRetrainRequestsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2PrairieStatus operation middleware
+func (sh *strictHandler) GetV2PrairieStatus(w http.ResponseWriter, r *http.Request) {
+	var request GetV2PrairieStatusRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2PrairieStatus(ctx, request.(GetV2PrairieStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2PrairieStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2PrairieStatusResponseObject); ok {
+		if err := validResponse.VisitGetV2PrairieStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SyncV2PrairieActiveLearning operation middleware
+func (sh *strictHandler) SyncV2PrairieActiveLearning(w http.ResponseWriter, r *http.Request) {
+	var request SyncV2PrairieActiveLearningRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SyncV2PrairieActiveLearning(ctx, request.(SyncV2PrairieActiveLearningRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SyncV2PrairieActiveLearning")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SyncV2PrairieActiveLearningResponseObject); ok {
+		if err := validResponse.VisitSyncV2PrairieActiveLearningResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PreviewV2TrainingJob operation middleware
+func (sh *strictHandler) PreviewV2TrainingJob(w http.ResponseWriter, r *http.Request) {
+	var request PreviewV2TrainingJobRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PreviewV2TrainingJob(ctx, request.(PreviewV2TrainingJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PreviewV2TrainingJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PreviewV2TrainingJobResponseObject); ok {
+		if err := validResponse.VisitPreviewV2TrainingJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2TrainingUpdateProposals operation middleware
+func (sh *strictHandler) ListV2TrainingUpdateProposals(w http.ResponseWriter, r *http.Request, params ListV2TrainingUpdateProposalsParams) {
+	var request ListV2TrainingUpdateProposalsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2TrainingUpdateProposals(ctx, request.(ListV2TrainingUpdateProposalsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2TrainingUpdateProposals")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2TrainingUpdateProposalsResponseObject); ok {
+		if err := validResponse.VisitListV2TrainingUpdateProposalsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2TrainingUpdateProposal operation middleware
+func (sh *strictHandler) CreateV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2TrainingUpdateProposalRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2TrainingUpdateProposal(ctx, request.(CreateV2TrainingUpdateProposalRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2TrainingUpdateProposal")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2TrainingUpdateProposalResponseObject); ok {
+		if err := validResponse.VisitCreateV2TrainingUpdateProposalResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PreviewV2TrainingUpdateProposal operation middleware
+func (sh *strictHandler) PreviewV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	var request PreviewV2TrainingUpdateProposalRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PreviewV2TrainingUpdateProposal(ctx, request.(PreviewV2TrainingUpdateProposalRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PreviewV2TrainingUpdateProposal")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PreviewV2TrainingUpdateProposalResponseObject); ok {
+		if err := validResponse.VisitPreviewV2TrainingUpdateProposalResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ApproveV2TrainingUpdateProposal operation middleware
+func (sh *strictHandler) ApproveV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string) {
+	var request ApproveV2TrainingUpdateProposalRequestObject
+
+	request.ProposalId = proposalId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ApproveV2TrainingUpdateProposal(ctx, request.(ApproveV2TrainingUpdateProposalRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ApproveV2TrainingUpdateProposal")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ApproveV2TrainingUpdateProposalResponseObject); ok {
+		if err := validResponse.VisitApproveV2TrainingUpdateProposalResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RejectV2TrainingUpdateProposal operation middleware
+func (sh *strictHandler) RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string) {
+	var request RejectV2TrainingUpdateProposalRequestObject
+
+	request.ProposalId = proposalId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RejectV2TrainingUpdateProposal(ctx, request.(RejectV2TrainingUpdateProposalRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RejectV2TrainingUpdateProposal")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RejectV2TrainingUpdateProposalResponseObject); ok {
+		if err := validResponse.VisitRejectV2TrainingUpdateProposalResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UploadFiles operation middleware
+func (sh *strictHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
+	var request UploadFilesRequestObject
+
+	if reader, err := r.MultipartReader(); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode multipart body: %w", err))
+		return
+	} else {
+		request.Body = reader
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UploadFiles(ctx, request.(UploadFilesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UploadFiles")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UploadFilesResponseObject); ok {
+		if err := validResponse.VisitUploadFilesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ImportV2BisqueResources operation middleware
+func (sh *strictHandler) ImportV2BisqueResources(w http.ResponseWriter, r *http.Request) {
+	var request ImportV2BisqueResourcesRequestObject
+
+	var body ImportV2BisqueResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ImportV2BisqueResources(ctx, request.(ImportV2BisqueResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ImportV2BisqueResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ImportV2BisqueResourcesResponseObject); ok {
+		if err := validResponse.VisitImportV2BisqueResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadCaption operation middleware
+func (sh *strictHandler) GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetUploadCaptionRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadCaption(ctx, request.(GetUploadCaptionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadCaption")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadCaptionResponseObject); ok {
+		if err := validResponse.VisitGetUploadCaptionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadDisplay operation middleware
+func (sh *strictHandler) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetUploadDisplayRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadDisplay(ctx, request.(GetUploadDisplayRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadDisplay")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadDisplayResponseObject); ok {
+		if err := validResponse.VisitGetUploadDisplayResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadPreview operation middleware
+func (sh *strictHandler) GetUploadPreview(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetUploadPreviewRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadPreview(ctx, request.(GetUploadPreviewRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadPreview")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadPreviewResponseObject); ok {
+		if err := validResponse.VisitGetUploadPreviewResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadSlice operation middleware
+func (sh *strictHandler) GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams) {
+	var request GetUploadSliceRequestObject
+
+	request.FileId = fileId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadSlice(ctx, request.(GetUploadSliceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadSlice")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadSliceResponseObject); ok {
+		if err := validResponse.VisitGetUploadSliceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadViewer operation middleware
+func (sh *strictHandler) GetUploadViewer(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetUploadViewerRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadViewer(ctx, request.(GetUploadViewerRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadViewer")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadViewerResponseObject); ok {
+		if err := validResponse.VisitGetUploadViewerResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PostV2WorkerHeartbeat operation middleware
+func (sh *strictHandler) PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var request PostV2WorkerHeartbeatRequestObject
+
+	var body PostV2WorkerHeartbeatJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostV2WorkerHeartbeat(ctx, request.(PostV2WorkerHeartbeatRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostV2WorkerHeartbeat")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostV2WorkerHeartbeatResponseObject); ok {
+		if err := validResponse.VisitPostV2WorkerHeartbeatResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // Base64 encoded, compressed with deflate, json marshaled OpenAPI spec.
 // Stored as a slice of fixed-width chunks rather than one concatenated
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"1Fpbc9u2Ev4rGpzzyGPKzkke9JaknTSdZpqqSV8yHg5MriTEIMDgYsf16L93AFC8SAAF0pbjvlnmAtjL",
-	"txfs4h7lvKw4A6YkWtyjCgtcggJhfy01e/+T+YMwtEAVVhuUIIZLQAskNMtIgRIk4JsmAgq0UEJDgmS+",
-	"gRKbVequMpRSCcLWaLtN0KeNAFwE91T289htt7uPlufXWm3+BCkJZ0uQFWcSrGCCVyAUAUuEtdoAUyTH",
-	"ypzQ7HnFOQXM0DZBWoIwX/4rYIUW6D9pq6i0Pi79VXL2+9VXyJWVrmX5y94J9XaXye4gXq9K0C+AqdqE",
-	"WZUKKy09cidISb+Wu3zUyy2x7/iOCEYvRUEU4QzTjx0mnAEOln7UV5TkbzlbkXWX/1Gb/HXxWiiywrn6",
-	"jUg1YLGayv4gCkp5zDjtzkvIuSisxtzxWAh8Z37nXDPVUSJhCtYgzKca30cV3PiB2yvpcHo5KG/NVVBS",
-	"/+kJMohac3FnPjJNKb6isKfeDrEAA8AMK+9e14T5DylB4QIrPMYDElSSEjK3VwRv1vejCAXcELjNohcI",
-	"kJqqbC24rmo1Hl8TsneC5AZfvHwVtYskf0N2daecKVdclEbzBlev/m/inH99B3aSa5FDvKhScYHXkGlB",
-	"oujbEBtFTRSNM6binGYujEdQ66rowPII+X5k7fhH0rqfhXIP8B0UH/PEY1FnfKwJMB3g5J3A1ebnG2Dh",
-	"qLAGpjLBI82RbyC/rjhhKtbUYE4fRxyMHu5zdCCgcAM0irIEKfE6blfGC4hHZIXvKMfFuHg3FDNyXkG0",
-	"m2F5HU07zoHleAdrXKpj5VZBfgAvNXujizUcrSL6qC7x90xopkzekJBzVgzx2wmTZqENOTmmNGrNNsT3",
-	"W8xyoEv4pkGqQ8eblgkFYMlZnO4DbNlAFmTrCli+KbG4HsfXlTVSRO3UGnSbICO/BGWSTL/+OsTbXoG1",
-	"ItR4wchVa47j4sE147cUijVkOWcKvquR9YoLJ2NqSneD+VDHIQ/vD8ELYeus5AXEFjmuVhhvFQkUcpMl",
-	"m6w9aQPC2TS933JxvaL8NtsQph5wyWrsFwxKNqfKcIIfuADY6DcGGgdJ3KO4ybeKmpugoMO3p+F7zhgh",
-	"l5qFpNsTYce5PSDI9yPVOy6uZea2C+OwOL5S6qyYch4vKwrRxe/RK1yuhTCqYrFxA4TgIopyF4Yf63YY",
-	"y2GFrUStrxxfQTFjILIbEJJE5V0bP623ZLv49aArosJihE2Hmjrj6juBcxh30e3fvQ4/SxCxWzVxPHAT",
-	"CAU1C6yk7U3199m7xHX4PXqjswFF6jJcNxWQk2iITMM54womV36uvjhS/OWcGaRjm4EjbUUYUQTT7PnU",
-	"PLHNhSFFTU57zs3Ga2Fk8tsdczkgw4f2UntgZgUsEPZ7WSH24hwLlolFbJ2tBwLno15v98OLOT5ptBah",
-	"8snoOYUT9SQflrQ7J9kh7Ugt3EPvoajji6DhqoRiBXJUCp8GuYFEKnVZ4sg2+ZDux3RBHy23Dhi8yZqT",
-	"s6TDwudKglADfY9/f57Y2ry34tYYbhf0hsg/NMw+UyXw7C1nSnA6+0gxM7GjqR/R/Oz8bG5O5xUwXBG0",
-	"QC/O5mcvkJtbWG2kN+cp1mqTSjdvNP+rW2BGkzY9vy/QAr0D1RlLorb2tNtczOd70R5XFSW5XZ9+rftI",
-	"7fxzSHO+6adVQwEyF6RSTjpDNttxvbUERpjczvLSyg72hqTpjv5OKY53xOiRx9HNHP8dgTZ2uDokiRu/",
-	"nlKGvQGvh3tHMRMdEsv/RdrMEtP7zthjOwi03aQh6Q3zv3gH7nuzlOiR++UJ9eWZy/gQvBOzVdauk+HV",
-	"jE31hsCvlm8axJ3/IcLAewb/4iZAj15JSUlUb2EBK6ypQovz+dx2vUmpS7R4aX8R5n6d+7rd/hP4aiUh",
-	"cER3y7lny9Mafb+H5bH5UrMZJXLf5um9KzMG3WKp2aHpfRy1JKl7/nJ6uZuZoU/ikLBp70XEEOZfN4QT",
-	"FTAerS97aD2fH4Xr0wSUGIC1ag0pPrcDI1sxcelRez1QeiDgbFn2hhd3j4u1/rTLifij0O14gWImBmDe",
-	"tuGHMO76/M8Y4MFcIQCX/jNWmMq2ym2epp0+Hu0NTWxhDd+VM8X/apZ7W3qe5B16lrPkjAv316zeKGR4",
-	"YRt5YTerG33P0836Xcht/z5nqqsf6HaOt32v6zTEgo72qaaJqqGedzEzvXY7rft52poeEzqqphhKQpnI",
-	"dggcMToV2n0d6ycHfL8560k1rlcycyg/hH1635T8g2Vko8txEad59/wk6Amr4VMjfoIq7RHRNYUeR8rT",
-	"ga3funp2YHPsRaIt7TbajkTeDzvS540/X3c9HMQa+YfVtLvdD0W6KcXAE4D24DXXD60HHl7M7YKp0MxU",
-	"c506brv9JwAA//8=",
+	"7H1Zd9s4lvBf4dH3PTqR46r0zOQty1R1upOptFPJPPTJ4YHIKwkxCTAAaMfl4/8+BwtXASBAWbZclaco",
+	"Jra74OJuuLhZZLSsKAEi+OLFzaJCDJUggKn//YILePtG/sJk8WJRIbFdnCwIKmHxYrHGBaQ4X5wsGHyr",
+	"MYN88UKwGk4WPNtCiWQ3cV3JplwwTDaL29uTxXlNnCOymsQP+PuWAcqdYwr1OXbY2+ajQsPLWmw/AueY",
+	"knPgFSUcFK4YrYAJDKoRqsUWiMAZEnKGdswVpQUgsrg9WWxq4CKtGJWok03+P4P14sXi/y07IizNvMt/",
+	"cEp+W32FTMiumKcoLyV8NwtSFwVayRE0GLsTlTQHT8sGzJNFzYHFLUT20KidHP62j/F/jxBk5v7S9qLt",
+	"FH8HVIitG9NcIFFzC9lOFoLbmaS/DtNdNbZN34NXkjXPscCUoOJDbxEDeLuuH+pVgbPXlKzxpr9+3yAj",
+	"LpJEToFItDq4CFVV2lBgBwHy4yUwyarW72tAombNXLZV2aYcAXprAf3z2Uu59NcMkIDf2AYR/AcSasd8",
+	"k2zvnnCNCr6DhxIEypFAcczpRAtlGykCbJ+c3DQJ5ScObB50OeZVga7dZIQS4cL6ZR5iPPAzWkAcYvTW",
+	"tY/nQdpbzmt4h7lw7+yM1kT0RsVEwAaYFoC81o2wgJJPgd+f8xwyyvIeHyPG0PWOXNCTtzN9mYDEjBq1",
+	"uzNK5OZU+8Lgb1JEq+Wk+s9WfuAcbeAueSXLasYgT5GwM0wdvHYOl8CwuLYzUVVQfTKHnlRhbT0s2JdL",
+	"Fu5Tu9oJ90OIpGm0VLl7zSMGNzOaNZ304R0M1AP1SxguZ+9q2hskenMPqBm6u4cz+uC7BHaJ4coN1wYI",
+	"MB/HXFQ4FJYPBRJrysp/yi63J4tvNdQQ2Pdfsu0bjDaEcoEz1Z9BBkSkB5CaSgAIXIau7ly3/liXJWKq",
+	"v6C0SGsptdL/yGPX9julxSfZ170+QatUiotouOWB3l/naFy95AJxkZ79vI0fHG3gVZ1dgLANfkXZxYwl",
+	"/6/qFnjCDRi2o2PDbYZhdwAdU6xbbB/XY57zbK0Bs8epx5nAl6BnbIiwK1UQ55gLRERqTkc+oJqlw+Wm",
+	"a1oBS/sHda8LqcuV7tFvwFMuEJNodU6wRriAPGU18Sw7cLGsJgSTjRrM2WJqEE7XIs2hALlsfRI7BuMC",
+	"FZBOT8rrLAPOU8lgtsk73AkqUDFAsWNI3bBBi6+Ne1n6OxeUSe5dXQs9kGQ/KbVl07/9vDhx9vTixjRp",
+	"ZM1uA6W1BNHVo7Uo+f6aEl6XwDo5H7tzLtJ1QSlLuWCAypRLy4VkEIgN2f8KYZFyyCgZIKSjrN6edhsy",
+	"hwJfgtQr5y0AGKPMesxikq4LvNmKCVYp0ffUrMLewKmrVUByyf398QOWzKAD2r80txFWt56InW+SHHJV",
+	"VV0UKdOGKJ/DW33dIY6pLhE2+qmN5Jnh2dSjATZtok8+166wnK1u1lljxkUsJ6ptHNmn8chZdH25GTyf",
+	"omSW6RLJp82G1Lw2pMSui22sYbhY67wmLzPh9ZlWDC4xrdUB6vI1dOZmlIdCmzM2vhwpRa3TebyYk85T",
+	"2Iz2xQvtbCuoOb1i2P+8JpF+DTWLH4I5Pg3EBF6jTExs8mi/x4Q1ntdMD9c7jxxjdudTKwgmZ4dLqcp6",
+	"QNKSowW+QAJIdh21Gj1EDoVAe/RXuvmc7huK7C7GLSAmVoC88CshqM57LK5TqVvFzK16axxr+k4SpNfj",
+	"ApM8to9XXDsGGkOrMB2zXNUhMFhysigAcUh9KpRuAd8rvbWnmvDgxapOaskMCFzJXRdLUMsQMZObuVIG",
+	"JcLS0oiYVVujoXLFnI1m3/mlsufgcek8xlwCxCkJ85F6olmSfzJUFL5ltkwWdW5PeA7vyN868v3EnSsT",
+	"kaxW9DJKHUcE5hUS2TZ1Kl9aNgiGCK8os4/yla4mWhAkeJohkkGR+vR13U4FB2vnBlaNmtNHK7fuwVQ7",
+	"Pj3pV7oKaMUQk9qLCGzu0Vzl1mGQ0Utg1+lK0aDAJfZstLa1N/Q5aClHYJfSuPdYpNLwh3SFsgsgrr1c",
+	"rxoR4p3cxCsc7ObZBWOXZWTIyK2CKKeSxxsDuevz4GQKh6Tvw4yCYqX6aD+ZnaPgyudHUR4tH7yqwQTQ",
+	"qo1y2TicNW5XjxcnwF5mLZmiQkrjOPC0WtrEhQOOuf3ixJMTNC6LiANuv2jWRNi5b/I0DfeNcUnazrbq",
+	"7j4E4TDs9EQTYMw6gwN8tEMOn6TwATl+ZJGIGG2QO8OTd74dwkSZ8bcfTthF7Mo5znOv23xW+sgg0rWb",
+	"fecxm1Q6AxFpROJCZwLHGkJbykW4ySdZtjfXXSYe+G0U5hGz0241V8+evj4J+8Bqc31tTH2/uO+GGnbs",
+	"efB6INvQPjobDDc1SJw+LIwt4j8rGosl6lAwfdzR7jkWrMsF2pwo3Ur98Dp3Y2ObOaibIQEbqk+jfR2B",
+	"DhaZu21KXHbZVpNrU7nGQQ0ZXGK4SoM7MOB1IdINo3UVfAZ5PBZbdPb8b2HiHv/hk/XTzjJOa5ZBOKjN",
+	"+VIzHNS+S+kOao1F4Mkc564bisLIVOje/jjptp8RWgOdNVDyTEudeFnjWLRjJb8yVG3/+xKIWyps1Ckc",
+	"qihlW8guKoqJCCW1dptENXZKD+MaChUEBVxCEaNxBrUlNIdwjqzQtVS64uSdT2ZktILgbYb4RXDbuA3M",
+	"4zdYu6V6VO4QZGfg9zSHYurugee0LWX/8LN9SIYgQ8/MYF/+/1DxuvUtugFwx8I5sEucTeWCA6lLuSZC",
+	"Rd+X+WWKInrevkZmprND84EhzDCcg2AI7xFZ7WVFHIoq7RxeSD4quGdeCtFZb4r8aYyOvQKSbUvELtIV",
+	"4lBgEnnrqOtfIAFcpBkiOZbn3txx5Ma/dphpiFCCM1SkYc0LxLkOjERSVR6nHIIPiqa5MzsoBwEq0WHW",
+	"apQx0kEcE1/k1yQL76AIWIJgJs0nQidWjLdVotHhvf0et5qK0ZIqlAXRmmkxkG4M5/lbzCLDYAAdvosM",
+	"qGkNH/IUl26PUk0Cm/G6qqgyWecy+khcDdh4RNPdxdtWOqKDA2cuKYhJhitUuJTDQ7ja9o1hnoM2ZfY4",
+	"fvQAMRZ/M2lsdk871RcvLC78ZyjbQrcHp++YZpSIKBV5wo5vrhNbM1IQT8W2LldkeC2utxzK8AYTVLjF",
+	"dGOC16wIlFGGZadpNubuHundFkZnksea4E6T23lLzHwPtbC5QBvI04JmqCgC+aGlTyCCR3zc3SYfUnKA",
+	"jBZpIyO5D/4Y9WPumdoerm3ejBq/g8e2STOQYyU1eVXnm9gIa4m+p+ZCR4C/epQV3SaaBPW5da37tcqB",
+	"6F2JvYs7vcGpNO5lKVZxLqvVQCJ1WkWkEIHeErSnTNYMR6oXZoNE9mqS/KavmeZQVlRnEV6A2vM58Izh",
+	"St+BWbyi+XWyRkWxQtlFsqYsedt1efJPuH7qdg72vLWEXhWQb6SSRgR8F5GaaC9cF3ie6voQ743XxYKi",
+	"fdhSXQoILbbQyqV44nMoIJPibm62lx5A2ygz8H5F2cW6oFfpFhOxhxLa0s8p+5QHkc/StnQ2VARr7Lgs",
+	"7Zcd58VQzGqcgL4DxN3amF9XsmV5OhoJegEkNrF+IsznC9250NKP0fVXZgHGnbUxhUyHhB9hYijXfqvQ",
+	"txoS9TVhIGpGIE9W1wnKFBgJInnSgKTknkpwXTJQwz5dOHNahRjkpo3EKcourhDLn0jORAKvCkhQgRFX",
+	"U/S6yglKTHBZl4sXzywRZ+80b4CrdasVJU3SfIJJEjr8gNjDwT8KKe8S3SLBORCBxXVSc8iTqy0Qg0JM",
+	"NglKXNhyHtv3dZ3iTm9SDC5R7BX+0PqFuowS6W2LD5z0esyZj5aVvkga6P2ZkG5NvgYJPVjDr3U47zzM",
+	"DBaHrrBCsRkoVYEIARbl7mVmt6TNAb9XxHiQJLJXGntcuIehDOLi3neWyt5TdMIyT9rjTTFWL7oxHGeP",
+	"PEQlUHhduk+3HDIczCIzi5hQAbMtMK2ATxhhsyrjECzw6IL4wxoFobkGPkTNPvb0NovHQuTh10zzxQPD",
+	"+y7GvUNmAcQh9uMySZt7PMHXfmZZea572RGSPEb8jcULVdlnDdYCUD6bew6xiQaQ+yHtl2lsw91+Y3HA",
+	"vbugxitBEzaXDqBFEH523qbrIOVdDncc1+2RFHWX18RcBG9PzdmnpOaFTxUHJjz+xz/JOcH0Fck32pc4",
+	"e8sbX+RBkyPaOb74QaHlPmkeuep+WEDMFH443mEC+0jhQvc/KCTtHH5Q3gPbNPraHqcK20B6H1k4o5km",
+	"YKM5OCPROaxRXTTZTZGpJX3/iPXCVwmE4+jcgjVDJUibwp4CDdeOa5qlq6qMSi7g6RoTEDVx3RNommGy",
+	"BtZcn/e0E6y7vG2JECJ+4QpRjqgqIWrrFHbA98cYItu2CBucVqAGdDkZM0AAK33WRvrsbWKM/INukHaO",
+	"AHj4fSRA2rfjneRCNgN/UirEB0YrylExmzyVGeCg9OkmscP0Sd2o+gUX4KGOChL67iSqQSCm6uIn00XO",
+	"HEij3ip6U/rAGgzvshrvJdXk2PJI7i5L5O4SLuyU1Bf0/t5cq3ISc8ZtvCO6U/fj4pzv4tyEmbbDIi5v",
+	"4EPwyOHs+Tvyoz84k+wS9Va5YddUjaKN2sUrzP9VQ/KpEAwlrykRjBbJhwIp7auFYXH69NnTUyVxKyCo",
+	"wosXi5+enj79aaFv1SkULC+fLVEttstNyydU/yu5RTmL3+aLFws5CyY1vOS/qoZtUv4rqtMZe35HVFUF",
+	"zlTf5VeTWdQ9BDIK2a3XuMDIqc67y/QH19a4ve0FbtSkZ6enUUv2saLt5RI14zCQ+45mqEgUkhOJ74Tr",
+	"PmZ5LRkKutFPkNjJ8E5+foX5txrujAQV4vzKHCRW79NjxLTeIoPQvx/rtBZetNNa9PD+sCC+LgCplAMF",
+	"qg+w5s+qlroFsF9B9OY8AtBe2oHRhuKyUq+/+KDpvw9zSHCs79BY4NHtEmPodgB1Vz1ckPy9uzhwIBhG",
+	"N/Esq9ctEtZrotZ/tlSv6CwH1UuWN6MQ46329RSgQ5tDCN+ovzevvfSLgZ8Mnsj6t/XNqXEwM+pBKzPi",
+	"txrYdTdkV9HG3fXLiBrPT5/dGTVc9wttm0TiLOnjIFFoVnlHPCFUJN3FwQSTRGwh+ZXKPypVoZKqQnIN",
+	"Yoeg3WsGVraU9n3/BQPuINYItboyWR+xxgG0eHH2XOVH6+So56en1lSpzsD6csDt4HxEx3nIKJwlBmdj",
+	"VCr3yZPpfW6m7d2NXRwUSNslXCePKSASDURSYL7LMZRtgvjlt8GrIHuzjeKUhm+enU4yjmPTf4va7gfg",
+	"NucbLxNMN3xkRTV2KO7KqWB7z2W+/hgAl/uVstuh9SOl9a7W+OyQeLaqVNr3orH7pEQEbSAfYHmX883z",
+	"NQGbu3npJozv+y9+WHj/P6MkpoPx9ZtXnh327OzYBPPOc0FTW6RB+phwTfbqlMg6r49IUtH1moNjjv6Q",
+	"p+FDdh6oQ+hKxypxx3nPE1ykmMXGQcsb7Tu7XerCtB7fifreTb/LU7Zld02W+kXXe0LO6EUBp2rAapJo",
+	"yAutgup6ShO4UkeOfnfLjqxz3eCOsHUX/pHuetwDO0Dm0aip5ps0xZpbQp0sfj79r907B+e1siIEsBIT",
+	"uQ9ILgktrYoVJIaA+Q6d22KcU2L1kznafmiA9gqoEwJJ4zlU45Oj34em13+p9WE0vH6V4GAFTyIzQV2v",
+	"XY5e3pjDLtybYXA+7cXojtFw78U9caQHkx/pWjzJMVeFvAPx2VQ7XN70CrPdet2STS20EESOqr0dCzLH",
+	"leNscroBcxJZy5xekab6mBVrb0yDI0QdzQSIJ109+27cNqi+wgQpwWx5Kd6Os2SNC0h0GL2Hvqho1uez",
+	"H/Gsg8SzzsLjWZ/PfkS07iyidRYT0Rpg/uhjWmfBMa3PZ48gqnUWHtX6fPY44lpnyxB/93FHttqk1eVX",
+	"uuKeM8So2W+b9v+gq8VxxIc+CkRyVFACSQtNIqFJEINReMgJ+fLmK10Zm13Zi16a9rFwrtuHaB96ir0U",
+	"j8eF4/Co0LEFhN57QkGDKmxO+/+8bfUndqp+m+MUbVICH8hQsVbhs7BA085J/uWNyXkNMJabwaL9e7/g",
+	"Au7CHTq+k6IKLNjvVbjTmcclIM0oXRd7Rt+4hIjqlbR1y1Qbl2h4cMSF1mabZiQ/Dy0HBQmn0PF72/h+",
+	"8HKnJm27s1qQd+zayahVeLhqcDM0VlbNjxr5oo0Dgf78IeT5gXfFdNTpvCY7grUfO/FugmONKvVK/1gh",
+	"dgG7HDzl4uP5l23DmQiI59bnserH/fgZQxisQ+sk4sMdjj0qvLr+oBX8uaTYWfITBgUS+BLatSfShnia",
+	"yIkSwZBKgtNhKrTitKgFqBZaE2fwVdX1e7o4sZLZ2COP1/F5svhZr2CkrmPOMdkklCU14Wg9Qp/u9/Nu",
+	"v5f9VsqOWdOa5E52CQt+P0wcd1I0DcupHjx86xWGei1SC/RIxa4Ao08k6gqPRywPd/e5qgqYaPCSK6zc",
+	"Zfo98UQXyuPJRjlcWCK2iCRii3mS1YxT9jT5xCE5TQRNKrSBZM1oqTJeV7DB6o2/hK4TlBSUbCRyXZIA",
+	"rQWw7hnzPqTzsmvUnrcibI0KbinxfPizeFT7U3m84bvQfGUVU9Oqa93SjTL9KzEDubhYFSr0WYjnuvJj",
+	"U3byGEXHoB5mUMT7dK8cFIUQq3m6U/zaNA2xPA2ildDR9SOdaSEKYFPEE/NEvdsnKY7JJSqwEWkqwcRG",
+	"TwJXf2Vqhi7AqSnrF//vjEzWo/qlLsf6g07z6WRQGEIok2aFCvUiRGL2IWVt4pVTfDJVrdCXQqeqGR6n",
+	"yjUstfgQJPTtMrm2sQbGYVMCEUuOyp+W6kn87ilcBwFq8vnsIyp/etu1/qhH2Tf13iLR/eh7qPDIy/c/",
+	"JT1kJbwH/+4lpR66e0UWnTru76bNvnGEI3A7zfeyHVZZtJTKtJBZt2rdVv6URN34YNmItiqo9y5fhgU/",
+	"3WmImst32X550zpnvQ6/FpdxAl53O7zbbwoNv7fgnyyq2gKiLjR4N1AejtmG5RCPjtn08gK5bdkv3jgh",
+	"ed83TY+b/2wVW91CrIXfj6YmDuOTdHN0rw41Fu9IzYErnwZ8x1xg7cjQ7xhsIeGoBEPjE5WCe6K8oRdw",
+	"nWDChQSOrtv8f9k7rzVu9dMCrUdkCyhXucvmFBq9PzN9HB3KT/ewQr2vNO7vMGmOAElBynZ9JU11vWW/",
+	"eqjnUsWoWOlsreh4Ahq+8qu2/WuaJy3CAm5HjOY4ksytMSiJqgk2qTKPOWZ5073AeutPM9rFw3TWVu95",
+	"10eYubXDLv6MLT9yl22NP4dPhXO8ITtofqt6/fVwnUh0JUghRZqDgWzdFR8OkYOm9Z9HDO6Wbvai2sAf",
+	"IwRVl6OTgWpVsSJQQ7+80T90vKFX8zmYgd41nYJ2aTPZXVSieQw8aSvD7aNlSwILycLyrJuhjifNugVu",
+	"Ou13AGubWR12MmuA/8y51HsjcmkqG/lvfDFa/FWx2pZ+CpKhzWZd3phfCsdrUxzdjuBfKLvYEQ9BGO7m",
+	"eNRYNmBIo/wilIntiO7XKg84rgyuPze9DojzR3xgOavIh9BUl8Fq6WKhpHoc4Un/GYYAyvUfgAjUV+8y",
+	"+/YIieR6EcNHJIX6pEV9hNrbn+7YdIohVIHyZMiFyxv9ZIfK6qwqRn0xy5e6gRM50zKlmexRS/EB2pPm",
+	"4b/98a/TUH0xe/n9B/b3wr66W9dI6eWN+aXwXzFamicW7QT4oBvYD4wgCnTTPW4aqLNO4yvY6vahnlH9",
+	"or2H+U2LH8jXyG8wFoH7YJVDN74/lYtHwN18pMyqY1UMYYZhuQKSbUvELpasJhNZOB90n1dNlyM55s2y",
+	"khaUGNO3wQMD9afmvJmoqSa5wEx7rjseGS4MOJF+AAcypvbDEBM9HfyA+2I455R+O0LLQMF1IaF72sJT",
+	"SUK3/dgYEocHWE8VAmvLAAYQH6jXJHNz/MdrkrXzv1QZaO8AMfNo2TFxvU6Pe1KY1SUSrjC5XzFYF3iz",
+	"FT6lRj2kdNTO0xaMMKj1YzhPBg+GBZx7w3fKgoNDPS/Jg16UPT5T3fPwm4/amnxJR74Ic3045bHx8Riy",
+	"wPNrzM9L8/hZxKb+a+Dlpvk505+xg6Vpo6I346O2KkYkiDasJ2gR69v4QYlYSugXHj1B0t7Tld786rIu",
+	"BK4QE8s1ZeWT5q0117WztRqw/5Ll5K3lgIcrueNq2n2m9Nne+rRm0Oq3MxO97h2KLNeMlk9Wuoiekzpv",
+	"y4qytthevwzSXVWo7pVfCn3y+Pbk0VwmMe/dNWAmWOHTqy829OmKyWSofTTaZRxpar9Glf0dogepS9Rb",
+	"dtQrq6bAzoubBRCpKf57sUbGD3eyKIpycbLIULaF3l501DTqnjHNWsyY0UOumGqkJk1fH4lyzKsCXU+T",
+	"6I1p+Agr/Rh0GFB3qvzsIqWnD/qRYvTCR4wUA2oAUniBNXP7UfJRNZuLEId1hr7jWVbdH3uXFLjee4Tv",
+	"e4+Q7T2CCB/h4VlSMVoAQ0q+BTbNkZ91u4c6W0KltQYnad/j7UDXb9XyZfu2r8dQpVzsvEh8sOt/jpeP",
+	"712ztD/SbUG1bpi0iExQlkElIA+p6WOu8ydXo0EUpW5v/y8AAP//",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

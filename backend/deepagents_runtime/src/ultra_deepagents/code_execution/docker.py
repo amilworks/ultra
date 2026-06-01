@@ -16,22 +16,33 @@ from ultra_deepagents.code_execution.paths import resolve_workspace_file
 class DockerSandboxConfig:
     image: str
     network: str = "none"
-    cpus: float = 1.0
-    memory: str = "2g"
-    pids_limit: int = 256
-    timeout_seconds: int = 120
-    output_limit_bytes: int = 200_000
+    cpus: float = 0.0
+    memory: str = ""
+    pids_limit: int = 0
+    timeout_seconds: int = 0
+    output_limit_bytes: int = 0
 
 
 class DockerSandboxBackend(BaseSandbox):
     """Deep Agents sandbox backend that executes commands in isolated Docker containers."""
 
-    def __init__(self, *, workspace_dir: str | Path, config: DockerSandboxConfig) -> None:
+    def __init__(
+        self,
+        *,
+        workspace_dir: str | Path,
+        config: DockerSandboxConfig,
+        outputs_dir: str | Path | None = None,
+    ) -> None:
         self.workspace_dir = Path(workspace_dir)
+        self.outputs_dir = Path(outputs_dir) if outputs_dir is not None else None
         self.config = config
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        if self.outputs_dir is not None:
+            self.outputs_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self.workspace_dir, 0o777)
+            if self.outputs_dir is not None:
+                os.chmod(self.outputs_dir, 0o777)
         except OSError:
             pass
 
@@ -41,18 +52,12 @@ class DockerSandboxBackend(BaseSandbox):
 
     def build_docker_command(self, command: str) -> list[str]:
         workspace_mount = f"{self.workspace_dir.resolve()}:/workspace:rw"
-        return [
+        docker_command = [
             "docker",
             "run",
             "--rm",
             "--network",
             self.config.network,
-            "--cpus",
-            str(self.config.cpus),
-            "--memory",
-            self.config.memory,
-            "--pids-limit",
-            str(self.config.pids_limit),
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -70,11 +75,22 @@ class DockerSandboxBackend(BaseSandbox):
             "MPLCONFIGDIR=/workspace/.cache/matplotlib",
             "--env",
             "XDG_CACHE_HOME=/workspace/.cache",
-            self.config.image,
-            "bash",
-            "-lc",
-            command,
         ]
+        if self.outputs_dir is not None:
+            docker_command.extend(
+                [
+                    "--volume",
+                    f"{self.outputs_dir.resolve()}:/outputs:rw",
+                ]
+            )
+        if self.config.cpus > 0:
+            docker_command.extend(["--cpus", str(self.config.cpus)])
+        if self.config.memory.strip():
+            docker_command.extend(["--memory", self.config.memory])
+        if self.config.pids_limit > 0:
+            docker_command.extend(["--pids-limit", str(self.config.pids_limit)])
+        docker_command.extend([self.config.image, "bash", "-lc", command])
+        return docker_command
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         violation = validate_sandbox_command(command)
@@ -200,6 +216,8 @@ def _combine_output(stdout: str | bytes | None, stderr: str | bytes | None) -> s
 
 
 def _truncate_output(output: str, limit_bytes: int) -> tuple[str, bool]:
+    if limit_bytes <= 0:
+        return output, False
     encoded = output.encode("utf-8", errors="replace")
     if len(encoded) <= limit_bytes:
         return output, False

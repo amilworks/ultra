@@ -113,6 +113,102 @@ type ArtifactRecord struct {
 	Metadata      JSONMap   `json:"metadata"`
 }
 
+type UserAccount struct {
+	UserID      string    `json:"user_id"`
+	Email       string    `json:"email,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	Role        string    `json:"role,omitempty"`
+	Status      string    `json:"status,omitempty"`
+	OrgID       string    `json:"org_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Metadata    JSONMap   `json:"metadata"`
+}
+
+type Organization struct {
+	OrgID     string    `json:"org_id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Metadata  JSONMap   `json:"metadata"`
+}
+
+type RunLeaseRecord struct {
+	RunID          string    `json:"run_id"`
+	WorkerID       string    `json:"worker_id"`
+	LeaseToken     string    `json:"lease_token"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type WorkerHeartbeatRecord struct {
+	WorkerID        string    `json:"worker_id"`
+	WorkerKind      string    `json:"worker_kind"`
+	Status          string    `json:"status"`
+	CurrentRunID    string    `json:"current_run_id,omitempty"`
+	Hostname        string    `json:"hostname,omitempty"`
+	Version         string    `json:"version,omitempty"`
+	StartedAt       time.Time `json:"started_at"`
+	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Metadata        JSONMap   `json:"metadata"`
+}
+
+type CreateUserInput struct {
+	UserID      string
+	Email       string
+	DisplayName string
+	Role        string
+	Status      string
+	OrgID       string
+	Metadata    JSONMap
+}
+
+type UpdateUserStatusInput struct {
+	UserID string
+	Status string
+}
+
+type CreateOrganizationInput struct {
+	OrgID    string
+	Name     string
+	Status   string
+	Metadata JSONMap
+}
+
+type AcquireRunLeaseInput struct {
+	RunID    string
+	WorkerID string
+	TTL      time.Duration
+	Now      time.Time
+}
+
+type RenewRunLeaseInput struct {
+	RunID      string
+	LeaseToken string
+	TTL        time.Duration
+	Now        time.Time
+}
+
+type ReleaseRunLeaseInput struct {
+	RunID      string
+	LeaseToken string
+}
+
+type UpsertWorkerHeartbeatInput struct {
+	WorkerID        string
+	WorkerKind      string
+	Status          string
+	CurrentRunID    string
+	Hostname        string
+	Version         string
+	StartedAt       time.Time
+	LastHeartbeatAt time.Time
+	Metadata        JSONMap
+}
+
 type CreateThreadInput struct {
 	UserID          string
 	Title           string
@@ -121,32 +217,55 @@ type CreateThreadInput struct {
 }
 
 type CreateRunInput struct {
-	ThreadID string
-	UserID   string
-	Goal     string
-	Messages []ThreadMessage
-	Metadata JSONMap
+	ThreadID     string
+	UserID       string
+	Goal         string
+	WorkflowKind string
+	Mode         string
+	Messages     []ThreadMessage
+	Metadata     JSONMap
+	Internal     bool
+}
+
+type CompleteRunInput struct {
+	RunID        string
+	ResponseText string
 }
 
 type AppendRunEventInput struct {
-	RunID     string
-	ThreadID  string
-	EventKind string
-	Message   string
-	Payload   JSONMap
+	EventID      string    `json:"event_id,omitempty"`
+	RunID        string    `json:"run_id"`
+	ThreadID     string    `json:"thread_id,omitempty"`
+	EventKind    string    `json:"event_kind"`
+	EventType    string    `json:"event_type,omitempty"`
+	NodeName     string    `json:"node_name,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
+	CheckpointID string    `json:"checkpoint_id,omitempty"`
+	ScopeID      string    `json:"scope_id,omitempty"`
+	AgentRole    string    `json:"agent_role,omitempty"`
+	Level        string    `json:"level,omitempty"`
+	TS           time.Time `json:"ts,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	Payload      JSONMap   `json:"payload"`
 }
 
 type CreateArtifactInput struct {
-	RunID      string
-	ThreadID   string
-	Kind       string
-	Path       string
-	Title      string
-	MimeType   string
-	SizeBytes  int64
-	SHA256     string
-	StorageURI string
-	Metadata   JSONMap
+	ArtifactID    string
+	RunID         string
+	ThreadID      string
+	Kind          string
+	Path          string
+	SourcePath    string
+	PreviewPath   string
+	Title         string
+	ResultGroupID string
+	MimeType      string
+	SizeBytes     int64
+	SHA256        string
+	StorageURI    string
+	ToolName      string
+	Category      string
+	Metadata      JSONMap
 }
 
 func NewID(prefix string) string {

@@ -5,18 +5,18 @@ import bisque.*
 try
 %% Start BQ lib
 BQ = BQMatlab; 
-%% Setup serversds_uri = 'http://bodzio.ece.ucsb.edu:8080';
-cs_uri = 'http://bodzio.ece.ucsb.edu:8080';
-ds_uri = 'http://hammer.ece.ucsb.edu:8080';
-cs_uri = 'http://hammer.ece.ucsb.edu:8080';
+%% Setup serversds_uri = 'https://bisque.example.org';
+cs_uri = 'https://bisque.example.org';
+ds_uri = 'https://bisque.example.org';
+cs_uri = 'https://bisque.example.org';
 BQ.initServers(ds_uri,cs_uri);
 %% Login to Bisquik DB
 user = 'admin'; password = 'admin';
 BQ.login(user, password);
-mex = BQ.loadMEX(['http://hammer.ece.ucsb.edu:8080/ds/mex/947?view=deep,canonical'])
+mex = BQ.loadMEX(['https://bisque.example.org/ds/mex/947?view=deep,canonical'])
 %% Post Image from File
 %% Load image
-image_uri = 'http://bodzio.ece.ucsb.edu:8080/ds/images/14477';
+image_uri = 'https://bisque.example.org/ds/images/14477';
 image = BQ.loadImage(image_uri);
 plane = BQ.loadImagePlane(image,1,1);
 pp = plane.toMatrix;
@@ -31,10 +31,10 @@ return
 
 
 %% Setup servers
-%ds_uri = 'http://bodzio.ece.ucsb.edu:8080';
-%cs_uri = 'http://bodzio.ece.ucsb.edu:8080';
-%ds_uri = 'http://dough.ece.ucsb.edu';
-%cs_uri = 'http://dough.ece.ucsb.edu';
+%ds_uri = 'https://bisque.example.org';
+%cs_uri = 'https://bisque.example.org';
+%ds_uri = 'https://bisque.example.org';
+%cs_uri = 'https://bisque.example.org';
 %BQ.initServers(ds_uri,cs_uri);
 %% Login to Bisquik DB
 %user = 'nuclei3d'; password = 'nuclei3d';
@@ -81,8 +81,8 @@ image_data = BQ.loadImageData(image);
 %image_data2 = BQ.loadImageDataCH(image,2);
 
 % %% Save image
-ds_uri = 'http://loup.ece.ucsb.edu:8080';
-cs_uri = 'http://loup.ece.ucsb.edu:8080';
+ds_uri = 'https://bisque.example.org';
+cs_uri = 'https://bisque.example.org';
 BQ.initServers(ds_uri,cs_uri);
 %% Login to Bisquik DB
 user = 'admin'; password = 'admin';

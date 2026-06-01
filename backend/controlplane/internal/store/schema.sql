@@ -11,6 +11,31 @@ CREATE TABLE IF NOT EXISTS control_threads (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS control_organizations (
+  org_id text PRIMARY KEY,
+  name text NOT NULL,
+  status text NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+INSERT INTO control_organizations (org_id, name, status, created_at, updated_at, metadata)
+VALUES ('local-org', 'Local Organization', 'active', now(), now(), '{"source":"dev_default"}'::jsonb)
+ON CONFLICT (org_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS control_users (
+  user_id text PRIMARY KEY,
+  email text UNIQUE,
+  display_name text,
+  role text NOT NULL,
+  status text NOT NULL,
+  org_id text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS control_thread_messages (
   message_id text PRIMARY KEY,
   thread_id text NOT NULL REFERENCES control_threads(thread_id) ON DELETE CASCADE,
@@ -65,6 +90,28 @@ CREATE TABLE IF NOT EXISTS control_run_events (
   UNIQUE(run_id, sequence_number)
 );
 
+CREATE TABLE IF NOT EXISTS control_run_leases (
+  run_id text PRIMARY KEY REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  worker_id text NOT NULL,
+  lease_token text NOT NULL UNIQUE,
+  lease_expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS control_worker_heartbeats (
+  worker_id text PRIMARY KEY,
+  worker_kind text NOT NULL,
+  status text NOT NULL,
+  current_run_id text,
+  hostname text,
+  version text,
+  started_at timestamptz NOT NULL,
+  last_heartbeat_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS control_artifacts (
   artifact_id text PRIMARY KEY,
   run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
@@ -88,7 +135,16 @@ CREATE TABLE IF NOT EXISTS control_artifacts (
 
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
+  ON control_runs(thread_id, user_id, (metadata->>'idempotency_key'))
+  WHERE COALESCE(metadata->>'idempotency_key', '') <> '';
 CREATE INDEX IF NOT EXISTS control_run_events_run_sequence_idx ON control_run_events(run_id, sequence_number);
 CREATE INDEX IF NOT EXISTS control_run_events_run_event_idx ON control_run_events(run_id, event_id);
+CREATE INDEX IF NOT EXISTS control_run_leases_expires_idx ON control_run_leases(lease_expires_at);
+CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_worker_heartbeats(worker_kind, status, last_heartbeat_at DESC);
+CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_run_created_idx ON control_artifacts(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_sha_idx ON control_artifacts(sha256);
+CREATE INDEX IF NOT EXISTS control_organizations_status_updated_idx ON control_organizations(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_users_org_status_idx ON control_users(org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_users_email_idx ON control_users(lower(email));

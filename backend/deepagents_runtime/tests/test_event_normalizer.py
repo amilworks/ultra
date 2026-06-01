@@ -4,6 +4,7 @@ from ultra_deepagents.events import (
     normalize_message_delta,
     normalize_run_completed,
     normalize_run_failed,
+    normalize_subagent_message_delta,
     normalize_subagent_status,
     normalize_tool_call,
 )
@@ -63,6 +64,26 @@ def test_normalize_subagent_status_includes_task_and_role():
     assert event["task_id"] == "task-1"
     assert event["agent_role"] == "statistics-analyst"
     assert event["payload"]["phase"] == "power-analysis"
+
+
+def test_normalize_subagent_message_delta_keeps_specialist_text_separate():
+    event = normalize_subagent_message_delta(
+        _context(),
+        name="literature-reviewer",
+        text="Found the methods section.",
+        task_id="task-paper-1",
+        payload={"namespace": ["literature-reviewer"]},
+    )
+
+    assert event["event_kind"] == "subagent.message.delta"
+    assert event["event_type"] == "subagent_message"
+    assert event["node_name"] == "literature-reviewer"
+    assert event["task_id"] == "task-paper-1"
+    assert event["agent_role"] == "literature-reviewer"
+    assert event["message"] == "Found the methods section."
+    assert event["payload"]["text"] == "Found the methods section."
+    assert event["payload"]["source"] == "literature-reviewer"
+    assert event["payload"]["namespace"] == ["literature-reviewer"]
 
 
 def test_normalize_artifact_created_is_go_compatible():

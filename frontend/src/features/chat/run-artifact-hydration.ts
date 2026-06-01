@@ -4,8 +4,22 @@ type HydrationRunArtifact = {
   downloadUrl?: string;
 };
 
+type HydrationArtifactRecord = {
+  path?: unknown;
+  mime_type?: unknown;
+  mimeType?: unknown;
+};
+
 type HydrationProgressEvent = {
   tool?: string;
+};
+
+type HydrationRunEvent = {
+  event_type?: string;
+  event_kind?: string;
+  payload?: {
+    event_kind?: unknown;
+  };
 };
 
 type HydrationCardImage = {
@@ -33,8 +47,10 @@ type HydrationToolCard = {
 type HydrationMessage = {
   role?: string;
   runId?: string | null;
+  content?: string;
   runArtifacts?: HydrationRunArtifact[];
   progressEvents?: HydrationProgressEvent[];
+  runEvents?: HydrationRunEvent[];
   responseMetadata?: Record<string, unknown> | null;
 };
 
@@ -59,6 +75,42 @@ const looksLikeLocalFilesystemPath = (value: string): boolean => {
     return true;
   }
   return /^\/(?:srv|mnt|private|Users)\//.test(normalized);
+};
+
+const HYDRATABLE_VISUAL_ARTIFACT_EXTENSIONS = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".svg",
+  ".avif",
+  ".tif",
+  ".tiff",
+  ".nii",
+  ".nii.gz",
+  ".nrrd",
+  ".mha",
+  ".mhd",
+];
+
+export const isHydratableRunArtifactVisual = (
+  artifact: HydrationArtifactRecord
+): boolean => {
+  const mimeType = String(artifact?.mime_type ?? artifact?.mimeType ?? "")
+    .trim()
+    .toLowerCase();
+  if (mimeType.startsWith("image/")) {
+    return true;
+  }
+  const path = String(artifact?.path ?? "").trim().toLowerCase();
+  if (!path) {
+    return false;
+  }
+  return HYDRATABLE_VISUAL_ARTIFACT_EXTENSIONS.some((extension) =>
+    path.endsWith(extension)
+  );
 };
 
 const visualToolName = (value: unknown): string =>
@@ -90,6 +142,96 @@ const messageHasVisualToolSignal = (message: HydrationMessage): boolean => {
   });
 };
 
+const messageHasCreatedArtifactEvent = (message: HydrationMessage): boolean => {
+  const runEvents = Array.isArray(message.runEvents) ? message.runEvents : [];
+  return runEvents.some((event) => {
+    const eventKind =
+      String(event?.event_kind || "").trim() ||
+      String(event?.event_type || "").trim() ||
+      String(event?.payload?.event_kind || "").trim();
+    return eventKind === "artifact.created";
+  });
+};
+
+const messageMentionsOutputImagePath = (message: HydrationMessage): boolean => {
+  const content = String(message.content || "");
+  if (!content) {
+    return false;
+  }
+  return /(?:\/outputs\/|(?:^|[\s`(["'])outputs\/|(?:^|[\s`(["'])paper_pages\/)[^\s`)"']+\.(?:png|jpe?g|gif|webp|svg)/i.test(
+    content
+  );
+};
+
+const decodePathSegment = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeArtifactReferencePath = (value: string): string => {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  let path = trimmed;
+  try {
+    const parsed = new URL(path, "http://ultra.local");
+    path = parsed.pathname;
+  } catch {
+    path = path.split(/[?#]/, 1)[0] ?? path;
+  }
+  path = decodePathSegment(path).replace(/\\/g, "/").replace(/^\/+/, "");
+  const outputsIndex = path.lastIndexOf("outputs/");
+  if (outputsIndex >= 0) {
+    path = path.slice(outputsIndex + "outputs/".length);
+  }
+  return path.replace(/^\/+/, "");
+};
+
+const artifactUrlForMarkdownPath = (
+  rawPath: string,
+  artifacts: HydrationRunArtifact[]
+): string | null => {
+  const normalizedPath = normalizeArtifactReferencePath(rawPath);
+  if (!normalizedPath) {
+    return null;
+  }
+  for (const artifact of artifacts) {
+    const artifactPath = normalizeArtifactReferencePath(String(artifact?.path || ""));
+    if (!artifactPath) {
+      continue;
+    }
+    if (
+      normalizedPath === artifactPath ||
+      normalizedPath.endsWith(`/${artifactPath}`) ||
+      artifactPath.endsWith(`/${normalizedPath}`)
+    ) {
+      return String(artifact.url || artifact.downloadUrl || "").trim() || null;
+    }
+  }
+  return null;
+};
+
+export const rewriteArtifactMarkdownImageUrls = (
+  content: string,
+  artifacts: HydrationRunArtifact[]
+): string => {
+  const markdown = String(content || "");
+  if (!markdown || !Array.isArray(artifacts) || artifacts.length === 0) {
+    return markdown;
+  }
+  return markdown.replace(
+    /(!\[[^\]]*]\(\s*)([^)\s]+)((?:\s+["'][^"']*["'])?\s*\))/g,
+    (match, prefix: string, rawUrl: string, suffix: string) => {
+      const resolvedUrl = artifactUrlForMarkdownPath(rawUrl, artifacts);
+      return resolvedUrl ? `${prefix}${resolvedUrl}${suffix}` : match;
+    }
+  );
+};
+
 export const shouldHydrateRunArtifacts = (
   message: HydrationMessage,
   toolCards: HydrationToolCard[]
@@ -100,9 +242,19 @@ export const shouldHydrateRunArtifacts = (
   if (!String(message.runId || "").trim()) {
     return false;
   }
+  const runArtifacts = Array.isArray(message.runArtifacts) ? message.runArtifacts : [];
+  if (runArtifacts.length === 0) {
+    return true;
+  }
   if (
     toolCards.some((card) => Boolean(card.yoloFigureAvailability?.missingAnnotatedFigure))
   ) {
+    return true;
+  }
+  if (messageHasCreatedArtifactEvent(message)) {
+    return true;
+  }
+  if (messageMentionsOutputImagePath(message)) {
     return true;
   }
 
@@ -118,11 +270,6 @@ export const shouldHydrateRunArtifacts = (
   const hasVisualSignal = hasVisualToolCard || messageHasVisualToolSignal(message);
   if (!hasVisualSignal) {
     return false;
-  }
-
-  const runArtifacts = Array.isArray(message.runArtifacts) ? message.runArtifacts : [];
-  if (runArtifacts.length === 0) {
-    return true;
   }
 
   const candidateUrls = new Set<string>();

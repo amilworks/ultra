@@ -29,7 +29,7 @@ BQAccessDialog::BQAccessDialog() {
   ui.downloadButton->setVisible( false );
 
   QSettings conf( QSettings::IniFormat, QSettings::UserScope, BQ_ORGANIZATION, BQ_APPLICATION );
-  ui.urlEdit->setText( conf.value( "url", "dough.ece.ucsb.edu" ).toString() );
+  ui.urlEdit->setText( conf.value( "url", "bisque.example.org" ).toString() );
   ui.userEdit->setText( conf.value( "user", "" ).toString() );
   ui.passwordEdit->setText( conf.value( "passwd", "" ).toString() );
 

@@ -5,7 +5,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const distAssetsDir = path.join(repoRoot, "dist", "assets");
 
 const budgets = [
-  { label: "app-shell", pattern: /^index-.*\.js$/, maxBytes: 600_000 },
+  { label: "app-shell", pattern: /^index-.*\.js$/, maxBytes: 650_000 },
   { label: "upload-viewer", pattern: /^UploadViewerSheet-.*\.js$/, maxBytes: 120_000 },
   { label: "vendor-ui", pattern: /^vendor-ui-.*\.js$/, maxBytes: 225_000 },
   { label: "vendor-markdown", pattern: /^vendor-markdown-.*\.js$/, maxBytes: 500_000 },

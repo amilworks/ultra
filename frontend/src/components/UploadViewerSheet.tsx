@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Layers3, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,14 +13,32 @@ import { cn } from "@/lib/utils";
 import type { ApiClient } from "../lib/api";
 import type { Hdf5DatasetSummary, UploadViewerInfo, UploadedFileRecord } from "../types";
 
-import { ImageViewerShell } from "./viewer/ImageViewerShell";
-import { Hdf5ViewerShell } from "./viewer/hdf5/Hdf5Overview";
 import {
   buildInitialViewerIndices,
   clampViewerIndex,
   type ViewerIndices,
   type ViewerSurface,
 } from "./viewer/shared";
+
+const LazyImageViewerShell = lazy(() =>
+  import("./viewer/ImageViewerShell").then((module) => ({
+    default: module.ImageViewerShell,
+  }))
+);
+
+const LazyHdf5ViewerShell = lazy(() =>
+  import("./viewer/hdf5/Hdf5Overview").then((module) => ({
+    default: module.Hdf5ViewerShell,
+  }))
+);
+
+function ViewerPanelFallback() {
+  return (
+    <div className="viewer-stage viewer-stage-loading min-h-[28rem] items-center justify-center rounded-xl border border-border/70 bg-background text-sm font-medium text-muted-foreground">
+      Loading viewer...
+    </div>
+  );
+}
 
 export type UploadViewerWorkspaceProps = {
   uploadedFiles: UploadedFileRecord[];
@@ -533,50 +551,52 @@ export function UploadViewerWorkspace({
                 </div>
               ) : null}
 
-              {isHdf5Viewer ? (
-                <Hdf5ViewerShell
-                  viewerInfo={selectedViewerInfo}
-                  apiClient={apiClient}
-                  selectedDatasetPath={selectedDatasetPath}
-                  onSelectedDatasetPathChange={(path) =>
-                    selectedFileId &&
-                    setViewerHdf5SelectedDatasetById((previous) => ({
-                      ...previous,
-                      [selectedFileId]: path,
-                    }))
-                  }
-                  selectedDatasetSummary={selectedDatasetSummary}
-                  cacheDatasetSummary={cacheDatasetSummary}
-                  onUseDatasetInChat={onUseHdf5DatasetInChat}
-                />
-              ) : (
-                <ImageViewerShell
-                  viewerInfo={selectedViewerInfo}
-                  apiClient={apiClient}
-                  selectedSurface={selectedSurface}
-                  onSurfaceChange={(surface) =>
-                    selectedFileId &&
-                    setViewerSurfaceById((previous) => ({
-                      ...previous,
-                      [selectedFileId]: normalizeSurface(selectedViewerInfo, surface),
-                    }))
-                  }
-                  selectedDisplayState={selectedDisplayState}
-                  updateSelectedDisplay={updateSelectedDisplay}
-                  clampedIndices={clampedIndices}
-                  debouncedX={debouncedX}
-                  debouncedY={debouncedY}
-                  debouncedZ={debouncedZ}
-                  debouncedT={debouncedT}
-                  xAxisSize={xAxisSize}
-                  yAxisSize={yAxisSize}
-                  zAxisSize={zAxisSize}
-                  tAxisSize={tAxisSize}
-                  setSelectedIndex={setSelectedIndex}
-                  selectedCaption=""
-                  captionLoading={false}
-                />
-              )}
+              <Suspense fallback={<ViewerPanelFallback />}>
+                {isHdf5Viewer ? (
+                  <LazyHdf5ViewerShell
+                    viewerInfo={selectedViewerInfo}
+                    apiClient={apiClient}
+                    selectedDatasetPath={selectedDatasetPath}
+                    onSelectedDatasetPathChange={(path) =>
+                      selectedFileId &&
+                      setViewerHdf5SelectedDatasetById((previous) => ({
+                        ...previous,
+                        [selectedFileId]: path,
+                      }))
+                    }
+                    selectedDatasetSummary={selectedDatasetSummary}
+                    cacheDatasetSummary={cacheDatasetSummary}
+                    onUseDatasetInChat={onUseHdf5DatasetInChat}
+                  />
+                ) : (
+                  <LazyImageViewerShell
+                    viewerInfo={selectedViewerInfo}
+                    apiClient={apiClient}
+                    selectedSurface={selectedSurface}
+                    onSurfaceChange={(surface) =>
+                      selectedFileId &&
+                      setViewerSurfaceById((previous) => ({
+                        ...previous,
+                        [selectedFileId]: normalizeSurface(selectedViewerInfo, surface),
+                      }))
+                    }
+                    selectedDisplayState={selectedDisplayState}
+                    updateSelectedDisplay={updateSelectedDisplay}
+                    clampedIndices={clampedIndices}
+                    debouncedX={debouncedX}
+                    debouncedY={debouncedY}
+                    debouncedZ={debouncedZ}
+                    debouncedT={debouncedT}
+                    xAxisSize={xAxisSize}
+                    yAxisSize={yAxisSize}
+                    zAxisSize={zAxisSize}
+                    tAxisSize={tAxisSize}
+                    setSelectedIndex={setSelectedIndex}
+                    selectedCaption=""
+                    captionLoading={false}
+                  />
+                )}
+              </Suspense>
             </>
           ) : null}
         </section>

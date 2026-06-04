@@ -1,9 +1,6 @@
-.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
-PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
-PLATFORM_SERVICES := bisque postgres keycloak
-PLATFORM_PROD_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
 PYTHON_TYPECHECK_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_SCOPE := backend/deepagents_runtime/src
@@ -20,27 +17,6 @@ install: ## Install production dependencies
 
 dev: ## Install all dependencies including dev tools
 	uv sync --all-extras
-
-platform-up: ## Start the absorbed BisQue platform from platform/bisque using the root env file
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_COMPOSE_FILES) up -d --build $(PLATFORM_SERVICES)
-
-platform-down: ## Stop the absorbed BisQue platform containers
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_COMPOSE_FILES) down --remove-orphans
-
-platform-logs: ## Tail logs from the absorbed BisQue platform container
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_COMPOSE_FILES) logs -f $(PLATFORM_SERVICES)
-
-platform-up-prod: ## Start the production-shaped BisQue platform (localhost-bound ports, hardened Keycloak)
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) up -d --build $(PLATFORM_SERVICES)
-
-platform-down-prod: ## Stop the production-shaped BisQue platform containers
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) down --remove-orphans
-
-platform-logs-prod: ## Tail logs from the production-shaped BisQue platform container
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) logs -f $(PLATFORM_SERVICES)
-
-platform-config-prod: ## Print merged production docker compose config for BisQue + Keycloak + Postgres
-	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) config
 
 dev-stack: ## Start production-like Go control stack plus workers and frontend
 	./scripts/restart_control_stack.sh restart
@@ -83,26 +59,12 @@ deploy-control-stack: ## Deploy Go control plane + Deep Agents worker stack (set
 test: ## Run tests with pytest
 	uv run pytest
 
-test-chat-stack: ## Run chat streaming/tool composition integration checks
-	uv run pytest tests/test_auth_bridge.py tests/test_bisque_auth_hardening.py tests/test_bisque_oidc_user_reconciliation.py -q
-
-verify-platform-smoke: ## Validate platform/bisque compose config and health endpoint
-	ENV_FILE=$(ENV_FILE) ./scripts/verify_platform_smoke.sh
+test-chat-stack: ## Run production-like Go control and Deep Agents chat checks
+	$(MAKE) control-test
+	$(MAKE) deepagents-test
 
 verify-integration: ## Validate Go control plane persistence and transport integration
 	$(MAKE) control-integration
-
-seed-bisque-fixtures: ## Seed deterministic BisQue fixtures for chat/live verification
-	ENV_FILE=$(ENV_FILE) ./scripts/manage_bisque_chat_fixtures.sh seed
-
-cleanup-bisque-fixtures: ## Remove deterministic BisQue fixtures created for chat/live verification
-	ENV_FILE=$(ENV_FILE) ./scripts/manage_bisque_chat_fixtures.sh cleanup
-
-verify-bisque-chat-api: ## Run deterministic BisQue chat selector/runtime/API verification
-	./scripts/verify_bisque_chat_api.sh
-
-verify-bisque-chat-live: ## Run seeded live Playwright BisQue chat verification against the local stack
-	ENV_FILE=$(ENV_FILE) ./scripts/verify_bisque_chat_live.sh
 
 smoke-pro-mode-opus: ## Probe the configured Pro Mode Opus gateway and optionally the local backend
 	uv run python scripts/smoke_pro_mode_opus.py

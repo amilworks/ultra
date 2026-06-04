@@ -8,6 +8,21 @@ def read_repo_file(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def test_internal_bisque_platform_checkout_is_not_public_deploy_surface() -> None:
+    removed_paths = [
+        "platform/bisque",
+        "docs/superpowers",
+        ".github/workflows/deploy-platform-manual.yml",
+        "deploy/env/platform.env.example",
+        "deploy/systemd/ultra-platform.service",
+        "scripts/deploy_platform_manual.sh",
+        "scripts/verify_platform_smoke.sh",
+    ]
+
+    for relative_path in removed_paths:
+        assert not (ROOT / relative_path).exists()
+
+
 def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
     script = read_repo_file("scripts/deploy_ultra_control_stack.sh")
 
@@ -81,6 +96,7 @@ def test_staging_env_example_documents_required_control_stack_settings() -> None
         "ULTRA_CONTROL_NATS_URL=",
         "ULTRA_CONTROL_ARTIFACT_ROOT=",
         "ULTRA_CONTROL_BISQUE_ROOT_URL=",
+        "BISQUE_UPSTREAM=http://127.0.0.1:8080",
         "ULTRA_CONTROL_HTTP_ADDR=127.0.0.1:8000",
         "ULTRA_CONTROL_BASE_URL=http://127.0.0.1:8000",
         "ULTRA_CONTROL_UPLOAD_ROOT=/srv/ultra/shared/uploads",

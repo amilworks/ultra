@@ -27,12 +27,17 @@ def load_env(path: Path) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ultra-env", required=True, help="Path to ultra-backend.env")
-    parser.add_argument("--platform-env", required=True, help="Path to platform.env")
+    parser.add_argument(
+        "--extra-env",
+        action="append",
+        default=[],
+        help="Optional additional env file to overlay after ultra-backend.env. Can be passed multiple times.",
+    )
     parser.add_argument(
         "--template",
         action="append",
         default=[],
-        help="Render only the named template file (for example: Caddyfile.platform-node.template). Can be passed multiple times.",
+        help="Render only the named template file (for example: Caddyfile.single-host.template). Can be passed multiple times.",
     )
     parser.add_argument(
         "--output-dir",
@@ -47,7 +52,8 @@ def main() -> int:
 
     env = {}
     env.update(load_env(Path(args.ultra_env).expanduser().resolve()))
-    env.update(load_env(Path(args.platform_env).expanduser().resolve()))
+    for extra_env in args.extra_env:
+        env.update(load_env(Path(extra_env).expanduser().resolve()))
     selected_templates = set(args.template)
 
     template_dirs = [

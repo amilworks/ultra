@@ -1,6 +1,0 @@
-recursive-include docs *
-recursive-include tests *.py
-recursive-include unfinished *.py README
-recursive-include webhelpers/public *
-include CHANGELOG LICENSE TODO requirements.txt
-prune docs/_build

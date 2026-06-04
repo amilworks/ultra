@@ -20,11 +20,6 @@ RG_COMMON=(
   --glob '!**/*.crt'
   --glob '!**/*.pem'
   --glob '!scripts/release_codescan.sh'
-  --glob '!platform/bisque/PLANS.md'
-  --glob '!platform/bisque/source/**'
-  --glob '!platform/bisque/source/legacy_upgraded/**'
-  --glob '!platform/bisque/source/tools/obsolete/**'
-  --glob '!platform/bisque/source/bqcore/bq/core/public/js/volume/dagre-d3.js'
 )
 
 CHECK_LABELS=(

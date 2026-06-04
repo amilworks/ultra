@@ -9,12 +9,12 @@
   <a href="#before-you-start">Before you start</a> ·
   <a href="#step-1-create-your-local-env">Set your environment</a> ·
   <a href="#step-2-choose-an-inference-engine">Choose vLLM or Ollama</a> ·
-  <a href="#bring-the-platform-up">Bring the platform up</a>
+  <a href="#step-4-start-the-control-stack">Start the control stack</a>
 </p>
 
-BisQue Ultra gives you one local surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. BisQue stores the data, the Go control plane owns runs and access, Deep Agents workers execute long-running tool work, and React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at any OpenAI-compatible server without rewriting the application around a single vendor.
+BisQue Ultra gives you one surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. An existing BisQue service stores the data, the Go control plane owns runs and access, Deep Agents workers execute long-running tool work, and React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at any OpenAI-compatible server without rewriting the application around a single vendor.
 
-If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a scientific workbench whose storage layer is BisQue, whose control plane is Go, whose workers are Deep Agents, whose interface is React, and whose language model can come from any OpenAI-compatible server.
+If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a scientific workbench whose data layer is an existing BisQue deployment, whose control plane is Go, whose workers are Deep Agents, whose interface is React, and whose language model can come from any OpenAI-compatible server.
 
 Production deployment and operator runbooks are intentionally kept in private internal documentation rather than the public repo.
 
@@ -22,13 +22,14 @@ Production deployment and operator runbooks are intentionally kept in private in
 
 You are starting five layers:
 
-1. `platform/bisque/` brings up BisQue, Postgres, and Keycloak in Docker.
+1. An existing BisQue deployment provides image, dataset, table, and metadata services.
 2. `backend/controlplane/` serves the BisQue Ultra API on `http://127.0.0.1:8000`.
-3. `backend/deepagents_runtime/` runs durable Deep Agents and RareSpot workers.
-4. `frontend/` serves the web client on `http://localhost:5174`.
-5. Your model server, usually vLLM or Ollama, answers OpenAI-style chat requests.
+3. Local Postgres and NATS JetStream provide durable state and dispatch for development.
+4. `backend/deepagents_runtime/` runs durable Deep Agents and RareSpot workers.
+5. `frontend/` serves the web client on `http://localhost:5174`.
+6. Your model server, usually vLLM or Ollama, answers OpenAI-style chat requests.
 
-Those layers are deliberately separate. If a page loads but chat fails, the frontend is alive and the API or model server is not. If login fails, the problem is usually in the BisQue or Keycloak layer, not the LLM layer. That separation is a feature, because it lets you debug the system by following the symptom instead of guessing.
+Those layers are deliberately separate. If a page loads but chat fails, the frontend is alive and the API, worker, model server, or durable transport is not. If BisQue imports fail, check the configured BisQue URL and linked credentials before debugging the frontend. That separation is a feature, because it lets you debug the system by following the symptom instead of guessing.
 
 ## Before You Start
 
@@ -36,7 +37,9 @@ Install the three tools this repo assumes:
 
 - [uv](https://github.com/astral-sh/uv) for Python dependency management
 - [pnpm](https://pnpm.io/) for the frontend
-- Docker with Compose for BisQue, Keycloak, and Postgres
+- Docker with Compose for local Postgres, NATS, and optional code-execution containers
+
+You also need access to a BisQue deployment. For local development, point the app at a reachable BisQue host in `.env`. For staging and production, set `ULTRA_CONTROL_BISQUE_ROOT_URL` in the server-side environment.
 
 You also need one model backend:
 
@@ -71,13 +74,13 @@ cp .env.example .env
 
 The public template is now local-first. It no longer points to an internal lab server. Out of the box it assumes:
 
-- BisQue on `http://localhost:8080`
+- BisQue on `http://localhost:8080` or another URL you set explicitly
 - API on `http://localhost:8000`
 - frontend on `http://localhost:5174`
 - vLLM on `http://localhost:8001/v1`
 - Ollama on `http://localhost:11434/v1`
 
-You do not need to fill every variable. The important move is to decide which inference engine you are using, then set the model section cleanly.
+You do not need to fill every variable. The important moves are to set the BisQue URL you actually use and decide which inference engine should answer model requests.
 
 ## Step 2: Choose an Inference Engine
 
@@ -165,22 +168,7 @@ pnpm --dir frontend install
 
 If you skip one half, the failure mode will tell on itself. Missing Python dependencies usually break worker or smoke checks. Missing frontend packages usually leave Vite unable to build or serve.
 
-## Step 4: Bring Up the BisQue Platform
-
-Start BisQue, Keycloak, and Postgres through the root Makefile:
-
-```bash
-make platform-up
-```
-
-Why the root Makefile? Because this repo treats the root `.env` as the shared contract between BisQue Ultra and the absorbed BisQue platform. Starting services from subdirectories invites drift. Starting them from the root keeps the whole stack reading from one configuration source.
-
-When this succeeds, you should have:
-
-- BisQue at `http://localhost:8080`
-- Keycloak at `http://localhost:18080`
-
-## Step 5: Start the API and Frontend
+## Step 4: Start the Control Stack
 
 For the production-like V2 stack, use the control stack launcher:
 
@@ -204,26 +192,19 @@ make stop-control-stack
 
 The status output should report `store_backend=postgres` and `dispatch_mode=nats_jetstream`. If it reports the in-memory store, user/admin state and past-chat hydration are not production-representative.
 
-## Step 6: Verify the System
+## Step 5: Verify the System
 
-Run the platform smoke test first:
-
-```bash
-make verify-platform-smoke
-```
-
-Then run the control-plane integration gate:
+Run the control-plane integration gate:
 
 ```bash
 make verify-integration
 ```
 
-Those two checks answer two different questions:
+That check answers the question that matters most for the modern app:
 
-- Is BisQue itself healthy?
 - Can the Go control plane persist and dispatch durable work through Postgres and NATS?
 
-That distinction saves time. A green platform check with a red integration check usually means the control stack dependencies need attention. A red platform check means the bug is lower in the BisQue layer.
+For BisQue connectivity, verify the actual URL configured in `BISQUE_ROOT` or `ULTRA_CONTROL_BISQUE_ROOT_URL`, then link credentials through the app. The public repo no longer carries the embedded BisQue deployment; staging and production should point at the operator-managed BisQue service directly.
 
 You can also check the live endpoints directly:
 
@@ -236,14 +217,13 @@ curl -I -fsS http://localhost:5174
 
 These ports are easy to confuse because they all belong to one system but not to one process.
 
-- `8080`: BisQue itself
-- `18080`: Keycloak
+- `8080`: common local BisQue service port when you point at a local instance
 - `8000`: BisQue Ultra API
 - `5174`: BisQue Ultra frontend
 - `8001`: example local vLLM endpoint
 - `11434`: default Ollama endpoint
 
-If the frontend says the API is unavailable, look at `8000`. If the API is healthy but chat hangs, inspect the model endpoint you configured. If auth redirects loop or fail, look at `8080` and `18080`.
+If the frontend says the API is unavailable, look at `8000`. If the API is healthy but chat hangs, inspect the worker, NATS, and model endpoint you configured. If BisQue import or browsing fails, check the configured BisQue root URL and the linked credentials.
 
 ## Common Failure Modes
 
@@ -269,15 +249,16 @@ make status-control-stack
 make control-test
 ```
 
-### Login works poorly or BisQue looks half-alive
+### BisQue imports or browsing fail
 
-Run:
+Check the BisQue URL and credentials configured for the control plane:
 
 ```bash
-make verify-platform-smoke
+make status-control-stack
+curl -fsS "${BISQUE_ROOT:-http://localhost:8080}/image_service/formats"
 ```
 
-If that fails, the issue is in the BisQue or Keycloak layer. Do not debug the frontend first.
+If the BisQue endpoint is not reachable from the app host, fix that connection before debugging the viewer or chat UI.
 
 ### vLLM is up, but the app says the model is missing
 
@@ -318,7 +299,6 @@ The absence of those assets does not stop the web stack from booting. It only na
 - `backend/controlplane/`: Go API, auth/session handling, run control, durable store, and OpenAPI contract
 - `backend/deepagents_runtime/`: Python Deep Agents worker runtime, tools, live trace checks, and RareSpot bridge
 - `frontend/`: React and Vite client
-- `platform/bisque/`: absorbed BisQue platform, Docker build context, Keycloak assets
 - `scripts/`: startup and smoke-check helpers
 
 ## Workflow-Equivalent Checks
@@ -367,9 +347,7 @@ If you already know which model you want, this is the whole story:
 cp .env.example .env
 uv sync
 pnpm --dir frontend install
-make platform-up
 make restart-control-stack
-make verify-platform-smoke
 make verify-integration
 ```
 

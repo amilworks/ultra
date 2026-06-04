@@ -1,2 +1,0 @@
-recursive-include bq/{{package}}/templates *
-recursive-include bq/{{package}}/public *

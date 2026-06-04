@@ -1,3 +1,0 @@
-# Legacy compatibility pin:
-# setuptools>=81 removes pkg_resources, which is still used by Pylons/BisQue commands.
-setuptools<81

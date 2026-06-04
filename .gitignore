@@ -41,14 +41,13 @@ repro_reports/
 # Local reference checkouts
 bqapi/
 
+# Internal-only reference material
+docs/superpowers/
+platform/bisque/
+
 # Local database / volume exports
 sqlite:/
 postgresql:/
-
-# BisQue generated state
-platform/bisque/Results/
-platform/bisque/SampleData/
-platform/bisque/.venv-engine-hardening/
 
 # Large local model assets and weights
 *.pt

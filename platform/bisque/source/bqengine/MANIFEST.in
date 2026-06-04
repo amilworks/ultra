@@ -1,4 +1,0 @@
-recursive-include bq *
-global-exclude *.pyc
-
-

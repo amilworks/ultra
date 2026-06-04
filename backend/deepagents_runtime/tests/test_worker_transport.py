@@ -9,6 +9,7 @@ from urllib import error as urllib_error
 
 import nats.errors
 import pytest
+from PIL import Image
 
 import ultra_deepagents.nats_worker as nats_worker_module
 from ultra_deepagents.config import RuntimeSettings
@@ -487,7 +488,32 @@ class FakeOutputWritingAgent:
         (output_dir / "plot_squared.py").write_text("print('plot')\n")
         (output_dir / "plot_squared.png").write_bytes(b"\x89PNG\r\n\x1a\nplot")
         (output_dir / "frame_006.png").write_bytes(b"\x89PNG\r\n\x1a\nframe")
+        (Path(context.workspace_root) / "matplotlibrc").write_text("savefig.dpi: 300\n")
         (Path(context.workspace_root) / "frame_007.png").write_bytes(b"\x89PNG\r\n\x1a\nframe")
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": [],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": "Created plot."},
+                    },
+                    {"lc_agent_name": "ultra-research-agent"},
+                ],
+            },
+        }
+
+
+class FakeLowDpiPlotAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        output_dir = Path(context.workspace_root) / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (600, 400), "white")
+        image.save(output_dir / "low_dpi_plot.png", dpi=(72, 72))
         yield {
             "type": "event",
             "method": "messages",
@@ -1292,6 +1318,50 @@ def test_run_job_publishes_artifacts_from_explicit_outputs_directory(tmp_path: P
         assert payload["size_bytes"] == copied.stat().st_size
     assert not (tmp_path / "artifacts" / "run-1" / "outputs" / "frame_006.png").exists()
     assert not (tmp_path / "artifacts" / "run-1" / "frame_007.png").exists()
+
+
+def test_run_job_normalizes_collected_plot_artifacts_to_publication_ppi(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Create a publication-quality plot.",
+            messages=[{"role": "user", "content": "Create a publication-quality plot."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeLowDpiPlotAgent(),
+        )
+        return result, published
+
+    result, events = asyncio.run(scenario())
+
+    assert result == "Created plot."
+    artifact_payload = next(event["payload"] for event in events if event["event_kind"] == "artifact.created")
+    copied = tmp_path / "artifacts" / "run-1" / artifact_payload["path"]
+    with Image.open(copied) as image:
+        dpi = image.info.get("dpi")
+
+    assert dpi is not None
+    assert dpi[0] >= 299.5
+    assert dpi[1] >= 299.5
+    quality = artifact_payload["metadata"]["figure_quality"]
+    assert quality["minimum_ppi"] == 300
+    assert quality["dpi_metadata_normalized"] is True
 
 
 def test_run_job_collects_markdown_reports_with_markdown_mime_type(tmp_path: Path):

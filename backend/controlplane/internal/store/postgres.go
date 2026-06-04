@@ -146,6 +146,44 @@ LIMIT $2`, query, limit32(limit, 250))
 	return users, nil
 }
 
+func (s *PostgresStore) GetUserByID(ctx context.Context, userID string) (domain.UserAccount, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.UserAccount{}, false, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+SELECT user_id, COALESCE(email, ''), COALESCE(display_name, ''), role, status, COALESCE(org_id, ''), created_at, updated_at, metadata
+FROM control_users
+WHERE user_id = $1`, userID)
+	user, err := scanUserAccount(row)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.UserAccount{}, false, nil
+		}
+		return domain.UserAccount{}, false, err
+	}
+	return user, true, nil
+}
+
+func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (domain.UserAccount, bool, error) {
+	email = normalizeEmail(email)
+	if email == "" {
+		return domain.UserAccount{}, false, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+SELECT user_id, COALESCE(email, ''), COALESCE(display_name, ''), role, status, COALESCE(org_id, ''), created_at, updated_at, metadata
+FROM control_users
+WHERE lower(email) = $1`, email)
+	user, err := scanUserAccount(row)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.UserAccount{}, false, nil
+		}
+		return domain.UserAccount{}, false, err
+	}
+	return user, true, nil
+}
+
 func (s *PostgresStore) UpdateUserStatus(ctx context.Context, userID string, status string) (domain.UserAccount, error) {
 	userID = strings.TrimSpace(userID)
 	status = strings.TrimSpace(status)
@@ -163,6 +201,105 @@ RETURNING user_id, COALESCE(email, ''), COALESCE(display_name, ''), role, status
 		domain.Now(),
 	)
 	return scanUserAccount(row)
+}
+
+func (s *PostgresStore) UpsertBisqueCredential(ctx context.Context, input domain.UpsertBisqueCredentialInput) (domain.BisqueCredentialRecord, error) {
+	now := domain.Now()
+	sessionID := strings.TrimSpace(input.SessionID)
+	if sessionID == "" {
+		sessionID = domain.NewID("bisque_session")
+	}
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		userID = "local-user"
+	}
+	orgID := strings.TrimSpace(input.OrgID)
+	if orgID == "" {
+		orgID = "local-org"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	lastVerifiedAt := pgtype.Timestamptz{}
+	if !input.LastVerifiedAt.IsZero() {
+		lastVerifiedAt = pgtype.Timestamptz{Time: input.LastVerifiedAt.UTC(), Valid: true}
+	}
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO control_bisque_credentials (
+  session_id, user_id, org_id, root_url, username,
+  password_ciphertext, password_nonce, password_key_id, password_algorithm,
+  status, last_verified_at, created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+ON CONFLICT (user_id, org_id, root_url) DO UPDATE
+SET username = EXCLUDED.username,
+    password_ciphertext = EXCLUDED.password_ciphertext,
+    password_nonce = EXCLUDED.password_nonce,
+    password_key_id = EXCLUDED.password_key_id,
+    password_algorithm = EXCLUDED.password_algorithm,
+    status = EXCLUDED.status,
+    last_verified_at = EXCLUDED.last_verified_at,
+    updated_at = EXCLUDED.updated_at,
+    metadata = EXCLUDED.metadata
+RETURNING session_id, user_id, COALESCE(org_id, ''), root_url, username,
+          password_ciphertext, password_nonce, password_key_id, password_algorithm,
+          status, last_verified_at, created_at, updated_at, metadata`,
+		sessionID,
+		userID,
+		orgID,
+		strings.TrimRight(strings.TrimSpace(input.RootURL), "/"),
+		strings.TrimSpace(input.Username),
+		strings.TrimSpace(input.PasswordCiphertext),
+		strings.TrimSpace(input.PasswordNonce),
+		strings.TrimSpace(input.PasswordKeyID),
+		strings.TrimSpace(input.PasswordAlgorithm),
+		status,
+		lastVerifiedAt,
+		now,
+		now,
+		jsonBytes(input.Metadata),
+	)
+	return scanBisqueCredential(row)
+}
+
+func (s *PostgresStore) GetBisqueCredentialBySessionID(ctx context.Context, sessionID string) (domain.BisqueCredentialRecord, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+SELECT session_id, user_id, COALESCE(org_id, ''), root_url, username,
+       password_ciphertext, password_nonce, password_key_id, password_algorithm,
+       status, last_verified_at, created_at, updated_at, metadata
+FROM control_bisque_credentials
+WHERE session_id = $1 AND status <> 'deleted'`,
+		sessionID,
+	)
+	record, err := scanBisqueCredential(row)
+	if errors.Is(err, ErrNotFound) {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.BisqueCredentialRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func (s *PostgresStore) DeleteBisqueCredentialBySessionID(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+UPDATE control_bisque_credentials
+SET status = 'deleted',
+    updated_at = $2
+WHERE session_id = $1`,
+		sessionID,
+		domain.Now(),
+	)
+	return err
 }
 
 func (s *PostgresStore) UpsertWorkerHeartbeat(ctx context.Context, input domain.UpsertWorkerHeartbeatInput) (domain.WorkerHeartbeatRecord, error) {
@@ -297,16 +434,32 @@ func (s *PostgresStore) GetThread(ctx context.Context, threadID string) (domain.
 	return threadFromRow(row), nil
 }
 
-func (s *PostgresStore) ListThreads(ctx context.Context, limit int) ([]domain.ThreadRecord, error) {
-	rows, err := s.queries.ListThreads(ctx, limit32(limit, 100))
+func (s *PostgresStore) ListThreads(ctx context.Context, limit int, offset int, status string) (domain.ThreadListPage, error) {
+	resolvedLimit := limit32(limit, 100)
+	resolvedOffset := max(offset, 0)
+	resolvedStatus := strings.TrimSpace(status)
+	totalCount, err := s.queries.CountThreads(ctx, resolvedStatus)
 	if err != nil {
-		return nil, err
+		return domain.ThreadListPage{}, err
+	}
+	rows, err := s.queries.ListThreads(ctx, sqlc.ListThreadsParams{
+		Status: resolvedStatus,
+		Limit:  resolvedLimit,
+		Offset: int32(resolvedOffset),
+	})
+	if err != nil {
+		return domain.ThreadListPage{}, err
 	}
 	threads := make([]domain.ThreadRecord, 0, len(rows))
 	for _, row := range rows {
 		threads = append(threads, threadFromRow(row))
 	}
-	return threads, nil
+	return domain.ThreadListPage{
+		Threads:    threads,
+		TotalCount: int(totalCount),
+		Limit:      int(resolvedLimit),
+		Offset:     resolvedOffset,
+	}, nil
 }
 
 func (s *PostgresStore) ListThreadMessages(ctx context.Context, threadID string) ([]domain.ThreadMessage, error) {
@@ -1130,6 +1283,37 @@ func scanUserAccount(row scanner) (domain.UserAccount, error) {
 	user.UpdatedAt = user.UpdatedAt.UTC()
 	user.Metadata = jsonMap(metadata)
 	return user, nil
+}
+
+func scanBisqueCredential(row scanner) (domain.BisqueCredentialRecord, error) {
+	var record domain.BisqueCredentialRecord
+	var lastVerifiedAt pgtype.Timestamptz
+	var metadata []byte
+	if err := row.Scan(
+		&record.SessionID,
+		&record.UserID,
+		&record.OrgID,
+		&record.RootURL,
+		&record.Username,
+		&record.PasswordCiphertext,
+		&record.PasswordNonce,
+		&record.PasswordKeyID,
+		&record.PasswordAlgorithm,
+		&record.Status,
+		&lastVerifiedAt,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+		&metadata,
+	); err != nil {
+		return domain.BisqueCredentialRecord{}, mapPgError(err)
+	}
+	if lastVerifiedAt.Valid {
+		record.LastVerifiedAt = lastVerifiedAt.Time.UTC()
+	}
+	record.CreatedAt = record.CreatedAt.UTC()
+	record.UpdatedAt = record.UpdatedAt.UTC()
+	record.Metadata = jsonMap(metadata)
+	return record, nil
 }
 
 func scanRunLease(row scanner) (domain.RunLeaseRecord, error) {

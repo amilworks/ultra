@@ -19,4 +19,6 @@ export const DEFAULT_API_KEY =
 
 export const DEFAULT_BISQUE_BROWSER_URL =
   readEnvString(import.meta.env.VITE_BISQUE_BROWSER_URL) ??
-  "https://bisque.example.org/client_service/";
+  (typeof window === "undefined"
+    ? "http://localhost:8080/client_service/"
+    : `${window.location.origin}/client_service/`);

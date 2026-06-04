@@ -15,7 +15,7 @@ export const loadLibraryResources = (
   query: ResourceLibraryQuery = {}
 ): Promise<ResourceListResponse> =>
   apiClient.listResources({
-    limit: query.limit ?? 500,
+    limit: query.limit ?? 50,
     offset: query.offset ?? 0,
     query: query.query,
     kind: query.kind === "all" ? undefined : query.kind,

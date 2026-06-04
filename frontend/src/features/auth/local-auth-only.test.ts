@@ -17,7 +17,7 @@ describe("local BisQue auth", () => {
     ].map(readSource);
 
     productionSources.forEach((source) => {
-      expect(source).not.toMatch(/Keycloak|SSO|OIDC|oidc|auth\/oidc|bisque_oidc|authOidc/i);
+      expect(source).not.toMatch(/Keycloak|\bSSO\b|OIDC|oidc|auth\/oidc|bisque_oidc|authOidc/i);
     });
   });
 });

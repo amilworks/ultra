@@ -2615,6 +2615,79 @@ func TestServiceCreateRunPersistsOnlyNewTranscriptSuffixForFollowups(t *testing.
 	}
 }
 
+func TestServiceCreateRunDoesNotDuplicatePriorAssistantWhenDisplayTextDrifts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Followup display drift",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	firstRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Create a plot.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Create a plot."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun first: %v", err)
+	}
+	drainJobs(bus)
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-" + firstRun.RunID + "-completed",
+		RunID:     firstRun.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload:   domain.JSONMap{"response_text": "Stored answer with /outputs/plot.png."},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+
+	fullFollowupTranscript := []domain.ThreadMessage{
+		{Role: "user", Content: "Create a plot."},
+		{Role: "assistant", Content: "Stored answer with [plot](/v2/artifacts/artifact_1/download)."},
+		{Role: "user", Content: "Now explain the axes."},
+	}
+	followupRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Now explain the axes.",
+		Messages: fullFollowupTranscript,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun followup: %v", err)
+	}
+
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if got, want := len(messages), 3; got != want {
+		t.Fatalf("persisted messages = %d, want existing user+assistant plus followup user only: %+v", got, messages)
+	}
+	if messages[1].Content != "Stored answer with /outputs/plot.png." || messages[1].RunID != firstRun.RunID {
+		t.Fatalf("previous assistant message = %+v, want original durable assistant owned by first run", messages[1])
+	}
+	if messages[2].Role != "user" || messages[2].Content != "Now explain the axes." || messages[2].RunID != followupRun.RunID {
+		t.Fatalf("followup user message = %+v, want new user turn owned by followup run %s", messages[2], followupRun.RunID)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if len(job.Messages) != len(fullFollowupTranscript) {
+			t.Fatalf("job messages = %d, want full incoming transcript %d", len(job.Messages), len(fullFollowupTranscript))
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected followup job")
+	}
+}
+
 func TestServiceCreateRunKeepsInternalToolRunsOutOfVisibleThreadState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

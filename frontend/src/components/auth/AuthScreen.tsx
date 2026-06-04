@@ -10,18 +10,23 @@ import { cn } from "@/lib/utils";
 
 type AuthMode = "login" | "guest";
 
+const requestAccountLabel = "Request an Account";
+
 type AuthScreenProps = {
+  authProvider?: "local" | "workos";
   bisqueRoot: string;
   bisqueHomeUrl?: string;
   loading: boolean;
   allowGuest?: boolean;
   errorMessage?: string | null;
+  statusMessage?: string | null;
   onAuthenticate: (payload: { username: string; password: string }) => Promise<void>;
-  onContinueGuest: (payload: {
+  onStartHostedAuth?: () => Promise<void>;
+  onRequestAccount: (payload: {
     name: string;
     email: string;
     affiliation: string;
-  }) => Promise<void>;
+  }) => Promise<void> | void;
 };
 
 const heroPhrases = [
@@ -47,13 +52,16 @@ const hostFromUrl = (value: string): string => {
 };
 
 export function AuthScreen({
+  authProvider = "local",
   bisqueRoot,
   bisqueHomeUrl,
   loading,
   allowGuest = true,
   errorMessage,
+  statusMessage,
   onAuthenticate,
-  onContinueGuest,
+  onStartHostedAuth,
+  onRequestAccount,
 }: AuthScreenProps) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
@@ -72,7 +80,8 @@ export function AuthScreen({
     }
     return `${bisqueRoot}/client_service/`;
   }, [bisqueHomeUrl, bisqueRoot]);
-  const effectiveMode: AuthMode = !allowGuest && mode === "guest" ? "login" : mode;
+  const hostedAuth = authProvider === "workos";
+  const effectiveMode: AuthMode = hostedAuth || (!allowGuest && mode === "guest") ? "login" : mode;
   const activeHeroPhrase = prefersReducedMotion ? heroPhrases[0] : heroPhrases[heroPhraseIndex];
   const { displayedText: streamedHeroText, isComplete: heroTextComplete } = useTextStream({
     textStream: activeHeroPhrase,
@@ -110,11 +119,24 @@ export function AuthScreen({
     return () => window.clearTimeout(timeoutId);
   }, [heroTextComplete, prefersReducedMotion]);
 
-  const submitLabel = effectiveMode === "login" ? "Sign in" : "Continue as guest";
+  const submitLabel = hostedAuth
+    ? "Sign in with WorkOS"
+    : effectiveMode === "login"
+      ? "Sign in"
+      : requestAccountLabel;
   const mergedError = localError || errorMessage || null;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
+    if (hostedAuth) {
+      setLocalError(null);
+      try {
+        await onStartHostedAuth?.();
+      } catch {
+        // Parent component exposes API error state.
+      }
+      return;
+    }
     if (effectiveMode === "guest") {
       const nextName = guestName.trim();
       const nextEmail = guestEmail.trim();
@@ -125,7 +147,7 @@ export function AuthScreen({
       }
       setLocalError(null);
       try {
-        await onContinueGuest({
+        await onRequestAccount({
           name: nextName,
           email: nextEmail,
           affiliation: nextAffiliation,
@@ -180,15 +202,23 @@ export function AuthScreen({
       <section className="auth-screen-form">
         <Card className="auth-card">
           <CardHeader>
-            <CardTitle>{effectiveMode === "login" ? "Welcome back" : "Continue as guest"}</CardTitle>
+            <CardTitle>
+              {hostedAuth
+                ? "Welcome back"
+                : effectiveMode === "login"
+                  ? "Welcome back"
+                  : requestAccountLabel}
+            </CardTitle>
             <CardDescription>
-              {effectiveMode === "login"
-                ? "Sign in with your BisQue username and password."
-                : "Continue without BisQue credentials. Some BisQue operations may be limited."}
+              {hostedAuth
+                ? "Sign in with your organization account."
+                : effectiveMode === "login"
+                  ? "Sign in with your BisQue username and password."
+                  : "Share your name, email, and affiliation so an administrator can review access."}
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {allowGuest ? (
+            {allowGuest && !hostedAuth ? (
               <div className="auth-mode-toggle" role="tablist" aria-label="Authentication mode">
                 <Button
                   type="button"
@@ -210,13 +240,22 @@ export function AuthScreen({
                     setLocalError(null);
                   }}
                 >
-                  Continue as guest
+                  {requestAccountLabel}
                 </Button>
               </div>
             ) : null}
 
             <form className="auth-form" onSubmit={handleSubmit}>
-              {effectiveMode === "login" ? (
+              {hostedAuth ? (
+                <Button
+                  type="submit"
+                  className="h-9 w-full rounded-xl"
+                  disabled={loading}
+                >
+                  <LockKeyhole className="size-4" />
+                  {loading ? "Opening sign in..." : submitLabel}
+                </Button>
+              ) : effectiveMode === "login" ? (
                 <>
                   <label className="auth-label" htmlFor="bisque-username">
                     <UserRound className="size-4" />
@@ -290,10 +329,19 @@ export function AuthScreen({
               )}
 
               {mergedError ? <p className="auth-error">{mergedError}</p> : null}
+              {!mergedError && statusMessage ? (
+                <p className="auth-status-message">{statusMessage}</p>
+              ) : null}
 
-              <Button type="submit" disabled={loading} className="w-full rounded-xl">
-                {loading ? "Authenticating…" : submitLabel}
-              </Button>
+              {!hostedAuth ? (
+                <Button type="submit" disabled={loading} className="w-full rounded-xl">
+                  {loading
+                    ? effectiveMode === "guest"
+                      ? "Submitting request…"
+                      : "Authenticating…"
+                    : submitLabel}
+                </Button>
+              ) : null}
             </form>
           </CardContent>
         </Card>

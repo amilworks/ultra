@@ -1,16 +1,18 @@
 [Unit]
-Description=BisQue Ultra backend instance %i
+Description=BisQue Ultra RareSpot NATS worker
 After=network-online.target
+After=ultra-control.service
 Wants=network-online.target
+Requires=ultra-control.service
 
 [Service]
 Type=simple
 User=ultra
 Group=ultra
-WorkingDirectory=/srv/ultra/current
+WorkingDirectory=/srv/ultra/current/backend/deepagents_runtime
 EnvironmentFile=/etc/ultra/ultra-backend.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/bin/bash -lc 'case "%i" in 1) port=8001 ;; 2) port=8002 ;; *) echo "Unsupported backend instance: %i" >&2; exit 1 ;; esac; exec /srv/ultra/current/.venv/bin/uvicorn src.api.main:app --host 127.0.0.1 --port "$port"'
+ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.rarespot_worker
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
@@ -18,7 +20,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=ultra-backend-%i
+SyslogIdentifier=ultra-rarespot-worker
 
 [Install]
 WantedBy=multi-user.target

@@ -25,6 +25,7 @@ type MemoryStore struct {
 	artifacts map[string]domain.ArtifactRecord
 	users     map[string]domain.UserAccount
 	orgs      map[string]domain.Organization
+	bisque    map[string]domain.BisqueCredentialRecord
 	leases    map[string]domain.RunLeaseRecord
 	workers   map[string]domain.WorkerHeartbeatRecord
 }
@@ -38,6 +39,7 @@ func NewMemoryStore() *MemoryStore {
 		artifacts: map[string]domain.ArtifactRecord{},
 		users:     map[string]domain.UserAccount{},
 		orgs:      map[string]domain.Organization{},
+		bisque:    map[string]domain.BisqueCredentialRecord{},
 		leases:    map[string]domain.RunLeaseRecord{},
 		workers:   map[string]domain.WorkerHeartbeatRecord{},
 	}
@@ -105,6 +107,96 @@ func (s *MemoryStore) CreateUser(ctx context.Context, input domain.CreateUserInp
 	}
 	s.users[user.UserID] = user
 	return user, nil
+}
+
+func (s *MemoryStore) UpsertBisqueCredential(ctx context.Context, input domain.UpsertBisqueCredentialInput) (domain.BisqueCredentialRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := domain.Now()
+	sessionID := strings.TrimSpace(input.SessionID)
+	if sessionID == "" {
+		sessionID = domain.NewID("bisque_session")
+	}
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		userID = "local-user"
+	}
+	orgID := strings.TrimSpace(input.OrgID)
+	if orgID == "" {
+		orgID = "local-org"
+	}
+	rootURL := strings.TrimRight(strings.TrimSpace(input.RootURL), "/")
+	username := strings.TrimSpace(input.Username)
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	if existingSessionID := s.bisqueSessionIDForOwnerLocked(userID, orgID, rootURL); existingSessionID != "" {
+		sessionID = existingSessionID
+	}
+	existing := s.bisque[sessionID]
+	createdAt := existing.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	record := domain.BisqueCredentialRecord{
+		SessionID:          sessionID,
+		UserID:             userID,
+		OrgID:              orgID,
+		RootURL:            rootURL,
+		Username:           username,
+		PasswordCiphertext: strings.TrimSpace(input.PasswordCiphertext),
+		PasswordNonce:      strings.TrimSpace(input.PasswordNonce),
+		PasswordKeyID:      strings.TrimSpace(input.PasswordKeyID),
+		PasswordAlgorithm:  strings.TrimSpace(input.PasswordAlgorithm),
+		Status:             status,
+		LastVerifiedAt:     input.LastVerifiedAt,
+		CreatedAt:          createdAt,
+		UpdatedAt:          now,
+		Metadata:           mapOrEmpty(input.Metadata),
+	}
+	s.bisque[sessionID] = record
+	return record, nil
+}
+
+func (s *MemoryStore) GetBisqueCredentialBySessionID(ctx context.Context, sessionID string) (domain.BisqueCredentialRecord, bool, error) {
+	_ = ctx
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.bisque[sessionID]
+	if !ok || strings.TrimSpace(record.Status) == "deleted" {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (s *MemoryStore) DeleteBisqueCredentialBySessionID(ctx context.Context, sessionID string) error {
+	_ = ctx
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.bisque, sessionID)
+	return nil
+}
+
+func (s *MemoryStore) bisqueSessionIDForOwnerLocked(userID string, orgID string, rootURL string) string {
+	for sessionID, record := range s.bisque {
+		if strings.EqualFold(record.UserID, userID) &&
+			strings.EqualFold(record.OrgID, orgID) &&
+			strings.EqualFold(strings.TrimRight(record.RootURL, "/"), rootURL) &&
+			strings.TrimSpace(record.Status) != "deleted" {
+			return sessionID
+		}
+	}
+	return ""
 }
 
 func orgMatchesQuery(org domain.Organization, query string) bool {
@@ -187,6 +279,34 @@ func (s *MemoryStore) ListUsers(ctx context.Context, limit int, query string) ([
 		return users[i].CreatedAt.After(users[j].CreatedAt)
 	})
 	return take(users, limit), nil
+}
+
+func (s *MemoryStore) GetUserByID(ctx context.Context, userID string) (domain.UserAccount, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.UserAccount{}, false, nil
+	}
+	user, ok := s.users[userID]
+	return user, ok, nil
+}
+
+func (s *MemoryStore) GetUserByEmail(ctx context.Context, email string) (domain.UserAccount, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	email = normalizeEmail(email)
+	if email == "" {
+		return domain.UserAccount{}, false, nil
+	}
+	for _, user := range s.users {
+		if normalizeEmail(user.Email) == email {
+			return user, true, nil
+		}
+	}
+	return domain.UserAccount{}, false, nil
 }
 
 func (s *MemoryStore) UpdateUserStatus(ctx context.Context, userID string, status string) (domain.UserAccount, error) {
@@ -310,18 +430,43 @@ func (s *MemoryStore) GetThread(ctx context.Context, threadID string) (domain.Th
 	return thread, nil
 }
 
-func (s *MemoryStore) ListThreads(ctx context.Context, limit int) ([]domain.ThreadRecord, error) {
+func (s *MemoryStore) ListThreads(ctx context.Context, limit int, offset int, status string) (domain.ThreadListPage, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	threads := make([]domain.ThreadRecord, 0, len(s.threads))
+	status = strings.TrimSpace(status)
 	for _, thread := range s.threads {
+		if status != "" && string(thread.Status) != status {
+			continue
+		}
 		threads = append(threads, thread)
 	}
 	sort.Slice(threads, func(i, j int) bool {
 		return threads[i].UpdatedAt.After(threads[j].UpdatedAt)
 	})
-	return take(threads, limit), nil
+	totalCount := len(threads)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = totalCount
+	}
+	if offset >= len(threads) {
+		threads = []domain.ThreadRecord{}
+	} else {
+		end := offset + limit
+		if end > len(threads) {
+			end = len(threads)
+		}
+		threads = threads[offset:end]
+	}
+	return domain.ThreadListPage{
+		Threads:    threads,
+		TotalCount: totalCount,
+		Limit:      limit,
+		Offset:     offset,
+	}, nil
 }
 
 func (s *MemoryStore) ListThreadMessages(ctx context.Context, threadID string) ([]domain.ThreadMessage, error) {

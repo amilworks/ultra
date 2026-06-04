@@ -1,0 +1,26 @@
+[Unit]
+Description=BisQue Ultra Deep Agents NATS worker
+After=network-online.target
+After=ultra-control.service
+Wants=network-online.target
+Requires=ultra-control.service
+
+[Service]
+Type=simple
+User=ultra
+Group=ultra
+WorkingDirectory=/srv/ultra/current/backend/deepagents_runtime
+EnvironmentFile=/etc/ultra/ultra-backend.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.nats_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-deepagents-worker
+
+[Install]
+WantedBy=multi-user.target

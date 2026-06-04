@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
+
 from ultra_deepagents.agent import build_research_agent
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
@@ -323,6 +325,25 @@ async def _preload_rarespot_for_context(
         raise
 
     output = json.dumps(result, default=str, sort_keys=True)
+    if _rarespot_result_failed(result):
+        error = _rarespot_result_error(result)
+        await publish_event(
+            sequencer.stamp(
+                normalize_tool_call(
+                    context,
+                    "rarespot_ecology_inference",
+                    "failed",
+                    {
+                        "source": "deterministic_preload",
+                        "error": error,
+                        "output": output,
+                        "output_size_chars": len(output),
+                        "tool_call_id": f"preload_rarespot_{context.run_id}",
+                    },
+                )
+            )
+        )
+        raise RuntimeError(f"RareSpot inference failed: {error}")
     await publish_event(
         sequencer.stamp(
             normalize_tool_call(
@@ -339,6 +360,20 @@ async def _preload_rarespot_for_context(
         )
     )
     return result
+
+
+def _rarespot_result_failed(result: dict[str, Any]) -> bool:
+    status = str(result.get("status") or "").strip().lower()
+    return bool(status) and status != "succeeded"
+
+
+def _rarespot_result_error(result: dict[str, Any]) -> str:
+    for key in ("error", "reason", "message"):
+        value = str(result.get(key) or "").strip()
+        if value:
+            return value
+    status = str(result.get("status") or "failed").strip()
+    return f"RareSpot run {status}."
 
 
 def _should_preload_rarespot(context: AgentRunContext, *, settings: RuntimeSettings) -> bool:
@@ -435,6 +470,8 @@ def _append_preloaded_rarespot_messages(
     messages: list[dict[str, Any]],
     result: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    if _rarespot_result_failed(result):
+        raise ValueError("Failed RareSpot results cannot be appended as verified context.")
     result_json = json.dumps(result, default=str, indent=2, sort_keys=True)
     return [
         *messages,
@@ -829,11 +866,13 @@ _ANIMATION_FRAME_RE = re.compile(
     re.IGNORECASE,
 )
 _SKIP_OUTPUT_DIRS = {".cache", ".deepagents", "__pycache__", "frames", "animation_frames", "tmp_frames"}
-_SKIP_OUTPUT_FILES = {"lease.json", "run.lock"}
+_SKIP_OUTPUT_FILES = {"lease.json", "run.lock", "matplotlibrc"}
 _CODE_SUFFIXES = {".py", ".ipynb", ".r", ".R", ".js", ".ts", ".tsx", ".jsx", ".jl", ".m", ".sh"}
 _TABLE_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".jsonl"}
 _REPORT_SUFFIXES = {".md", ".txt", ".pdf", ".html"}
 _MODEL_SUFFIXES = {".pt", ".pth", ".ckpt", ".safetensors", ".onnx"}
+_MINIMUM_FIGURE_PPI = 300
+_DPI_CAPABLE_FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 _MIME_TYPES_BY_SUFFIX = {
     ".md": "text/markdown",
     ".txt": "text/plain",
@@ -872,16 +911,30 @@ def _collect_output_artifacts(
                 relative = relative[2:]
             if not relative or relative in seen:
                 continue
-            content_hash = _file_sha256(source)
-            if content_hash in seen_hashes:
-                continue
             seen.add(relative)
-            seen_hashes.add(content_hash)
             target = artifact_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            if source.resolve() != target.resolve():
+            copied = source.resolve() != target.resolve()
+            if copied:
                 shutil.copy2(source, target)
-            events.append(_artifact_event_for_path(context, target, relative))
+            figure_quality = _ensure_publication_figure_ppi(target)
+            content_hash = _file_sha256(target)
+            if content_hash in seen_hashes:
+                if copied:
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                continue
+            seen_hashes.add(content_hash)
+            events.append(
+                _artifact_event_for_path(
+                    context,
+                    target,
+                    relative,
+                    figure_quality=figure_quality,
+                )
+            )
     return events
 
 
@@ -904,32 +957,112 @@ def _should_collect_output_file(path: Path, root: Path) -> bool:
     return True
 
 
-def _artifact_event_for_path(context: AgentRunContext, path: Path, relative_path: str) -> dict[str, Any]:
+def _artifact_event_for_path(
+    context: AgentRunContext,
+    path: Path,
+    relative_path: str,
+    *,
+    figure_quality: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sha256 = _file_sha256(path)
     mime_type = _artifact_mime_type(path)
+    kind = _artifact_kind(path, mime_type)
     path_digest = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:16]
     safe_run_id = re.sub(r"[^A-Za-z0-9_]+", "_", context.run_id).strip("_") or "run"
     artifact_id = f"artifact_{safe_run_id}_{path_digest}"
     output_id = f"output_{safe_run_id}_{path_digest}"
     title = _title_from_path(path)
     resolved_path = str(path.resolve())
+    payload: dict[str, Any] = {
+        "output_id": output_id,
+        "kind": kind,
+        "relative_path": relative_path,
+        "source_path": resolved_path,
+        "storage_uri": f"file://{resolved_path}",
+        "mime_type": mime_type,
+        "size_bytes": path.stat().st_size,
+        "sha256": sha256,
+        "tool_name": "outputs_collector",
+    }
+    if kind == "figure" and figure_quality is not None:
+        payload["metadata"] = {"figure_quality": figure_quality}
     return normalize_artifact_created(
         context,
         artifact_id=artifact_id,
         path=relative_path,
         title=title,
-        payload={
-            "output_id": output_id,
-            "kind": _artifact_kind(path, mime_type),
-            "relative_path": relative_path,
-            "source_path": resolved_path,
-            "storage_uri": f"file://{resolved_path}",
-            "mime_type": mime_type,
-            "size_bytes": path.stat().st_size,
-            "sha256": sha256,
-            "tool_name": "outputs_collector",
-        },
+        payload=payload,
     )
+
+
+def _ensure_publication_figure_ppi(path: Path) -> dict[str, Any] | None:
+    if path.suffix.lower() not in _DPI_CAPABLE_FIGURE_SUFFIXES:
+        return None
+    if not _artifact_mime_type(path).startswith("image/"):
+        return None
+    try:
+        with Image.open(path) as image:
+            image_format = image.format
+            original_ppi = _image_ppi(image)
+            if _ppi_meets_minimum(original_ppi):
+                return _figure_quality_metadata(
+                    original_ppi=original_ppi,
+                    final_ppi=original_ppi,
+                    normalized=False,
+                )
+            image.load()
+            save_image = image
+            save_kwargs: dict[str, Any] = {"dpi": (_MINIMUM_FIGURE_PPI, _MINIMUM_FIGURE_PPI)}
+            if image_format == "JPEG":
+                save_kwargs["quality"] = 95
+                if image.mode in {"P", "LA", "RGBA"}:
+                    save_image = image.convert("RGB")
+            save_image.save(path, format=image_format, **save_kwargs)
+        with Image.open(path) as updated_image:
+            final_ppi = _image_ppi(updated_image)
+    except (OSError, UnidentifiedImageError):
+        return None
+    return _figure_quality_metadata(
+        original_ppi=original_ppi,
+        final_ppi=final_ppi,
+        normalized=True,
+    )
+
+
+def _image_ppi(image: Image.Image) -> tuple[float, float] | None:
+    value = image.info.get("dpi")
+    if isinstance(value, int | float):
+        ppi = float(value)
+        return (ppi, ppi)
+    if isinstance(value, tuple | list) and len(value) >= 2:
+        try:
+            return (float(value[0]), float(value[1]))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _ppi_meets_minimum(ppi: tuple[float, float] | None) -> bool:
+    if ppi is None:
+        return False
+    return min(ppi) >= _MINIMUM_FIGURE_PPI - 0.5
+
+
+def _figure_quality_metadata(
+    *,
+    original_ppi: tuple[float, float] | None,
+    final_ppi: tuple[float, float] | None,
+    normalized: bool,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "minimum_ppi": _MINIMUM_FIGURE_PPI,
+        "dpi_metadata_normalized": normalized,
+    }
+    if original_ppi is not None:
+        metadata["original_ppi"] = [round(original_ppi[0], 3), round(original_ppi[1], 3)]
+    if final_ppi is not None:
+        metadata["final_ppi"] = [round(final_ppi[0], 3), round(final_ppi[1], 3)]
+    return metadata
 
 
 def _artifact_mime_type(path: Path) -> str:

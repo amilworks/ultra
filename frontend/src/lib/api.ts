@@ -1,4 +1,6 @@
 import type {
+  AccountRequestPayload,
+  AccountRequestResponse,
   AdminConversationActionResponse,
   AdminCreateOrganizationRequest,
   AdminCreateUserRequest,
@@ -8,7 +10,9 @@ import type {
   AdminOverviewResponse,
   AdminRunActionResponse,
   AdminRunListResponse,
+  AdminUpdateUserStatusRequest,
   AdminUserAccount,
+  AdminUserStatus,
   AdminUserListResponse,
   AnalysisHistoryResponse,
   ArtifactRecord,
@@ -17,6 +21,9 @@ import type {
   BisqueAuthSessionResponse,
   BisqueGuestAuthRequest,
   BisqueImportResponse,
+  BisqueSearchRequest,
+  BisqueSearchResponse,
+  BisqueUploadResponse,
   ChatRequest,
   ChatResponse,
   ChatTitleRequest,
@@ -202,6 +209,32 @@ const v2ThreadConversationId = (thread: Record<string, unknown>): string => {
   return asOptionalString(metadata.conversation_id) ?? asTrimmedString(thread.thread_id);
 };
 
+const isDefaultConversationTitle = (value: unknown): boolean => {
+  const normalized = asTrimmedString(value).replace(/\s+/g, " ");
+  return normalized.length === 0 || normalized === "New conversation";
+};
+
+const fallbackConversationTitleFromSeed = (value: string, maxWords = 4): string => {
+  const singleLine = value.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "");
+  if (!singleLine) {
+    return "New conversation";
+  }
+  const words = singleLine.split(" ").filter(Boolean).slice(0, Math.max(1, maxWords));
+  const title = words.join(" ").trim();
+  return title || "New conversation";
+};
+
+const conversationTitleFromStoredOrSeed = (
+  storedTitle: unknown,
+  fallbackSeed: string
+): string => {
+  const normalized = asTrimmedString(storedTitle).replace(/\s+/g, " ").replace(/^["'`]+|["'`]+$/g, "");
+  const title = isDefaultConversationTitle(normalized)
+    ? fallbackConversationTitleFromSeed(fallbackSeed, 4)
+    : normalized;
+  return title.length <= 120 ? title : `${title.slice(0, 119)}...`;
+};
+
 const v2ThreadToConversationRecord = (
   thread: Record<string, unknown>,
   includeState: boolean
@@ -214,18 +247,33 @@ const v2ThreadToConversationRecord = (
     : {};
   const createdAt = asMillis(metadata.created_at_ms, asMillis(thread.created_at, now));
   const updatedAt = asMillis(metadata.updated_at_ms, asMillis(thread.updated_at, createdAt));
+  const preview = asOptionalString(metadata.preview) ?? asOptionalString(thread.summary) ?? "";
   return {
     conversation_id: conversationId,
-    title: asOptionalString(thread.title) ?? "New conversation",
+    title: conversationTitleFromStoredOrSeed(thread.title, preview),
     created_at_ms: createdAt,
     updated_at_ms: updatedAt,
-    preview: asOptionalString(metadata.preview) ?? asOptionalString(thread.summary) ?? "",
+    preview,
     message_count: Math.max(0, Math.floor(asFiniteNumber(metadata.message_count, 0))),
     preferred_panel: "chat",
     running: Boolean(metadata.running),
     state,
   };
 };
+
+const v2ListRecordNeedsDurableTitleHydration = (
+  thread: Record<string, unknown>,
+  record: ConversationRecord
+): boolean =>
+  Boolean(asTrimmedString(thread.thread_id)) &&
+  isDefaultConversationTitle(record.title) &&
+  (!asTrimmedString(record.preview) || record.message_count === 0);
+
+const isEmptyDefaultV2HistoryRecord = (record: ConversationRecord): boolean =>
+  isDefaultConversationTitle(record.title) &&
+  !asTrimmedString(record.preview) &&
+  record.message_count === 0 &&
+  !record.running;
 
 const v2ConversationMetadataFromRecord = (record: ConversationRecord): Record<string, unknown> => ({
   conversation_id: record.conversation_id,
@@ -271,6 +319,83 @@ const chatTitleFromMessages = (request: ChatTitleRequest): string => {
   return title || "New conversation";
 };
 
+const stateMessagesFromState = (state: Record<string, unknown>): Array<Record<string, unknown>> =>
+  Array.isArray(state.messages) ? state.messages.filter(isRecord) : [];
+
+const stateMessageRole = (message: Record<string, unknown>): string =>
+  asTrimmedString(message.role).toLowerCase();
+
+const stateMessageRunId = (message: Record<string, unknown>): string | null =>
+  asOptionalString(message.runId ?? message.run_id);
+
+const isActiveV2RunStatus = (status: unknown): boolean => {
+  const normalized = asTrimmedString(status).toLowerCase();
+  return (
+    normalized === "queued" ||
+    normalized === "pending" ||
+    normalized === "running" ||
+    normalized === "waiting_for_input" ||
+    normalized === "waiting_for_task"
+  );
+};
+
+const frontendStateNeedsV2RunReconciliation = (
+  thread: Record<string, unknown>,
+  state: Record<string, unknown>
+): boolean => {
+  const latestRunId = asOptionalString(thread.latest_run_id);
+  if (!latestRunId) {
+    return Boolean(state.sending) || Boolean(asOptionalString(state.streamingMessageId));
+  }
+
+  const messages = stateMessagesFromState(state);
+  const latestAssistant = messages.find(
+    (message) =>
+      stateMessageRole(message) === "assistant" && stateMessageRunId(message) === latestRunId
+  );
+  if (!latestAssistant) {
+    return true;
+  }
+  if (Boolean(state.sending) || Boolean(asOptionalString(state.streamingMessageId))) {
+    return true;
+  }
+  return !asOptionalString(latestAssistant.content);
+};
+
+const threadMessageToStateMessage = (
+  message: Record<string, unknown>,
+  index: number,
+  threadId: string,
+  conversationId: string,
+  fallbackTime: number
+): Record<string, unknown> => ({
+  id: asOptionalString(message.message_id) ?? `${threadId || conversationId}-message-${index}`,
+  role: asOptionalString(message.role) ?? "user",
+  content: asPlainString(message.content),
+  createdAt: asMillis(message.created_at, fallbackTime),
+  runId: asOptionalString(message.run_id) ?? undefined,
+});
+
+const findAssistantPatchIndex = (
+  messages: Array<Record<string, unknown>>,
+  latestRunId: string
+): number => {
+  const ownedIndex = messages.findIndex(
+    (message) =>
+      stateMessageRole(message) === "assistant" && stateMessageRunId(message) === latestRunId
+  );
+  if (ownedIndex >= 0) {
+    return ownedIndex;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (stateMessageRole(message) === "assistant" && !stateMessageRunId(message)) {
+      return index;
+    }
+  }
+  return -1;
+};
+
 const normalizeV2RunEvent = (event: Record<string, unknown>): RunEvent => {
   const payload = isRecord(event.payload) ? event.payload : {};
   const eventType = asTrimmedString(event.event_kind) || asTrimmedString(event.event_type) || "run_event";
@@ -310,6 +435,8 @@ const progressEventFromV2RunEvent = (event: Record<string, unknown>): ProgressEv
 
 const isV2TerminalEventKind = (eventKind: string): boolean =>
   eventKind === "run.completed" || eventKind === "run.failed" || eventKind === "run.canceled";
+
+const isV2ThreadID = (value: unknown): boolean => asTrimmedString(value).startsWith("thread_");
 
 const normalizeRunResultStatus = (
   status: unknown
@@ -417,8 +544,8 @@ export class ApiClient {
         const parsed = JSON.parse(storage.getItem(V2_CHAT_THREAD_MAP_STORAGE_KEY) ?? "{}");
         if (isRecord(parsed)) {
           Object.entries(parsed).forEach(([key, value]) => {
-            const threadId = asOptionalString(value);
-            if (threadId) {
+            const threadId = asTrimmedString(value);
+            if (isV2ThreadID(threadId)) {
               map.set(key, threadId);
             }
           });
@@ -434,7 +561,7 @@ export class ApiClient {
   private rememberV2Thread(conversationId: string, threadId: string): void {
     const conversationKey = asTrimmedString(conversationId);
     const resolvedThreadId = asTrimmedString(threadId);
-    if (!conversationKey || !resolvedThreadId) {
+    if (!conversationKey || !isV2ThreadID(resolvedThreadId)) {
       return;
     }
     const map = this.v2ThreadMap();
@@ -475,6 +602,9 @@ export class ApiClient {
   }
 
   private async getExistingV2ThreadID(threadId: string): Promise<string | null> {
+    if (!isV2ThreadID(threadId)) {
+      return null;
+    }
     try {
       const thread = await this.fetchJson<Record<string, unknown>>(
         `/v2/threads/${encodeURIComponent(threadId)}`,
@@ -482,7 +612,7 @@ export class ApiClient {
       );
       return asTrimmedString(thread.thread_id) || threadId;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 404) {
+      if (error instanceof ApiError && (error.status === 400 || error.status === 404)) {
         return null;
       }
       throw error;
@@ -511,24 +641,41 @@ export class ApiClient {
     const threads = Array.isArray(payload.threads)
       ? payload.threads.filter(isRecord)
       : [];
-    const conversations = threads.map((thread) => {
-      const record = v2ThreadToConversationRecord(thread, includeState);
-      const threadId = asTrimmedString(thread.thread_id);
-      if (record.conversation_id && threadId) {
-        this.rememberV2Thread(record.conversation_id, threadId);
-      }
-      return record;
-    });
+    const pageCount = Math.max(
+      threads.length,
+      Math.floor(asFiniteNumber(payload.count, threads.length))
+    );
+    const conversations = (
+      await Promise.all(
+        threads.map(async (thread): Promise<ConversationRecord | null> => {
+          let record = v2ThreadToConversationRecord(thread, includeState);
+          if (v2ListRecordNeedsDurableTitleHydration(thread, record)) {
+            const hydrated = await this.hydrateV2ConversationRecord(thread, record);
+            if (!includeState && isEmptyDefaultV2HistoryRecord(hydrated)) {
+              return null;
+            }
+            record = includeState ? hydrated : { ...hydrated, state: {} };
+          } else if (!includeState && isEmptyDefaultV2HistoryRecord(record)) {
+            return null;
+          }
+          const threadId = asTrimmedString(thread.thread_id);
+          if (record.conversation_id && threadId) {
+            this.rememberV2Thread(record.conversation_id, threadId);
+          }
+          return record;
+        })
+      )
+    ).filter((record): record is ConversationRecord => record !== null);
     const totalCount = Math.max(
-      conversations.length,
-      Math.floor(asFiniteNumber(payload.total_count ?? payload.count, conversations.length))
+      pageCount,
+      Math.floor(asFiniteNumber(payload.total_count ?? payload.count, pageCount))
     );
     return {
-      count: conversations.length,
+      count: pageCount,
       total_count: totalCount,
       limit: requestedLimit,
       offset: requestedOffset,
-      has_more: requestedOffset + conversations.length < totalCount,
+      has_more: requestedOffset + pageCount < totalCount,
       conversations,
     };
   }
@@ -574,8 +721,27 @@ export class ApiClient {
     thread: Record<string, unknown>,
     record: ConversationRecord
   ): Promise<ConversationRecord> {
-    if (Object.keys(record.state ?? {}).length > 0) {
+    const existingState = isRecord(record.state) ? record.state : {};
+    const hasExistingState = Object.keys(existingState).length > 0;
+    const latestRunId = asOptionalString(thread.latest_run_id);
+
+    if (
+      hasExistingState &&
+      !frontendStateNeedsV2RunReconciliation(thread, existingState)
+    ) {
       return record;
+    }
+
+    if (hasExistingState && !latestRunId) {
+      return {
+        ...record,
+        running: false,
+        state: {
+          ...existingState,
+          sending: false,
+          streamingMessageId: null,
+        },
+      };
     }
 
     const threadId = asTrimmedString(thread.thread_id);
@@ -594,39 +760,95 @@ export class ApiClient {
       }
     }
 
-    const stateMessages: Array<Record<string, unknown>> = messages.map((message, index) => ({
-      id: asOptionalString(message.message_id) ?? `${threadId || record.conversation_id}-message-${index}`,
-      role: asOptionalString(message.role) ?? "user",
-      content: asPlainString(message.content),
-      createdAt: asMillis(message.created_at, record.updated_at_ms),
-      runId: asOptionalString(message.run_id) ?? undefined,
-    }));
+    const stateMessages: Array<Record<string, unknown>> = hasExistingState
+      ? stateMessagesFromState(existingState).map((message) => ({ ...message }))
+      : messages.map((message, index) =>
+          threadMessageToStateMessage(
+            message,
+            index,
+            threadId,
+            record.conversation_id,
+            record.updated_at_ms
+          )
+        );
 
-    const latestRunId = asOptionalString(thread.latest_run_id);
-    if (latestRunId && !stateMessages.some((message) => message.role === "assistant" && message.runId === latestRunId)) {
+    if (hasExistingState && stateMessages.length === 0 && messages.length > 0) {
+      stateMessages.push(
+        ...messages.map((message, index) =>
+          threadMessageToStateMessage(
+            message,
+            index,
+            threadId,
+            record.conversation_id,
+            record.updated_at_ms
+          )
+        )
+      );
+    }
+
+    let latestRun: Record<string, unknown> | null = null;
+    if (latestRunId) {
       try {
-        const run = await this.fetchJson<Record<string, unknown>>(
+        latestRun = await this.fetchJson<Record<string, unknown>>(
           `/v2/runs/${encodeURIComponent(latestRunId)}`,
           { method: "GET" }
         );
-        const responseText = asOptionalString(run.response_text);
-        const runStatus = asOptionalString(run.status);
-        const isActiveRun =
-          runStatus === "queued" ||
-          runStatus === "pending" ||
-          runStatus === "running";
-        if (responseText || isActiveRun) {
+      } catch {
+        // Keep the durable message reconstruction if the latest run record is unavailable.
+      }
+    }
+
+    const latestRunActive = latestRun ? isActiveV2RunStatus(latestRun.status) : false;
+    const latestRunMetadata = latestRun && isRecord(latestRun.metadata) ? latestRun.metadata : null;
+    const latestRunResponseText = latestRun ? asOptionalString(latestRun.response_text) : null;
+    const durableLatestAssistant = latestRunId
+      ? messages.find(
+          (message) =>
+            asTrimmedString(message.role).toLowerCase() === "assistant" &&
+            asOptionalString(message.run_id) === latestRunId
+        )
+      : null;
+    const latestAssistantText =
+      latestRunResponseText ?? asOptionalString(durableLatestAssistant?.content) ?? "";
+
+    if (latestRunId) {
+      if (!stateMessages.some((message) => stateMessageRole(message) === "assistant" && stateMessageRunId(message) === latestRunId)) {
+        const patchIndex = findAssistantPatchIndex(stateMessages, latestRunId);
+        const createdAt = asMillis(
+          durableLatestAssistant?.created_at,
+          asMillis(latestRun?.completed_at, asMillis(latestRun?.updated_at, record.updated_at_ms))
+        );
+        if (patchIndex >= 0) {
+          const existing = stateMessages[patchIndex];
+          stateMessages[patchIndex] = {
+            ...existing,
+            role: "assistant",
+            content: latestAssistantText || asPlainString(existing.content),
+            createdAt: asMillis(existing.createdAt, createdAt),
+            runId: latestRunId,
+            responseMetadata: latestRunMetadata ?? existing.responseMetadata ?? null,
+          };
+        } else if (latestAssistantText || latestRunActive) {
           stateMessages.push({
             id: `${latestRunId}-assistant`,
             role: "assistant",
-            content: responseText ?? "",
-            createdAt: asMillis(run.completed_at, asMillis(run.updated_at, record.updated_at_ms)),
+            content: latestAssistantText,
+            createdAt,
             runId: latestRunId,
-            responseMetadata: isRecord(run.metadata) ? run.metadata : null,
+            responseMetadata: latestRunMetadata,
           });
         }
-      } catch {
-        // Keep the user-turn reconstruction if the latest run record is unavailable.
+      } else if (latestAssistantText || latestRunMetadata || latestRunActive) {
+        const patchIndex = findAssistantPatchIndex(stateMessages, latestRunId);
+        if (patchIndex >= 0) {
+          const existing = stateMessages[patchIndex];
+          stateMessages[patchIndex] = {
+            ...existing,
+            content: latestAssistantText || asPlainString(existing.content),
+            runId: latestRunId,
+            responseMetadata: latestRunMetadata ?? existing.responseMetadata ?? null,
+          };
+        }
       }
     }
 
@@ -635,22 +857,33 @@ export class ApiClient {
     ) || "";
     return {
       ...record,
+      title: conversationTitleFromStoredOrSeed(record.title, preview),
       preview,
       message_count: stateMessages.length || record.message_count,
+      running: latestRunActive,
       state: {
-        preferredPanel: "chat",
+        ...(hasExistingState ? existingState : {}),
+        preferredPanel: asOptionalString(existingState.preferredPanel) ?? "chat",
         prompt: "",
         messages: stateMessages,
-        uploadedFiles: [],
-        stagedUploadFileIds: [],
-        activeSelectionContext: null,
-        failedUploadPreviewIds: {},
-        bisqueLinksByFileId: {},
-        composerWorkflowPreset: null,
+        uploadedFiles: hasExistingState ? existingState.uploadedFiles ?? [] : [],
+        stagedUploadFileIds: hasExistingState ? existingState.stagedUploadFileIds ?? [] : [],
+        activeSelectionContext: hasExistingState ? existingState.activeSelectionContext ?? null : null,
+        failedUploadPreviewIds: hasExistingState ? existingState.failedUploadPreviewIds ?? {} : {},
+        bisqueLinksByFileId: hasExistingState ? existingState.bisqueLinksByFileId ?? {} : {},
+        composerWorkflowPreset: hasExistingState ? existingState.composerWorkflowPreset ?? null : null,
         selectionImportPending: false,
-        sending: false,
-        chatError: null,
-        streamingMessageId: null,
+        sending: latestRunActive,
+        chatError: latestRunActive ? null : existingState.chatError ?? null,
+        streamingMessageId: latestRunActive
+          ? asOptionalString(
+              stateMessages.find(
+                (message) =>
+                  stateMessageRole(message) === "assistant" &&
+                  stateMessageRunId(message) === latestRunId
+              )?.id
+            )
+          : null,
       },
     };
   }
@@ -1010,6 +1243,26 @@ export class ApiClient {
       credentials: "include",
       body: JSON.stringify(payload),
     });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminUserAccount;
+  }
+
+  async updateAdminUserStatus(
+    userId: string,
+    status: AdminUserStatus
+  ): Promise<AdminUserAccount> {
+    const payload: AdminUpdateUserStatusRequest = { status };
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/admin/users/${encodeURIComponent(userId)}/status`),
+      {
+        method: "PATCH",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        credentials: "include",
+        body: JSON.stringify(payload),
+      }
+    );
     if (!response.ok) {
       return parseError(response);
     }
@@ -1727,6 +1980,19 @@ export class ApiClient {
     return (await response.json()) as BisqueAuthSessionResponse;
   }
 
+  async startHostedAuth(): Promise<BisqueAuthSessionResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/login"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({}),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisqueAuthSessionResponse;
+  }
+
   async logoutBisque(): Promise<BisqueAuthSessionResponse> {
     const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/logout"), {
       method: "POST",
@@ -1737,6 +2003,31 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as BisqueAuthSessionResponse;
+  }
+
+  async unlinkBisqueAccount(): Promise<BisqueAuthSessionResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/unlink"), {
+      method: "POST",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisqueAuthSessionResponse;
+  }
+
+  async requestAccount(payload: AccountRequestPayload): Promise<AccountRequestResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/request-account"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AccountRequestResponse;
   }
 
   async continueAsGuest(payload: BisqueGuestAuthRequest): Promise<BisqueAuthSessionResponse> {
@@ -1968,6 +2259,22 @@ export class ApiClient {
     }
 
     const finalRun = await this.getV2Run(runId);
+    if (!terminalEventSeen) {
+      const finalStatus = normalizeRunResultStatus(finalRun?.status ?? fallbackRun.status);
+      if (finalStatus === "pending" || finalStatus === "running") {
+        throw new ApiError("Run stream ended before a terminal event", 503, {
+          run_id: runId,
+          status: finalStatus,
+          response_text: streamedText,
+        });
+      }
+      if (finalStatus === "failed") {
+        throw new ApiError("Run failed", 500, finalRun ?? fallbackRun);
+      }
+      if (finalStatus === "canceled") {
+        throw new ApiError("Run canceled", 499, finalRun ?? fallbackRun);
+      }
+    }
     const responseText =
       terminalResponseText || asTrimmedString(finalRun?.response_text) || streamedText;
     const completedPayload = normalizeV2RunResponse(finalRun ?? fallbackRun, {
@@ -2188,6 +2495,68 @@ export class ApiClient {
     return (await response.json()) as BisqueImportResponse;
   }
 
+  async searchBisqueResources(options: BisqueSearchRequest = {}): Promise<BisqueSearchResponse> {
+    const extensions = asStringArray(options.extensions);
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/search"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        resource_type: asTrimmedString(options.resourceType) || "image",
+        tag_query: asTrimmedString(options.tagQuery),
+        ...(asTrimmedString(options.tagOrder) ? { tag_order: asTrimmedString(options.tagOrder) } : {}),
+        query: asTrimmedString(options.query),
+        ...(asTrimmedString(options.nameContains)
+          ? { name_contains: asTrimmedString(options.nameContains) }
+          : {}),
+        ...(extensions.length > 0 ? { extensions } : {}),
+        ...(asTrimmedString(options.scope) ? { scope: asTrimmedString(options.scope) } : {}),
+        ...(asTrimmedString(options.sort) ? { sort: asTrimmedString(options.sort) } : {}),
+        limit: Math.max(1, Math.min(100, Number(options.limit) || 25)),
+        ...(options.countAll ? { count_all: true } : {}),
+        ...(Number.isFinite(Number(options.offset)) && Number(options.offset) > 0
+          ? { offset: Math.floor(Number(options.offset)) }
+          : {}),
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisqueSearchResponse;
+  }
+
+  async downloadBisqueResources(resources: string[]): Promise<BisqueImportResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/download"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ resources }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisqueImportResponse;
+  }
+
+  async uploadBisqueOutputs(options: {
+    fileIds?: string[];
+    artifactIds?: string[];
+  }): Promise<BisqueUploadResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/upload"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        file_ids: options.fileIds ?? [],
+        artifact_ids: options.artifactIds ?? [],
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisqueUploadResponse;
+  }
+
   async listResources(options?: {
     limit?: number;
     offset?: number;
@@ -2262,13 +2631,50 @@ export class ApiClient {
     return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/preview`);
   }
 
-  uploadDisplayUrl(fileId: string, explicitPath?: string | null): string {
+  uploadDisplayUrl(
+    fileId: string,
+    explicitPath?: string | null,
+    config?: {
+      enhancement?: string;
+      negative?: boolean;
+      gamma?: number | null;
+      channels?: number[];
+      channelColors?: string[];
+      cacheKey?: string;
+    }
+  ): string {
     const safeFileId = encodeURIComponent(fileId);
     const path =
       explicitPath && String(explicitPath).trim()
         ? String(explicitPath)
         : `/v2/uploads/${safeFileId}/display`;
-    return buildUrl(this.baseUrl, path);
+    const params: Record<string, string> = {};
+    if (config?.enhancement) {
+      params.enhancement = config.enhancement;
+    }
+    if (typeof config?.negative === "boolean") {
+      params.negative = config.negative ? "true" : "false";
+    }
+    if (typeof config?.gamma === "number" && Number.isFinite(config.gamma) && config.gamma > 0) {
+      params.gamma = String(config.gamma);
+    }
+    if (Array.isArray(config?.channels) && config.channels.length > 0) {
+      params.channels = config.channels
+        .filter((value) => Number.isFinite(value))
+        .map((value) => String(Math.max(0, Math.floor(value))))
+        .join(",");
+    }
+    if (Array.isArray(config?.channelColors) && config.channelColors.length > 0) {
+      params.channel_colors = config.channelColors
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(",");
+    }
+    const cacheKey = String(config?.cacheKey ?? "").trim();
+    if (cacheKey) {
+      params.cache_key = cacheKey;
+    }
+    return buildUrl(this.baseUrl, path, params);
   }
 
   uploadSliceUrl(
@@ -2286,6 +2692,7 @@ export class ApiClient {
       channels?: number[];
       channelColors?: string[];
       fullResolution?: boolean;
+      cacheKey?: string;
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -2332,6 +2739,10 @@ export class ApiClient {
     if (typeof indices?.fullResolution === "boolean") {
       params.full_resolution = indices.fullResolution ? "true" : "false";
     }
+    const cacheKey = String(indices?.cacheKey ?? "").trim();
+    if (cacheKey) {
+      params.cache_key = cacheKey;
+    }
     return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/slice`, params);
   }
 
@@ -2347,7 +2758,7 @@ export class ApiClient {
     if (typeof config?.channel === "number" && Number.isFinite(config.channel)) {
       params.channel = String(Math.max(0, Math.floor(config.channel)));
     }
-    const response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/scalar-volume`, params), {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scalar-volume`, params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -2400,7 +2811,7 @@ export class ApiClient {
     }
     return buildUrl(
       this.baseUrl,
-      `/v1/uploads/${safeFileId}/tiles/${safeAxis}/${safeLevel}/${safeTileX}/${safeTileY}`,
+      `/v2/uploads/${safeFileId}/tiles/${safeAxis}/${safeLevel}/${safeTileX}/${safeTileY}`,
       params
     );
   }
@@ -2442,7 +2853,7 @@ export class ApiClient {
     if (typeof config?.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
     }
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/atlas`, params);
+    return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/atlas`, params);
   }
 
   async getUploadHistogram(
@@ -2463,7 +2874,7 @@ export class ApiClient {
     if (typeof config?.bins === "number" && Number.isFinite(config.bins)) {
       params.bins = String(Math.max(8, Math.floor(config.bins)));
     }
-    const response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/histogram`, params), {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/histogram`, params), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",

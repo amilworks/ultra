@@ -6,8 +6,15 @@ RETURNING *;
 -- name: GetThread :one
 SELECT * FROM control_threads WHERE thread_id = $1;
 
+-- name: CountThreads :one
+SELECT COUNT(*) FROM control_threads
+WHERE ($1::text = '' OR status = $1);
+
 -- name: ListThreads :many
-SELECT * FROM control_threads ORDER BY updated_at DESC LIMIT $1;
+SELECT * FROM control_threads
+WHERE ($1::text = '' OR status = $1)
+ORDER BY updated_at DESC
+LIMIT $2 OFFSET $3;
 
 -- name: InsertThreadMessage :one
 INSERT INTO control_thread_messages (message_id, thread_id, role, content, created_at, metadata, run_id)

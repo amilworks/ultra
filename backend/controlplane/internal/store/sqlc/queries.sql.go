@@ -77,6 +77,18 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 	return i, err
 }
 
+const countThreads = `-- name: CountThreads :one
+SELECT COUNT(*) FROM control_threads
+WHERE ($1::text = '' OR status = $1)
+`
+
+func (q *Queries) CountThreads(ctx context.Context, status string) (int64, error) {
+	row := q.db.QueryRow(ctx, countThreads, status)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createArtifact = `-- name: CreateArtifact :one
 INSERT INTO control_artifacts (
   artifact_id, run_id, thread_id, kind, path, source_path, preview_path, title,
@@ -656,11 +668,20 @@ func (q *Queries) ListThreadMessages(ctx context.Context, threadID string) ([]Co
 }
 
 const listThreads = `-- name: ListThreads :many
-SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads ORDER BY updated_at DESC LIMIT $1
+SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads
+WHERE ($1::text = '' OR status = $1)
+ORDER BY updated_at DESC
+LIMIT $2 OFFSET $3
 `
 
-func (q *Queries) ListThreads(ctx context.Context, limit int32) ([]ControlThread, error) {
-	rows, err := q.db.Query(ctx, listThreads, limit)
+type ListThreadsParams struct {
+	Status string `json:"status"`
+	Limit  int32  `json:"limit"`
+	Offset int32  `json:"offset"`
+}
+
+func (q *Queries) ListThreads(ctx context.Context, arg ListThreadsParams) ([]ControlThread, error) {
+	rows, err := q.db.Query(ctx, listThreads, arg.Status, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

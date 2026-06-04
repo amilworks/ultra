@@ -1,0 +1,7 @@
+[Unit]
+Description=BisQue Ultra Go control plane and worker stack
+Wants=ultra-control.service ultra-deepagents-worker.service ultra-rarespot-worker.service
+After=ultra-control.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=BisQue Ultra Go control plane
+After=network-online.target postgresql.service nats-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ultra
+Group=ultra
+WorkingDirectory=/srv/ultra/current/backend/controlplane
+EnvironmentFile=/etc/ultra/ultra-backend.env
+Environment=ULTRA_CONTROL_HTTP_ADDR=127.0.0.1:8000
+ExecStart=/srv/ultra/current/bin/ultra-control serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-control
+
+[Install]
+WantedBy=multi-user.target

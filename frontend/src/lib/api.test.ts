@@ -43,6 +43,46 @@ describe("ApiClient browser auth hardening", () => {
     );
   });
 
+  it("can cache-bust transformed uploaded image slice URLs", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    expect(client.uploadSliceUrl("file-123", { axis: "z", z: 2, cacheKey: "windowed-v1:abc123" })).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/slice?axis=z&z=2&cache_key=windowed-v1%3Aabc123"
+    );
+  });
+
+  it("builds transformed uploaded image display URLs", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    expect(
+      client.uploadDisplayUrl("file-123", "/v2/uploads/file-123/display", {
+        enhancement: "hounsfield:1001.500:1.000",
+        negative: true,
+        gamma: 1.2,
+        channels: [1],
+        channelColors: ["#00ff00"],
+        cacheKey: "windowed-v2:abc123",
+      })
+    ).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/display?enhancement=hounsfield%3A1001.500%3A1.000&negative=true&gamma=1.2&channels=1&channel_colors=%2300ff00&cache_key=windowed-v2%3Aabc123"
+    );
+  });
+
+  it("builds scientific upload viewer URLs through the V2 upload API", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const urls = [
+      client.uploadTileUrl("file-123", { axis: "z", level: 0, tileX: 1, tileY: 2, z: 3 }),
+      client.uploadAtlasUrl("file-123", { enhancement: "d", t: 1 }),
+    ];
+
+    expect(urls).toEqual([
+      "https://ultra.example.org/v2/uploads/file-123/tiles/z/0/1/2?z=3",
+      "https://ultra.example.org/v2/uploads/file-123/atlas?enhancement=d&t=1",
+    ]);
+    expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
+  });
+
   it("keeps header-based automation auth for fetch requests", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ authenticated: false }), {
@@ -290,6 +330,59 @@ describe("ApiClient V2 chat bridge", () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/runs/run_resume/events?stream=true&after_sequence=0",
       "https://ultra.example.org/v2/runs/run_resume",
+    ]);
+  });
+
+  it("does not complete a chat response when the V2 stream ends while the run is still active", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=0") {
+        const body =
+          'event: run_event\ndata: {"run_id":"run_live","event_kind":"message.delta","sequence":1,"payload":{"text":"partial"}}\n\n';
+        return new Response(encoder.encode(body), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_live") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_live",
+            status: "running",
+            response_text: "",
+            updated_at: "2026-05-31T00:00:01Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const tokens: string[] = [];
+    const donePayloads: unknown[] = [];
+
+    await expect(
+      client.resumeRunStream("run_live", {
+        onToken: (delta) => tokens.push(delta),
+        onDone: (payload) => donePayloads.push(payload),
+      })
+    ).rejects.toMatchObject({
+      status: 503,
+      detail: {
+        run_id: "run_live",
+        status: "running",
+      },
+    });
+
+    expect(tokens).toEqual(["partial"]);
+    expect(donePayloads).toEqual([]);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=0",
+      "https://ultra.example.org/v2/runs/run_live",
     ]);
   });
 
@@ -578,6 +671,68 @@ describe("ApiClient V2 chat bridge", () => {
     });
   });
 
+  it("recovers when a cached V2 thread id is invalid or corrupt", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({
+        "conversation-local-123": "0013d3a4-aa72-4da1-99e5-5613cb164e17",
+      })
+    );
+
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url.endsWith("/v2/threads")) {
+        return new Response(JSON.stringify({ thread_id: "thread_fresh" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v2/threads/thread_fresh/runs")) {
+        return new Response(JSON.stringify({ run_id: "run_fresh" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v2/runs/run_fresh/events")) {
+        return new Response(
+          encoder.encode(
+            'event: run_event\ndata: {"run_id":"run_fresh","thread_id":"thread_fresh","event_kind":"run.completed","payload":{"response_text":"done"}}\n\n'
+          ),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } }
+        );
+      }
+      if (url.endsWith("/v2/runs/run_fresh")) {
+        return new Response(JSON.stringify({ run_id: "run_fresh", response_text: "done" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.chatStream({
+      messages: [{ role: "user", content: "What are my most recent uploads to BisQue?" }],
+      uploaded_files: [],
+      conversation_id: "conversation-local-123",
+      goal: "What are my most recent uploads to BisQue?",
+    });
+
+    expect(response.run_id).toBe("run_fresh");
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads",
+      "https://ultra.example.org/v2/threads/thread_fresh/runs",
+      "https://ultra.example.org/v2/runs/run_fresh/events?stream=true&after_sequence=0",
+      "https://ultra.example.org/v2/runs/run_fresh",
+    ]);
+    expect(JSON.parse(browserStorage().getItem("bisque-ultra:v2-chat-thread-map") ?? "{}")).toEqual({
+      "conversation-local-123": "thread_fresh",
+    });
+  });
+
   it("retries run creation once when a cached thread disappears after validation", async () => {
     browserStorage().setItem(
       "bisque-ultra:v2-chat-thread-map",
@@ -658,6 +813,7 @@ describe("ApiClient V2 chat bridge", () => {
         return new Response(
           JSON.stringify({
             count: 1,
+            total_count: 40,
             threads: [
               {
                 thread_id: "thread_v2_123",
@@ -690,10 +846,10 @@ describe("ApiClient V2 chat bridge", () => {
 
     expect(response).toMatchObject({
       count: 1,
-      total_count: 1,
+      total_count: 40,
       limit: 25,
       offset: 0,
-      has_more: false,
+      has_more: true,
       conversations: [
         {
           conversation_id: "conversation-local-123",
@@ -711,6 +867,159 @@ describe("ApiClient V2 chat bridge", () => {
     });
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/threads?limit=25&offset=0",
+    ]);
+  });
+
+  it("derives default V2 sidebar titles from durable thread messages", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads?limit=25&offset=0") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            total_count: 1,
+            limit: 25,
+            offset: 0,
+            has_more: false,
+            threads: [
+              {
+                thread_id: "thread_v2_default_title",
+                title: "New conversation",
+                status: "active",
+                created_at: "2026-06-03T10:00:00Z",
+                updated_at: "2026-06-03T10:01:00Z",
+                latest_run_id: "run_v2_default_title",
+                metadata: {
+                  conversation_id: "conversation-local-default-title",
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_default_title/messages") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_default_title",
+            count: 2,
+            messages: [
+              {
+                role: "user",
+                content: "Run prairie dog detection on this image and discuss the results.",
+                created_at: "2026-06-03T10:00:00Z",
+                run_id: "run_v2_default_title",
+              },
+              {
+                role: "assistant",
+                content: "RareSpot completed.",
+                created_at: "2026-06-03T10:01:00Z",
+                run_id: "run_v2_default_title",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_v2_default_title") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_v2_default_title",
+            thread_id: "thread_v2_default_title",
+            goal: "Run prairie dog detection on this image and discuss the results.",
+            status: "succeeded",
+            workflow_kind: "deepagents",
+            response_text: "RareSpot completed.",
+            created_at: "2026-06-03T10:00:00Z",
+            updated_at: "2026-06-03T10:01:00Z",
+            metadata: {},
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.listConversations(25, 0, false);
+
+    expect(response.conversations).toMatchObject([
+      {
+        conversation_id: "conversation-local-default-title",
+        title: "Run prairie dog detection",
+        preview: "Run prairie dog detection on this image and discuss the results.",
+        message_count: 2,
+      },
+    ]);
+    expect(response.conversations[0].state).toEqual({});
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads?limit=25&offset=0",
+      "https://ultra.example.org/v2/threads/thread_v2_default_title/messages",
+      "https://ultra.example.org/v2/runs/run_v2_default_title",
+    ]);
+  });
+
+  it("omits empty default V2 threads while preserving page progress", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads?limit=25&offset=0") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            total_count: 1,
+            limit: 25,
+            offset: 0,
+            has_more: false,
+            threads: [
+              {
+                thread_id: "thread_v2_empty_default",
+                title: "New conversation",
+                status: "active",
+                created_at: "2026-06-03T10:00:00Z",
+                updated_at: "2026-06-03T10:01:00Z",
+                latest_run_id: null,
+                metadata: {
+                  conversation_id: "conversation-local-empty-default",
+                  preview: "",
+                  message_count: 0,
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_empty_default/messages") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_empty_default",
+            count: 0,
+            messages: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.listConversations(25, 0, false);
+
+    expect(response).toMatchObject({
+      count: 1,
+      total_count: 1,
+      limit: 25,
+      offset: 0,
+      has_more: false,
+      conversations: [],
+    });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads?limit=25&offset=0",
+      "https://ultra.example.org/v2/threads/thread_v2_empty_default/messages",
     ]);
   });
 
@@ -1078,6 +1387,217 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
+  it("reconciles stale frontend state with a completed durable latest run after refresh", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({ "conversation-local-123": "thread_v2_123" })
+    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_123") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_123",
+            title: "run durable analysis",
+            status: "active",
+            created_at: "2026-05-31T11:16:00Z",
+            updated_at: "2026-05-31T11:17:00Z",
+            latest_run_id: "run_v2_123",
+            metadata: {
+              conversation_id: "conversation-local-123",
+              frontend_state: {
+                sending: true,
+                streamingMessageId: "msg-assistant",
+                messages: [
+                  {
+                    id: "msg-user",
+                    role: "user",
+                    content: "run durable analysis",
+                    createdAt: Date.parse("2026-05-31T11:16:00Z"),
+                  },
+                  {
+                    id: "msg-assistant",
+                    role: "assistant",
+                    content: "",
+                    createdAt: Date.parse("2026-05-31T11:16:01Z"),
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_123/messages") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_123",
+            count: 1,
+            messages: [
+              {
+                message_id: "msg_durable_user",
+                role: "user",
+                content: "run durable analysis",
+                created_at: "2026-05-31T11:16:00Z",
+                run_id: "run_v2_123",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_v2_123") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_v2_123",
+            thread_id: "thread_v2_123",
+            status: "succeeded",
+            response_text: "Durable answer restored.",
+            completed_at: "2026-05-31T11:17:00Z",
+            updated_at: "2026-05-31T11:17:00Z",
+            metadata: { response_layout: { sections: [] } },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.getConversation("conversation-local-123");
+
+    expect(response.running).toBe(false);
+    expect(response.message_count).toBe(2);
+    expect(response.state).toMatchObject({
+      sending: false,
+      streamingMessageId: null,
+      messages: [
+        {
+          id: "msg-user",
+          role: "user",
+          content: "run durable analysis",
+        },
+        {
+          id: "msg-assistant",
+          role: "assistant",
+          content: "Durable answer restored.",
+          runId: "run_v2_123",
+          responseMetadata: { response_layout: { sections: [] } },
+        },
+      ],
+    });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads/thread_v2_123",
+      "https://ultra.example.org/v2/threads/thread_v2_123/messages",
+      "https://ultra.example.org/v2/runs/run_v2_123",
+    ]);
+  });
+
+  it("patches stale frontend state with an active latest run id for stream recovery", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({ "conversation-local-123": "thread_v2_123" })
+    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_123") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_123",
+            title: "run long analysis",
+            status: "active",
+            created_at: "2026-05-31T11:16:00Z",
+            updated_at: "2026-05-31T11:17:00Z",
+            latest_run_id: "run_v2_123",
+            metadata: {
+              conversation_id: "conversation-local-123",
+              frontend_state: {
+                sending: true,
+                streamingMessageId: "msg-assistant",
+                messages: [
+                  {
+                    id: "msg-user",
+                    role: "user",
+                    content: "run long analysis",
+                  },
+                  {
+                    id: "msg-assistant",
+                    role: "assistant",
+                    content: "",
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_123/messages") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_123",
+            count: 1,
+            messages: [
+              {
+                message_id: "msg_durable_user",
+                role: "user",
+                content: "run long analysis",
+                created_at: "2026-05-31T11:16:00Z",
+                run_id: "run_v2_123",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_v2_123") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_v2_123",
+            thread_id: "thread_v2_123",
+            status: "running",
+            response_text: "",
+            updated_at: "2026-05-31T11:17:00Z",
+            metadata: {},
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.getConversation("conversation-local-123");
+
+    expect(response.running).toBe(true);
+    expect(response.state).toMatchObject({
+      sending: true,
+      streamingMessageId: "msg-assistant",
+      messages: [
+        {
+          id: "msg-user",
+          role: "user",
+          content: "run long analysis",
+        },
+        {
+          id: "msg-assistant",
+          role: "assistant",
+          content: "",
+          runId: "run_v2_123",
+        },
+      ],
+    });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads/thread_v2_123",
+      "https://ultra.example.org/v2/threads/thread_v2_123/messages",
+      "https://ultra.example.org/v2/runs/run_v2_123",
+    ]);
+  });
+
   it("searches conversations from V2 threads without probing legacy search routes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
@@ -1231,8 +1751,8 @@ describe("ApiClient V2 chat bridge", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      if (url === "https://ultra.example.org/v2/auth/guest") {
-        return new Response(JSON.stringify({ authenticated: true, mode: "guest" }), {
+      if (url === "https://ultra.example.org/v2/auth/request-account") {
+        return new Response(JSON.stringify({ authenticated: false, account_status: "pending" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -1249,6 +1769,12 @@ describe("ApiClient V2 chat bridge", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
+      if (url === "https://ultra.example.org/v2/bisque/unlink") {
+        return new Response(JSON.stringify({ authenticated: false, user: null, bisque_linked: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1257,13 +1783,21 @@ describe("ApiClient V2 chat bridge", () => {
     await client.health();
     await client.getPublicConfig();
     await client.getBisqueSession();
-    await client.continueAsGuest({ name: "Grace", email: "", affiliation: "" });
+    await client.requestAccount({
+      name: "Grace",
+      email: "grace@example.org",
+      affiliation: "US Navy",
+    });
+    await client.startHostedAuth();
     await client.loginBisque({ username: "local", password: "local" });
     await client.logoutBisque();
+    await client.unlinkBisqueAccount();
 
     const urls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(urls.every((url) => url.includes("/v2/"))).toBe(true);
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
+    expect(urls).toContain("https://ultra.example.org/v2/auth/request-account");
+    expect(urls).not.toContain("https://ultra.example.org/v2/auth/guest");
   });
 
   it("uses V2 run and artifact recovery endpoints without legacy fallbacks", async () => {
@@ -1352,6 +1886,9 @@ describe("ApiClient V2 chat bridge", () => {
     expect(viewer.axis_sizes.X).toBe(3);
     expect(viewer.service_urls?.display).toBe("/v2/uploads/file-1/display");
     expect(viewer.service_urls?.slice).toBe("/v2/uploads/file-1/slice");
+    expect(viewer.service_urls?.tile).toBe("/v2/uploads/file-1/tiles");
+    expect(viewer.service_urls?.atlas).toBe("/v2/uploads/file-1/atlas");
+    expect(viewer.service_urls?.histogram).toBe("/v2/uploads/file-1/histogram");
     const urls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(urls).toEqual(["https://ultra.example.org/v2/uploads/file-1/viewer"]);
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
@@ -1452,6 +1989,179 @@ describe("ApiClient V2 chat bridge", () => {
     const urls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(urls).toEqual(["https://ultra.example.org/v2/uploads/from-bisque"]);
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
+  });
+
+  it("searches BisQue resources through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/bisque/search") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_type: "image",
+          tag_query: "species:prairie_dog",
+          query: "",
+          limit: 5,
+        });
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            results: [
+              {
+                resource_uri: "https://bisque.example.org/data_service/image/1",
+                name: "prairie.jpg",
+                resource_type: "image",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.searchBisqueResources({
+      resourceType: "image",
+      tagQuery: "species:prairie_dog",
+      limit: 5,
+    });
+
+    expect(response.count).toBe(1);
+    expect(response.results[0]?.name).toBe("prairie.jpg");
+  });
+
+  it("can request BisQue inventory counts through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/bisque/search") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_type: "image",
+          tag_query: "",
+          query: "",
+          limit: 1,
+          count_all: true,
+        });
+        return new Response(JSON.stringify({ count: 18, results: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.searchBisqueResources({
+      resourceType: "image",
+      limit: 1,
+      countAll: true,
+    });
+
+    expect(response.count).toBe(18);
+  });
+
+  it("sends precise BisQue search filters through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/bisque/search") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_type: "image",
+          tag_query: "",
+          tag_order: "@ts:desc",
+          query: "",
+          name_contains: "EnrNE_",
+          extensions: ["png"],
+          scope: "owner",
+          sort: "recent",
+          limit: 10,
+          count_all: true,
+        });
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            results: [
+              {
+                resource_uri: "https://bisque.example.org/data_service/image/1",
+                name: "EnrNE_recent.png",
+                resource_type: "image",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.searchBisqueResources({
+      resourceType: "image",
+      tagOrder: "@ts:desc",
+      nameContains: "EnrNE_",
+      extensions: ["png"],
+      scope: "owner",
+      sort: "recent",
+      limit: 10,
+      countAll: true,
+    });
+
+    expect(response.count).toBe(1);
+    expect(response.results[0]?.name).toBe("EnrNE_recent.png");
+  });
+
+  it("downloads and uploads BisQue resources through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/bisque/download") {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resources: ["https://bisque.example.org/data_service/image/1"],
+        });
+        return new Response(
+          JSON.stringify({ file_count: 1, uploaded: [], imports: [] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/bisque/upload") {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          file_ids: ["file_1"],
+          artifact_ids: ["artifact_1"],
+        });
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            uploads: [
+              {
+                file_id: "file_1",
+                artifact_id: "artifact_1",
+                resource_uri: "https://bisque.example.org/data_service/file/2",
+                name: "report.md",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const download = await client.downloadBisqueResources([
+      "https://bisque.example.org/data_service/image/1",
+    ]);
+    const upload = await client.uploadBisqueOutputs({
+      fileIds: ["file_1"],
+      artifactIds: ["artifact_1"],
+    });
+
+    expect(download.file_count).toBe(1);
+    expect(upload.count).toBe(1);
+    expect(upload.uploads[0]?.resource_uri).toContain("/data_service/file/2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("loads admin read models from V2 instead of legacy admin routes", async () => {
@@ -1641,6 +2351,50 @@ describe("ApiClient V2 chat bridge", () => {
     expect(user.status).toBe("disabled");
     expect(urls).toEqual(["https://ultra.example.org/v2/admin/users/user_grace"]);
     expect(methods).toEqual(["DELETE"]);
+  });
+
+  it("updates admin user approval status through V2", async () => {
+    const urls: string[] = [];
+    const methods: string[] = [];
+    const bodies: string[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        urls.push(url);
+        methods.push(String(init?.method ?? "GET"));
+        bodies.push(String(init?.body ?? ""));
+        if (url === "https://ultra.example.org/v2/admin/users/workos%3Auser_pending/status") {
+          return new Response(
+            JSON.stringify({
+              user_id: "workos:user_pending",
+              email: "pending@example.org",
+              display_name: "Pending Scientist",
+              role: "researcher",
+              status: "active",
+              org_id: "local-org",
+              created_at: "2026-06-01T00:00:00Z",
+              updated_at: "2026-06-01T00:01:00Z",
+              metadata: {},
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      baseUrl: "https://ultra.example.org",
+    });
+
+    const user = await client.updateAdminUserStatus("workos:user_pending", "active");
+
+    expect(user.status).toBe("active");
+    expect(urls).toEqual([
+      "https://ultra.example.org/v2/admin/users/workos%3Auser_pending/status",
+    ]);
+    expect(methods).toEqual(["PATCH"]);
+    expect(JSON.parse(bodies[0])).toEqual({ status: "active" });
   });
 
   it("requeues admin runs through V2 with an explicit reason", async () => {

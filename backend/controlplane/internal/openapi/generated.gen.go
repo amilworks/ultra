@@ -24,6 +24,51 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AuthSessionResponseMode.
+const (
+	Bisque AuthSessionResponseMode = "bisque"
+	Guest  AuthSessionResponseMode = "guest"
+	Workos AuthSessionResponseMode = "workos"
+)
+
+// Valid indicates whether the value is a known member of the AuthSessionResponseMode enum.
+func (e AuthSessionResponseMode) Valid() bool {
+	switch e {
+	case Bisque:
+		return true
+	case Guest:
+		return true
+	case Workos:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2AdminUpdateUserStatusRequestStatus.
+const (
+	Active   V2AdminUpdateUserStatusRequestStatus = "active"
+	Disabled V2AdminUpdateUserStatusRequestStatus = "disabled"
+	Pending  V2AdminUpdateUserStatusRequestStatus = "pending"
+	Rejected V2AdminUpdateUserStatusRequestStatus = "rejected"
+)
+
+// Valid indicates whether the value is a known member of the V2AdminUpdateUserStatusRequestStatus enum.
+func (e V2AdminUpdateUserStatusRequestStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case Disabled:
+		return true
+	case Pending:
+		return true
+	case Rejected:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for V2NotConfiguredResponseStatus.
 const (
 	NotConfigured V2NotConfiguredResponseStatus = "not_configured"
@@ -62,13 +107,24 @@ func (e GetUploadCaption200JSONResponseBodySource) Valid() bool {
 
 // AuthSessionResponse defines model for AuthSessionResponse.
 type AuthSessionResponse struct {
-	Authenticated bool        `json:"authenticated"`
-	GuestProfile  *JsonObject `json:"guest_profile,omitempty"`
-	IsAdmin       *bool       `json:"is_admin,omitempty"`
-	Mode          *string     `json:"mode,omitempty"`
-	User          JsonObject  `json:"user"`
-	Username      *string     `json:"username,omitempty"`
+	AccountEmail     *string                  `json:"account_email,omitempty"`
+	AccountStatus    *string                  `json:"account_status,omitempty"`
+	AccountUserId    *string                  `json:"account_user_id,omitempty"`
+	Authenticated    bool                     `json:"authenticated"`
+	AuthorizationUrl *string                  `json:"authorization_url,omitempty"`
+	BisqueLinked     *bool                    `json:"bisque_linked,omitempty"`
+	GuestProfile     *JsonObject              `json:"guest_profile,omitempty"`
+	IsAdmin          *bool                    `json:"is_admin,omitempty"`
+	LogoutUrl        *string                  `json:"logout_url,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Mode             *AuthSessionResponseMode `json:"mode,omitempty"`
+	Provider         *string                  `json:"provider,omitempty"`
+	User             *JsonObject              `json:"user,omitempty"`
+	Username         *string                  `json:"username,omitempty"`
 }
+
+// AuthSessionResponseMode defines model for AuthSessionResponse.Mode.
+type AuthSessionResponseMode string
 
 // HealthResponse defines model for HealthResponse.
 type HealthResponse struct {
@@ -85,6 +141,28 @@ type PublicConfigResponse struct {
 	AppName              *string                `json:"app_name,omitempty"`
 	AppVersion           *string                `json:"app_version,omitempty"`
 	Features             *map[string]bool       `json:"features,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// V2AccountRequest defines model for V2AccountRequest.
+type V2AccountRequest struct {
+	Affiliation string `json:"affiliation"`
+	Email       string `json:"email"`
+	Name        string `json:"name"`
+}
+
+// V2AdminActivityPeriod defines model for V2AdminActivityPeriod.
+type V2AdminActivityPeriod struct {
+	ActiveUsers          *int                   `json:"active_users,omitempty"`
+	Artifacts            *int                   `json:"artifacts,omitempty"`
+	AssistantMessages    *int                   `json:"assistant_messages,omitempty"`
+	FailedRuns           *int                   `json:"failed_runs,omitempty"`
+	Label                *string                `json:"label,omitempty"`
+	Messages             *int                   `json:"messages,omitempty"`
+	Runs                 *int                   `json:"runs,omitempty"`
+	ToolCalls            *int                   `json:"tool_calls,omitempty"`
+	UserMessages         *int                   `json:"user_messages,omitempty"`
+	Window               *string                `json:"window,omitempty"`
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
@@ -145,6 +223,7 @@ type V2AdminOrganizationListResponse struct {
 
 // V2AdminOverviewResponse defines model for V2AdminOverviewResponse.
 type V2AdminOverviewResponse struct {
+	Activity     []V2AdminActivityPeriod  `json:"activity"`
 	GeneratedAt  string                   `json:"generated_at"`
 	Kpis         V2AdminPlatformKpis      `json:"kpis"`
 	Queue        V2AdminQueueDiagnostics  `json:"queue"`
@@ -297,6 +376,14 @@ type V2AdminToolUsageRecord struct {
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
+// V2AdminUpdateUserStatusRequest defines model for V2AdminUpdateUserStatusRequest.
+type V2AdminUpdateUserStatusRequest struct {
+	Status V2AdminUpdateUserStatusRequestStatus `json:"status"`
+}
+
+// V2AdminUpdateUserStatusRequestStatus defines model for V2AdminUpdateUserStatusRequest.Status.
+type V2AdminUpdateUserStatusRequestStatus string
+
 // V2AdminUsageBucket defines model for V2AdminUsageBucket.
 type V2AdminUsageBucket struct {
 	BucketStart          *string                `json:"bucket_start,omitempty"`
@@ -397,6 +484,56 @@ type V2ArtifactRecord struct {
 // V2ArtifactResponse defines model for V2ArtifactResponse.
 type V2ArtifactResponse struct {
 	Artifact V2ArtifactRecord `json:"artifact"`
+}
+
+// V2BisqueImportRecord defines model for V2BisqueImportRecord.
+type V2BisqueImportRecord struct {
+	ClientViewUrl   *string              `json:"client_view_url,omitempty"`
+	ImageServiceUrl *string              `json:"image_service_url,omitempty"`
+	InputUrl        string               `json:"input_url"`
+	ResourceUniq    *string              `json:"resource_uniq,omitempty"`
+	ResourceUri     string               `json:"resource_uri"`
+	Status          string               `json:"status"`
+	Uploaded        V2UploadedFileRecord `json:"uploaded"`
+}
+
+// V2BisqueImportResponse defines model for V2BisqueImportResponse.
+type V2BisqueImportResponse struct {
+	FileCount int                    `json:"file_count"`
+	Imports   []V2BisqueImportRecord `json:"imports"`
+	Uploaded  []V2UploadedFileRecord `json:"uploaded"`
+}
+
+// V2BisqueResource defines model for V2BisqueResource.
+type V2BisqueResource struct {
+	ClientViewUrl   *string            `json:"client_view_url,omitempty"`
+	ImageServiceUrl *string            `json:"image_service_url,omitempty"`
+	Name            *string            `json:"name,omitempty"`
+	ResourceType    *string            `json:"resource_type,omitempty"`
+	ResourceUniq    *string            `json:"resource_uniq,omitempty"`
+	ResourceUri     string             `json:"resource_uri"`
+	Tags            *map[string]string `json:"tags,omitempty"`
+}
+
+// V2BisqueSearchResponse defines model for V2BisqueSearchResponse.
+type V2BisqueSearchResponse struct {
+	Count   int                `json:"count"`
+	Results []V2BisqueResource `json:"results"`
+}
+
+// V2BisqueUploadRecord defines model for V2BisqueUploadRecord.
+type V2BisqueUploadRecord struct {
+	ArtifactId   *string `json:"artifact_id,omitempty"`
+	FileId       *string `json:"file_id,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	ResourceUniq *string `json:"resource_uniq,omitempty"`
+	ResourceUri  string  `json:"resource_uri"`
+}
+
+// V2BisqueUploadResponse defines model for V2BisqueUploadResponse.
+type V2BisqueUploadResponse struct {
+	Count   int                    `json:"count"`
+	Uploads []V2BisqueUploadRecord `json:"uploads"`
 }
 
 // V2GraphEventRecord defines model for V2GraphEventRecord.
@@ -616,8 +753,12 @@ type V2ThreadCreateRequest struct {
 
 // V2ThreadListResponse defines model for V2ThreadListResponse.
 type V2ThreadListResponse struct {
-	Count   int              `json:"count"`
-	Threads []V2ThreadRecord `json:"threads"`
+	Count      int              `json:"count"`
+	HasMore    bool             `json:"has_more"`
+	Limit      int              `json:"limit"`
+	Offset     int              `json:"offset"`
+	Threads    []V2ThreadRecord `json:"threads"`
+	TotalCount int              `json:"total_count"`
 }
 
 // V2ThreadMessage defines model for V2ThreadMessage.
@@ -731,6 +872,7 @@ type V2UploadedFileRecord struct {
 	Principal    *V2PrincipalRecord `json:"principal,omitempty"`
 	Sha256       string             `json:"sha256"`
 	SizeBytes    int64              `json:"size_bytes"`
+	SourceUri    *string            `json:"source_uri,omitempty"`
 }
 
 // V2WorkerHeartbeatRecord defines model for V2WorkerHeartbeatRecord.
@@ -837,6 +979,47 @@ type LoginV2BisqueJSONBody struct {
 	Username *string `json:"username,omitempty"`
 }
 
+// DownloadBisqueResourcesJSONBody defines parameters for DownloadBisqueResources.
+type DownloadBisqueResourcesJSONBody struct {
+	ResourceUris *[]string `json:"resource_uris,omitempty"`
+	Resources    *[]string `json:"resources,omitempty"`
+}
+
+// SearchBisqueResourcesJSONBody defines parameters for SearchBisqueResources.
+type SearchBisqueResourcesJSONBody struct {
+	// CountAll Page through the BisQue list to return the full inventory count when the upstream response omits a total.
+	CountAll *bool `json:"count_all,omitempty"`
+
+	// Extensions File extensions such as png, jpg, nii, nii.gz, or nifti verified against returned resources.
+	Extensions *[]string `json:"extensions,omitempty"`
+
+	// FileExtensions Alias for extensions.
+	FileExtensions *[]string `json:"file_extensions,omitempty"`
+	Limit          *int      `json:"limit,omitempty"`
+
+	// NameContains Filename/resource text fragment verified against returned resources.
+	NameContains *string `json:"name_contains,omitempty"`
+	Offset       *int    `json:"offset,omitempty"`
+	Query        *string `json:"query,omitempty"`
+	ResourceType *string `json:"resource_type,omitempty"`
+
+	// Scope BisQue visibility scope. Use owner for the linked user's own resources.
+	Scope *string `json:"scope,omitempty"`
+
+	// Sort Convenience sort such as recent, oldest, name, or name_desc.
+	Sort *string `json:"sort,omitempty"`
+
+	// TagOrder BisQue data_service tag_order passed through for server-side ordering.
+	TagOrder *string `json:"tag_order,omitempty"`
+	TagQuery *string `json:"tag_query,omitempty"`
+}
+
+// UploadBisqueOutputsJSONBody defines parameters for UploadBisqueOutputs.
+type UploadBisqueOutputsJSONBody struct {
+	ArtifactIds *[]string `json:"artifact_ids,omitempty"`
+	FileIds     *[]string `json:"file_ids,omitempty"`
+}
+
 // ListResourcesParams defines parameters for ListResources.
 type ListResourcesParams struct {
 	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -929,11 +1112,54 @@ type UploadFilesMultipartBody struct {
 
 // ImportV2BisqueResourcesJSONBody defines parameters for ImportV2BisqueResources.
 type ImportV2BisqueResourcesJSONBody struct {
-	Resources *[]string `json:"resources,omitempty"`
+	ResourceUris *[]string `json:"resource_uris,omitempty"`
+	Resources    *[]string `json:"resources,omitempty"`
+}
+
+// GetUploadAtlasParams defines parameters for GetUploadAtlas.
+type GetUploadAtlasParams struct {
+	Enhancement *string `form:"enhancement,omitempty" json:"enhancement,omitempty"`
+	T           *int    `form:"t,omitempty" json:"t,omitempty"`
 }
 
 // GetUploadCaption200JSONResponseBodySource defines parameters for GetUploadCaption.
 type GetUploadCaption200JSONResponseBodySource string
+
+// GetUploadDisplayParams defines parameters for GetUploadDisplay.
+type GetUploadDisplayParams struct {
+	// Enhancement Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
+	Enhancement *string `form:"enhancement,omitempty" json:"enhancement,omitempty"`
+
+	// Negative Invert grayscale preview output.
+	Negative *bool `form:"negative,omitempty" json:"negative,omitempty"`
+
+	// Gamma Gamma adjustment for grayscale preview output.
+	Gamma *float32 `form:"gamma,omitempty" json:"gamma,omitempty"`
+
+	// Channels Comma-separated RGB channel indices to visualize. A single selected channel is rendered as grayscale intensity.
+	Channels *string `form:"channels,omitempty" json:"channels,omitempty"`
+
+	// ChannelColors Optional comma-separated channel colors reserved for channel-aware display renderers.
+	ChannelColors *string `form:"channel_colors,omitempty" json:"channel_colors,omitempty"`
+
+	// WindowMin Explicit source-value lower window bound for grayscale preview output.
+	WindowMin *float32 `form:"window_min,omitempty" json:"window_min,omitempty"`
+
+	// WindowMax Explicit source-value upper window bound for grayscale preview output.
+	WindowMax *float32 `form:"window_max,omitempty" json:"window_max,omitempty"`
+}
+
+// GetUploadHistogramParams defines parameters for GetUploadHistogram.
+type GetUploadHistogramParams struct {
+	// Channels Comma-separated image channel indices to summarize; grayscale uploads always use channel 0.
+	Channels *string `form:"channels,omitempty" json:"channels,omitempty"`
+
+	// T Time index to report in the histogram payload for direct-image uploads.
+	T *int `form:"t,omitempty" json:"t,omitempty"`
+
+	// Bins Number of histogram bins. Values are clamped by the control plane.
+	Bins *int `form:"bins,omitempty" json:"bins,omitempty"`
+}
 
 // GetUploadSliceParams defines parameters for GetUploadSlice.
 type GetUploadSliceParams struct {
@@ -943,6 +1169,28 @@ type GetUploadSliceParams struct {
 	X    *int    `form:"x,omitempty" json:"x,omitempty"`
 	C    *int    `form:"c,omitempty" json:"c,omitempty"`
 	T    *int    `form:"t,omitempty" json:"t,omitempty"`
+
+	// Enhancement Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
+	Enhancement *string `form:"enhancement,omitempty" json:"enhancement,omitempty"`
+
+	// Negative Invert grayscale preview output.
+	Negative *bool `form:"negative,omitempty" json:"negative,omitempty"`
+
+	// Gamma Gamma adjustment for grayscale preview output.
+	Gamma *float32 `form:"gamma,omitempty" json:"gamma,omitempty"`
+
+	// WindowMin Explicit source-value lower window bound for grayscale preview output.
+	WindowMin *float32 `form:"window_min,omitempty" json:"window_min,omitempty"`
+
+	// WindowMax Explicit source-value upper window bound for grayscale preview output.
+	WindowMax *float32 `form:"window_max,omitempty" json:"window_max,omitempty"`
+}
+
+// GetUploadTileParams defines parameters for GetUploadTile.
+type GetUploadTileParams struct {
+	Z *int `form:"z,omitempty" json:"z,omitempty"`
+	C *int `form:"c,omitempty" json:"c,omitempty"`
+	T *int `form:"t,omitempty" json:"t,omitempty"`
 }
 
 // ContinueAsGuestJSONRequestBody defines body for ContinueAsGuest for application/json ContentType.
@@ -960,11 +1208,26 @@ type RequeueV2AdminRunJSONRequestBody RequeueV2AdminRunJSONBody
 // CreateV2AdminUserJSONRequestBody defines body for CreateV2AdminUser for application/json ContentType.
 type CreateV2AdminUserJSONRequestBody = V2AdminCreateUserRequest
 
+// UpdateV2AdminUserStatusJSONRequestBody defines body for UpdateV2AdminUserStatus for application/json ContentType.
+type UpdateV2AdminUserStatusJSONRequestBody = V2AdminUpdateUserStatusRequest
+
 // ContinueAsV2GuestJSONRequestBody defines body for ContinueAsV2Guest for application/json ContentType.
 type ContinueAsV2GuestJSONRequestBody ContinueAsV2GuestJSONBody
 
 // LoginV2BisqueJSONRequestBody defines body for LoginV2Bisque for application/json ContentType.
 type LoginV2BisqueJSONRequestBody LoginV2BisqueJSONBody
+
+// RequestV2AccountJSONRequestBody defines body for RequestV2Account for application/json ContentType.
+type RequestV2AccountJSONRequestBody = V2AccountRequest
+
+// DownloadBisqueResourcesJSONRequestBody defines body for DownloadBisqueResources for application/json ContentType.
+type DownloadBisqueResourcesJSONRequestBody DownloadBisqueResourcesJSONBody
+
+// SearchBisqueResourcesJSONRequestBody defines body for SearchBisqueResources for application/json ContentType.
+type SearchBisqueResourcesJSONRequestBody SearchBisqueResourcesJSONBody
+
+// UploadBisqueOutputsJSONRequestBody defines body for UploadBisqueOutputs for application/json ContentType.
+type UploadBisqueOutputsJSONRequestBody UploadBisqueOutputsJSONBody
 
 // CancelRunJSONRequestBody defines body for CancelRun for application/json ContentType.
 type CancelRunJSONRequestBody = V2RunCancelRequest
@@ -1103,6 +1366,209 @@ func (a PublicConfigResponse) MarshalJSON() ([]byte, error) {
 		object["features"], err = json.Marshal(a.Features)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'features': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for V2AdminActivityPeriod. Returns the specified
+// element and whether it was found
+func (a V2AdminActivityPeriod) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for V2AdminActivityPeriod
+func (a *V2AdminActivityPeriod) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for V2AdminActivityPeriod to handle AdditionalProperties
+func (a *V2AdminActivityPeriod) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["active_users"]; found {
+		err = json.Unmarshal(raw, &a.ActiveUsers)
+		if err != nil {
+			return fmt.Errorf("error reading 'active_users': %w", err)
+		}
+		delete(object, "active_users")
+	}
+
+	if raw, found := object["artifacts"]; found {
+		err = json.Unmarshal(raw, &a.Artifacts)
+		if err != nil {
+			return fmt.Errorf("error reading 'artifacts': %w", err)
+		}
+		delete(object, "artifacts")
+	}
+
+	if raw, found := object["assistant_messages"]; found {
+		err = json.Unmarshal(raw, &a.AssistantMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'assistant_messages': %w", err)
+		}
+		delete(object, "assistant_messages")
+	}
+
+	if raw, found := object["failed_runs"]; found {
+		err = json.Unmarshal(raw, &a.FailedRuns)
+		if err != nil {
+			return fmt.Errorf("error reading 'failed_runs': %w", err)
+		}
+		delete(object, "failed_runs")
+	}
+
+	if raw, found := object["label"]; found {
+		err = json.Unmarshal(raw, &a.Label)
+		if err != nil {
+			return fmt.Errorf("error reading 'label': %w", err)
+		}
+		delete(object, "label")
+	}
+
+	if raw, found := object["messages"]; found {
+		err = json.Unmarshal(raw, &a.Messages)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages': %w", err)
+		}
+		delete(object, "messages")
+	}
+
+	if raw, found := object["runs"]; found {
+		err = json.Unmarshal(raw, &a.Runs)
+		if err != nil {
+			return fmt.Errorf("error reading 'runs': %w", err)
+		}
+		delete(object, "runs")
+	}
+
+	if raw, found := object["tool_calls"]; found {
+		err = json.Unmarshal(raw, &a.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_calls': %w", err)
+		}
+		delete(object, "tool_calls")
+	}
+
+	if raw, found := object["user_messages"]; found {
+		err = json.Unmarshal(raw, &a.UserMessages)
+		if err != nil {
+			return fmt.Errorf("error reading 'user_messages': %w", err)
+		}
+		delete(object, "user_messages")
+	}
+
+	if raw, found := object["window"]; found {
+		err = json.Unmarshal(raw, &a.Window)
+		if err != nil {
+			return fmt.Errorf("error reading 'window': %w", err)
+		}
+		delete(object, "window")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for V2AdminActivityPeriod to handle AdditionalProperties
+func (a V2AdminActivityPeriod) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ActiveUsers != nil {
+		object["active_users"], err = json.Marshal(a.ActiveUsers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'active_users': %w", err)
+		}
+	}
+
+	if a.Artifacts != nil {
+		object["artifacts"], err = json.Marshal(a.Artifacts)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'artifacts': %w", err)
+		}
+	}
+
+	if a.AssistantMessages != nil {
+		object["assistant_messages"], err = json.Marshal(a.AssistantMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'assistant_messages': %w", err)
+		}
+	}
+
+	if a.FailedRuns != nil {
+		object["failed_runs"], err = json.Marshal(a.FailedRuns)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'failed_runs': %w", err)
+		}
+	}
+
+	if a.Label != nil {
+		object["label"], err = json.Marshal(a.Label)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'label': %w", err)
+		}
+	}
+
+	if a.Messages != nil {
+		object["messages"], err = json.Marshal(a.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages': %w", err)
+		}
+	}
+
+	if a.Runs != nil {
+		object["runs"], err = json.Marshal(a.Runs)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'runs': %w", err)
+		}
+	}
+
+	if a.ToolCalls != nil {
+		object["tool_calls"], err = json.Marshal(a.ToolCalls)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_calls': %w", err)
+		}
+	}
+
+	if a.UserMessages != nil {
+		object["user_messages"], err = json.Marshal(a.UserMessages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'user_messages': %w", err)
+		}
+	}
+
+	if a.Window != nil {
+		object["window"], err = json.Marshal(a.Window)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'window': %w", err)
 		}
 	}
 
@@ -4010,6 +4476,9 @@ type ServerInterface interface {
 	// (DELETE /v2/admin/users/{user_id})
 	DeleteV2AdminUser(w http.ResponseWriter, r *http.Request, userId string)
 
+	// (PATCH /v2/admin/users/{user_id}/status)
+	UpdateV2AdminUserStatus(w http.ResponseWriter, r *http.Request, userId string)
+
 	// (GET /v2/artifacts/{artifact_id})
 	GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string)
 
@@ -4025,8 +4494,23 @@ type ServerInterface interface {
 	// (POST /v2/auth/logout)
 	LogoutV2Bisque(w http.ResponseWriter, r *http.Request)
 
+	// (POST /v2/auth/request-account)
+	RequestV2Account(w http.ResponseWriter, r *http.Request)
+
 	// (GET /v2/auth/session)
 	GetV2AuthSession(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/bisque/download)
+	DownloadBisqueResources(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/bisque/search)
+	SearchBisqueResources(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/bisque/unlink)
+	UnlinkBisqueAccount(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/bisque/upload)
+	UploadBisqueOutputs(w http.ResponseWriter, r *http.Request)
 
 	// (GET /v2/config/public)
 	GetV2PublicConfig(w http.ResponseWriter, r *http.Request)
@@ -4202,17 +4686,29 @@ type ServerInterface interface {
 	// (POST /v2/uploads/from-bisque)
 	ImportV2BisqueResources(w http.ResponseWriter, r *http.Request)
 
+	// (GET /v2/uploads/{file_id}/atlas)
+	GetUploadAtlas(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadAtlasParams)
+
 	// (GET /v2/uploads/{file_id}/caption)
 	GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID)
 
 	// (GET /v2/uploads/{file_id}/display)
-	GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID)
+	GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadDisplayParams)
+
+	// (GET /v2/uploads/{file_id}/histogram)
+	GetUploadHistogram(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadHistogramParams)
 
 	// (GET /v2/uploads/{file_id}/preview)
 	GetUploadPreview(w http.ResponseWriter, r *http.Request, fileId FileID)
 
+	// (GET /v2/uploads/{file_id}/scalar-volume)
+	GetUploadScalarVolume(w http.ResponseWriter, r *http.Request, fileId FileID)
+
 	// (GET /v2/uploads/{file_id}/slice)
 	GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams)
+
+	// (GET /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y})
+	GetUploadTile(w http.ResponseWriter, r *http.Request, fileId FileID, axis string, level int, tileX int, tileY int, params GetUploadTileParams)
 
 	// (GET /v2/uploads/{file_id}/viewer)
 	GetUploadViewer(w http.ResponseWriter, r *http.Request, fileId FileID)
@@ -4315,6 +4811,11 @@ func (_ Unimplemented) DeleteV2AdminUser(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (PATCH /v2/admin/users/{user_id}/status)
+func (_ Unimplemented) UpdateV2AdminUserStatus(w http.ResponseWriter, r *http.Request, userId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/artifacts/{artifact_id})
 func (_ Unimplemented) GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -4340,8 +4841,33 @@ func (_ Unimplemented) LogoutV2Bisque(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (POST /v2/auth/request-account)
+func (_ Unimplemented) RequestV2Account(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/auth/session)
 func (_ Unimplemented) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/bisque/download)
+func (_ Unimplemented) DownloadBisqueResources(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/bisque/search)
+func (_ Unimplemented) SearchBisqueResources(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/bisque/unlink)
+func (_ Unimplemented) UnlinkBisqueAccount(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/bisque/upload)
+func (_ Unimplemented) UploadBisqueOutputs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -4635,13 +5161,23 @@ func (_ Unimplemented) ImportV2BisqueResources(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /v2/uploads/{file_id}/atlas)
+func (_ Unimplemented) GetUploadAtlas(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadAtlasParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/uploads/{file_id}/caption)
 func (_ Unimplemented) GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 // (GET /v2/uploads/{file_id}/display)
-func (_ Unimplemented) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID) {
+func (_ Unimplemented) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadDisplayParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/histogram)
+func (_ Unimplemented) GetUploadHistogram(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadHistogramParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -4650,8 +5186,18 @@ func (_ Unimplemented) GetUploadPreview(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /v2/uploads/{file_id}/scalar-volume)
+func (_ Unimplemented) GetUploadScalarVolume(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/uploads/{file_id}/slice)
 func (_ Unimplemented) GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y})
+func (_ Unimplemented) GetUploadTile(w http.ResponseWriter, r *http.Request, fileId FileID, axis string, level int, tileX int, tileY int, params GetUploadTileParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5176,6 +5722,32 @@ func (siw *ServerInterfaceWrapper) DeleteV2AdminUser(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// UpdateV2AdminUserStatus operation middleware
+func (siw *ServerInterfaceWrapper) UpdateV2AdminUserStatus(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_id" -------------
+	var userId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_id", chi.URLParam(r, "user_id"), &userId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateV2AdminUserStatus(w, r, userId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetArtifact operation middleware
 func (siw *ServerInterfaceWrapper) GetArtifact(w http.ResponseWriter, r *http.Request) {
 
@@ -5270,11 +5842,81 @@ func (siw *ServerInterfaceWrapper) LogoutV2Bisque(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// RequestV2Account operation middleware
+func (siw *ServerInterfaceWrapper) RequestV2Account(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RequestV2Account(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetV2AuthSession operation middleware
 func (siw *ServerInterfaceWrapper) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetV2AuthSession(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DownloadBisqueResources operation middleware
+func (siw *ServerInterfaceWrapper) DownloadBisqueResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DownloadBisqueResources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SearchBisqueResources operation middleware
+func (siw *ServerInterfaceWrapper) SearchBisqueResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SearchBisqueResources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UnlinkBisqueAccount operation middleware
+func (siw *ServerInterfaceWrapper) UnlinkBisqueAccount(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UnlinkBisqueAccount(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UploadBisqueOutputs operation middleware
+func (siw *ServerInterfaceWrapper) UploadBisqueOutputs(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UploadBisqueOutputs(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6862,6 +7504,61 @@ func (siw *ServerInterfaceWrapper) ImportV2BisqueResources(w http.ResponseWriter
 	handler.ServeHTTP(w, r)
 }
 
+// GetUploadAtlas operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadAtlas(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetUploadAtlasParams
+
+	// ------------- Optional query parameter "enhancement" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "enhancement", r.URL.Query(), &params.Enhancement, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "enhancement"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "enhancement", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "t" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "t", r.URL.Query(), &params.T, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "t"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "t", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadAtlas(w, r, fileId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetUploadCaption operation middleware
 func (siw *ServerInterfaceWrapper) GetUploadCaption(w http.ResponseWriter, r *http.Request) {
 
@@ -6903,8 +7600,170 @@ func (siw *ServerInterfaceWrapper) GetUploadDisplay(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetUploadDisplayParams
+
+	// ------------- Optional query parameter "enhancement" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "enhancement", r.URL.Query(), &params.Enhancement, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "enhancement"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "enhancement", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "negative" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "negative", r.URL.Query(), &params.Negative, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "negative"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "negative", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "gamma" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "gamma", r.URL.Query(), &params.Gamma, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "gamma"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "gamma", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "channels" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "channels", r.URL.Query(), &params.Channels, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "channels"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "channels", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "channel_colors" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "channel_colors", r.URL.Query(), &params.ChannelColors, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "channel_colors"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "channel_colors", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "window_min" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "window_min", r.URL.Query(), &params.WindowMin, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_min"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_min", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "window_max" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "window_max", r.URL.Query(), &params.WindowMax, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_max"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_max", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetUploadDisplay(w, r, fileId)
+		siw.Handler.GetUploadDisplay(w, r, fileId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadHistogram operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadHistogram(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetUploadHistogramParams
+
+	// ------------- Optional query parameter "channels" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "channels", r.URL.Query(), &params.Channels, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "channels"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "channels", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "t" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "t", r.URL.Query(), &params.T, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "t"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "t", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "bins" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "bins", r.URL.Query(), &params.Bins, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "bins"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bins", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadHistogram(w, r, fileId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6931,6 +7790,32 @@ func (siw *ServerInterfaceWrapper) GetUploadPreview(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUploadPreview(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadScalarVolume operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadScalarVolume(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadScalarVolume(w, r, fileId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -7036,8 +7921,177 @@ func (siw *ServerInterfaceWrapper) GetUploadSlice(w http.ResponseWriter, r *http
 		return
 	}
 
+	// ------------- Optional query parameter "enhancement" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "enhancement", r.URL.Query(), &params.Enhancement, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "enhancement"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "enhancement", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "negative" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "negative", r.URL.Query(), &params.Negative, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "negative"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "negative", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "gamma" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "gamma", r.URL.Query(), &params.Gamma, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "gamma"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "gamma", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "window_min" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "window_min", r.URL.Query(), &params.WindowMin, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_min"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_min", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "window_max" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "window_max", r.URL.Query(), &params.WindowMax, runtime.BindQueryParameterOptions{Type: "number", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_max"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_max", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUploadSlice(w, r, fileId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUploadTile operation middleware
+func (siw *ServerInterfaceWrapper) GetUploadTile(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "axis" -------------
+	var axis string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "axis", chi.URLParam(r, "axis"), &axis, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "axis", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "level" -------------
+	var level int
+
+	err = runtime.BindStyledParameterWithOptions("simple", "level", chi.URLParam(r, "level"), &level, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "level", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "tile_x" -------------
+	var tileX int
+
+	err = runtime.BindStyledParameterWithOptions("simple", "tile_x", chi.URLParam(r, "tile_x"), &tileX, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tile_x", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "tile_y" -------------
+	var tileY int
+
+	err = runtime.BindStyledParameterWithOptions("simple", "tile_y", chi.URLParam(r, "tile_y"), &tileY, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tile_y", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetUploadTileParams
+
+	// ------------- Optional query parameter "z" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "z", r.URL.Query(), &params.Z, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "z"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "z", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "c" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "c", r.URL.Query(), &params.C, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "c"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "c", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "t" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "t", r.URL.Query(), &params.T, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "t"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "t", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUploadTile(w, r, fileId, axis, level, tileX, tileY, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -7255,6 +8309,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Delete(options.BaseURL+"/v2/admin/users/{user_id}", wrapper.DeleteV2AdminUser)
 	})
 	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/admin/users/{user_id}/status", wrapper.UpdateV2AdminUserStatus)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/artifacts/{artifact_id}", wrapper.GetArtifact)
 	})
 	r.Group(func(r chi.Router) {
@@ -7270,7 +8327,22 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/v2/auth/logout", wrapper.LogoutV2Bisque)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/auth/request-account", wrapper.RequestV2Account)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/auth/session", wrapper.GetV2AuthSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/bisque/download", wrapper.DownloadBisqueResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/bisque/search", wrapper.SearchBisqueResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/bisque/unlink", wrapper.UnlinkBisqueAccount)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/bisque/upload", wrapper.UploadBisqueOutputs)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/config/public", wrapper.GetV2PublicConfig)
@@ -7447,16 +8519,28 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/v2/uploads/from-bisque", wrapper.ImportV2BisqueResources)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/atlas", wrapper.GetUploadAtlas)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/uploads/{file_id}/caption", wrapper.GetUploadCaption)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/uploads/{file_id}/display", wrapper.GetUploadDisplay)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/histogram", wrapper.GetUploadHistogram)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/uploads/{file_id}/preview", wrapper.GetUploadPreview)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/scalar-volume", wrapper.GetUploadScalarVolume)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/uploads/{file_id}/slice", wrapper.GetUploadSlice)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", wrapper.GetUploadTile)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/uploads/{file_id}/viewer", wrapper.GetUploadViewer)
@@ -7869,6 +8953,29 @@ func (response DeleteV2AdminUser200JSONResponse) VisitDeleteV2AdminUserResponse(
 	return err
 }
 
+type UpdateV2AdminUserStatusRequestObject struct {
+	UserId string `json:"user_id"`
+	Body   *UpdateV2AdminUserStatusJSONRequestBody
+}
+
+type UpdateV2AdminUserStatusResponseObject interface {
+	VisitUpdateV2AdminUserStatusResponse(w http.ResponseWriter) error
+}
+
+type UpdateV2AdminUserStatus200JSONResponse V2AdminUserAccount
+
+func (response UpdateV2AdminUserStatus200JSONResponse) VisitUpdateV2AdminUserStatusResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetArtifactRequestObject struct {
 	ArtifactId string `json:"artifact_id"`
 }
@@ -7984,6 +9091,28 @@ func (response LogoutV2Bisque200JSONResponse) VisitLogoutV2BisqueResponse(w http
 	return err
 }
 
+type RequestV2AccountRequestObject struct {
+	Body *RequestV2AccountJSONRequestBody
+}
+
+type RequestV2AccountResponseObject interface {
+	VisitRequestV2AccountResponse(w http.ResponseWriter) error
+}
+
+type RequestV2Account202JSONResponse AuthSessionResponse
+
+func (response RequestV2Account202JSONResponse) VisitRequestV2AccountResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetV2AuthSessionRequestObject struct {
 }
 
@@ -8001,6 +9130,135 @@ func (response GetV2AuthSession200JSONResponse) VisitGetV2AuthSessionResponse(w 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DownloadBisqueResourcesRequestObject struct {
+	Body *DownloadBisqueResourcesJSONRequestBody
+}
+
+type DownloadBisqueResourcesResponseObject interface {
+	VisitDownloadBisqueResourcesResponse(w http.ResponseWriter) error
+}
+
+type DownloadBisqueResources200JSONResponse V2BisqueImportResponse
+
+func (response DownloadBisqueResources200JSONResponse) VisitDownloadBisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DownloadBisqueResources501JSONResponse V2NotConfiguredResponse
+
+func (response DownloadBisqueResources501JSONResponse) VisitDownloadBisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SearchBisqueResourcesRequestObject struct {
+	Body *SearchBisqueResourcesJSONRequestBody
+}
+
+type SearchBisqueResourcesResponseObject interface {
+	VisitSearchBisqueResourcesResponse(w http.ResponseWriter) error
+}
+
+type SearchBisqueResources200JSONResponse V2BisqueSearchResponse
+
+func (response SearchBisqueResources200JSONResponse) VisitSearchBisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SearchBisqueResources501JSONResponse V2NotConfiguredResponse
+
+func (response SearchBisqueResources501JSONResponse) VisitSearchBisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UnlinkBisqueAccountRequestObject struct {
+}
+
+type UnlinkBisqueAccountResponseObject interface {
+	VisitUnlinkBisqueAccountResponse(w http.ResponseWriter) error
+}
+
+type UnlinkBisqueAccount200JSONResponse AuthSessionResponse
+
+func (response UnlinkBisqueAccount200JSONResponse) VisitUnlinkBisqueAccountResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UploadBisqueOutputsRequestObject struct {
+	Body *UploadBisqueOutputsJSONRequestBody
+}
+
+type UploadBisqueOutputsResponseObject interface {
+	VisitUploadBisqueOutputsResponse(w http.ResponseWriter) error
+}
+
+type UploadBisqueOutputs200JSONResponse V2BisqueUploadResponse
+
+func (response UploadBisqueOutputs200JSONResponse) VisitUploadBisqueOutputsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UploadBisqueOutputs501JSONResponse V2NotConfiguredResponse
+
+func (response UploadBisqueOutputs501JSONResponse) VisitUploadBisqueOutputsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -9406,9 +10664,60 @@ type ImportV2BisqueResourcesResponseObject interface {
 	VisitImportV2BisqueResourcesResponse(w http.ResponseWriter) error
 }
 
+type ImportV2BisqueResources200JSONResponse V2BisqueImportResponse
+
+func (response ImportV2BisqueResources200JSONResponse) VisitImportV2BisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ImportV2BisqueResources501JSONResponse V2NotConfiguredResponse
 
 func (response ImportV2BisqueResources501JSONResponse) VisitImportV2BisqueResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUploadAtlasRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Params GetUploadAtlasParams
+}
+
+type GetUploadAtlasResponseObject interface {
+	VisitGetUploadAtlasResponse(w http.ResponseWriter) error
+}
+
+type GetUploadAtlas200JSONResponse map[string]interface{}
+
+func (response GetUploadAtlas200JSONResponse) VisitGetUploadAtlasResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUploadAtlas501JSONResponse V2NotConfiguredResponse
+
+func (response GetUploadAtlas501JSONResponse) VisitGetUploadAtlasResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -9448,6 +10757,7 @@ func (response GetUploadCaption200JSONResponse) VisitGetUploadCaptionResponse(w 
 
 type GetUploadDisplayRequestObject struct {
 	FileId FileID `json:"file_id"`
+	Params GetUploadDisplayParams
 }
 
 type GetUploadDisplayResponseObject interface {
@@ -9471,6 +10781,60 @@ func (response GetUploadDisplay200ApplicationoctetStreamResponse) VisitGetUpload
 		defer closer.Close()
 	}
 	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadHistogramRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Params GetUploadHistogramParams
+}
+
+type GetUploadHistogramResponseObject interface {
+	VisitGetUploadHistogramResponse(w http.ResponseWriter) error
+}
+
+type GetUploadHistogram200JSONResponse struct {
+	Bins      int    `json:"bins"`
+	Channels  []int  `json:"channels"`
+	Dtype     string `json:"dtype"`
+	FileId    string `json:"file_id"`
+	Histogram struct {
+		Bins           []int     `json:"bins"`
+		ChannelIndices []int     `json:"channel_indices"`
+		Edges          []float32 `json:"edges"`
+		Max            float32   `json:"max"`
+		Min            float32   `json:"min"`
+		TimeIndex      int       `json:"time_index"`
+	} `json:"histogram"`
+	SampleCount int    `json:"sample_count"`
+	Source      string `json:"source"`
+}
+
+func (response GetUploadHistogram200JSONResponse) VisitGetUploadHistogramResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUploadHistogram415JSONResponse struct {
+	Error string `json:"error"`
+}
+
+func (response GetUploadHistogram415JSONResponse) VisitGetUploadHistogramResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(415)
+	_, err := buf.WriteTo(w)
 	return err
 }
 
@@ -9502,6 +10866,80 @@ func (response GetUploadPreview200ApplicationoctetStreamResponse) VisitGetUpload
 	return err
 }
 
+type GetUploadScalarVolumeRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type GetUploadScalarVolumeResponseObject interface {
+	VisitGetUploadScalarVolumeResponse(w http.ResponseWriter) error
+}
+
+type GetUploadScalarVolume200ResponseHeaders struct {
+	XVolumeBytesPerVoxel *int
+	XVolumeDepth         *int
+	XVolumeDtype         *string
+	XVolumeHeight        *int
+	XVolumeRawMax        *float32
+	XVolumeRawMin        *float32
+	XVolumeWidth         *int
+}
+
+type GetUploadScalarVolume200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	Headers       GetUploadScalarVolume200ResponseHeaders
+	ContentLength int64
+}
+
+func (response GetUploadScalarVolume200ApplicationoctetStreamResponse) VisitGetUploadScalarVolumeResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	if response.Headers.XVolumeBytesPerVoxel != nil {
+		w.Header().Set("x-volume-bytes-per-voxel", fmt.Sprint(*response.Headers.XVolumeBytesPerVoxel))
+	}
+	if response.Headers.XVolumeDepth != nil {
+		w.Header().Set("x-volume-depth", fmt.Sprint(*response.Headers.XVolumeDepth))
+	}
+	if response.Headers.XVolumeDtype != nil {
+		w.Header().Set("x-volume-dtype", fmt.Sprint(*response.Headers.XVolumeDtype))
+	}
+	if response.Headers.XVolumeHeight != nil {
+		w.Header().Set("x-volume-height", fmt.Sprint(*response.Headers.XVolumeHeight))
+	}
+	if response.Headers.XVolumeRawMax != nil {
+		w.Header().Set("x-volume-raw-max", fmt.Sprint(*response.Headers.XVolumeRawMax))
+	}
+	if response.Headers.XVolumeRawMin != nil {
+		w.Header().Set("x-volume-raw-min", fmt.Sprint(*response.Headers.XVolumeRawMin))
+	}
+	if response.Headers.XVolumeWidth != nil {
+		w.Header().Set("x-volume-width", fmt.Sprint(*response.Headers.XVolumeWidth))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadScalarVolume501JSONResponse V2NotConfiguredResponse
+
+func (response GetUploadScalarVolume501JSONResponse) VisitGetUploadScalarVolumeResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetUploadSliceRequestObject struct {
 	FileId FileID `json:"file_id"`
 	Params GetUploadSliceParams
@@ -9528,6 +10966,53 @@ func (response GetUploadSlice200ApplicationoctetStreamResponse) VisitGetUploadSl
 		defer closer.Close()
 	}
 	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadTileRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Axis   string `json:"axis"`
+	Level  int    `json:"level"`
+	TileX  int    `json:"tile_x"`
+	TileY  int    `json:"tile_y"`
+	Params GetUploadTileParams
+}
+
+type GetUploadTileResponseObject interface {
+	VisitGetUploadTileResponse(w http.ResponseWriter) error
+}
+
+type GetUploadTile200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response GetUploadTile200ApplicationoctetStreamResponse) VisitGetUploadTileResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type GetUploadTile501JSONResponse V2NotConfiguredResponse
+
+func (response GetUploadTile501JSONResponse) VisitGetUploadTileResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
 	return err
 }
 
@@ -9640,6 +11125,9 @@ type StrictServerInterface interface {
 	// (DELETE /v2/admin/users/{user_id})
 	DeleteV2AdminUser(ctx context.Context, request DeleteV2AdminUserRequestObject) (DeleteV2AdminUserResponseObject, error)
 
+	// (PATCH /v2/admin/users/{user_id}/status)
+	UpdateV2AdminUserStatus(ctx context.Context, request UpdateV2AdminUserStatusRequestObject) (UpdateV2AdminUserStatusResponseObject, error)
+
 	// (GET /v2/artifacts/{artifact_id})
 	GetArtifact(ctx context.Context, request GetArtifactRequestObject) (GetArtifactResponseObject, error)
 
@@ -9655,8 +11143,23 @@ type StrictServerInterface interface {
 	// (POST /v2/auth/logout)
 	LogoutV2Bisque(ctx context.Context, request LogoutV2BisqueRequestObject) (LogoutV2BisqueResponseObject, error)
 
+	// (POST /v2/auth/request-account)
+	RequestV2Account(ctx context.Context, request RequestV2AccountRequestObject) (RequestV2AccountResponseObject, error)
+
 	// (GET /v2/auth/session)
 	GetV2AuthSession(ctx context.Context, request GetV2AuthSessionRequestObject) (GetV2AuthSessionResponseObject, error)
+
+	// (POST /v2/bisque/download)
+	DownloadBisqueResources(ctx context.Context, request DownloadBisqueResourcesRequestObject) (DownloadBisqueResourcesResponseObject, error)
+
+	// (POST /v2/bisque/search)
+	SearchBisqueResources(ctx context.Context, request SearchBisqueResourcesRequestObject) (SearchBisqueResourcesResponseObject, error)
+
+	// (POST /v2/bisque/unlink)
+	UnlinkBisqueAccount(ctx context.Context, request UnlinkBisqueAccountRequestObject) (UnlinkBisqueAccountResponseObject, error)
+
+	// (POST /v2/bisque/upload)
+	UploadBisqueOutputs(ctx context.Context, request UploadBisqueOutputsRequestObject) (UploadBisqueOutputsResponseObject, error)
 
 	// (GET /v2/config/public)
 	GetV2PublicConfig(ctx context.Context, request GetV2PublicConfigRequestObject) (GetV2PublicConfigResponseObject, error)
@@ -9832,17 +11335,29 @@ type StrictServerInterface interface {
 	// (POST /v2/uploads/from-bisque)
 	ImportV2BisqueResources(ctx context.Context, request ImportV2BisqueResourcesRequestObject) (ImportV2BisqueResourcesResponseObject, error)
 
+	// (GET /v2/uploads/{file_id}/atlas)
+	GetUploadAtlas(ctx context.Context, request GetUploadAtlasRequestObject) (GetUploadAtlasResponseObject, error)
+
 	// (GET /v2/uploads/{file_id}/caption)
 	GetUploadCaption(ctx context.Context, request GetUploadCaptionRequestObject) (GetUploadCaptionResponseObject, error)
 
 	// (GET /v2/uploads/{file_id}/display)
 	GetUploadDisplay(ctx context.Context, request GetUploadDisplayRequestObject) (GetUploadDisplayResponseObject, error)
 
+	// (GET /v2/uploads/{file_id}/histogram)
+	GetUploadHistogram(ctx context.Context, request GetUploadHistogramRequestObject) (GetUploadHistogramResponseObject, error)
+
 	// (GET /v2/uploads/{file_id}/preview)
 	GetUploadPreview(ctx context.Context, request GetUploadPreviewRequestObject) (GetUploadPreviewResponseObject, error)
 
+	// (GET /v2/uploads/{file_id}/scalar-volume)
+	GetUploadScalarVolume(ctx context.Context, request GetUploadScalarVolumeRequestObject) (GetUploadScalarVolumeResponseObject, error)
+
 	// (GET /v2/uploads/{file_id}/slice)
 	GetUploadSlice(ctx context.Context, request GetUploadSliceRequestObject) (GetUploadSliceResponseObject, error)
+
+	// (GET /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y})
+	GetUploadTile(ctx context.Context, request GetUploadTileRequestObject) (GetUploadTileResponseObject, error)
 
 	// (GET /v2/uploads/{file_id}/viewer)
 	GetUploadViewer(ctx context.Context, request GetUploadViewerRequestObject) (GetUploadViewerResponseObject, error)
@@ -10375,6 +11890,39 @@ func (sh *strictHandler) DeleteV2AdminUser(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// UpdateV2AdminUserStatus operation middleware
+func (sh *strictHandler) UpdateV2AdminUserStatus(w http.ResponseWriter, r *http.Request, userId string) {
+	var request UpdateV2AdminUserStatusRequestObject
+
+	request.UserId = userId
+
+	var body UpdateV2AdminUserStatusJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateV2AdminUserStatus(ctx, request.(UpdateV2AdminUserStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateV2AdminUserStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateV2AdminUserStatusResponseObject); ok {
+		if err := validResponse.VisitUpdateV2AdminUserStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetArtifact operation middleware
 func (sh *strictHandler) GetArtifact(w http.ResponseWriter, r *http.Request, artifactId string) {
 	var request GetArtifactRequestObject
@@ -10519,6 +12067,37 @@ func (sh *strictHandler) LogoutV2Bisque(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// RequestV2Account operation middleware
+func (sh *strictHandler) RequestV2Account(w http.ResponseWriter, r *http.Request) {
+	var request RequestV2AccountRequestObject
+
+	var body RequestV2AccountJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RequestV2Account(ctx, request.(RequestV2AccountRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RequestV2Account")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RequestV2AccountResponseObject); ok {
+		if err := validResponse.VisitRequestV2AccountResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetV2AuthSession operation middleware
 func (sh *strictHandler) GetV2AuthSession(w http.ResponseWriter, r *http.Request) {
 	var request GetV2AuthSessionRequestObject
@@ -10536,6 +12115,126 @@ func (sh *strictHandler) GetV2AuthSession(w http.ResponseWriter, r *http.Request
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetV2AuthSessionResponseObject); ok {
 		if err := validResponse.VisitGetV2AuthSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DownloadBisqueResources operation middleware
+func (sh *strictHandler) DownloadBisqueResources(w http.ResponseWriter, r *http.Request) {
+	var request DownloadBisqueResourcesRequestObject
+
+	var body DownloadBisqueResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DownloadBisqueResources(ctx, request.(DownloadBisqueResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DownloadBisqueResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DownloadBisqueResourcesResponseObject); ok {
+		if err := validResponse.VisitDownloadBisqueResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SearchBisqueResources operation middleware
+func (sh *strictHandler) SearchBisqueResources(w http.ResponseWriter, r *http.Request) {
+	var request SearchBisqueResourcesRequestObject
+
+	var body SearchBisqueResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SearchBisqueResources(ctx, request.(SearchBisqueResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SearchBisqueResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SearchBisqueResourcesResponseObject); ok {
+		if err := validResponse.VisitSearchBisqueResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UnlinkBisqueAccount operation middleware
+func (sh *strictHandler) UnlinkBisqueAccount(w http.ResponseWriter, r *http.Request) {
+	var request UnlinkBisqueAccountRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UnlinkBisqueAccount(ctx, request.(UnlinkBisqueAccountRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UnlinkBisqueAccount")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UnlinkBisqueAccountResponseObject); ok {
+		if err := validResponse.VisitUnlinkBisqueAccountResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UploadBisqueOutputs operation middleware
+func (sh *strictHandler) UploadBisqueOutputs(w http.ResponseWriter, r *http.Request) {
+	var request UploadBisqueOutputsRequestObject
+
+	var body UploadBisqueOutputsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UploadBisqueOutputs(ctx, request.(UploadBisqueOutputsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UploadBisqueOutputs")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UploadBisqueOutputsResponseObject); ok {
+		if err := validResponse.VisitUploadBisqueOutputsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12095,6 +13794,33 @@ func (sh *strictHandler) ImportV2BisqueResources(w http.ResponseWriter, r *http.
 	}
 }
 
+// GetUploadAtlas operation middleware
+func (sh *strictHandler) GetUploadAtlas(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadAtlasParams) {
+	var request GetUploadAtlasRequestObject
+
+	request.FileId = fileId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadAtlas(ctx, request.(GetUploadAtlasRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadAtlas")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadAtlasResponseObject); ok {
+		if err := validResponse.VisitGetUploadAtlasResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetUploadCaption operation middleware
 func (sh *strictHandler) GetUploadCaption(w http.ResponseWriter, r *http.Request, fileId FileID) {
 	var request GetUploadCaptionRequestObject
@@ -12122,10 +13848,11 @@ func (sh *strictHandler) GetUploadCaption(w http.ResponseWriter, r *http.Request
 }
 
 // GetUploadDisplay operation middleware
-func (sh *strictHandler) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID) {
+func (sh *strictHandler) GetUploadDisplay(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadDisplayParams) {
 	var request GetUploadDisplayRequestObject
 
 	request.FileId = fileId
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetUploadDisplay(ctx, request.(GetUploadDisplayRequestObject))
@@ -12140,6 +13867,33 @@ func (sh *strictHandler) GetUploadDisplay(w http.ResponseWriter, r *http.Request
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetUploadDisplayResponseObject); ok {
 		if err := validResponse.VisitGetUploadDisplayResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadHistogram operation middleware
+func (sh *strictHandler) GetUploadHistogram(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadHistogramParams) {
+	var request GetUploadHistogramRequestObject
+
+	request.FileId = fileId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadHistogram(ctx, request.(GetUploadHistogramRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadHistogram")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadHistogramResponseObject); ok {
+		if err := validResponse.VisitGetUploadHistogramResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12173,6 +13927,32 @@ func (sh *strictHandler) GetUploadPreview(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// GetUploadScalarVolume operation middleware
+func (sh *strictHandler) GetUploadScalarVolume(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request GetUploadScalarVolumeRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadScalarVolume(ctx, request.(GetUploadScalarVolumeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadScalarVolume")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadScalarVolumeResponseObject); ok {
+		if err := validResponse.VisitGetUploadScalarVolumeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetUploadSlice operation middleware
 func (sh *strictHandler) GetUploadSlice(w http.ResponseWriter, r *http.Request, fileId FileID, params GetUploadSliceParams) {
 	var request GetUploadSliceRequestObject
@@ -12193,6 +13973,37 @@ func (sh *strictHandler) GetUploadSlice(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetUploadSliceResponseObject); ok {
 		if err := validResponse.VisitGetUploadSliceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUploadTile operation middleware
+func (sh *strictHandler) GetUploadTile(w http.ResponseWriter, r *http.Request, fileId FileID, axis string, level int, tileX int, tileY int, params GetUploadTileParams) {
+	var request GetUploadTileRequestObject
+
+	request.FileId = fileId
+	request.Axis = axis
+	request.Level = level
+	request.TileX = tileX
+	request.TileY = tileY
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUploadTile(ctx, request.(GetUploadTileRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUploadTile")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUploadTileResponseObject); ok {
+		if err := validResponse.VisitGetUploadTileResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12262,115 +14073,147 @@ func (sh *strictHandler) PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Re
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

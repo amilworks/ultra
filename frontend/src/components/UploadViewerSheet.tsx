@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Layers3, RefreshCw } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -23,16 +22,21 @@ import {
   type ViewerSurface,
 } from "./viewer/shared";
 
-type UploadViewerSheetProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+export type UploadViewerWorkspaceProps = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
   onUseHdf5DatasetInChat?: (fileId: string, datasetPaths: string[]) => void;
+  active?: boolean;
+  className?: string;
 };
 
-type BisqueViewerLink = {
+type UploadViewerSheetProps = Omit<UploadViewerWorkspaceProps, "active" | "className"> & {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+};
+
+export type BisqueViewerLink = {
   clientViewUrl: string;
   resourceUri?: string | null;
   imageServiceUrl?: string | null;
@@ -97,14 +101,41 @@ const buildViewerDisplayState = (
   ...override,
 });
 
-export function UploadViewerSheet({
-  open,
-  onOpenChange,
+const formatStageNumber = (value: number): string =>
+  Number.isFinite(value) ? Math.max(0, Math.floor(value)).toLocaleString() : "0";
+
+const formatStageLabel = (value: string | null | undefined): string => {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+};
+
+const buildViewerStageMeta = (viewerInfo: UploadViewerInfo): string => {
+  const size = viewerInfo.is_volume
+    ? `${formatStageNumber(viewerInfo.axis_sizes.X)} x ${formatStageNumber(
+        viewerInfo.axis_sizes.Y
+      )} x ${formatStageNumber(viewerInfo.axis_sizes.Z)} voxels`
+    : `${formatStageNumber(viewerInfo.axis_sizes.X)} x ${formatStageNumber(viewerInfo.axis_sizes.Y)} px`;
+  return [
+    formatStageLabel(viewerInfo.modality),
+    viewerInfo.is_volume ? "Volume" : "Image",
+    size,
+    viewerInfo.dims_order ? `Axes ${viewerInfo.dims_order}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+};
+
+export function UploadViewerWorkspace({
   uploadedFiles,
   bisqueLinksByFileId,
   apiClient,
   onUseHdf5DatasetInChat,
-}: UploadViewerSheetProps) {
+  active = true,
+  className,
+}: UploadViewerWorkspaceProps) {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [viewerInfoById, setViewerInfoById] = useState<Record<string, UploadViewerInfo>>({});
   const [viewerErrorById, setViewerErrorById] = useState<Record<string, string>>({});
@@ -112,8 +143,6 @@ export function UploadViewerSheet({
   const [viewerSurfaceById, setViewerSurfaceById] = useState<Record<string, ViewerSurface>>({});
   const [viewerDisplayById, setViewerDisplayById] = useState<Record<string, ViewerDisplayState>>({});
   const [viewerSurfaceModeById, setViewerSurfaceModeById] = useState<Record<string, ViewerSurfaceMode>>({});
-  const [viewerCaptionById, setViewerCaptionById] = useState<Record<string, string>>({});
-  const [captionLoadingById, setCaptionLoadingById] = useState<Record<string, boolean>>({});
   const [viewerHdf5SelectedDatasetById, setViewerHdf5SelectedDatasetById] = useState<
     Record<string, string | null>
   >({});
@@ -121,6 +150,7 @@ export function UploadViewerSheet({
     Record<string, Hdf5DatasetSummary>
   >({});
   const [loadingFileId, setLoadingFileId] = useState<string | null>(null);
+  const loadingFileIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const validIds = new Set(uploadedFiles.map((file) => file.file_id));
@@ -140,6 +170,9 @@ export function UploadViewerSheet({
       Object.fromEntries(
         Object.entries(record).filter(([cacheKey]) => validIds.has(cacheKey.split(":", 1)[0] ?? ""))
       );
+    if (loadingFileIdRef.current && !validIds.has(loadingFileIdRef.current)) {
+      loadingFileIdRef.current = null;
+    }
 
     setViewerInfoById((previous) => retainKeys(previous));
     setViewerErrorById((previous) => retainKeys(previous));
@@ -147,8 +180,6 @@ export function UploadViewerSheet({
     setViewerSurfaceById((previous) => retainKeys(previous));
     setViewerDisplayById((previous) => retainKeys(previous));
     setViewerSurfaceModeById((previous) => retainKeys(previous));
-    setViewerCaptionById((previous) => retainKeys(previous));
-    setCaptionLoadingById((previous) => retainKeys(previous));
     setViewerHdf5SelectedDatasetById((previous) => retainKeys(previous));
     setViewerHdf5DatasetSummaryByKey((previous) => retainDatasetSummaries(previous));
   }, [selectedFileId, uploadedFiles]);
@@ -177,15 +208,20 @@ export function UploadViewerSheet({
     : null;
   const selectedViewerInfo = selectedFileId ? viewerInfoById[selectedFileId] ?? null : null;
   const selectedViewerError = selectedFileId ? viewerErrorById[selectedFileId] ?? null : null;
-  const selectedCaption = selectedFileId ? viewerCaptionById[selectedFileId] : "";
-  const selectedCaptionLoading = selectedFileId ? Boolean(captionLoadingById[selectedFileId]) : false;
 
   useEffect(() => {
-    if (!open || !selectedFileId || selectedViewerInfo || selectedViewerError || loadingFileId === selectedFileId) {
+    if (
+      !active ||
+      !selectedFileId ||
+      selectedViewerInfo ||
+      selectedViewerError ||
+      loadingFileIdRef.current === selectedFileId
+    ) {
       return;
     }
     let cancelled = false;
     const activeFileId = selectedFileId;
+    loadingFileIdRef.current = activeFileId;
     setLoadingFileId(activeFileId);
 
     void apiClient
@@ -245,58 +281,20 @@ export function UploadViewerSheet({
         if (cancelled) {
           return;
         }
+        if (loadingFileIdRef.current === activeFileId) {
+          loadingFileIdRef.current = null;
+        }
         setLoadingFileId((current) => (current === activeFileId ? null : current));
       });
 
     return () => {
       cancelled = true;
+      if (loadingFileIdRef.current === activeFileId) {
+        loadingFileIdRef.current = null;
+      }
+      setLoadingFileId((current) => (current === activeFileId ? null : current));
     };
-  }, [apiClient, open, selectedFileId, selectedViewerError, selectedViewerInfo]);
-
-  useEffect(() => {
-    if (!open || !selectedFileId || !selectedViewerInfo) {
-      return;
-    }
-    if (selectedViewerInfo.kind === "hdf5") {
-      return;
-    }
-    if (selectedCaption || selectedCaptionLoading) {
-      return;
-    }
-    let cancelled = false;
-    const activeFileId = selectedFileId;
-    setCaptionLoadingById((previous) => ({ ...previous, [activeFileId]: true }));
-    void apiClient
-      .getUploadCaption(activeFileId)
-      .then((response) => {
-        if (cancelled) {
-          return;
-        }
-        const caption = (response.caption || "").trim();
-        if (!caption) {
-          return;
-        }
-        setViewerCaptionById((previous) => ({ ...previous, [activeFileId]: caption }));
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setCaptionLoadingById((previous) => {
-          const next = { ...previous };
-          delete next[activeFileId];
-          return next;
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiClient, open, selectedCaption, selectedFileId, selectedViewerInfo]);
+  }, [active, apiClient, selectedFileId, selectedViewerError, selectedViewerInfo]);
 
   const selectedIndices = selectedFileId ? viewerIndicesById[selectedFileId] ?? null : null;
 
@@ -331,6 +329,7 @@ export function UploadViewerSheet({
   const selectedDatasetSummary = selectedDatasetSummaryKey
     ? viewerHdf5DatasetSummaryByKey[selectedDatasetSummaryKey] ?? null
     : null;
+  const showFileStrip = uploadedFiles.length !== 1;
 
   const retrySelected = (): void => {
     if (!selectedFileId) {
@@ -385,19 +384,17 @@ export function UploadViewerSheet({
   }, []);
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="viewer-sheet w-full p-0 sm:max-w-none">
-        <SheetHeader className="border-b px-4 pb-3">
-          <SheetTitle className="flex items-center gap-2">
-            <Layers3 className="size-4" />
-            Scientific Viewer
-          </SheetTitle>
-          <SheetDescription>
-            Native BisQue-inspired viewer with deep zoom, orthogonal slices, and atlas-backed volume rendering. Use BisQue when you need the legacy fallback surface.
-          </SheetDescription>
-        </SheetHeader>
-
-        <div className="viewer-body">
+    <section
+      className={cn(
+        "viewer-workspace",
+        !showFileStrip && "viewer-workspace-single-file",
+        selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
+        className
+      )}
+      aria-label="Scientific viewer workspace"
+    >
+      <div className="viewer-body">
+        {showFileStrip ? (
           <aside className="viewer-file-strip">
             {uploadedFiles.length === 0 ? (
               <p className="viewer-empty">No uploaded files yet.</p>
@@ -419,19 +416,106 @@ export function UploadViewerSheet({
               })
             )}
           </aside>
+        ) : null}
 
-          <section className="viewer-stage">
-            {!selectedFileId ? (
-              <div className="viewer-empty">Select a file to start.</div>
-            ) : showBisqueFrame ? (
-              <>
-                <div className="viewer-stage-header">
+        <section className="viewer-stage">
+          {!selectedFileId ? (
+            <div className="viewer-empty">Select a file to start.</div>
+          ) : showBisqueFrame ? (
+            <>
+              <div className="viewer-stage-header">
+                <div className="viewer-stage-heading">
                   <div className="viewer-stage-title">{selectedFile?.original_name ?? "BisQue Viewer"}</div>
-                  <div className="viewer-badges">
-                    <Badge variant="outline">BisQue fallback</Badge>
+                  <div className="viewer-stage-meta">BisQue fallback surface</div>
+                </div>
+              </div>
+              <div className="viewer-mode-toggle">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    selectedFileId &&
+                    setViewerSurfaceModeById((previous) => ({
+                      ...previous,
+                      [selectedFileId]: "native",
+                    }))
+                  }
+                >
+                  Native viewer
+                </Button>
+                <Button type="button" size="sm" variant="secondary">
+                  BisQue iframe
+                </Button>
+              </div>
+              <div className="viewer-canvas-shell">
+                <iframe
+                  src={selectedBisqueLink?.clientViewUrl}
+                  title={`BisQue resource ${selectedFile?.original_name ?? selectedFileId}`}
+                  className="viewer-bisque-iframe"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+              <div className="viewer-bisque-footer">
+                <a
+                  href={selectedBisqueLink?.clientViewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="viewer-bisque-open-link"
+                >
+                  <ExternalLink className="size-3.5" />
+                  Open in BisQue tab
+                </a>
+                {selectedBisqueLink?.clientViewUrl ? (
+                  <p className="viewer-meta-line">view={selectedBisqueLink.clientViewUrl}</p>
+                ) : null}
+              </div>
+            </>
+          ) : loadingFileId === selectedFileId && !selectedViewerInfo ? (
+            <div className="viewer-empty">Loading viewer metadata…</div>
+          ) : selectedViewerError ? (
+            <div className="viewer-error">
+              <p>{selectedViewerError}</p>
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={retrySelected}>
+                  <RefreshCw className="mr-2 size-3.5" />
+                  Retry
+                </Button>
+                {selectedBisqueLink?.clientViewUrl ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() =>
+                      selectedFileId &&
+                      setViewerSurfaceModeById((previous) => ({
+                        ...previous,
+                        [selectedFileId]: "bisque",
+                      }))
+                    }
+                  >
+                    Switch to BisQue iframe
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : selectedViewerInfo ? (
+            <>
+              {!isHdf5Viewer ? (
+                <div className="viewer-stage-header">
+                  <div className="viewer-stage-heading">
+                    <div className="viewer-stage-title">{selectedViewerInfo.original_name}</div>
+                    <div className="viewer-stage-meta">{buildViewerStageMeta(selectedViewerInfo)}</div>
                   </div>
                 </div>
+              ) : null}
+
+              {selectedBisqueLink?.clientViewUrl ? (
                 <div className="viewer-mode-toggle">
+                  <Button type="button" size="sm" variant="secondary">
+                    Native viewer
+                  </Button>
                   <Button
                     type="button"
                     size="sm"
@@ -440,161 +524,97 @@ export function UploadViewerSheet({
                       selectedFileId &&
                       setViewerSurfaceModeById((previous) => ({
                         ...previous,
-                        [selectedFileId]: "native",
+                        [selectedFileId]: "bisque",
                       }))
                     }
                   >
-                    Native viewer
-                  </Button>
-                  <Button type="button" size="sm" variant="secondary">
                     BisQue iframe
                   </Button>
                 </div>
-                <div className="viewer-canvas-shell">
-                  <iframe
-                    src={selectedBisqueLink?.clientViewUrl}
-                    title={`BisQue resource ${selectedFile?.original_name ?? selectedFileId}`}
-                    className="viewer-bisque-iframe"
-                    loading="lazy"
-                    referrerPolicy="no-referrer"
-                  />
-                </div>
-                <div className="viewer-bisque-footer">
-                  <a
-                    href={selectedBisqueLink?.clientViewUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="viewer-bisque-open-link"
-                  >
-                    <ExternalLink className="size-3.5" />
-                    Open in BisQue tab
-                  </a>
-                  {selectedBisqueLink?.clientViewUrl ? (
-                    <p className="viewer-meta-line">view={selectedBisqueLink.clientViewUrl}</p>
-                  ) : null}
-                </div>
-              </>
-            ) : loadingFileId === selectedFileId && !selectedViewerInfo ? (
-              <div className="viewer-empty">Loading viewer metadata…</div>
-            ) : selectedViewerError ? (
-              <div className="viewer-error">
-                <p>{selectedViewerError}</p>
-                <div className="flex items-center gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={retrySelected}>
-                    <RefreshCw className="mr-2 size-3.5" />
-                    Retry
-                  </Button>
-                  {selectedBisqueLink?.clientViewUrl ? (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      onClick={() =>
-                        selectedFileId &&
-                        setViewerSurfaceModeById((previous) => ({
-                          ...previous,
-                          [selectedFileId]: "bisque",
-                        }))
-                      }
-                    >
-                      Switch to BisQue iframe
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            ) : selectedViewerInfo ? (
-              <>
-                {!isHdf5Viewer ? (
-                  <div className="viewer-stage-header">
-                    <div className="viewer-stage-title">{selectedViewerInfo.original_name}</div>
-                    <div className="viewer-badges">
-                      <Badge variant="outline">{selectedViewerInfo.viewer.status}</Badge>
-                      {selectedViewerInfo.modality ? (
-                        <Badge variant="outline" className="capitalize">
-                          {selectedViewerInfo.modality}
-                        </Badge>
-                      ) : null}
-                      <Badge variant="outline">
-                        {selectedViewerInfo.backend_mode ?? selectedViewerInfo.viewer.backend_mode ?? "native"}
-                      </Badge>
-                      <Badge variant="secondary">{selectedViewerInfo.dims_order}</Badge>
-                      {selectedViewerInfo.is_volume ? (
-                        <Badge variant="outline">{`${zAxisSize} z-slices`}</Badge>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
+              ) : null}
 
-                {selectedBisqueLink?.clientViewUrl ? (
-                  <div className="viewer-mode-toggle">
-                    <Button type="button" size="sm" variant="secondary">
-                      Native viewer
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() =>
-                        selectedFileId &&
-                        setViewerSurfaceModeById((previous) => ({
-                          ...previous,
-                          [selectedFileId]: "bisque",
-                        }))
-                      }
-                    >
-                      BisQue iframe
-                    </Button>
-                  </div>
-                ) : null}
+              {isHdf5Viewer ? (
+                <Hdf5ViewerShell
+                  viewerInfo={selectedViewerInfo}
+                  apiClient={apiClient}
+                  selectedDatasetPath={selectedDatasetPath}
+                  onSelectedDatasetPathChange={(path) =>
+                    selectedFileId &&
+                    setViewerHdf5SelectedDatasetById((previous) => ({
+                      ...previous,
+                      [selectedFileId]: path,
+                    }))
+                  }
+                  selectedDatasetSummary={selectedDatasetSummary}
+                  cacheDatasetSummary={cacheDatasetSummary}
+                  onUseDatasetInChat={onUseHdf5DatasetInChat}
+                />
+              ) : (
+                <ImageViewerShell
+                  viewerInfo={selectedViewerInfo}
+                  apiClient={apiClient}
+                  selectedSurface={selectedSurface}
+                  onSurfaceChange={(surface) =>
+                    selectedFileId &&
+                    setViewerSurfaceById((previous) => ({
+                      ...previous,
+                      [selectedFileId]: normalizeSurface(selectedViewerInfo, surface),
+                    }))
+                  }
+                  selectedDisplayState={selectedDisplayState}
+                  updateSelectedDisplay={updateSelectedDisplay}
+                  clampedIndices={clampedIndices}
+                  debouncedX={debouncedX}
+                  debouncedY={debouncedY}
+                  debouncedZ={debouncedZ}
+                  debouncedT={debouncedT}
+                  xAxisSize={xAxisSize}
+                  yAxisSize={yAxisSize}
+                  zAxisSize={zAxisSize}
+                  tAxisSize={tAxisSize}
+                  setSelectedIndex={setSelectedIndex}
+                  selectedCaption=""
+                  captionLoading={false}
+                />
+              )}
+            </>
+          ) : null}
+        </section>
+      </div>
+    </section>
+  );
+}
 
-                {isHdf5Viewer ? (
-                  <Hdf5ViewerShell
-                    viewerInfo={selectedViewerInfo}
-                    apiClient={apiClient}
-                    selectedDatasetPath={selectedDatasetPath}
-                    onSelectedDatasetPathChange={(path) =>
-                      selectedFileId &&
-                      setViewerHdf5SelectedDatasetById((previous) => ({
-                        ...previous,
-                        [selectedFileId]: path,
-                      }))
-                    }
-                    selectedDatasetSummary={selectedDatasetSummary}
-                    cacheDatasetSummary={cacheDatasetSummary}
-                    onUseDatasetInChat={onUseHdf5DatasetInChat}
-                  />
-                ) : (
-                  <ImageViewerShell
-                    viewerInfo={selectedViewerInfo}
-                    apiClient={apiClient}
-                    selectedSurface={selectedSurface}
-                    onSurfaceChange={(surface) =>
-                      selectedFileId &&
-                      setViewerSurfaceById((previous) => ({
-                        ...previous,
-                        [selectedFileId]: normalizeSurface(selectedViewerInfo, surface),
-                      }))
-                    }
-                    selectedDisplayState={selectedDisplayState}
-                    updateSelectedDisplay={updateSelectedDisplay}
-                    clampedIndices={clampedIndices}
-                    debouncedX={debouncedX}
-                    debouncedY={debouncedY}
-                    debouncedZ={debouncedZ}
-                    debouncedT={debouncedT}
-                    xAxisSize={xAxisSize}
-                    yAxisSize={yAxisSize}
-                    zAxisSize={zAxisSize}
-                    tAxisSize={tAxisSize}
-                    setSelectedIndex={setSelectedIndex}
-                    selectedCaption={selectedCaption}
-                    captionLoading={selectedCaptionLoading}
-                  />
-                )}
-              </>
-            ) : null}
-          </section>
-        </div>
+export function UploadViewerSheet({
+  open,
+  onOpenChange,
+  uploadedFiles,
+  bisqueLinksByFileId,
+  apiClient,
+  onUseHdf5DatasetInChat,
+}: UploadViewerSheetProps) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="viewer-sheet w-full p-0 sm:max-w-none">
+        <SheetHeader className="viewer-sheet-header border-b px-4 pb-3">
+          <SheetTitle className="viewer-sheet-title flex items-center gap-2">
+            <Layers3 className="size-4" />
+            Scientific Viewer
+          </SheetTitle>
+          <SheetDescription className="viewer-sheet-description">
+            Native scientific imaging workspace for 2D planes, orthogonal slices, metadata, and Three.js volume
+            rendering.
+          </SheetDescription>
+        </SheetHeader>
+
+        <UploadViewerWorkspace
+          active={open}
+          uploadedFiles={uploadedFiles}
+          bisqueLinksByFileId={bisqueLinksByFileId}
+          apiClient={apiClient}
+          onUseHdf5DatasetInChat={onUseHdf5DatasetInChat}
+          className="viewer-workspace-sheet"
+        />
       </SheetContent>
     </Sheet>
   );

@@ -57,7 +57,7 @@ class RuntimeSettings:
     rarespot_worker_kind: str = "rarespot"
     rarespot_database_url: str = ""
     rarespot_artifact_root: str = "data/artifacts"
-    rarespot_weights_path: str = "RareSpotWeights.pt"
+    rarespot_weights_path: str = "data/models/yolo/RareSpotWeights.pt"
     rarespot_yolov5_path: str = "third_party/yolov5"
     rarespot_allowed_input_roots: tuple[str, ...] = ()
     rarespot_upload_roots: tuple[str, ...] = ("data/uploads",)
@@ -222,7 +222,10 @@ class RuntimeSettings:
                 "ULTRA_RARESPOT_ARTIFACT_ROOT",
                 os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),
             ),
-            rarespot_weights_path=os.getenv("YOLOV5_RARESPOT_WEIGHTS", "RareSpotWeights.pt"),
+            rarespot_weights_path=os.getenv(
+                "YOLOV5_RARESPOT_WEIGHTS",
+                "data/models/yolo/RareSpotWeights.pt",
+            ),
             rarespot_yolov5_path=os.getenv("YOLOV5_RUNTIME_PATH", "third_party/yolov5"),
             rarespot_allowed_input_roots=_env_tuple("ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS"),
             rarespot_upload_roots=_rarespot_upload_roots(),

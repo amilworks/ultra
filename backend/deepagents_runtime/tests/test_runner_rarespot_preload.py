@@ -175,6 +175,94 @@ def test_run_job_preloads_rarespot_for_uploaded_detection_requests(monkeypatch, 
     assert parsed["configuration"]["tile_size"] == 512
 
 
+def test_run_job_failed_rarespot_preload_fails_parent_without_synthesizing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def fake_create_rarespot_run(_settings, *, thread_id, body):
+        return {"run_id": "run-nested-failed", "status": "queued"}
+
+    def fake_wait_for_rarespot_run(_settings, *, run_id, timeout_seconds):
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "error": "RareSpot weights not found",
+            "configuration": {},
+            "counts_by_class": {},
+            "confidence_summary": {},
+            "artifact_ids": [],
+            "key_artifacts": {},
+            "final_answer_hint": (
+                "RareSpot inference failed. Do not claim production detections."
+            ),
+        }
+
+    def fail_agent_factory(*_args, **_kwargs):
+        raise AssertionError("failed RareSpot preload must not invoke model synthesis")
+
+    monkeypatch.setattr(
+        "ultra_deepagents.runner.create_rarespot_run",
+        fake_create_rarespot_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "ultra_deepagents.runner.wait_for_rarespot_run",
+        fake_wait_for_rarespot_run,
+        raising=False,
+    )
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "workspaces"),
+        artifact_root=str(tmp_path / "artifacts"),
+        completion_max_continuations=0,
+    )
+    job = RunJobEnvelope(
+        run_id="run-outer",
+        thread_id="thread-1",
+        user_id="researcher-1",
+        goal="Run RareSpot prairie dog detection on the uploaded image.",
+        messages=[{"role": "user", "content": "Run prairie dog detection on this image."}],
+        file_ids=["file-1"],
+    )
+    published: list[dict[str, Any]] = []
+
+    async def publish(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    try:
+        asyncio.run(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=fail_agent_factory,
+            )
+        )
+    except RuntimeError as exc:
+        assert "RareSpot inference failed" in str(exc)
+    else:
+        raise AssertionError("failed RareSpot preload should fail the parent run")
+
+    assert any(
+        event["event_kind"] == "tool_call.started"
+        and event["payload"].get("source") == "deterministic_preload"
+        for event in published
+    )
+    assert any(
+        event["event_kind"] == "tool_call.failed"
+        and event["payload"].get("source") == "deterministic_preload"
+        and "RareSpot weights not found" in event["payload"].get("error", "")
+        for event in published
+    )
+    assert not any(
+        event["event_kind"] == "tool_call.completed"
+        and event["payload"].get("source") == "deterministic_preload"
+        for event in published
+    )
+
+
 def test_run_job_does_not_preload_rarespot_for_negated_report_only_request(
     monkeypatch,
     tmp_path: Path,

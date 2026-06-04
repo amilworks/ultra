@@ -5,7 +5,62 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 
+import { scalarVolumePayloadToTextureBytes } from "./scalarVolume";
 import { getPlaneDescriptor } from "./shared";
+import { computePhysicalVolumeGeometry } from "./volumeGeometry";
+import {
+  resolveScalarVolumeColorMap,
+} from "./volumeColorMap";
+import { resolveScalarVolumeLighting } from "./volumeLighting";
+import { resolveVolumeAxisCue } from "./volumeAxisCue";
+import { resolveVolumeClipCue } from "./volumeClipCue";
+import { resolveVolumeScaleBar } from "./volumeScaleBar";
+import {
+  resolveVolumeSliceCursorCue,
+  type VolumeSliceCursorCue,
+} from "./volumeSliceCursor";
+import { resolveScalarVolumeTransferFunction } from "./volumeTransferFunction";
+import {
+  resolveVolumeCameraMode,
+  type VolumeCameraMode,
+} from "./volumeCameraMode";
+import {
+  resolveVolumeViewPreset,
+  type VolumeViewPreset,
+} from "./volumeViewPreset";
+import { resolveVolumeOrientationCue } from "./volumeOrientation";
+
+export { scalarVolumePayloadToTextureBytes, scalarVolumePayloadValueAt } from "./scalarVolume";
+export { computePhysicalVolumeGeometry, type PhysicalVolumeGeometry } from "./volumeGeometry";
+export { resolveVolumeScaleBar, type VolumeScaleBar } from "./volumeScaleBar";
+export {
+  resolveVolumeSliceCursorCue,
+  type VolumeSliceCursorAxis,
+  type VolumeSliceCursorCue,
+} from "./volumeSliceCursor";
+export {
+  SCALAR_VOLUME_COLOR_MAPS,
+  resolveScalarVolumeColorMap,
+  type ScalarVolumeColorMap,
+  type ScalarVolumeColorMapId,
+} from "./volumeColorMap";
+export { resolveVolumeAxisCue, type VolumeAxisCue, type VolumeAxisCueAxis } from "./volumeAxisCue";
+export { resolveVolumeClipCue, type VolumeClipCue, type VolumeClipCueAxis } from "./volumeClipCue";
+export { resolveScalarVolumeLighting, type ScalarVolumeLighting } from "./volumeLighting";
+export { resolveScalarVolumeTransferFunction, type ScalarVolumeTransferFunction } from "./volumeTransferFunction";
+export { resolveVolumeOrientationCue, type VolumeOrientationCue } from "./volumeOrientation";
+export {
+  VOLUME_VIEW_PRESETS,
+  resolveVolumeViewPreset,
+  type VolumeViewPreset,
+  type VolumeViewPresetId,
+} from "./volumeViewPreset";
+export {
+  VOLUME_CAMERA_MODES,
+  resolveVolumeCameraMode,
+  type VolumeCameraMode,
+  type VolumeCameraModeId,
+} from "./volumeCameraMode";
 
 type ScalarVolumeSource = {
   kind: "scalar";
@@ -34,6 +89,8 @@ type SliceStackVolumeCanvasProps = {
   apiClient?: ApiClient;
   fileId?: string;
   viewerInfo?: UploadViewerInfo;
+  xIndex?: number;
+  yIndex?: number;
   zIndex?: number;
   tIndex?: number;
   className?: string;
@@ -41,8 +98,82 @@ type SliceStackVolumeCanvasProps = {
   volumeSource?: ScalarVolumeSource | AtlasVolumeSource;
 };
 
-const MAX_STEPS = 512;
+export const MAX_STEPS = 512;
+const MIN_INTERACTIVE_STEPS = 32;
+const SAMPLE_RAMP_FACTOR = 1.5;
 const DEFAULT_VOLUME_CLEAR = 0x07090d;
+const ORTHOGRAPHIC_FRUSTUM_SCALE = 2.8;
+const MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT = 1.8;
+
+type VolumeCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
+
+export type VolumeSampleBudget = {
+  interactiveSteps: number;
+  settledSteps: number;
+  rampFactor: number;
+};
+
+export function computeVolumeSampleBudget({
+  sourceKind,
+  volumeDepth,
+  projectionMode,
+}: {
+  sourceKind: ScalarVolumeSource["kind"] | AtlasVolumeSource["kind"];
+  volumeDepth: number;
+  projectionMode: "mip" | "composite";
+}): VolumeSampleBudget {
+  const safeDepth = Math.max(1, Math.floor(Number(volumeDepth) || 1));
+  const floor = sourceKind === "scalar" ? 128 : 96;
+  const projectionMultiplier = projectionMode === "mip" ? 2 : 2;
+  const settledSteps = Math.max(floor, Math.min(MAX_STEPS, safeDepth * projectionMultiplier));
+  const interactiveSteps = Math.max(
+    MIN_INTERACTIVE_STEPS,
+    Math.min(settledSteps, Math.round(settledSteps / 8))
+  );
+  return {
+    interactiveSteps,
+    settledSteps,
+    rampFactor: SAMPLE_RAMP_FACTOR,
+  };
+}
+
+export function advanceProgressiveVolumeSteps(
+  currentSteps: number,
+  budget: VolumeSampleBudget
+): number {
+  const current = Math.max(1, Math.floor(Number(currentSteps) || 1));
+  if (current >= budget.settledSteps) {
+    return budget.settledSteps;
+  }
+  return Math.min(
+    budget.settledSteps,
+    Math.max(current + 1, Math.round(current * budget.rampFactor))
+  );
+}
+
+export function resolveVolumeProjectionMode({
+  renderPolicy,
+  modality,
+  fusionMethod,
+}: {
+  renderPolicy?: string;
+  modality?: string;
+  fusionMethod?: string;
+}): "mip" | "composite" {
+  const normalizedPolicy = String(renderPolicy ?? "").trim().toLowerCase();
+  const normalizedModality = String(modality ?? "").trim().toLowerCase();
+  const normalizedFusion = String(fusionMethod ?? "").trim().toLowerCase();
+  if (normalizedPolicy !== "scalar") {
+    return "composite";
+  }
+  if (normalizedFusion === "m") {
+    return "mip";
+  }
+  if (normalizedFusion === "a") {
+    return "composite";
+  }
+  return normalizedModality === "microscopy" ? "mip" : "composite";
+}
 
 const VERTEX_SHADER = `
   varying vec3 vPosition;
@@ -64,6 +195,8 @@ const ATLAS_FRAGMENT_SHADER = `
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
   uniform vec3 uCameraPositionLocal;
+  uniform vec3 uCameraDirectionLocal;
+  uniform bool uOrthographicCamera;
 
   varying vec3 vPosition;
 
@@ -86,8 +219,12 @@ const ATLAS_FRAGMENT_SHADER = `
   }
 
   void main() {
-    vec3 rayOrigin = uCameraPositionLocal;
-    vec3 rayDir = normalize(vPosition - rayOrigin);
+    vec3 rayDir = uOrthographicCamera
+      ? normalize(uCameraDirectionLocal)
+      : normalize(vPosition - uCameraPositionLocal);
+    vec3 rayOrigin = uOrthographicCamera
+      ? vPosition - rayDir * 2.0
+      : uCameraPositionLocal;
     vec3 boxMin = uClipMin - vec3(0.5);
     vec3 boxMax = uClipMax - vec3(0.5);
     float tNear = 0.0;
@@ -140,10 +277,18 @@ const SCALAR_FRAGMENT_SHADER = `
   uniform float uWindowLow;
   uniform float uWindowHigh;
   uniform bool uInvert;
+  uniform int uColorMap;
+  uniform float uSignalFloor;
+  uniform float uDensityScale;
+  uniform bool uLightingEnabled;
+  uniform float uLightingStrength;
+  uniform vec3 uVoxelStep;
   uniform int uProjectionMode;
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
   uniform vec3 uCameraPositionLocal;
+  uniform vec3 uCameraDirectionLocal;
+  uniform bool uOrthographicCamera;
 
   varying vec3 vPosition;
 
@@ -175,9 +320,92 @@ const SCALAR_FRAGMENT_SHADER = `
     return uInvert ? (1.0 - normalized) : normalized;
   }
 
+  vec3 ramp5(float value, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4) {
+    float v = clamp(value, 0.0, 1.0);
+    if (v < 0.25) {
+      return mix(c0, c1, v / 0.25);
+    }
+    if (v < 0.5) {
+      return mix(c1, c2, (v - 0.25) / 0.25);
+    }
+    if (v < 0.75) {
+      return mix(c2, c3, (v - 0.5) / 0.25);
+    }
+    return mix(c3, c4, (v - 0.75) / 0.25);
+  }
+
+  vec3 scalarColor(float value) {
+    if (uColorMap == 1) {
+      return ramp5(
+        value,
+        vec3(0.267, 0.004, 0.329),
+        vec3(0.204, 0.286, 0.561),
+        vec3(0.129, 0.568, 0.551),
+        vec3(0.369, 0.789, 0.383),
+        vec3(0.993, 0.906, 0.145)
+      );
+    }
+    if (uColorMap == 2) {
+      return ramp5(
+        value,
+        vec3(0.000, 0.000, 0.016),
+        vec3(0.322, 0.071, 0.486),
+        vec3(0.714, 0.216, 0.475),
+        vec3(0.984, 0.537, 0.384),
+        vec3(0.988, 0.992, 0.749)
+      );
+    }
+    if (uColorMap == 3) {
+      return ramp5(
+        value,
+        vec3(0.000, 0.000, 0.016),
+        vec3(0.341, 0.063, 0.431),
+        vec3(0.737, 0.216, 0.329),
+        vec3(0.976, 0.557, 0.035),
+        vec3(0.988, 1.000, 0.643)
+      );
+    }
+    return vec3(value);
+  }
+
+  float sampleOpacity(float value) {
+    return smoothstep(uSignalFloor, 1.0, clamp(value, 0.0, 1.0));
+  }
+
+  vec3 applyDepthLighting(vec3 location, vec3 color, float value) {
+    if (!uLightingEnabled || uLightingStrength <= 0.0 || value <= uSignalFloor) {
+      return color;
+    }
+
+    float gx = sampleWindowed(location + vec3(uVoxelStep.x, 0.0, 0.0)) -
+      sampleWindowed(location - vec3(uVoxelStep.x, 0.0, 0.0));
+    float gy = sampleWindowed(location + vec3(0.0, uVoxelStep.y, 0.0)) -
+      sampleWindowed(location - vec3(0.0, uVoxelStep.y, 0.0));
+    float gz = sampleWindowed(location + vec3(0.0, 0.0, uVoxelStep.z)) -
+      sampleWindowed(location - vec3(0.0, 0.0, uVoxelStep.z));
+    vec3 gradient = vec3(gx, gy, gz);
+    if (length(gradient) < 0.0001) {
+      return color;
+    }
+
+    vec3 normal = normalize(gradient);
+    vec3 lightDir = normalize(vec3(-0.45, 0.55, 0.72));
+    vec3 viewDir = uOrthographicCamera
+      ? -normalize(uCameraDirectionLocal)
+      : normalize(uCameraPositionLocal - (location - vec3(0.5)));
+    float diffuse = max(dot(normal, lightDir), dot(-normal, lightDir));
+    float rim = pow(1.0 - clamp(abs(dot(normal, viewDir)), 0.0, 1.0), 2.0);
+    float shade = clamp(0.42 + 0.72 * diffuse + 0.18 * rim, 0.35, 1.25);
+    return mix(color, color * shade, uLightingStrength);
+  }
+
   void main() {
-    vec3 rayOrigin = uCameraPositionLocal;
-    vec3 rayDir = normalize(vPosition - rayOrigin);
+    vec3 rayDir = uOrthographicCamera
+      ? normalize(uCameraDirectionLocal)
+      : normalize(vPosition - uCameraPositionLocal);
+    vec3 rayOrigin = uOrthographicCamera
+      ? vPosition - rayDir * 2.0
+      : uCameraPositionLocal;
     vec3 boxMin = uClipMin - vec3(0.5);
     vec3 boxMax = uClipMax - vec3(0.5);
     float tNear = 0.0;
@@ -199,18 +427,23 @@ const SCALAR_FRAGMENT_SHADER = `
 
     vec4 accum = vec4(0.0);
     float maxValue = 0.0;
+    vec3 maxLocation = location;
     for (int iter = 0; iter < ${MAX_STEPS}; iter++) {
       if (iter >= steps) {
         break;
       }
       float sampleValue = sampleWindowed(location);
+      float opacityValue = sampleOpacity(sampleValue);
       if (uProjectionMode == 1) {
-        maxValue = max(maxValue, sampleValue);
+        if (opacityValue > 0.0 && sampleValue > maxValue) {
+          maxValue = sampleValue;
+          maxLocation = location;
+        }
         location += delta;
         continue;
       }
-      float alpha = sampleValue * uDensity;
-      vec3 sampleColor = vec3(sampleValue);
+      float alpha = opacityValue * uDensity * uDensityScale;
+      vec3 sampleColor = applyDepthLighting(location, scalarColor(sampleValue), sampleValue);
       accum.rgb += (1.0 - accum.a) * sampleColor * alpha;
       accum.a += (1.0 - accum.a) * alpha;
       if (accum.a >= 0.985) {
@@ -220,10 +453,12 @@ const SCALAR_FRAGMENT_SHADER = `
     }
 
     if (uProjectionMode == 1) {
-      if (maxValue < 0.02) {
+      float maxOpacity = sampleOpacity(maxValue);
+      if (maxOpacity < 0.02) {
         discard;
       }
-      gl_FragColor = vec4(vec3(maxValue), clamp(maxValue * 1.2, 0.0, 1.0));
+      vec3 maxColor = applyDepthLighting(maxLocation, scalarColor(maxValue), maxValue);
+      gl_FragColor = vec4(maxColor, clamp(maxOpacity * uDensityScale * 1.2, 0.0, 1.0));
       return;
     }
 
@@ -296,16 +531,7 @@ const scalarToVolumeTexture = async (
   const width = Math.max(1, payload.width);
   const height = Math.max(1, payload.height);
   const depth = Math.max(1, payload.depth);
-  let textureData: Uint8Array;
-  if (payload.bytesPerVoxel >= 2) {
-    const source = new Uint16Array(payload.data);
-    textureData = new Uint8Array(source.length);
-    for (let index = 0; index < source.length; index += 1) {
-      textureData[index] = source[index] >>> 8;
-    }
-  } else {
-    textureData = new Uint8Array(payload.data);
-  }
+  const textureData = scalarVolumePayloadToTextureBytes(payload);
   const texture = new THREE.Data3DTexture(textureData, width, height, depth);
   texture.format = THREE.RedFormat;
   texture.type = THREE.UnsignedByteType;
@@ -349,10 +575,126 @@ const normalizeWindowRange = (
   return { low: lowNorm, high: highNorm };
 };
 
+const computeOrthographicFrustumHeight = (volumeRadius: number): number =>
+  Math.max(MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT, volumeRadius * ORTHOGRAPHIC_FRUSTUM_SCALE);
+
+const createVolumeCamera = ({
+  mode,
+  volumeRadius,
+}: {
+  mode: VolumeCameraMode;
+  volumeRadius: number;
+}): VolumeCamera => {
+  if (!mode.isOrthographic) {
+    return new THREE.PerspectiveCamera(42, 1, 0.01, 100);
+  }
+  const frustumHeight = computeOrthographicFrustumHeight(volumeRadius);
+  return new THREE.OrthographicCamera(
+    -frustumHeight / 2,
+    frustumHeight / 2,
+    frustumHeight / 2,
+    -frustumHeight / 2,
+    0.01,
+    100
+  );
+};
+
+const configureVolumeCameraProjection = ({
+  camera,
+  width,
+  height,
+  volumeRadius,
+}: {
+  camera: VolumeCamera;
+  width: number;
+  height: number;
+  volumeRadius: number;
+}) => {
+  const aspect = width / height;
+  if (camera instanceof THREE.OrthographicCamera) {
+    const frustumHeight = computeOrthographicFrustumHeight(volumeRadius);
+    const frustumWidth = frustumHeight * aspect;
+    camera.left = -frustumWidth / 2;
+    camera.right = frustumWidth / 2;
+    camera.top = frustumHeight / 2;
+    camera.bottom = -frustumHeight / 2;
+  } else {
+    camera.aspect = aspect;
+  }
+  camera.updateProjectionMatrix();
+};
+
+const applyVolumeCameraPreset = ({
+  camera,
+  controls,
+  preset,
+  volumeRadius,
+}: {
+  camera: VolumeCamera;
+  controls: TrackballControls;
+  preset: VolumeViewPreset;
+  volumeRadius: number;
+}) => {
+  const direction = new THREE.Vector3(preset.direction.x, preset.direction.y, preset.direction.z).normalize();
+  const distance = Math.max(volumeRadius * 3.4, 2.4);
+  camera.position.copy(direction.multiplyScalar(distance));
+  camera.up.set(preset.up.x, preset.up.y, preset.up.z);
+  controls.target.set(0, 0, 0);
+  camera.lookAt(0, 0, 0);
+  controls.update();
+};
+
+type SliceCursorPlanes = {
+  x: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  y: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  z: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+};
+
+const applyVolumeSliceCursorPlanes = ({
+  planes,
+  cue,
+  normalizedScale,
+}: {
+  planes: SliceCursorPlanes;
+  cue: VolumeSliceCursorCue;
+  normalizedScale: { x: number; y: number; z: number };
+}) => {
+  planes.x.visible = cue.visible && cue.x.count > 1;
+  planes.y.visible = cue.visible && cue.y.count > 1;
+  planes.z.visible = cue.visible && cue.z.count > 1;
+
+  planes.x.scale.set(normalizedScale.z, normalizedScale.y, 1);
+  planes.x.position.set(normalizedScale.x * cue.x.local, 0, 0);
+
+  planes.y.scale.set(normalizedScale.x, normalizedScale.z, 1);
+  planes.y.position.set(0, normalizedScale.y * cue.y.local, 0);
+
+  planes.z.scale.set(normalizedScale.x, normalizedScale.y, 1);
+  planes.z.position.set(0, 0, normalizedScale.z * cue.z.local);
+};
+
+const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
+  const coordinates = viewerInfo?.phys?.coordinates;
+  const units =
+    coordinates && typeof coordinates === "object"
+      ? (coordinates as Record<string, unknown>).space_units
+      : null;
+  const spatial =
+    units && typeof units === "object"
+      ? (units as Record<string, unknown>).spatial
+      : null;
+  if (typeof spatial === "string" && spatial.trim()) {
+    return spatial.trim();
+  }
+  return viewerInfo?.metadata.physical_spacing ? "vox" : "units";
+};
+
 export function SliceStackVolumeCanvas({
   apiClient,
   fileId,
   viewerInfo,
+  xIndex,
+  yIndex,
   zIndex,
   tIndex,
   className,
@@ -365,11 +707,21 @@ export function SliceStackVolumeCanvas({
     uWindowLow: { value: number };
     uWindowHigh: { value: number };
     uInvert: { value: boolean };
+    uColorMap: { value: number };
+    uSignalFloor: { value: number };
+    uDensityScale: { value: number };
+    uLightingEnabled: { value: boolean };
+    uLightingStrength: { value: number };
   } | null>(null);
   const clipUniformsRef = useRef<{
     uClipMin: { value: THREE.Vector3 };
     uClipMax: { value: THREE.Vector3 };
   } | null>(null);
+  const cameraRigRef = useRef<{
+    camera: VolumeCamera;
+    controls: TrackballControls;
+  } | null>(null);
+  const sliceCursorPlanesRef = useRef<SliceCursorPlanes | null>(null);
   const scalarRangeRef = useRef<{ rawMin: number; rawMax: number } | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
@@ -385,20 +737,16 @@ export function SliceStackVolumeCanvas({
   const axisSizes = volumeSource?.axisSizes ?? viewerInfo?.axis_sizes ?? { T: 1, C: 1, Z: 1, Y: 1, X: 1 };
   const spacing = volumeSource?.physicalSpacing ?? viewerInfo?.metadata.physical_spacing ?? null;
   const volumeDepth = Math.max(1, axisSizes.Z);
-  const zSpacing = Math.max(1e-6, Number(spacing?.z ?? 1));
-  const ySpacing = Math.max(1e-6, Number(spacing?.y ?? 1));
-  const xSpacing = Math.max(1e-6, Number(spacing?.x ?? 1));
-  const worldWidth = Math.max(1, Number(plane.pixel_size.width) * xSpacing);
-  const worldHeight = Math.max(1, Number(plane.pixel_size.height) * ySpacing);
-  const worldDepth = Math.max(1, volumeDepth * zSpacing);
-  const normalizedScale = useMemo(() => {
-    const normalizer = Math.max(worldWidth, worldHeight, worldDepth, 1);
-    return {
-      x: worldWidth / normalizer,
-      y: worldHeight / normalizer,
-      z: worldDepth / normalizer,
-    };
-  }, [worldDepth, worldHeight, worldWidth]);
+  const physicalGeometry = useMemo(
+    () =>
+      computePhysicalVolumeGeometry({
+        planePixelSize: plane.pixel_size,
+        volumeDepth,
+        physicalSpacing: spacing,
+      }),
+    [plane.pixel_size, spacing, volumeDepth]
+  );
+  const normalizedScale = physicalGeometry.normalizedScale;
   const volumeRadius = useMemo(
     () =>
       Math.max(
@@ -531,6 +879,7 @@ export function SliceStackVolumeCanvas({
   ]);
 
   const renderPolicy = resolvedSource?.renderPolicy ?? viewerInfo?.viewer.render_policy ?? "scalar";
+  const orientationCue = resolveVolumeOrientationCue(viewerInfo?.viewer.orientation);
   const modality = String(viewerInfo?.modality ?? "").trim().toLowerCase();
   const clipBounds = useMemo(() => {
     const rawMin = displayState?.volume_clip_min ?? { x: 0, y: 0, z: 0 };
@@ -563,7 +912,70 @@ export function SliceStackVolumeCanvas({
     });
     return { min: nextMin, max: nextMax };
   }, [displayState?.volume_clip_max, displayState?.volume_clip_min]);
-  const projectionMode = renderPolicy === "scalar" && modality === "microscopy" ? "mip" : "composite";
+  const projectionMode = resolveVolumeProjectionMode({
+    renderPolicy,
+    modality,
+    fusionMethod: displayState?.fusion_method,
+  });
+  const scalarColorMap = resolveScalarVolumeColorMap(displayState?.scalar_colormap);
+  const scalarTransfer = resolveScalarVolumeTransferFunction(displayState);
+  const scalarLighting = resolveScalarVolumeLighting(displayState);
+  const volumeCameraMode = resolveVolumeCameraMode(displayState?.volume_camera_mode);
+  const volumeViewPreset = resolveVolumeViewPreset(displayState?.volume_view_preset);
+  const spatialUnit = resolveSpatialUnit(viewerInfo);
+  const sliceCursorCue = useMemo(
+    () =>
+      resolveVolumeSliceCursorCue({
+        axisSizes,
+        indices: {
+          x: xIndex ?? Math.floor((Math.max(1, axisSizes.X) - 1) / 2),
+          y: yIndex ?? Math.floor((Math.max(1, axisSizes.Y) - 1) / 2),
+          z: zIndex ?? Math.floor((Math.max(1, axisSizes.Z) - 1) / 2),
+        },
+        worldWidth: physicalGeometry.worldWidth,
+        worldHeight: physicalGeometry.worldHeight,
+        worldDepth: physicalGeometry.worldDepth,
+        unit: spatialUnit,
+      }),
+    [
+      axisSizes.X,
+      axisSizes.Y,
+      axisSizes.Z,
+      physicalGeometry.worldDepth,
+      physicalGeometry.worldHeight,
+      physicalGeometry.worldWidth,
+      spatialUnit,
+      xIndex,
+      yIndex,
+      zIndex,
+    ]
+  );
+  const volumeScaleBar = resolveVolumeScaleBar({
+    worldWidth: physicalGeometry.worldWidth,
+    unit: spatialUnit,
+  });
+  const volumeAxisCue = resolveVolumeAxisCue({
+    worldWidth: physicalGeometry.worldWidth,
+    worldHeight: physicalGeometry.worldHeight,
+    worldDepth: physicalGeometry.worldDepth,
+    unit: spatialUnit,
+  });
+  const volumeClipCue = resolveVolumeClipCue({
+    worldWidth: physicalGeometry.worldWidth,
+    worldHeight: physicalGeometry.worldHeight,
+    worldDepth: physicalGeometry.worldDepth,
+    clipMin: clipBounds.min,
+    clipMax: clipBounds.max,
+    unit: spatialUnit,
+  });
+  const scalarVoxelStep = useMemo(
+    () => ({
+      x: 1 / Math.max(1, axisSizes.X - 1),
+      y: 1 / Math.max(1, axisSizes.Y - 1),
+      z: 1 / Math.max(1, axisSizes.Z - 1),
+    }),
+    [axisSizes.X, axisSizes.Y, axisSizes.Z]
+  );
   const clearColor =
     renderPolicy === "scalar" || renderPolicy === "categorical" || renderPolicy === "display"
       ? DEFAULT_VOLUME_CLEAR
@@ -582,8 +994,17 @@ export function SliceStackVolumeCanvas({
       : viewerInfo?.viewer.texture_policy === "nearest" || viewerInfo?.viewer.texture_policy === "linear"
         ? viewerInfo.viewer.texture_policy
         : renderPolicy === "categorical" || renderPolicy === "analysis"
-          ? "nearest"
-          : "linear";
+        ? "nearest"
+        : "linear";
+  const sampleBudget = useMemo(
+    () =>
+      computeVolumeSampleBudget({
+        sourceKind: resolvedSource?.kind ?? "atlas",
+        volumeDepth,
+        projectionMode,
+      }),
+    [projectionMode, resolvedSource?.kind, volumeDepth]
+  );
 
   useEffect(() => {
     const scalarRange = scalarRangeRef.current;
@@ -599,8 +1020,21 @@ export function SliceStackVolumeCanvas({
     scalarUniforms.uWindowLow.value = normalizedWindow.low;
     scalarUniforms.uWindowHigh.value = normalizedWindow.high;
     scalarUniforms.uInvert.value = Boolean(displayState?.negative);
+    scalarUniforms.uColorMap.value = scalarColorMap.shaderValue;
+    scalarUniforms.uSignalFloor.value = scalarTransfer.signalFloor;
+    scalarUniforms.uDensityScale.value = scalarTransfer.densityScale;
+    scalarUniforms.uLightingEnabled.value = scalarLighting.enabled;
+    scalarUniforms.uLightingStrength.value = scalarLighting.strength;
     requestRenderRef.current?.();
-  }, [displayState?.enhancement, displayState?.negative]);
+  }, [
+    displayState?.enhancement,
+    displayState?.negative,
+    scalarColorMap.shaderValue,
+    scalarLighting.enabled,
+    scalarLighting.strength,
+    scalarTransfer.densityScale,
+    scalarTransfer.signalFloor,
+  ]);
 
   useEffect(() => {
     const clipUniforms = clipUniformsRef.current;
@@ -611,6 +1045,20 @@ export function SliceStackVolumeCanvas({
     clipUniforms.uClipMax.value.set(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z);
     requestRenderRef.current?.();
   }, [clipBounds]);
+
+  useEffect(() => {
+    const rig = cameraRigRef.current;
+    if (!rig) {
+      return;
+    }
+    applyVolumeCameraPreset({
+      camera: rig.camera,
+      controls: rig.controls,
+      preset: volumeViewPreset,
+      volumeRadius,
+    });
+    requestRenderRef.current?.();
+  }, [volumeRadius, volumeViewPreset]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -665,7 +1113,10 @@ export function SliceStackVolumeCanvas({
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100);
+    const camera = createVolumeCamera({
+      mode: volumeCameraMode,
+      volumeRadius,
+    });
     const controls = new TrackballControls(camera, renderer.domElement);
     controls.noPan = false;
     controls.noZoom = false;
@@ -676,6 +1127,13 @@ export function SliceStackVolumeCanvas({
     controls.panSpeed = 0.9;
     controls.minDistance = volumeRadius * 1.05;
     controls.maxDistance = Math.max(volumeRadius * 10, 6);
+    cameraRigRef.current = { camera, controls };
+    applyVolumeCameraPreset({
+      camera,
+      controls,
+      preset: volumeViewPreset,
+      volumeRadius,
+    });
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material =
@@ -683,15 +1141,23 @@ export function SliceStackVolumeCanvas({
         ? new THREE.ShaderMaterial({
             uniforms: {
               uData: { value: null },
-              uSteps: { value: Math.max(128, Math.min(MAX_STEPS, volumeDepth * 2)) },
+              uSteps: { value: sampleBudget.interactiveSteps },
               uDensity: { value: density },
               uWindowLow: { value: 0.0 },
               uWindowHigh: { value: 1.0 },
               uInvert: { value: Boolean(displayState?.negative) },
+              uColorMap: { value: scalarColorMap.shaderValue },
+              uSignalFloor: { value: scalarTransfer.signalFloor },
+              uDensityScale: { value: scalarTransfer.densityScale },
+              uLightingEnabled: { value: scalarLighting.enabled },
+              uLightingStrength: { value: scalarLighting.strength },
+              uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
               uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
               uClipMax: { value: new THREE.Vector3(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
+              uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
+              uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
             },
             vertexShader: VERTEX_SHADER,
             fragmentShader: SCALAR_FRAGMENT_SHADER,
@@ -702,11 +1168,13 @@ export function SliceStackVolumeCanvas({
         : new THREE.ShaderMaterial({
             uniforms: {
               uData: { value: null },
-              uSteps: { value: Math.max(96, Math.min(MAX_STEPS, volumeDepth * 2)) },
+              uSteps: { value: sampleBudget.interactiveSteps },
               uDensity: { value: density },
               uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
               uClipMax: { value: new THREE.Vector3(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
+              uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
+              uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
             },
             vertexShader: VERTEX_SHADER,
             fragmentShader: ATLAS_FRAGMENT_SHADER,
@@ -718,13 +1186,121 @@ export function SliceStackVolumeCanvas({
     mesh.scale.set(normalizedScale.x, normalizedScale.y, normalizedScale.z);
     scene.add(mesh);
 
+    const edgeGeometry = new THREE.EdgesGeometry(geometry);
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color: renderPolicy === "scalar" ? 0x8fb7d9 : 0x334155,
+      depthTest: false,
+      depthWrite: false,
+      opacity: renderPolicy === "scalar" ? 0.78 : 0.55,
+      transparent: true,
+    });
+    const edgeLines = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+    edgeLines.scale.set(normalizedScale.x, normalizedScale.y, normalizedScale.z);
+    edgeLines.renderOrder = 2;
+    scene.add(edgeLines);
+
+    const clipEdgeGeometry = new THREE.EdgesGeometry(geometry);
+    const clipEdgeMaterial = new THREE.LineBasicMaterial({
+      color: 0xf7c948,
+      depthTest: false,
+      depthWrite: false,
+      opacity: 0.94,
+      transparent: true,
+    });
+    const clipEdgeLines = new THREE.LineSegments(clipEdgeGeometry, clipEdgeMaterial);
+    const clipSize = {
+      x: Math.max(0.001, clipBounds.max.x - clipBounds.min.x),
+      y: Math.max(0.001, clipBounds.max.y - clipBounds.min.y),
+      z: Math.max(0.001, clipBounds.max.z - clipBounds.min.z),
+    };
+    const clipCenter = {
+      x: clipBounds.min.x + clipSize.x / 2,
+      y: clipBounds.min.y + clipSize.y / 2,
+      z: clipBounds.min.z + clipSize.z / 2,
+    };
+    clipEdgeLines.scale.set(
+      normalizedScale.x * clipSize.x,
+      normalizedScale.y * clipSize.y,
+      normalizedScale.z * clipSize.z
+    );
+    clipEdgeLines.position.set(
+      normalizedScale.x * (clipCenter.x - 0.5),
+      normalizedScale.y * (clipCenter.y - 0.5),
+      normalizedScale.z * (clipCenter.z - 0.5)
+    );
+    clipEdgeLines.renderOrder = 3;
+    clipEdgeLines.visible = volumeClipCue.active;
+    scene.add(clipEdgeLines);
+
+    const slicePlaneGeometry = new THREE.PlaneGeometry(1, 1);
+    const createSlicePlane = (color: number, opacity: number) => {
+      const sliceMaterial = new THREE.MeshBasicMaterial({
+        color,
+        depthTest: false,
+        depthWrite: false,
+        opacity,
+        side: THREE.DoubleSide,
+        transparent: true,
+      });
+      const planeMesh = new THREE.Mesh(slicePlaneGeometry, sliceMaterial);
+      planeMesh.renderOrder = 4;
+      return planeMesh;
+    };
+    const sliceCursorPlanes: SliceCursorPlanes = {
+      x: createSlicePlane(0xf47f72, 0.16),
+      y: createSlicePlane(0x66c78d, 0.14),
+      z: createSlicePlane(0x74a7ff, 0.15),
+    };
+    sliceCursorPlanes.x.rotation.y = Math.PI / 2;
+    sliceCursorPlanes.y.rotation.x = -Math.PI / 2;
+    applyVolumeSliceCursorPlanes({
+      planes: sliceCursorPlanes,
+      cue: sliceCursorCue,
+      normalizedScale,
+    });
+    sliceCursorPlanesRef.current = sliceCursorPlanes;
+    scene.add(sliceCursorPlanes.x, sliceCursorPlanes.y, sliceCursorPlanes.z);
+
     scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 
-    const cameraPositionUniform = (material.uniforms as Record<string, { value: THREE.Vector3 }>).uCameraPositionLocal;
+    const volumeUniforms = material.uniforms as Record<string, { value: THREE.Vector3 | number | boolean | null }>;
+    const cameraPositionUniform = volumeUniforms.uCameraPositionLocal as { value: THREE.Vector3 };
+    const cameraDirectionUniform = volumeUniforms.uCameraDirectionLocal as { value: THREE.Vector3 };
+    const stepsUniform = (material.uniforms as Record<string, { value: number }>).uSteps;
+    let currentSteps = sampleBudget.interactiveSteps;
+    let lastInteractionAt = window.performance.now();
+    const setSamplingSteps = (steps: number) => {
+      const nextSteps = Math.max(1, Math.floor(steps));
+      if (nextSteps === currentSteps) {
+        return;
+      }
+      currentSteps = nextSteps;
+      stepsUniform.value = nextSteps;
+    };
+    const resetInteractiveSampling = () => {
+      lastInteractionAt = window.performance.now();
+      setSamplingSteps(sampleBudget.interactiveSteps);
+    };
+    const markInteractionSettled = () => {
+      lastInteractionAt = window.performance.now();
+    };
+    controls.addEventListener("start", resetInteractiveSampling);
+    controls.addEventListener("change", resetInteractiveSampling);
+    controls.addEventListener("end", markInteractionSettled);
 
+    const cameraWorldDirection = new THREE.Vector3();
+    const cameraWorldPoint = new THREE.Vector3();
+    const cameraLocal = new THREE.Vector3();
+    const cameraDirectionLocal = new THREE.Vector3();
     const render = () => {
-      const cameraLocal = mesh.worldToLocal(camera.position.clone());
+      cameraLocal.copy(camera.position);
+      mesh.worldToLocal(cameraLocal);
+      camera.getWorldDirection(cameraWorldDirection);
+      cameraWorldPoint.copy(camera.position).add(cameraWorldDirection);
+      cameraDirectionLocal.copy(cameraWorldPoint);
+      mesh.worldToLocal(cameraDirectionLocal).sub(cameraLocal).normalize();
       cameraPositionUniform.value.copy(cameraLocal);
+      cameraDirectionUniform.value.copy(cameraDirectionLocal);
       renderer.render(scene, camera);
     };
     requestRenderRef.current = render;
@@ -737,8 +1313,7 @@ export function SliceStackVolumeCanvas({
       const width = Math.max(1, container.clientWidth || 1);
       const height = Math.max(1, container.clientHeight || 1);
       renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      configureVolumeCameraProjection({ camera, width, height, volumeRadius });
       camera.lookAt(0, 0, 0);
       controls.handleResize();
       render();
@@ -749,14 +1324,14 @@ export function SliceStackVolumeCanvas({
 
     let texture3D: THREE.Data3DTexture | null = null;
     let animationFrame = 0;
-    camera.position.set(1.8, 1.4, 1.8);
-    camera.lookAt(0, 0, 0);
-    controls.target.set(0, 0, 0);
     const animate = () => {
       if (disposed) {
         return;
       }
       controls.update();
+      if (window.performance.now() - lastInteractionAt > 120 && currentSteps < sampleBudget.settledSteps) {
+        setSamplingSteps(advanceProgressiveVolumeSteps(currentSteps, sampleBudget));
+      }
       render();
       animationFrame = window.requestAnimationFrame(animate);
     };
@@ -775,10 +1350,20 @@ export function SliceStackVolumeCanvas({
               uWindowLow: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowLow as { value: number },
               uWindowHigh: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowHigh as { value: number },
               uInvert: (material.uniforms as Record<string, { value: number | boolean | null }>).uInvert as { value: boolean },
+              uColorMap: (material.uniforms as Record<string, { value: number | boolean | null }>).uColorMap as { value: number },
+              uSignalFloor: (material.uniforms as Record<string, { value: number | boolean | null }>).uSignalFloor as { value: number },
+              uDensityScale: (material.uniforms as Record<string, { value: number | boolean | null }>).uDensityScale as { value: number },
+              uLightingEnabled: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingEnabled as { value: boolean },
+              uLightingStrength: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingStrength as { value: number },
             };
             scalarUniformsRef.current.uWindowLow.value = normalizedWindow.low;
             scalarUniformsRef.current.uWindowHigh.value = normalizedWindow.high;
             scalarUniformsRef.current.uInvert.value = Boolean(displayState?.negative);
+            scalarUniformsRef.current.uColorMap.value = scalarColorMap.shaderValue;
+            scalarUniformsRef.current.uSignalFloor.value = scalarTransfer.signalFloor;
+            scalarUniformsRef.current.uDensityScale.value = scalarTransfer.densityScale;
+            scalarUniformsRef.current.uLightingEnabled.value = scalarLighting.enabled;
+            scalarUniformsRef.current.uLightingStrength.value = scalarLighting.strength;
             return texture;
           })
         : atlasToVolumeTexture(resolvedSource.atlasUrl, resolvedSource.atlasScheme, texturePolicy);
@@ -812,13 +1397,26 @@ export function SliceStackVolumeCanvas({
       requestRenderRef.current = null;
       scalarUniformsRef.current = null;
       clipUniformsRef.current = null;
+      cameraRigRef.current = null;
+      sliceCursorPlanesRef.current = null;
       scalarRangeRef.current = null;
       observer.disconnect();
       if (animationFrame) {
         window.cancelAnimationFrame(animationFrame);
       }
+      controls.removeEventListener("start", resetInteractiveSampling);
+      controls.removeEventListener("change", resetInteractiveSampling);
+      controls.removeEventListener("end", markInteractionSettled);
       controls.dispose();
       geometry.dispose();
+      edgeGeometry.dispose();
+      edgeMaterial.dispose();
+      clipEdgeGeometry.dispose();
+      clipEdgeMaterial.dispose();
+      slicePlaneGeometry.dispose();
+      sliceCursorPlanes.x.material.dispose();
+      sliceCursorPlanes.y.material.dispose();
+      sliceCursorPlanes.z.material.dispose();
       material.dispose();
       texture3D?.dispose();
       renderer.dispose();
@@ -831,6 +1429,12 @@ export function SliceStackVolumeCanvas({
     clearColor,
     density,
     projectionMode,
+    sampleBudget.interactiveSteps,
+    sampleBudget.rampFactor,
+    sampleBudget.settledSteps,
+    scalarVoxelStep.x,
+    scalarVoxelStep.y,
+    scalarVoxelStep.z,
     clipBounds.max.x,
     clipBounds.max.y,
     clipBounds.max.z,
@@ -842,12 +1446,155 @@ export function SliceStackVolumeCanvas({
     normalizedScale.z,
     volumeDepth,
     volumeRadius,
-    worldDepth,
-    worldHeight,
-    worldWidth,
+    volumeCameraMode.id,
+    volumeCameraMode.isOrthographic,
+    volumeViewPreset,
+    physicalGeometry.worldDepth,
+    physicalGeometry.worldHeight,
+    physicalGeometry.worldWidth,
+    volumeClipCue.active,
+  ]);
+
+  useEffect(() => {
+    const planes = sliceCursorPlanesRef.current;
+    if (!planes) {
+      return;
+    }
+    applyVolumeSliceCursorPlanes({
+      planes,
+      cue: sliceCursorCue,
+      normalizedScale,
+    });
+    requestRenderRef.current?.();
+  }, [
+    normalizedScale.x,
+    normalizedScale.y,
+    normalizedScale.z,
+    sliceCursorCue.visible,
+    sliceCursorCue.x.count,
+    sliceCursorCue.x.local,
+    sliceCursorCue.y.count,
+    sliceCursorCue.y.local,
+    sliceCursorCue.z.count,
+    sliceCursorCue.z.local,
   ]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
+  const renderVolumeOrientationOverlay = (variant?: "fallback") => (
+    <div
+      className={[
+        "viewer-volume-orientation-triad",
+        variant === "fallback" ? "viewer-volume-orientation-triad-fallback" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      aria-label={`Volume orientation ${orientationCue.frame}`}
+      data-viewer-volume-orientation="true"
+      data-viewer-orientation-frame={orientationCue.frame}
+      data-viewer-orientation-x={orientationCue.x.label}
+      data-viewer-orientation-y={orientationCue.y.label}
+      data-viewer-orientation-z={orientationCue.z.label}
+    >
+      <span className="viewer-volume-orientation-frame">{orientationCue.frame}</span>
+      <span className="viewer-volume-orientation-axis viewer-volume-orientation-axis-x">
+        {orientationCue.x.label}
+      </span>
+      <span className="viewer-volume-orientation-axis viewer-volume-orientation-axis-y">
+        {orientationCue.y.label}
+      </span>
+      <span className="viewer-volume-orientation-axis viewer-volume-orientation-axis-z">
+        {orientationCue.z.label}
+      </span>
+    </div>
+  );
+  const renderVolumeScaleBar = () =>
+    volumeScaleBar.visible ? (
+      <div
+        className="viewer-volume-scale-bar"
+        aria-label={`Volume scale ${volumeScaleBar.label}`}
+        data-viewer-volume-scale-bar="true"
+        data-viewer-scale-length={volumeScaleBar.length.toFixed(4)}
+        data-viewer-scale-label={volumeScaleBar.label}
+        data-viewer-scale-fraction={volumeScaleBar.fraction.toFixed(4)}
+      >
+        <span className="viewer-volume-scale-track">
+          <span
+            className="viewer-volume-scale-measure"
+            style={{ width: `${(volumeScaleBar.fraction * 100).toFixed(2)}%` }}
+          />
+        </span>
+        <span className="viewer-volume-scale-label">{volumeScaleBar.label}</span>
+      </div>
+    ) : null;
+  const renderVolumeAxisCue = () =>
+    volumeAxisCue.visible ? (
+      <div
+        className="viewer-volume-axis-cue"
+        aria-label={`Volume axes ${volumeAxisCue.summary}`}
+        data-viewer-volume-axis-cue="true"
+        data-viewer-axis-unit={volumeAxisCue.unit}
+        data-viewer-axis-summary={volumeAxisCue.summary}
+        data-viewer-axis-x-label={volumeAxisCue.x.label}
+        data-viewer-axis-y-label={volumeAxisCue.y.label}
+        data-viewer-axis-z-label={volumeAxisCue.z.label}
+        data-viewer-axis-x-length={volumeAxisCue.x.length.toFixed(4)}
+        data-viewer-axis-y-length={volumeAxisCue.y.length.toFixed(4)}
+        data-viewer-axis-z-length={volumeAxisCue.z.length.toFixed(4)}
+      >
+        <span className="viewer-volume-axis-chip viewer-volume-axis-chip-x">{volumeAxisCue.x.label}</span>
+        <span className="viewer-volume-axis-chip viewer-volume-axis-chip-y">{volumeAxisCue.y.label}</span>
+        <span className="viewer-volume-axis-chip viewer-volume-axis-chip-z">{volumeAxisCue.z.label}</span>
+      </div>
+    ) : null;
+  const renderVolumeClipCue = () =>
+    volumeClipCue.active ? (
+      <div
+        className="viewer-volume-clip-cue"
+        aria-label={`Active volume cutaway ${volumeClipCue.summary}`}
+        data-viewer-volume-clip-cue="true"
+        data-viewer-clip-active="true"
+        data-viewer-clip-unit={volumeClipCue.unit}
+        data-viewer-clip-summary={volumeClipCue.summary}
+        data-viewer-clip-x-label={volumeClipCue.x.label}
+        data-viewer-clip-y-label={volumeClipCue.y.label}
+        data-viewer-clip-z-label={volumeClipCue.z.label}
+        data-viewer-clip-x-length={volumeClipCue.x.length.toFixed(4)}
+        data-viewer-clip-y-length={volumeClipCue.y.length.toFixed(4)}
+        data-viewer-clip-z-length={volumeClipCue.z.length.toFixed(4)}
+      >
+        <span className="viewer-volume-clip-cue-title">Cutaway</span>
+        <span className="viewer-volume-clip-chip">{volumeClipCue.x.label}</span>
+        <span className="viewer-volume-clip-chip">{volumeClipCue.y.label}</span>
+        <span className="viewer-volume-clip-chip">{volumeClipCue.z.label}</span>
+      </div>
+    ) : null;
+  const renderVolumeSliceCursorCue = () =>
+    sliceCursorCue.visible ? (
+      <div
+        className="viewer-volume-slice-cue"
+        aria-label={`Current volume slices ${sliceCursorCue.summary}`}
+        data-viewer-volume-slice-cue="true"
+        data-viewer-slice-summary={sliceCursorCue.summary}
+        data-viewer-slice-unit={sliceCursorCue.unit}
+        data-viewer-slice-x-label={sliceCursorCue.x.label}
+        data-viewer-slice-y-label={sliceCursorCue.y.label}
+        data-viewer-slice-z-label={sliceCursorCue.z.label}
+      >
+        <span className="viewer-volume-slice-cue-title">Slices</span>
+        <span className="viewer-volume-slice-chip viewer-volume-slice-chip-x">
+          {sliceCursorCue.x.label}
+          <em>{sliceCursorCue.x.positionLabel}</em>
+        </span>
+        <span className="viewer-volume-slice-chip viewer-volume-slice-chip-y">
+          {sliceCursorCue.y.label}
+          <em>{sliceCursorCue.y.positionLabel}</em>
+        </span>
+        <span className="viewer-volume-slice-chip viewer-volume-slice-chip-z">
+          {sliceCursorCue.z.label}
+          <em>{sliceCursorCue.z.positionLabel}</em>
+        </span>
+      </div>
+    ) : null;
 
   if (
     renderError ||
@@ -864,6 +1611,44 @@ export function SliceStackVolumeCanvas({
         data-viewer-render-policy={renderPolicy}
         data-viewer-texture-policy={texturePolicy}
         data-viewer-projection-mode={projectionMode}
+        data-viewer-scalar-colormap={scalarColorMap.id}
+        data-viewer-scalar-colormap-label={scalarColorMap.label}
+        data-viewer-signal-floor={scalarTransfer.signalFloor.toFixed(2)}
+        data-viewer-density-scale={scalarTransfer.densityScale.toFixed(2)}
+        data-viewer-depth-lighting={scalarLighting.enabled ? "true" : "false"}
+        data-viewer-lighting-strength={scalarLighting.strength.toFixed(2)}
+        data-viewer-scale-label={volumeScaleBar.label || undefined}
+        data-viewer-view-preset={volumeViewPreset.id}
+        data-viewer-view-label={volumeViewPreset.label}
+        data-viewer-camera-mode={volumeCameraMode.id}
+        data-viewer-camera-label={volumeCameraMode.label}
+        data-viewer-camera-orthographic={volumeCameraMode.isOrthographic ? "true" : "false"}
+        data-viewer-axis-summary={volumeAxisCue.summary || undefined}
+        data-viewer-axis-unit={volumeAxisCue.unit}
+        data-viewer-axis-x-length={volumeAxisCue.visible ? volumeAxisCue.x.length.toFixed(4) : undefined}
+        data-viewer-axis-y-length={volumeAxisCue.visible ? volumeAxisCue.y.length.toFixed(4) : undefined}
+        data-viewer-axis-z-length={volumeAxisCue.visible ? volumeAxisCue.z.length.toFixed(4) : undefined}
+        data-viewer-slice-summary={sliceCursorCue.summary || undefined}
+        data-viewer-slice-unit={sliceCursorCue.unit}
+        data-viewer-slice-x-index={String(sliceCursorCue.x.index)}
+        data-viewer-slice-y-index={String(sliceCursorCue.y.index)}
+        data-viewer-slice-z-index={String(sliceCursorCue.z.index)}
+        data-viewer-slice-x-normalized={sliceCursorCue.x.normalized.toFixed(4)}
+        data-viewer-slice-y-normalized={sliceCursorCue.y.normalized.toFixed(4)}
+        data-viewer-slice-z-normalized={sliceCursorCue.z.normalized.toFixed(4)}
+        data-viewer-slice-x-position={sliceCursorCue.x.position.toFixed(4)}
+        data-viewer-slice-y-position={sliceCursorCue.y.position.toFixed(4)}
+        data-viewer-slice-z-position={sliceCursorCue.z.position.toFixed(4)}
+        data-viewer-clip-active={volumeClipCue.active ? "true" : "false"}
+        data-viewer-clip-summary={volumeClipCue.summary || undefined}
+        data-viewer-clip-unit={volumeClipCue.unit}
+        data-viewer-clip-x-length={volumeClipCue.active ? volumeClipCue.x.length.toFixed(4) : undefined}
+        data-viewer-clip-y-length={volumeClipCue.active ? volumeClipCue.y.length.toFixed(4) : undefined}
+        data-viewer-clip-z-length={volumeClipCue.active ? volumeClipCue.z.length.toFixed(4) : undefined}
+        data-viewer-orientation-frame={orientationCue.frame}
+        data-viewer-orientation-x={orientationCue.x.label}
+        data-viewer-orientation-y={orientationCue.y.label}
+        data-viewer-orientation-z={orientationCue.z.label}
         data-viewer-clip-x-min={clipBounds.min.x.toFixed(2)}
         data-viewer-clip-x-max={clipBounds.max.x.toFixed(2)}
         data-viewer-clip-y-min={clipBounds.min.y.toFixed(2)}
@@ -871,10 +1656,25 @@ export function SliceStackVolumeCanvas({
         data-viewer-clip-z-min={clipBounds.min.z.toFixed(2)}
         data-viewer-clip-z-max={clipBounds.max.z.toFixed(2)}
         data-viewer-volume-channel={scalarChannel == null ? undefined : String(scalarChannel)}
+        data-viewer-physical-width={physicalGeometry.worldWidth.toFixed(4)}
+        data-viewer-physical-height={physicalGeometry.worldHeight.toFixed(4)}
+        data-viewer-physical-depth={physicalGeometry.worldDepth.toFixed(4)}
+        data-viewer-physical-scale-x={physicalGeometry.normalizedScale.x.toFixed(4)}
+        data-viewer-physical-scale-y={physicalGeometry.normalizedScale.y.toFixed(4)}
+        data-viewer-physical-scale-z={physicalGeometry.normalizedScale.z.toFixed(4)}
+        data-viewer-physical-anisotropic={physicalGeometry.isAnisotropic ? "true" : "false"}
+        data-viewer-progressive-sampling="true"
+        data-viewer-sample-steps-interactive={String(sampleBudget.interactiveSteps)}
+        data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
       >
         <div className="viewer-image-fallback" style={{ aspectRatio: `${Math.max(1e-6, plane.aspect_ratio)}` }}>
           <img src={fallbackImageUrl} alt="Volume fallback preview" className="viewer-image-fallback-media" />
         </div>
+        {renderVolumeOrientationOverlay("fallback")}
+        {renderVolumeAxisCue()}
+        {renderVolumeSliceCursorCue()}
+        {renderVolumeClipCue()}
+        {renderVolumeScaleBar()}
         <p className="viewer-fallback-note">
           {renderError
             ? `${backendLabel === "scalar" ? "Scalar" : "Atlas"} volume viewer unavailable: ${renderError}. Showing a representative slice preview instead.`
@@ -894,6 +1694,44 @@ export function SliceStackVolumeCanvas({
       data-viewer-render-policy={renderPolicy}
       data-viewer-texture-policy={texturePolicy}
       data-viewer-projection-mode={projectionMode}
+      data-viewer-scalar-colormap={scalarColorMap.id}
+      data-viewer-scalar-colormap-label={scalarColorMap.label}
+      data-viewer-signal-floor={scalarTransfer.signalFloor.toFixed(2)}
+      data-viewer-density-scale={scalarTransfer.densityScale.toFixed(2)}
+      data-viewer-depth-lighting={scalarLighting.enabled ? "true" : "false"}
+      data-viewer-lighting-strength={scalarLighting.strength.toFixed(2)}
+      data-viewer-scale-label={volumeScaleBar.label || undefined}
+      data-viewer-view-preset={volumeViewPreset.id}
+      data-viewer-view-label={volumeViewPreset.label}
+      data-viewer-camera-mode={volumeCameraMode.id}
+      data-viewer-camera-label={volumeCameraMode.label}
+      data-viewer-camera-orthographic={volumeCameraMode.isOrthographic ? "true" : "false"}
+      data-viewer-axis-summary={volumeAxisCue.summary || undefined}
+      data-viewer-axis-unit={volumeAxisCue.unit}
+      data-viewer-axis-x-length={volumeAxisCue.visible ? volumeAxisCue.x.length.toFixed(4) : undefined}
+      data-viewer-axis-y-length={volumeAxisCue.visible ? volumeAxisCue.y.length.toFixed(4) : undefined}
+      data-viewer-axis-z-length={volumeAxisCue.visible ? volumeAxisCue.z.length.toFixed(4) : undefined}
+      data-viewer-slice-summary={sliceCursorCue.summary || undefined}
+      data-viewer-slice-unit={sliceCursorCue.unit}
+      data-viewer-slice-x-index={String(sliceCursorCue.x.index)}
+      data-viewer-slice-y-index={String(sliceCursorCue.y.index)}
+      data-viewer-slice-z-index={String(sliceCursorCue.z.index)}
+      data-viewer-slice-x-normalized={sliceCursorCue.x.normalized.toFixed(4)}
+      data-viewer-slice-y-normalized={sliceCursorCue.y.normalized.toFixed(4)}
+      data-viewer-slice-z-normalized={sliceCursorCue.z.normalized.toFixed(4)}
+      data-viewer-slice-x-position={sliceCursorCue.x.position.toFixed(4)}
+      data-viewer-slice-y-position={sliceCursorCue.y.position.toFixed(4)}
+      data-viewer-slice-z-position={sliceCursorCue.z.position.toFixed(4)}
+      data-viewer-clip-active={volumeClipCue.active ? "true" : "false"}
+      data-viewer-clip-summary={volumeClipCue.summary || undefined}
+      data-viewer-clip-unit={volumeClipCue.unit}
+      data-viewer-clip-x-length={volumeClipCue.active ? volumeClipCue.x.length.toFixed(4) : undefined}
+      data-viewer-clip-y-length={volumeClipCue.active ? volumeClipCue.y.length.toFixed(4) : undefined}
+      data-viewer-clip-z-length={volumeClipCue.active ? volumeClipCue.z.length.toFixed(4) : undefined}
+      data-viewer-orientation-frame={orientationCue.frame}
+      data-viewer-orientation-x={orientationCue.x.label}
+      data-viewer-orientation-y={orientationCue.y.label}
+      data-viewer-orientation-z={orientationCue.z.label}
       data-viewer-clip-x-min={clipBounds.min.x.toFixed(2)}
       data-viewer-clip-x-max={clipBounds.max.x.toFixed(2)}
       data-viewer-clip-y-min={clipBounds.min.y.toFixed(2)}
@@ -901,6 +1739,22 @@ export function SliceStackVolumeCanvas({
       data-viewer-clip-z-min={clipBounds.min.z.toFixed(2)}
       data-viewer-clip-z-max={clipBounds.max.z.toFixed(2)}
       data-viewer-volume-channel={scalarChannel == null ? undefined : String(scalarChannel)}
-    />
+      data-viewer-physical-width={physicalGeometry.worldWidth.toFixed(4)}
+      data-viewer-physical-height={physicalGeometry.worldHeight.toFixed(4)}
+      data-viewer-physical-depth={physicalGeometry.worldDepth.toFixed(4)}
+      data-viewer-physical-scale-x={physicalGeometry.normalizedScale.x.toFixed(4)}
+      data-viewer-physical-scale-y={physicalGeometry.normalizedScale.y.toFixed(4)}
+      data-viewer-physical-scale-z={physicalGeometry.normalizedScale.z.toFixed(4)}
+      data-viewer-physical-anisotropic={physicalGeometry.isAnisotropic ? "true" : "false"}
+      data-viewer-progressive-sampling="true"
+      data-viewer-sample-steps-interactive={String(sampleBudget.interactiveSteps)}
+      data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
+    >
+      {renderVolumeOrientationOverlay()}
+      {renderVolumeAxisCue()}
+      {renderVolumeSliceCursorCue()}
+      {renderVolumeClipCue()}
+      {renderVolumeScaleBar()}
+    </div>
   );
 }

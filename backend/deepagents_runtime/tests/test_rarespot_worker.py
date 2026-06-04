@@ -17,6 +17,7 @@ from ultra_deepagents.rarespot.worker import (
     build_rarespot_consumer_config,
     apply_rarespot_metadata_overrides,
     rarespot_ack_extension_interval,
+    run_worker_loop,
     subscribe_rarespot_jobs,
 )
 
@@ -713,6 +714,30 @@ def test_process_rarespot_job_acks_terminal_control_plane_run_without_compute(tm
     assert ack.nacked is False
     assert store.statuses == []
     assert store.events == []
+
+
+def test_run_worker_loop_validates_rarespot_config_before_connecting(monkeypatch, tmp_path: Path):
+    def fail_validate(_settings: RuntimeSettings) -> None:
+        raise RuntimeError("RareSpot weights not found")
+
+    async def fail_connect(*_args, **_kwargs):
+        raise AssertionError("worker should validate config before connecting to NATS")
+
+    monkeypatch.setattr("ultra_deepagents.rarespot.worker.validate_rarespot_runtime_config", fail_validate)
+    monkeypatch.setattr("nats.connect", fail_connect)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        rarespot_artifact_root=str(tmp_path / "artifacts"),
+    )
+
+    try:
+        asyncio.run(run_worker_loop(settings))
+    except RuntimeError as exc:
+        assert "RareSpot weights not found" in str(exc)
+    else:
+        raise AssertionError("bad RareSpot config should stop the worker before NATS connect")
 
 
 def test_process_rarespot_job_acks_and_records_canceled_event_when_cancel_requested(tmp_path: Path):

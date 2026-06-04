@@ -5,8 +5,8 @@ import process from "node:process";
 
 const repoRoot = path.resolve(process.cwd());
 const frontendRoot = repoRoot;
-const mockPort = Number(process.env.SMOKE_API_PORT || "18000");
-const vitePort = Number(process.env.SMOKE_WEB_PORT || "15173");
+const preferredMockPort = Number(process.env.SMOKE_API_PORT || "18000");
+const preferredVitePort = Number(process.env.SMOKE_WEB_PORT || "15173");
 
 const startProcess = (command, args, env = {}) =>
   spawn(command, args, {
@@ -38,6 +38,27 @@ const waitForPort = (port, timeoutMs = 30000) =>
     tryConnect();
   });
 
+const isPortAvailable = (port) =>
+  new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
+
+const findAvailablePort = async (preferredPort) => {
+  for (let port = preferredPort; port < preferredPort + 100; port += 1) {
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+  throw new Error(`No available port found near ${preferredPort}`);
+};
+
 const stopProcess = (child) =>
   new Promise((resolve) => {
     if (!child || child.exitCode !== null) {
@@ -52,6 +73,13 @@ const stopProcess = (child) =>
       }
     }, 2000);
   });
+
+const mockPort = process.env.SMOKE_API_PORT
+  ? preferredMockPort
+  : await findAvailablePort(preferredMockPort);
+const vitePort = process.env.SMOKE_WEB_PORT
+  ? preferredVitePort
+  : await findAvailablePort(preferredVitePort);
 
 const mockApi = startProcess("node", ["scripts/mock-api.mjs"], {
   MOCK_API_PORT: String(mockPort),

@@ -16,6 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
+from ultra_deepagents.bisque.tools import build_bisque_tools
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import build_context_tools, build_tool_capability_manifest_tool
@@ -48,7 +49,12 @@ PLOT_WORKFLOW_GUIDANCE = """
 For code, simulation, model-training, or algorithm-demonstration prompts that ask for plots,
 run the code and create inspectable artifacts. In the final answer, mention each plot near
 the explanation it supports, with a caption immediately after each figure reference. Keep
-captions inline, not all at the end. For follow-up plot edits
+captions inline, not all at the end. Save static Matplotlib figures as publication-quality
+outputs with at least 300 PPI: use the workspace matplotlibrc defaults
+(`savefig.dpi: 300`) or call `fig.savefig(..., dpi=300, bbox_inches="tight")` /
+`plt.savefig(..., dpi=300, bbox_inches="tight")` explicitly. For animated GIFs, also save a
+static 300 PPI summary or key-frame figure when the user needs a durable publication-style
+visual. For follow-up plot edits
 such as "Change the plot to include error bars", edit
 or rerun the existing plotting code and identify the updated artifact instead of starting an
 unrelated analysis.
@@ -105,6 +111,17 @@ artifact_manifest and stage_artifact_for_analysis to inspect prior nested RareSp
 CSV files, JSON predictions, and overlays. Call rarespot_ecology_inference again only when
 the user explicitly asks for a new inference pass, changed threshold/configuration, or new
 image/dataset.
+"""
+
+BISQUE_GUIDANCE = """
+When BisQue resource or dataset URIs are present, use the BisQue tools through the Go
+control plane. Use bisque_search_resources for account-scoped queries, bisque_download_resource
+to materialize selected BisQue resources into local file_ids before code execution, and
+bisque_upload_files to send local V2 upload file_ids back to the linked BisQue account.
+For requests about "my" BisQue resources, pass scope="owner"; for newest/recent resources,
+pass sort="recent"; for file-type questions, pass extensions such as ["png"] or
+["nii", "nii.gz", "nifti"] instead of estimating from broad search results.
+Never expose or ask for BisQue credentials in the answer; the control plane owns account auth.
 """
 
 
@@ -171,6 +188,7 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     sections.append(UPLOADED_FILE_GUIDANCE.strip())
     sections.append(PAPER_REVIEW_GUIDANCE.strip())
     sections.append(RARESPOT_GUIDANCE.strip())
+    sections.append(BISQUE_GUIDANCE.strip())
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -189,6 +207,19 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     if context.selected_file_ids:
         file_ids = ", ".join(context.selected_file_ids)
         lines.append(f"- selected uploaded file ids: {file_ids} | use stage_uploaded_files_for_analysis")
+    if str(context.run_metadata.get("bisque_session_id") or "").strip():
+        lines.append(
+            "- linked BisQue account available: use bisque_search_resources, "
+            "bisque_download_resource, and bisque_upload_files through the control plane; "
+            "use scope='owner' for the user's own resources, sort='recent' for newest-first "
+            "queries, and extensions=['png'] or extensions=['nii','nii.gz','nifti'] for file-type searches"
+        )
+    if context.selected_resource_uris:
+        resource_uris = ", ".join(context.selected_resource_uris[:8])
+        lines.append(f"- selected BisQue resource URIs: {resource_uris} | use bisque_download_resource")
+    if context.selected_dataset_uris:
+        dataset_uris = ", ".join(context.selected_dataset_uris[:8])
+        lines.append(f"- selected BisQue dataset URIs: {dataset_uris} | use BisQue tools before analysis")
     ingested_papers = context.knowledge_context.get("ingested_papers")
     if isinstance(ingested_papers, list) and ingested_papers:
         lines.append("- ingested papers available through paper_manifest/search_paper/read_paper_pages:")
@@ -322,6 +353,8 @@ def build_research_agent(
     )
     resolved_tools.extend(context_tools)
     resolved_tools.extend(paper_tools)
+    if _should_register_bisque_tools(context):
+        resolved_tools.extend(build_bisque_tools(settings))
     if _should_register_rarespot_tools(context):
         resolved_tools.extend(build_rarespot_tools(settings))
     resolved_tools.append(build_tool_capability_manifest_tool(resolved_tools))
@@ -368,3 +401,15 @@ def _should_register_rarespot_tools(context: AgentRunContext | None) -> bool:
         token in lowered
         for token in ("rarespot", "prairie dog", "prairie dogs", "burrow", "burrows")
     )
+
+
+def _should_register_bisque_tools(context: AgentRunContext | None) -> bool:
+    if context is None:
+        return False
+    if str(context.run_metadata.get("bisque_session_id") or "").strip():
+        return True
+    if context.selected_resource_uris or context.selected_dataset_uris:
+        return True
+    if any(str(pack).lower() == "bisque" for pack in context.allowed_tool_packs):
+        return True
+    return any(token in str(context.goal or "").lower() for token in ("bisque", "bqapi"))

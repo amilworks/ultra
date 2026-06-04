@@ -12,20 +12,21 @@
   <a href="#bring-the-platform-up">Bring the platform up</a>
 </p>
 
-BisQue Ultra gives you one local surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. BisQue stores the data. Keycloak handles identity. FastAPI routes tools, runs, and model traffic. React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at vLLM or Ollama without rewriting the application around a single vendor.
+BisQue Ultra gives you one local surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. BisQue stores the data, the Go control plane owns runs and access, Deep Agents workers execute long-running tool work, and React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at any OpenAI-compatible server without rewriting the application around a single vendor.
 
-If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a local scientific workbench whose storage layer is BisQue, whose control plane is FastAPI, whose interface is React, and whose language model can come from any OpenAI-compatible server.
+If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a scientific workbench whose storage layer is BisQue, whose control plane is Go, whose workers are Deep Agents, whose interface is React, and whose language model can come from any OpenAI-compatible server.
 
 Production deployment and operator runbooks are intentionally kept in private internal documentation rather than the public repo.
 
 ## What You Are Launching
 
-You are starting four layers:
+You are starting five layers:
 
 1. `platform/bisque/` brings up BisQue, Postgres, and Keycloak in Docker.
-2. `src/` serves the BisQue Ultra API on `http://127.0.0.1:8000`.
-3. `frontend/` serves the web client on `http://localhost:5173`.
-4. Your model server, usually vLLM or Ollama, answers OpenAI-style chat requests.
+2. `backend/controlplane/` serves the BisQue Ultra API on `http://127.0.0.1:8000`.
+3. `backend/deepagents_runtime/` runs durable Deep Agents and RareSpot workers.
+4. `frontend/` serves the web client on `http://localhost:5174`.
+5. Your model server, usually vLLM or Ollama, answers OpenAI-style chat requests.
 
 Those layers are deliberately separate. If a page loads but chat fails, the frontend is alive and the API or model server is not. If login fails, the problem is usually in the BisQue or Keycloak layer, not the LLM layer. That separation is a feature, because it lets you debug the system by following the symptom instead of guessing.
 
@@ -72,7 +73,7 @@ The public template is now local-first. It no longer points to an internal lab s
 
 - BisQue on `http://localhost:8080`
 - API on `http://localhost:8000`
-- frontend on `http://localhost:5173`
+- frontend on `http://localhost:5174`
 - vLLM on `http://localhost:8001/v1`
 - Ollama on `http://localhost:11434/v1`
 
@@ -162,7 +163,7 @@ Install the frontend:
 pnpm --dir frontend install
 ```
 
-If you skip one half, the failure mode will tell on itself. Missing Python dependencies usually break the API on startup. Missing frontend packages usually leave Vite unable to build or serve.
+If you skip one half, the failure mode will tell on itself. Missing Python dependencies usually break worker or smoke checks. Missing frontend packages usually leave Vite unable to build or serve.
 
 ## Step 4: Bring Up the BisQue Platform
 
@@ -203,31 +204,6 @@ make stop-control-stack
 
 The status output should report `store_backend=postgres` and `dispatch_mode=nats_jetstream`. If it reports the in-memory store, user/admin state and past-chat hydration are not production-representative.
 
-### Legacy Dev Helper
-
-Use the helper script:
-
-```bash
-./scripts/restart_dev.sh restart
-```
-
-That script starts:
-
-- the FastAPI backend on `http://127.0.0.1:8000`
-- the React frontend on `http://localhost:5173`
-
-It also gives you a quick status command:
-
-```bash
-./scripts/restart_dev.sh status
-```
-
-If you want to stop the app layer without tearing down BisQue:
-
-```bash
-./scripts/restart_dev.sh stop
-```
-
 ## Step 6: Verify the System
 
 Run the platform smoke test first:
@@ -236,7 +212,7 @@ Run the platform smoke test first:
 make verify-platform-smoke
 ```
 
-Then run the app-to-platform smoke test:
+Then run the control-plane integration gate:
 
 ```bash
 make verify-integration
@@ -245,15 +221,15 @@ make verify-integration
 Those two checks answer two different questions:
 
 - Is BisQue itself healthy?
-- Can BisQue Ultra actually talk to BisQue?
+- Can the Go control plane persist and dispatch durable work through Postgres and NATS?
 
-That distinction saves time. A green platform check with a red integration check usually means your local API is misconfigured. A red platform check means the bug is lower in the stack.
+That distinction saves time. A green platform check with a red integration check usually means the control stack dependencies need attention. A red platform check means the bug is lower in the BisQue layer.
 
 You can also check the live endpoints directly:
 
 ```bash
 curl -fsS http://127.0.0.1:8000/v1/health
-curl -I -fsS http://localhost:5173
+curl -I -fsS http://localhost:5174
 ```
 
 ## What the Ports Mean
@@ -263,7 +239,7 @@ These ports are easy to confuse because they all belong to one system but not to
 - `8080`: BisQue itself
 - `18080`: Keycloak
 - `8000`: BisQue Ultra API
-- `5173`: BisQue Ultra frontend
+- `5174`: BisQue Ultra frontend
 - `8001`: example local vLLM endpoint
 - `11434`: default Ollama endpoint
 
@@ -278,19 +254,19 @@ Usually the API or the model backend is down.
 Check:
 
 ```bash
-./scripts/restart_dev.sh status
+make status-control-stack
 curl -fsS http://127.0.0.1:8000/v1/health
 ```
 
 If the API is healthy, your next suspect is the model server. Make sure the base URL ends in `/v1` and the model name in `.env` matches the model name the server actually exposes.
 
-### The API starts, then dies on import
+### The control plane starts, then exits
 
 This usually means the environment is incomplete, not that the whole architecture is broken. Run:
 
 ```bash
-uv sync
-uv run python -m py_compile src/api/main.py src/agno_backend/runtime.py src/tools.py
+make status-control-stack
+make control-test
 ```
 
 ### Login works poorly or BisQue looks half-alive
@@ -339,8 +315,8 @@ The absence of those assets does not stop the web stack from booting. It only na
 
 ## Repo Layout
 
-- `src/`: FastAPI backend, tool runtime, Agno orchestration, scientific logic
-- `src/evals/`: runtime evaluation and review helpers imported by the backend
+- `backend/controlplane/`: Go API, auth/session handling, run control, durable store, and OpenAPI contract
+- `backend/deepagents_runtime/`: Python Deep Agents worker runtime, tools, live trace checks, and RareSpot bridge
 - `frontend/`: React and Vite client
 - `platform/bisque/`: absorbed BisQue platform, Docker build context, Keycloak assets
 - `scripts/`: startup and smoke-check helpers
@@ -392,11 +368,11 @@ cp .env.example .env
 uv sync
 pnpm --dir frontend install
 make platform-up
-./scripts/restart_dev.sh restart
+make restart-control-stack
 make verify-platform-smoke
 make verify-integration
 ```
 
-Then point your browser at [http://localhost:5173](http://localhost:5173).
+Then point your browser at [http://localhost:5174](http://localhost:5174).
 
 The rest of this README exists to make that path legible, not longer.

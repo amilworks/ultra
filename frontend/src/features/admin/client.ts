@@ -5,6 +5,7 @@ import type {
   AdminOrganization,
   AdminOrganizationListResponse,
   AdminRunActionResponse,
+  AdminUserStatus,
   AdminUserAccount,
   AdminIssueListResponse,
   AdminOverviewResponse,
@@ -76,6 +77,12 @@ export const deleteAdminUser = (
   apiClient: ApiClient,
   userId: string
 ): Promise<AdminUserAccount> => apiClient.deleteAdminUser(userId);
+
+export const updateAdminUserStatus = (
+  apiClient: ApiClient,
+  userId: string,
+  status: AdminUserStatus
+): Promise<AdminUserAccount> => apiClient.updateAdminUserStatus(userId, status);
 
 export const loadAdminRuns = (
   apiClient: ApiClient,

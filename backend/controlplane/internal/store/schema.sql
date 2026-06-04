@@ -133,6 +133,24 @@ CREATE TABLE IF NOT EXISTS control_artifacts (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS control_bisque_credentials (
+  session_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  org_id text,
+  root_url text NOT NULL,
+  username text NOT NULL,
+  password_ciphertext text NOT NULL,
+  password_nonce text NOT NULL,
+  password_key_id text NOT NULL,
+  password_algorithm text NOT NULL,
+  status text NOT NULL,
+  last_verified_at timestamptz,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  UNIQUE(user_id, org_id, root_url)
+);
+
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
@@ -148,3 +166,4 @@ CREATE INDEX IF NOT EXISTS control_artifacts_sha_idx ON control_artifacts(sha256
 CREATE INDEX IF NOT EXISTS control_organizations_status_updated_idx ON control_organizations(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_org_status_idx ON control_users(org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_email_idx ON control_users(lower(email));
+CREATE INDEX IF NOT EXISTS control_bisque_credentials_user_status_idx ON control_bisque_credentials(user_id, org_id, status, updated_at DESC);

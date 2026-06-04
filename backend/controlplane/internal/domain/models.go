@@ -49,6 +49,13 @@ type ThreadRecord struct {
 	Metadata     JSONMap      `json:"metadata"`
 }
 
+type ThreadListPage struct {
+	Threads    []ThreadRecord
+	TotalCount int
+	Limit      int
+	Offset     int
+}
+
 type RunRecord struct {
 	RunID           string     `json:"run_id"`
 	ThreadID        string     `json:"thread_id,omitempty"`
@@ -125,6 +132,23 @@ type UserAccount struct {
 	Metadata    JSONMap   `json:"metadata"`
 }
 
+type BisqueCredentialRecord struct {
+	SessionID          string    `json:"session_id"`
+	UserID             string    `json:"user_id"`
+	OrgID              string    `json:"org_id,omitempty"`
+	RootURL            string    `json:"root_url"`
+	Username           string    `json:"username"`
+	PasswordCiphertext string    `json:"password_ciphertext"`
+	PasswordNonce      string    `json:"password_nonce"`
+	PasswordKeyID      string    `json:"password_key_id"`
+	PasswordAlgorithm  string    `json:"password_algorithm"`
+	Status             string    `json:"status"`
+	LastVerifiedAt     time.Time `json:"last_verified_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	Metadata           JSONMap   `json:"metadata"`
+}
+
 type Organization struct {
 	OrgID     string    `json:"org_id"`
 	Name      string    `json:"name"`
@@ -176,6 +200,21 @@ type CreateOrganizationInput struct {
 	Name     string
 	Status   string
 	Metadata JSONMap
+}
+
+type UpsertBisqueCredentialInput struct {
+	SessionID          string
+	UserID             string
+	OrgID              string
+	RootURL            string
+	Username           string
+	PasswordCiphertext string
+	PasswordNonce      string
+	PasswordKeyID      string
+	PasswordAlgorithm  string
+	Status             string
+	LastVerifiedAt     time.Time
+	Metadata           JSONMap
 }
 
 type AcquireRunLeaseInput struct {

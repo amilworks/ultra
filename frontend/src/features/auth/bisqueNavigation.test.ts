@@ -27,6 +27,17 @@ describe("bisqueNavigation", () => {
     });
   });
 
+  it("builds configured BisQue browser shortcuts", () => {
+    expect(buildBisqueNavLinks("https://bisque.example.org")).toMatchObject({
+      datasets:
+        "https://bisque.example.org/client_service/browser?resource=/data_service/dataset",
+      images:
+        "https://bisque.example.org/client_service/browser?resource=/data_service/image",
+      tables:
+        "https://bisque.example.org/client_service/browser?resource=/data_service/table",
+    });
+  });
+
   it("infers the origin from a full BisQue URL", () => {
     expect(
       inferBisqueRootFromUrl(

@@ -431,6 +431,70 @@ def test_wait_for_rarespot_run_uses_terminal_event_payload(monkeypatch):
     assert "canonical downloadable outputs" in result["final_answer_hint"]
 
 
+def test_wait_for_rarespot_run_failed_status_returns_failure_hint(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        rarespot_control_base_url="http://control.test",
+    )
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            if url.endswith("/v2/runs/run-failed"):
+                return FakeResponse(
+                    {
+                        "run_id": "run-failed",
+                        "status": "failed",
+                        "error": "RareSpot weights not found",
+                        "response_text": "",
+                    }
+                )
+            if url.endswith("/v2/runs/run-failed/artifacts"):
+                return FakeResponse({"artifacts": []})
+            if url.endswith("/v2/runs/run-failed/events?limit=50&after_sequence=0"):
+                return FakeResponse(
+                    {
+                        "events": [
+                            {
+                                "event_kind": "run.failed",
+                                "payload": {"error": "RareSpot weights not found"},
+                            }
+                        ]
+                    }
+                )
+            raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    result = wait_for_rarespot_run(settings, run_id="run-failed", timeout_seconds=5)
+
+    assert result["status"] == "failed"
+    assert result["error"] == "RareSpot weights not found"
+    assert result["artifact_ids"] == []
+    assert "RareSpot inference failed" in result["final_answer_hint"]
+    assert "Do not claim production detections" in result["final_answer_hint"]
+    assert "Do not run sandbox heuristic replacement" in result["final_answer_hint"]
+
+
 def test_create_rarespot_run_sends_idempotency_header(monkeypatch):
     settings = RuntimeSettings(
         openai_base_url="http://localhost:8001/v1",

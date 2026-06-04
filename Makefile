@@ -1,12 +1,12 @@
-.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
+.PHONY: help install dev platform-up platform-down platform-logs platform-up-prod platform-down-prod platform-logs-prod platform-config-prod dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack test test-chat-stack verify-platform-smoke verify-integration seed-bisque-fixtures cleanup-bisque-fixtures verify-bisque-chat-api verify-bisque-chat-live smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PLATFORM_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.oidc.yml
 PLATFORM_SERVICES := bisque postgres keycloak
 PLATFORM_PROD_COMPOSE_FILES := -f platform/bisque/docker-compose.with-engine.yml -f platform/bisque/docker-compose.production.yml
-PYTHON_QUALITY_SCOPE := src tests
-PYTHON_TYPECHECK_SCOPE := --explicit-package-bases src/config.py src/auth src/api/client.py src/api/v3.py src/tooling/domains src/evals/golden_tasks.py
-PYTHON_STRICT_SCOPE := src/auth src/config.py src/api/client.py src/api/v3.py src/tooling/domains src/tooling/engine.py src/evals/golden_tasks.py src/agno_backend/runtime.py src/agno_backend/pro_mode.py src/training/adapters.py src/api/main.py
+PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
+PYTHON_TYPECHECK_SCOPE := backend/deepagents_runtime/src
+PYTHON_STRICT_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_RULES := --select B,RUF,SIM,RET
 
 help: ## Show this help message
@@ -42,28 +42,26 @@ platform-logs-prod: ## Tail logs from the production-shaped BisQue platform cont
 platform-config-prod: ## Print merged production docker compose config for BisQue + Keycloak + Postgres
 	docker compose --env-file $(ENV_FILE) $(PLATFORM_PROD_COMPOSE_FILES) config
 
-dev-stack: ## Start BisQue platform in Docker plus local API/frontend processes
-	ENV_FILE=$(ENV_FILE) ./scripts/dev_stack.sh
+dev-stack: ## Start production-like Go control stack plus workers and frontend
+	./scripts/restart_control_stack.sh restart
 
-run: ## Run the FastAPI backend
-	uv run uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+run: ## Run the Go control plane API
+	$(MAKE) -C backend/controlplane run
 
-run-reload: ## Run the FastAPI backend with scoped reload watchers
-	@reload_dirs="--reload-dir src"; \
-	if [ -d tests ]; then reload_dirs="$$reload_dirs --reload-dir tests"; fi; \
-	uv run uvicorn src.api.main:app --reload $$reload_dirs --host 127.0.0.1 --port 8000
+run-reload: ## Run the Go control plane API; Go hot reload is not configured
+	$(MAKE) -C backend/controlplane run
 
 run-frontend: ## Run the React frontend
 	pnpm --dir frontend dev
 
-restart-dev: ## Restart local backend (with reload) and frontend dev servers
-	./scripts/restart_dev.sh restart
+restart-dev: ## Restart production-like Go control stack
+	./scripts/restart_control_stack.sh restart
 
-stop-dev: ## Stop local backend and frontend dev servers
-	./scripts/restart_dev.sh stop
+stop-dev: ## Stop production-like Go control stack
+	./scripts/restart_control_stack.sh stop
 
-status-dev: ## Check local backend and frontend dev server health
-	./scripts/restart_dev.sh status
+status-dev: ## Inspect production-like Go control stack
+	./scripts/restart_control_stack.sh status
 
 restart-control-stack: ## Restart production-like Go + NATS + Postgres + worker + frontend stack
 	./scripts/restart_control_stack.sh restart
@@ -74,6 +72,14 @@ stop-control-stack: ## Stop production-like Go control stack
 status-control-stack: ## Inspect production-like Go control stack durability and worker health
 	./scripts/restart_control_stack.sh status
 
+deploy-control-stack: ## Deploy Go control plane + Deep Agents worker stack (set RELEASE_SHA)
+	@release="$${RELEASE_SHA:-$${SHA:-}}"; \
+	if [ -z "$$release" ]; then \
+		echo "Set RELEASE_SHA=<git-sha> or SHA=<git-sha>." >&2; \
+		exit 1; \
+	fi; \
+	./scripts/deploy_ultra_control_stack.sh "$$release"
+
 test: ## Run tests with pytest
 	uv run pytest
 
@@ -83,8 +89,8 @@ test-chat-stack: ## Run chat streaming/tool composition integration checks
 verify-platform-smoke: ## Validate platform/bisque compose config and health endpoint
 	ENV_FILE=$(ENV_FILE) ./scripts/verify_platform_smoke.sh
 
-verify-integration: ## Validate local API wiring against the absorbed BisQue platform
-	ENV_FILE=$(ENV_FILE) ./scripts/verify_integration.sh
+verify-integration: ## Validate Go control plane persistence and transport integration
+	$(MAKE) control-integration
 
 seed-bisque-fixtures: ## Seed deterministic BisQue fixtures for chat/live verification
 	ENV_FILE=$(ENV_FILE) ./scripts/manage_bisque_chat_fixtures.sh seed
@@ -154,7 +160,7 @@ control-migrate: ## Apply the Go control-plane Postgres schema
 	cd backend/controlplane && go run ./cmd/ultra-control migrate
 
 test-cov: ## Run tests with coverage report
-	uv run pytest --cov=src --cov-report=html --cov-report=term
+	uv run pytest --cov=backend/deepagents_runtime/src --cov-report=html --cov-report=term
 
 lint: ## Run linting checks
 	uv run ruff check $(PYTHON_QUALITY_SCOPE)
@@ -198,7 +204,7 @@ shell: ## Open a shell in the virtual environment
 	uv run bash
 
 codeexec-image: ## Build Python sandbox image for execute_python_job
-	docker build -f docker/codeexec/Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
+	docker build -f deploy/docker/deepagents-sandbox.Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
 
 control-test: ## Run Go control plane tests
 	$(MAKE) -C backend/controlplane test

@@ -23,6 +23,7 @@ var requiredPostgresControlTables = []string{
 	"control_run_leases",
 	"control_worker_heartbeats",
 	"control_artifacts",
+	"control_bisque_credentials",
 }
 
 func VerifyPostgresSchema(ctx context.Context, db schemaQuerier) error {

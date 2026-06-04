@@ -898,6 +898,19 @@ export type AdminToolUsageRecord = {
   failed: number;
 };
 
+export type AdminActivityPeriod = {
+  label: string;
+  window: string;
+  messages: number;
+  user_messages: number;
+  assistant_messages: number;
+  tool_calls: number;
+  active_users: number;
+  runs: number;
+  failed_runs: number;
+  artifacts: number;
+};
+
 export type AdminRuntimeSummary = {
   app_version?: string;
   store_backend: string;
@@ -1037,6 +1050,7 @@ export type AdminOverviewResponse = {
   runtime: AdminRuntimeSummary;
   queue: AdminQueueDiagnostics;
   kpis: AdminPlatformKpis;
+  activity: AdminActivityPeriod[];
   usage_last_24h: AdminUsageBucket[];
   tool_usage_7d: AdminToolUsageRecord[];
   workers: AdminWorkerRecord[];
@@ -1078,6 +1092,12 @@ export type AdminCreateUserRequest = {
   status?: string;
   org_id?: string;
   metadata?: Record<string, unknown>;
+};
+
+export type AdminUserStatus = "active" | "pending" | "disabled" | "rejected";
+
+export type AdminUpdateUserStatusRequest = {
+  status: AdminUserStatus;
 };
 
 export type AdminUserAccount = {
@@ -1152,6 +1172,48 @@ export type BisqueImportResponse = {
   file_count: number;
   uploaded: UploadedFileRecord[];
   imports: BisqueImportItem[];
+};
+
+export type BisqueResourceRecord = {
+  resource_uri: string;
+  name?: string | null;
+  resource_uniq?: string | null;
+  resource_type?: string | null;
+  tags?: Record<string, string>;
+  client_view_url?: string | null;
+  image_service_url?: string | null;
+};
+
+export type BisqueSearchRequest = {
+  resourceType?: string;
+  tagQuery?: string;
+  tagOrder?: string;
+  query?: string;
+  nameContains?: string;
+  extensions?: string[];
+  scope?: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+  countAll?: boolean;
+};
+
+export type BisqueSearchResponse = {
+  count: number;
+  results: BisqueResourceRecord[];
+};
+
+export type BisqueUploadRecord = {
+  file_id?: string | null;
+  artifact_id?: string | null;
+  resource_uri: string;
+  name?: string | null;
+  resource_uniq?: string | null;
+};
+
+export type BisqueUploadResponse = {
+  count: number;
+  uploads: BisqueUploadRecord[];
 };
 
 export type Hdf5ViewerTreeNode = {
@@ -1427,7 +1489,14 @@ export type UploadViewerInfo = {
     channel_colors: string[];
     time_index: number;
     z_index: number;
+    scalar_colormap?: string | null;
+    volume_signal_floor?: number | null;
+    volume_density?: number | null;
+    volume_lighting?: boolean | null;
+    volume_lighting_strength?: number | null;
     volume_channel?: number | null;
+    volume_view_preset?: string | null;
+    volume_camera_mode?: string | null;
     volume_clip_min?: { x: number; y: number; z: number };
     volume_clip_max?: { x: number; y: number; z: number };
   };
@@ -1447,6 +1516,9 @@ export type UploadViewerInfo = {
     dims_order: string;
     array_shape: number[];
     array_dtype: string;
+    sha256?: string;
+    size_bytes?: number;
+    content_type?: string;
     array_min?: number;
     array_max?: number;
     intensity_stats?: {
@@ -1605,7 +1677,14 @@ export type UploadViewerInfo = {
       channel_colors: string[];
       time_index: number;
       z_index: number;
+      scalar_colormap?: string | null;
+      volume_signal_floor?: number | null;
+      volume_density?: number | null;
+      volume_lighting?: boolean | null;
+      volume_lighting_strength?: number | null;
       volume_channel?: number | null;
+      volume_view_preset?: string | null;
+      volume_camera_mode?: string | null;
     };
     service_urls?: {
       preview?: string;
@@ -1653,6 +1732,10 @@ export type UploadViewerInfo = {
 export type UploadViewerHistogramResponse = {
   file_id: string;
   bins: number;
+  dtype?: string;
+  channels?: number[];
+  source?: string;
+  sample_count?: number;
   histogram: {
     bins: number[];
     edges: number[];
@@ -1752,13 +1835,28 @@ export type BisqueAuthSessionResponse = {
   username?: string | null;
   bisque_root?: string | null;
   expires_at?: string | null;
-  mode?: "bisque" | "guest" | null;
+  mode?: "bisque" | "guest" | "workos" | null;
+  provider?: "local" | "workos" | string | null;
+  account_status?: AdminUserStatus | "not_configured" | string | null;
+  account_email?: string | null;
+  account_user_id?: string | null;
+  message?: string | null;
+  authorization_url?: string | null;
+  logout_url?: string | null;
+  user?: {
+    id?: string | null;
+    username?: string | null;
+    email?: string | null;
+    org_id?: string | null;
+    role?: string | null;
+  } | null;
   guest_profile?: {
     name: string;
     email: string;
     affiliation: string;
   } | null;
   is_admin?: boolean;
+  bisque_linked?: boolean | null;
 };
 
 export type BisqueAuthLoginRequest = {
@@ -1766,10 +1864,14 @@ export type BisqueAuthLoginRequest = {
   password: string;
 };
 
-export type BisqueGuestAuthRequest = {
+export type AccountRequestPayload = {
   name: string;
   email: string;
   affiliation: string;
 };
+
+export type AccountRequestResponse = BisqueAuthSessionResponse;
+
+export type BisqueGuestAuthRequest = AccountRequestPayload;
 
 export * from "./types-v2";

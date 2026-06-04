@@ -183,6 +183,19 @@ def build_rarespot_store(js: Any, settings: RuntimeSettings) -> Any:
     return NATSRunEventStore(js, settings)
 
 
+def validate_rarespot_runtime_config(settings: RuntimeSettings) -> RareSpotConfig:
+    config = RareSpotConfig.from_settings(settings)
+    if not config.weights_path.is_file():
+        raise FileNotFoundError(f"RareSpot weights not found: {config.weights_path}")
+    if not config.yolov5_path.is_dir():
+        raise FileNotFoundError(f"YOLOv5 runtime directory not found: {config.yolov5_path}")
+    detect_script = config.yolov5_path / "detect.py"
+    if not detect_script.is_file():
+        raise FileNotFoundError(f"YOLOv5 detect.py not found: {detect_script}")
+    config.artifact_root.mkdir(parents=True, exist_ok=True)
+    return config
+
+
 def build_rarespot_consumer_config(settings: RuntimeSettings) -> Any:
     from nats.js import api
 
@@ -669,6 +682,7 @@ async def _stop_run_heartbeat_task(task: asyncio.Task | None) -> None:
 async def run_worker_loop(settings: RuntimeSettings | None = None) -> None:
     settings = settings or RuntimeSettings.from_env()
     settings = _rarespot_worker_identity(settings)
+    validate_rarespot_runtime_config(settings)
     import nats
     from nats.errors import TimeoutError as NATSTimeoutError
 

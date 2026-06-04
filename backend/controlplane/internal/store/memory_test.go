@@ -92,6 +92,39 @@ func TestMemoryStoreThreadRunEventArtifactFlow(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreListThreadsPaginatesWithTotalCount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+
+	for _, title := range []string{"first", "second", "third", "fourth"} {
+		if _, err := store.CreateThread(ctx, domain.CreateThreadInput{
+			UserID: "user-1",
+			Title:  title,
+		}); err != nil {
+			t.Fatalf("CreateThread %q: %v", title, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	page, err := store.ListThreads(ctx, 2, 1, "")
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	if page.TotalCount != 4 {
+		t.Fatalf("total count = %d, want 4", page.TotalCount)
+	}
+	if page.Limit != 2 || page.Offset != 1 {
+		t.Fatalf("page = limit %d offset %d, want limit 2 offset 1", page.Limit, page.Offset)
+	}
+	if len(page.Threads) != 2 {
+		t.Fatalf("threads = %d, want 2", len(page.Threads))
+	}
+	if page.Threads[0].Title != "third" || page.Threads[1].Title != "second" {
+		t.Fatalf("paged titles = %q, %q; want third, second", page.Threads[0].Title, page.Threads[1].Title)
+	}
+}
+
 func TestMemoryStoreCreateAndListUserAccounts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

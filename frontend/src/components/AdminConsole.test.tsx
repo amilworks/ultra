@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -11,6 +14,34 @@ class ResizeObserverMock {
 }
 
 globalThis.ResizeObserver = ResizeObserverMock as typeof ResizeObserver;
+
+if (!HTMLElement.prototype.hasPointerCapture) {
+  Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+    configurable: true,
+    value: () => false,
+  });
+}
+
+if (!HTMLElement.prototype.setPointerCapture) {
+  Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+    configurable: true,
+    value: () => undefined,
+  });
+}
+
+if (!HTMLElement.prototype.releasePointerCapture) {
+  Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", {
+    configurable: true,
+    value: () => undefined,
+  });
+}
+
+if (!HTMLElement.prototype.scrollIntoView) {
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: () => undefined,
+  });
+}
 
 const emptyOverview: AdminOverviewResponse = {
   generated_at: "2026-06-01T00:00:00Z",
@@ -79,6 +110,7 @@ const emptyOverview: AdminOverviewResponse = {
     total_storage_bytes: 0,
     avg_messages_per_conversation: 0,
   },
+  activity: [],
   usage_last_24h: [],
   tool_usage_7d: [],
   workers: [],
@@ -86,7 +118,28 @@ const emptyOverview: AdminOverviewResponse = {
   recent_issues: [],
 };
 
+const openUsersManagement = (): void => {
+  fireEvent.click(screen.getByRole("tab", { name: /Users Management/i }));
+};
+
+const chooseSelectOption = async (name: string, optionName: string): Promise<void> => {
+  fireEvent.pointerDown(screen.getByRole("combobox", { name }), {
+    button: 0,
+    ctrlKey: false,
+    pointerId: 1,
+    pointerType: "mouse",
+  });
+  fireEvent.click(await screen.findByRole("option", { name: optionName }));
+};
+
 describe("AdminConsole", () => {
+  it("uses shadcn selects instead of native browser dropdowns", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/components/AdminConsole.tsx"), "utf8");
+
+    expect(source).not.toMatch(/<select\b/);
+    expect(source).toMatch(/<SelectTrigger/);
+  });
+
   it("surfaces stale worker-event diagnostics for long autonomous runs", () => {
     const staleRun: AdminRunRecord = {
       run_id: "run_stale",
@@ -193,12 +246,8 @@ describe("AdminConsole", () => {
     expect(screen.getByText("NATS JetStream")).toBeInTheDocument();
     expect(screen.getByText("ultra.runs.jobs")).toBeInTheDocument();
     expect(screen.getByText("external workers")).toBeInTheDocument();
-    expect(screen.getByText("Workers")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "No app-level worker heartbeats yet. 1 active NATS worker consumer is ready to pull jobs."
-      )
-    ).toBeInTheDocument();
+    expect(screen.getByText("Activity")).toBeInTheDocument();
+    expect(screen.getByText("Tool calls")).toBeInTheDocument();
     expect(screen.getByText("Queue Health")).toBeInTheDocument();
     expect(screen.getByText("ULTRA_RUNS")).toBeInTheDocument();
     expect(screen.getByText("ultra-deepagents-worker")).toBeInTheDocument();
@@ -222,14 +271,64 @@ describe("AdminConsole", () => {
     expect(onRequeueRun).toHaveBeenCalledWith("run_stale");
   });
 
-  it("renders durable worker heartbeat records", () => {
+  it("replaces the worker liveness card with periodized activity metrics", () => {
     render(
       <AdminConsole
         overview={{
           ...emptyOverview,
+          activity: [
+            {
+              label: "Daily",
+              window: "24h",
+              messages: 12,
+              user_messages: 7,
+              assistant_messages: 5,
+              tool_calls: 9,
+              active_users: 3,
+              runs: 4,
+              failed_runs: 1,
+              artifacts: 2,
+            },
+            {
+              label: "Weekly",
+              window: "7d",
+              messages: 40,
+              user_messages: 21,
+              assistant_messages: 19,
+              tool_calls: 33,
+              active_users: 8,
+              runs: 12,
+              failed_runs: 2,
+              artifacts: 7,
+            },
+            {
+              label: "Monthly",
+              window: "30d",
+              messages: 120,
+              user_messages: 64,
+              assistant_messages: 56,
+              tool_calls: 95,
+              active_users: 19,
+              runs: 44,
+              failed_runs: 5,
+              artifacts: 31,
+            },
+            {
+              label: "Total",
+              window: "all",
+              messages: 180,
+              user_messages: 96,
+              assistant_messages: 84,
+              tool_calls: 140,
+              active_users: 24,
+              runs: 70,
+              failed_runs: 9,
+              artifacts: 48,
+            },
+          ],
           workers: [
             {
-              worker_id: "ultra-deepagents-worker@host:123",
+              worker_id: "worker-card-only",
               worker_kind: "deepagents",
               status: "busy",
               current_run_id: "run_active",
@@ -280,11 +379,101 @@ describe("AdminConsole", () => {
       />
     );
 
-    expect(screen.getByText("ultra-deepagents-worker@host:123")).toBeInTheDocument();
-    expect(screen.getByText("deepagents • host")).toBeInTheDocument();
-    expect(screen.getByText("busy")).toBeInTheDocument();
-    expect(screen.getByText("Running run_active • heartbeat 12s ago")).toBeInTheDocument();
-    expect(screen.getByText("Version: 0.1.0")).toBeInTheDocument();
+    const activityCard = screen.getByText("Activity").closest("[data-slot='card']");
+    expect(activityCard).not.toBeNull();
+    expect(within(activityCard as HTMLElement).getByText("Daily")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Weekly")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Monthly")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Total")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Messages")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Tool calls")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Active users")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("Artifacts")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("120")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("95")).toBeInTheDocument();
+    expect(within(activityCard as HTMLElement).getByText("31")).toBeInTheDocument();
+    expect(screen.queryByText("Workers")).not.toBeInTheDocument();
+    expect(screen.queryByText("Durable Deep Agents and tool-worker liveness heartbeats.")).not.toBeInTheDocument();
+    expect(screen.queryByText("worker-card-only")).not.toBeInTheDocument();
+  });
+
+  it("separates WorkOS user management into its own admin page", () => {
+    render(
+      <AdminConsole
+        overview={emptyOverview}
+        organizations={[
+          {
+            org_id: "local-org",
+            name: "Local Organization",
+            status: "active",
+            created_at: "2026-06-01T00:00:00Z",
+            updated_at: "2026-06-01T00:00:00Z",
+            metadata: {},
+          },
+        ]}
+        users={[
+          {
+            user_id: "user_existing",
+            email: "existing@example.org",
+            display_name: "Existing Researcher",
+            role: "researcher",
+            status: "active",
+            org_id: "local-org",
+            conversations: 2,
+            messages: 12,
+            runs_total: 3,
+            runs_running: 0,
+            runs_failed: 1,
+            runs_succeeded: 2,
+            uploads: 1,
+            storage_bytes: 2048,
+            last_activity_at: "2026-06-01T00:00:00Z",
+          },
+        ]}
+        runs={[]}
+        issues={[]}
+        loadingOverview={false}
+        loadingOrganizations={false}
+        loadingUsers={false}
+        loadingRuns={false}
+        loadingIssues={false}
+        error={null}
+        runCancellingById={{}}
+        deletingConversationKey={null}
+        runStatusFilter="running"
+        runQuery=""
+        userQuery=""
+        activeRunEventRunId={null}
+        runEventsById={{}}
+        runEventsLoadingById={{}}
+        onRunStatusFilterChange={vi.fn()}
+        onRunQueryChange={vi.fn()}
+        onUserQueryChange={vi.fn()}
+        onRefreshAll={vi.fn()}
+        onRefreshOrganizations={vi.fn()}
+        onRefreshUsers={vi.fn()}
+        onRefreshRuns={vi.fn()}
+        onRefreshIssues={vi.fn()}
+        onCreateOrganization={vi.fn()}
+        onCreateUser={vi.fn()}
+        onDeleteUser={vi.fn()}
+        onCancelRun={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onInspectRunEvents={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("tab", { name: /Overview/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Users Management/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("New user email")).not.toBeInTheDocument();
+
+    openUsersManagement();
+
+    expect(screen.getByRole("heading", { name: "Users Management" })).toBeInTheDocument();
+    expect(screen.getByText(/WorkOS AuthKit signs users in/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("New user email")).toBeInTheDocument();
+    expect(screen.getByText("existing@example.org")).toBeInTheDocument();
+    expect(screen.getByText("Local Organization")).toBeInTheDocument();
   });
 
   it("submits admin-created user accounts", async () => {
@@ -362,18 +551,16 @@ describe("AdminConsole", () => {
       />
     );
 
+    openUsersManagement();
+
     fireEvent.change(screen.getByLabelText("New user email"), {
       target: { value: "grace@example.org" },
     });
     fireEvent.change(screen.getByLabelText("New user display name"), {
       target: { value: "Grace Hopper" },
     });
-    fireEvent.change(screen.getByLabelText("New user role"), {
-      target: { value: "admin" },
-    });
-    fireEvent.change(screen.getByLabelText("New user org"), {
-      target: { value: "smithsonian" },
-    });
+    await chooseSelectOption("New user role", "Admin");
+    await chooseSelectOption("New user org", "Smithsonian (smithsonian)");
     fireEvent.click(screen.getByRole("button", { name: "Create user" }));
 
     expect(onCreateUser).toHaveBeenCalledWith({
@@ -443,9 +630,81 @@ describe("AdminConsole", () => {
       />
     );
 
+    openUsersManagement();
+
     fireEvent.click(screen.getByRole("button", { name: "Deactivate user user_existing" }));
 
     expect(onDeleteUser).toHaveBeenCalledWith("user_existing");
+  });
+
+  it("approves and rejects pending WorkOS account requests", () => {
+    const onUpdateUserStatus = vi.fn();
+
+    render(
+      <AdminConsole
+        overview={emptyOverview}
+        organizations={[]}
+        users={[
+          {
+            user_id: "workos:user_pending",
+            email: "pending@example.org",
+            display_name: "Pending Scientist",
+            role: "researcher",
+            status: "pending",
+            org_id: "local-org",
+            conversations: 0,
+            messages: 0,
+            runs_total: 0,
+            runs_running: 0,
+            runs_failed: 0,
+            runs_succeeded: 0,
+            uploads: 0,
+            storage_bytes: 0,
+          },
+        ]}
+        runs={[]}
+        issues={[]}
+        loadingOverview={false}
+        loadingOrganizations={false}
+        loadingUsers={false}
+        loadingRuns={false}
+        loadingIssues={false}
+        error={null}
+        runCancellingById={{}}
+        deletingConversationKey={null}
+        userUpdatingById={{}}
+        runStatusFilter="running"
+        runQuery=""
+        userQuery=""
+        activeRunEventRunId={null}
+        runEventsById={{}}
+        runEventsLoadingById={{}}
+        onRunStatusFilterChange={vi.fn()}
+        onRunQueryChange={vi.fn()}
+        onUserQueryChange={vi.fn()}
+        onRefreshAll={vi.fn()}
+        onRefreshOrganizations={vi.fn()}
+        onRefreshUsers={vi.fn()}
+        onRefreshRuns={vi.fn()}
+        onRefreshIssues={vi.fn()}
+        onCreateOrganization={vi.fn()}
+        onCreateUser={vi.fn()}
+        onDeleteUser={vi.fn()}
+        onUpdateUserStatus={onUpdateUserStatus}
+        onCancelRun={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onInspectRunEvents={vi.fn()}
+      />
+    );
+
+    openUsersManagement();
+
+    expect(screen.getByText("Pending review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve user workos:user_pending" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject user workos:user_pending" }));
+
+    expect(onUpdateUserStatus).toHaveBeenCalledWith("workos:user_pending", "active");
+    expect(onUpdateUserStatus).toHaveBeenCalledWith("workos:user_pending", "rejected");
   });
 
   it("submits admin-created organizations", async () => {
@@ -497,6 +756,8 @@ describe("AdminConsole", () => {
         onInspectRunEvents={vi.fn()}
       />
     );
+
+    openUsersManagement();
 
     fireEvent.change(screen.getByLabelText("New org id"), {
       target: { value: "allen-institute" },

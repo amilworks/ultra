@@ -59,6 +59,10 @@ export type V2ThreadRecord = {
 
 export type V2ThreadListResponse = {
   count: number;
+  total_count: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
   threads: V2ThreadRecord[];
 };
 

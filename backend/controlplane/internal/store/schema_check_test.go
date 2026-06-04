@@ -20,7 +20,7 @@ func TestVerifyPostgresSchemaReportsMissingControlTables(t *testing.T) {
 		t.Fatalf("VerifyPostgresSchema() error = nil, want missing table error")
 	}
 	message := err.Error()
-	for _, want := range []string{"control_organizations", "control_users", "control_run_events", "control_run_leases", "control_worker_heartbeats", "control_artifacts"} {
+	for _, want := range []string{"control_organizations", "control_users", "control_run_events", "control_run_leases", "control_worker_heartbeats", "control_artifacts", "control_bisque_credentials"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("VerifyPostgresSchema() error = %q, want mention %s", message, want)
 		}

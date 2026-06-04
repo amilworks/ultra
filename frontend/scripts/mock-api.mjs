@@ -38,6 +38,23 @@ const browserLogoutRedirectUrl = (value) => {
   return "/";
 };
 
+const workosSession = () => ({
+  authenticated: true,
+  provider: "workos",
+  mode: "workos",
+  username: "mobile.smoke@example.com",
+  user: {
+    id: "user_mobile_smoke",
+    email: "mobile.smoke@example.com",
+    first_name: "Mobile",
+    last_name: "Smoke",
+  },
+  bisque_root: bisqueRoot,
+  bisque_linked: true,
+  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  is_admin: false,
+});
+
 const readSessionMode = (request) =>
   String(request.headers.cookie || "")
     .split(";")
@@ -60,8 +77,68 @@ const server = http.createServer(async (request, response) => {
       bisque_urls: navLinks,
       bisque_auth_enabled: true,
       bisque_guest_enabled: true,
+      auth_provider: "local",
       admin_enabled: false,
     });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/config/public") {
+    sendJson(response, 200, {
+      bisque_root: bisqueRoot,
+      bisque_browser_url: navLinks.images,
+      bisque_urls: navLinks,
+      bisque_auth_enabled: true,
+      bisque_guest_enabled: false,
+      auth_provider: "workos",
+      admin_enabled: false,
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/auth/session") {
+    sendJson(response, 200, workosSession());
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/auth/login") {
+    sendJson(response, 200, {
+      authenticated: false,
+      provider: "workos",
+      mode: "workos",
+      authorization_url: "/",
+    });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/auth/logout") {
+    sendJson(response, 200, {
+      authenticated: false,
+      provider: "workos",
+      mode: "workos",
+      logout_url: "/",
+    });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/auth/guest") {
+    sendJson(response, 200, workosSession());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/threads") {
+    sendJson(response, 200, {
+      threads: [],
+      count: 0,
+      total_count: 0,
+      offset: Number(url.searchParams.get("offset") || "0"),
+      limit: Number(url.searchParams.get("limit") || "50"),
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/resources") {
+    sendJson(response, 200, { count: 0, resources: [] });
     return;
   }
 

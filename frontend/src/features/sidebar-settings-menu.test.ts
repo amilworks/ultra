@@ -20,6 +20,43 @@ describe("sidebar settings menu", () => {
     expect(app).toMatch(/<TabsList/);
     expect(app).toMatch(/<SelectGroup>/);
     expect(app).toMatch(/<Separator/);
+    expect(app).toMatch(/import \{ Toaster, toast \} from "sonner";/);
+    expect(app).toMatch(/Alert,\s*AlertAction,\s*AlertDescription,\s*AlertTitle/);
+    expect(app).toMatch(/onLinkBisqueAccount/);
+    expect(app).toMatch(/onUnlinkBisqueAccount/);
+    expect(app).toMatch(/settings-bisque-username/);
+    expect(app).toMatch(/settings-bisque-password/);
+    expect(app).toMatch(/const \[bisqueCredentialsLinked,\s*setBisqueCredentialsLinked\]/);
+    expect(app).toMatch(/setBisqueCredentialsLinked\(Boolean\(session\.bisque_linked\)\)/);
+    expect(app).toMatch(
+      /authStatus !== "authenticated" \|\|\s*\(authMode !== "bisque" && authMode !== "workos"\) \|\|\s*!bisqueCredentialsLinked \|\|\s*!bisqueNavLinks/
+    );
+    expect(app).toMatch(/const bisqueLinked = Boolean\(bisqueCredentialsLinked && authUser\)/);
+    expect(app).toMatch(
+      /apiClient\.searchBisqueResources\(\{\s*resourceType: "image",\s*scope: "owner",\s*limit: 1,\s*countAll: true,/s
+    );
+    expect(app).toMatch(/type BisqueResourceCounts/);
+    expect(app).toMatch(/formatBisqueShortcutLabel/);
+    expect(app).toMatch(/resourceType: "image",\s*scope: "owner",\s*limit: 1,\s*countAll: true/s);
+    expect(app).toMatch(/resourceType: "dataset",\s*scope: "owner",\s*limit: 1,\s*countAll: true/s);
+    expect(app).toMatch(/resourceType: "table",\s*scope: "owner",\s*limit: 1,\s*countAll: true/s);
+    expect(app).toMatch(
+      /formatBisqueShortcutLabel\(\s*bisqueResourceCounts\?\.image,\s*"Image",\s*"Images"\s*\)/s
+    );
+    expect(app).toMatch(
+      /formatBisqueShortcutLabel\(\s*bisqueResourceCounts\?\.dataset,\s*"Dataset",\s*"Datasets"\s*\)/s
+    );
+    expect(app).toMatch(
+      /formatBisqueShortcutLabel\(\s*bisqueResourceCounts\?\.table,\s*"Table",\s*"Tables"\s*\)/s
+    );
+    expect(app).not.toMatch(/<span>View Images<\/span>/);
+    expect(app).not.toMatch(/<span>View Datasets<\/span>/);
+    expect(app).not.toMatch(/<span>View Tables<\/span>/);
+    expect(app).toMatch(/BisQue account linked/);
+    expect(app).toMatch(/Open BisQue/);
+    expect(app).toMatch(/Unlink account/);
+    expect(app).toMatch(/toast\.success\("Successfully linked BisQue account"/);
+    expect(app).toMatch(/<Toaster/);
     expect(app).toMatch(/app-sidebar-user-menu/);
     expect(app).toMatch(/<Avatar className="app-sidebar-account-avatar">/);
     expect(app).toMatch(/className="app-sidebar-account-menu"/);
@@ -104,6 +141,11 @@ describe("sidebar settings menu", () => {
     expect(styles).toMatch(
       /\.app-settings-row-title,\s*\.app-settings-account-name\s*\{[^}]*font-size:\s*0\.86rem;[^}]*font-weight:\s*470;/s
     );
+    expect(styles).toMatch(/\.app-settings-bisque-link-form/);
+    expect(styles).toMatch(
+      /\.app-settings-bisque-credential-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s
+    );
+    expect(styles).toMatch(/\.app-settings-bisque-link-status/);
     expect(styles).not.toMatch(/var\(--fg\)/);
     expect(styles).toMatch(/@media \(max-width: 760px\)/);
   });

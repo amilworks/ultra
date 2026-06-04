@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
@@ -160,6 +160,14 @@ export function SlicePlaneCanvas({
     }),
     [descriptor.world_size.height, descriptor.world_size.width]
   );
+  const planeAspect = useMemo(() => {
+    const descriptorAspect = Number(descriptor.aspect_ratio);
+    const aspect = Number.isFinite(descriptorAspect) && descriptorAspect > 0
+      ? descriptorAspect
+      : worldSize.width / Math.max(1e-9, worldSize.height);
+    return Math.max(0.125, Math.min(8, aspect));
+  }, [descriptor.aspect_ratio, worldSize.height, worldSize.width]);
+  const planeStyle = { "--viewer-plane-aspect": String(planeAspect) } as CSSProperties;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -173,16 +181,13 @@ export function SlicePlaneCanvas({
         alpha: true,
         powerPreference: "high-performance",
       });
-      if (renderError) {
-        setRenderError(null);
-      }
     } catch (error) {
       setRenderError(error instanceof Error ? error.message : "WebGL unavailable");
       return;
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setClearColor(0xf5f2eb, 1);
+    renderer.setClearColor(0x05070a, 1);
     renderer.domElement.className = "viewer-webgl-canvas";
     container.appendChild(renderer.domElement);
 
@@ -330,7 +335,6 @@ export function SlicePlaneCanvas({
     measurement,
     onMeasurePoint,
     onSelectPoint,
-    renderError,
     worldSize.height,
     worldSize.width,
   ]);
@@ -376,9 +380,14 @@ export function SlicePlaneCanvas({
     return (
       <div
         className={className ?? "viewer-canvas-root"}
+        style={planeStyle}
         data-viewer-title={title}
         data-viewer-aspect={descriptor.aspect_ratio.toFixed(4)}
-        data-viewer-renderer="fallback"
+        data-viewer-renderer="fallback-slice-plane"
+        data-viewer-world-width={worldSize.width.toFixed(4)}
+        data-viewer-world-height={worldSize.height.toFixed(4)}
+        data-viewer-pixel-width={String(descriptor.pixel_size.width)}
+        data-viewer-pixel-height={String(descriptor.pixel_size.height)}
         data-crosshair-row={crosshair ? String(Math.round(crosshair.row)) : undefined}
         data-crosshair-col={crosshair ? String(Math.round(crosshair.col)) : undefined}
       >
@@ -405,8 +414,14 @@ export function SlicePlaneCanvas({
     <div
       ref={containerRef}
       className={className ?? "viewer-canvas-root"}
+      style={planeStyle}
       data-viewer-title={title}
       data-viewer-aspect={descriptor.aspect_ratio.toFixed(4)}
+      data-viewer-renderer="threejs-slice-plane"
+      data-viewer-world-width={worldSize.width.toFixed(4)}
+      data-viewer-world-height={worldSize.height.toFixed(4)}
+      data-viewer-pixel-width={String(descriptor.pixel_size.width)}
+      data-viewer-pixel-height={String(descriptor.pixel_size.height)}
       data-crosshair-row={crosshair ? String(Math.round(crosshair.row)) : undefined}
       data-crosshair-col={crosshair ? String(Math.round(crosshair.col)) : undefined}
     >

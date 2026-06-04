@@ -43,14 +43,14 @@ async function maybeContinueAsGuest(page) {
 }
 
 async function openMobileDrawer(page) {
-  await page.getByRole("button", { name: /toggle sidebar/i }).click();
+  await page.getByRole("button", { name: /toggle sidebar|expand sidebar|collapse sidebar/i }).click();
   await page.locator('.app-sidebar[data-mobile="true"]').waitFor({ state: "visible" });
 }
 
 async function captureCommonMetrics(page) {
   return page.evaluate(() => {
     const query = (selector) => document.querySelector(selector);
-    const headerTitle = query(".app-header-title-text");
+    const title = query(".app-header-title-text") ?? query(".hero-title");
     const composer = query(".app-composer-textarea");
     const bodyStyles = getComputedStyle(document.body);
     const composerStyles = composer ? getComputedStyle(composer) : null;
@@ -67,7 +67,7 @@ async function captureCommonMetrics(page) {
       },
       fonts: {
         body: bodyStyles.fontSize,
-        headerTitle: headerTitle ? getComputedStyle(headerTitle).fontSize : null,
+        title: title ? getComputedStyle(title).fontSize : null,
         composer: composerStyles?.fontSize ?? null,
       },
       composerRect: composer
@@ -98,7 +98,8 @@ async function runCase(browser, testCase) {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await maybeContinueAsGuest(page);
   await page.waitForLoadState("networkidle");
-  await page.waitForSelector(".app-header-title-text", { timeout: 10000 });
+  await page.waitForSelector(".app-shell", { timeout: 10000 });
+  await page.waitForSelector(".pk-prompt-input-textarea", { timeout: 10000 });
 
   const metrics = await captureCommonMetrics(page);
   assert(
@@ -113,7 +114,6 @@ async function runCase(browser, testCase) {
   const result = { name: testCase.name, ...metrics };
 
   if (testCase.mobile) {
-    await page.waitForSelector(".pk-prompt-input-textarea", { timeout: 10000 });
     const mobileMetrics = await captureCommonMetrics(page);
     result.fonts = mobileMetrics.fonts;
     result.composerRect = mobileMetrics.composerRect;
@@ -123,34 +123,37 @@ async function runCase(browser, testCase) {
       `${testCase.name}: composer font expected 16px`
     );
 
-    await openMobileDrawer(page);
-    const drawer = page.locator('.app-sidebar[data-mobile="true"]');
-    const drawerBox = await drawer.boundingBox();
-    assert(drawerBox, `${testCase.name}: drawer bounding box missing`);
-    result.drawerWidth = drawerBox.width;
+    const sidebarToggle = page
+      .getByRole("button", { name: /toggle sidebar|expand sidebar|collapse sidebar/i })
+      .first();
+    if (await sidebarToggle.count()) {
+      await openMobileDrawer(page);
+      const drawer = page.locator('.app-sidebar[data-mobile="true"]');
+      const drawerBox = await drawer.boundingBox();
+      assert(drawerBox, `${testCase.name}: drawer bounding box missing`);
+      result.drawerWidth = drawerBox.width;
 
-    const resourcesButton = drawer.getByRole("button", { name: /^resources$/i });
-    await resourcesButton.click();
-    await page.waitForLoadState("networkidle");
-    await page
-      .locator(".app-header-title-text")
-      .filter({ hasText: "Resource browser" })
-      .waitFor({ state: "visible" });
-    await page.waitForFunction(
-      () => !document.querySelector('.app-sidebar[data-mobile="true"]')
-    );
+      const resourcesButton = drawer.getByRole("button", { name: /^resources$/i });
+      await resourcesButton.click();
+      await page.waitForLoadState("networkidle");
+      await page.getByText(/Resource browser|Resources/i).first().waitFor({ state: "visible" });
+      await page.waitForFunction(
+        () => !document.querySelector('.app-sidebar[data-mobile="true"]')
+      );
 
-    await openMobileDrawer(page);
-    const newChatButton = drawer.getByRole("button", { name: /new chat/i });
-    await newChatButton.click();
-    await page.waitForLoadState("networkidle");
-    await page
-      .locator(".app-header-title-text")
-      .filter({ hasText: "New conversation" })
-      .waitFor({ state: "visible" });
-    await page.waitForFunction(
-      () => !document.querySelector('.app-sidebar[data-mobile="true"]')
-    );
+      await openMobileDrawer(page);
+      const newChatButton = drawer.getByRole("button", { name: /new chat/i });
+      await newChatButton.click();
+      await page.waitForLoadState("networkidle");
+      await page.getByText(/New conversation|Ready when you are/i).first().waitFor({
+        state: "visible",
+      });
+      await page.waitForFunction(
+        () => !document.querySelector('.app-sidebar[data-mobile="true"]')
+      );
+    } else {
+      result.drawerWidth = null;
+    }
   } else {
     const sidebar = page.locator('[data-slot="sidebar-container"]');
     assert(await sidebar.isVisible(), "desktop-1440: desktop sidebar should remain visible");

@@ -132,6 +132,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/auth/request-account:
+    post:
+      operationId: requestV2Account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2AccountRequest"
+      responses:
+        "202":
+          description: Account request created or already pending approval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
   /v2/auth/login:
     post:
       operationId: loginV2Bisque
@@ -316,6 +332,34 @@ paths:
       operationId: getUploadDisplay
       parameters:
         - $ref: "#/components/parameters/FileID"
+        - name: enhancement
+          in: query
+          description: Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
+          schema: { type: string }
+        - name: negative
+          in: query
+          description: Invert grayscale preview output.
+          schema: { type: boolean }
+        - name: gamma
+          in: query
+          description: Gamma adjustment for grayscale preview output.
+          schema: { type: number, minimum: 0.05, maximum: 8 }
+        - name: channels
+          in: query
+          description: Comma-separated RGB channel indices to visualize. A single selected channel is rendered as grayscale intensity.
+          schema: { type: string }
+        - name: channel_colors
+          in: query
+          description: Optional comma-separated channel colors reserved for channel-aware display renderers.
+          schema: { type: string }
+        - name: window_min
+          in: query
+          description: Explicit source-value lower window bound for grayscale preview output.
+          schema: { type: number }
+        - name: window_max
+          in: query
+          description: Explicit source-value upper window bound for grayscale preview output.
+          schema: { type: number }
       responses:
         "200":
           description: Upload display bytes
@@ -347,6 +391,26 @@ paths:
         - name: t
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: enhancement
+          in: query
+          description: Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
+          schema: { type: string }
+        - name: negative
+          in: query
+          description: Invert grayscale preview output.
+          schema: { type: boolean }
+        - name: gamma
+          in: query
+          description: Gamma adjustment for grayscale preview output.
+          schema: { type: number, minimum: 0.05, maximum: 8 }
+        - name: window_min
+          in: query
+          description: Explicit source-value lower window bound for grayscale preview output.
+          schema: { type: number }
+        - name: window_max
+          in: query
+          description: Explicit source-value upper window bound for grayscale preview output.
+          schema: { type: number }
       responses:
         "200":
           description: Upload slice bytes
@@ -355,6 +419,167 @@ paths:
               schema:
                 type: string
                 format: binary
+  /v2/uploads/{file_id}/scalar-volume:
+    get:
+      operationId: getUploadScalarVolume
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Upload scalar volume payload
+          headers:
+            x-volume-width:
+              schema: { type: integer }
+            x-volume-height:
+              schema: { type: integer }
+            x-volume-depth:
+              schema: { type: integer }
+            x-volume-dtype:
+              schema: { type: string }
+            x-volume-bytes-per-voxel:
+              schema: { type: integer }
+            x-volume-raw-min:
+              schema: { type: number }
+            x-volume-raw-max:
+              schema: { type: number }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "501":
+          description: Upload scalar volume preparation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}:
+    get:
+      operationId: getUploadTile
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: axis
+          in: path
+          required: true
+          schema: { type: string }
+        - name: level
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: tile_x
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: tile_y
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: z
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: c
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: t
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Upload tile bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "501":
+          description: Upload tile pyramid preparation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/atlas:
+    get:
+      operationId: getUploadAtlas
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: enhancement
+          in: query
+          schema: { type: string }
+        - name: t
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Upload atlas payload
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: Upload atlas preparation is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/histogram:
+    get:
+      operationId: getUploadHistogram
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: channels
+          in: query
+          description: Comma-separated image channel indices to summarize; grayscale uploads always use channel 0.
+          schema: { type: string }
+        - name: t
+          in: query
+          description: Time index to report in the histogram payload for direct-image uploads.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: bins
+          in: query
+          description: Number of histogram bins. Values are clamped by the control plane.
+          schema: { type: integer, minimum: 8, maximum: 4096, default: 256 }
+      responses:
+        "200":
+          description: Upload histogram payload computed from the decoded direct-image upload.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_id, bins, dtype, channels, source, sample_count, histogram]
+                properties:
+                  file_id: { type: string }
+                  bins: { type: integer }
+                  dtype: { type: string, example: uint16 }
+                  channels:
+                    type: array
+                    items: { type: integer }
+                  source: { type: string, example: decoded-image }
+                  sample_count: { type: integer }
+                  histogram:
+                    type: object
+                    required: [bins, edges, min, max, channel_indices, time_index]
+                    properties:
+                      bins:
+                        type: array
+                        items: { type: integer }
+                      edges:
+                        type: array
+                        items: { type: number }
+                      min: { type: number }
+                      max: { type: number }
+                      channel_indices:
+                        type: array
+                        items: { type: integer }
+                      time_index: { type: integer }
+        "415":
+          description: Upload histogram could not be decoded for this resource
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
   /v2/uploads/{file_id}/caption:
     get:
       operationId: getUploadCaption
@@ -387,13 +612,143 @@ paths:
                 resources:
                   type: array
                   items: { type: string }
+                resource_uris:
+                  type: array
+                  items: { type: string }
       responses:
+        "200":
+          description: BisQue resources materialized into the V2 upload store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueImportResponse"
         "501":
           description: BisQue resource import is not configured
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/search:
+    post:
+      operationId: searchBisqueResources
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resource_type: { type: string, default: image }
+                tag_query: { type: string }
+                tag_order:
+                  type: string
+                  description: BisQue data_service tag_order passed through for server-side ordering.
+                query: { type: string }
+                name_contains:
+                  type: string
+                  description: Filename/resource text fragment verified against returned resources.
+                extensions:
+                  type: array
+                  items: { type: string }
+                  description: File extensions such as png, jpg, nii, nii.gz, or nifti verified against returned resources.
+                file_extensions:
+                  type: array
+                  items: { type: string }
+                  description: Alias for extensions.
+                scope:
+                  type: string
+                  default: owner,shared
+                  description: BisQue visibility scope. Use owner for the linked user's own resources.
+                sort:
+                  type: string
+                  description: Convenience sort such as recent, oldest, name, or name_desc.
+                limit: { type: integer, minimum: 1, maximum: 100, default: 25 }
+                offset: { type: integer, minimum: 0, default: 0 }
+                count_all:
+                  type: boolean
+                  default: false
+                  description: Page through the BisQue list to return the full inventory count when the upstream response omits a total.
+      responses:
+        "200":
+          description: BisQue resources visible to the linked account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueSearchResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/download:
+    post:
+      operationId: downloadBisqueResources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resources:
+                  type: array
+                  items: { type: string }
+                resource_uris:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: BisQue resources materialized into the V2 upload store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueImportResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/upload:
+    post:
+      operationId: uploadBisqueOutputs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_ids:
+                  type: array
+                  items: { type: string }
+                artifact_ids:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Local uploads or artifacts posted to the linked BisQue account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueUploadResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/unlink:
+    post:
+      operationId: unlinkBisqueAccount
+      responses:
+        "200":
+          description: Deleted stored BisQue credentials and cleared local auth session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
   /v2/resources:
     get:
       operationId: listResources
@@ -792,6 +1147,27 @@ paths:
       responses:
         "200":
           description: Soft-disabled admin-managed user account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2AdminUserAccount"
+  /v2/admin/users/{user_id}/status:
+    patch:
+      operationId: updateV2AdminUserStatus
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2AdminUpdateUserStatusRequest"
+      responses:
+        "200":
+          description: Updated admin-managed user account status
           content:
             application/json:
               schema:
@@ -1381,18 +1757,34 @@ components:
           additionalProperties: { type: boolean }
     AuthSessionResponse:
       type: object
-      required: [authenticated, user]
+      required: [authenticated]
       properties:
         authenticated: { type: boolean }
         username: { type: string, nullable: true }
-        mode: { type: string, nullable: true }
+        mode: { type: string, enum: [bisque, guest, workos], nullable: true }
+        provider: { type: string, nullable: true }
+        account_status: { type: string, nullable: true }
+        account_email: { type: string, nullable: true }
+        account_user_id: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+        authorization_url: { type: string, nullable: true }
+        logout_url: { type: string, nullable: true }
         is_admin: { type: boolean, nullable: true }
+        bisque_linked: { type: boolean, nullable: true }
         guest_profile:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
         user:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
+    V2AccountRequest:
+      type: object
+      additionalProperties: false
+      required: [name, email, affiliation]
+      properties:
+        name: { type: string }
+        email: { type: string }
+        affiliation: { type: string }
     V2NotConfiguredResponse:
       type: object
       required: [error, status, service]
@@ -1440,6 +1832,20 @@ components:
         count: { type: integer }
         succeeded: { type: integer }
         failed: { type: integer }
+    V2AdminActivityPeriod:
+      type: object
+      additionalProperties: true
+      properties:
+        label: { type: string }
+        window: { type: string }
+        messages: { type: integer }
+        user_messages: { type: integer }
+        assistant_messages: { type: integer }
+        tool_calls: { type: integer }
+        active_users: { type: integer }
+        runs: { type: integer }
+        failed_runs: { type: integer }
+        artifacts: { type: integer }
     V2AdminRuntimeSummary:
       type: object
       additionalProperties: true
@@ -1560,6 +1966,14 @@ components:
         org_id: { type: string }
         metadata:
           $ref: "#/components/schemas/JsonObject"
+    V2AdminUpdateUserStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, pending, disabled, rejected]
     V2AdminUserAccount:
       type: object
       required: [user_id, created_at, updated_at, metadata]
@@ -1676,7 +2090,7 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2AdminOverviewResponse:
       type: object
-      required: [generated_at, runtime, queue, kpis, usage_last_24h, tool_usage_7d, workers, top_users, recent_issues]
+      required: [generated_at, runtime, queue, kpis, activity, usage_last_24h, tool_usage_7d, workers, top_users, recent_issues]
       properties:
         generated_at: { type: string }
         runtime:
@@ -1685,6 +2099,10 @@ components:
           $ref: "#/components/schemas/V2AdminQueueDiagnostics"
         kpis:
           $ref: "#/components/schemas/V2AdminPlatformKpis"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminActivityPeriod"
         usage_last_24h:
           type: array
           items:
@@ -1903,9 +2321,13 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2ThreadListResponse:
       type: object
-      required: [count, threads]
+      required: [count, total_count, limit, offset, has_more, threads]
       properties:
         count: { type: integer }
+        total_count: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        has_more: { type: boolean }
         threads:
           type: array
           items:
@@ -2018,6 +2440,7 @@ components:
         size_bytes: { type: integer, format: int64 }
         sha256: { type: string }
         created_at: { type: string }
+        source_uri: { type: string, nullable: true }
         preview_url: { type: string, nullable: true }
         principal:
           nullable: true
@@ -2031,6 +2454,71 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2BisqueResource:
+      type: object
+      required: [resource_uri]
+      properties:
+        resource_uri: { type: string }
+        name: { type: string, nullable: true }
+        resource_uniq: { type: string, nullable: true }
+        resource_type: { type: string, nullable: true }
+        tags:
+          type: object
+          additionalProperties: { type: string }
+        client_view_url: { type: string, nullable: true }
+        image_service_url: { type: string, nullable: true }
+    V2BisqueSearchResponse:
+      type: object
+      required: [count, results]
+      properties:
+        count: { type: integer }
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueResource"
+    V2BisqueImportRecord:
+      type: object
+      required: [input_url, status, resource_uri, uploaded]
+      properties:
+        input_url: { type: string }
+        status: { type: string }
+        resource_uri: { type: string }
+        resource_uniq: { type: string, nullable: true }
+        uploaded:
+          $ref: "#/components/schemas/V2UploadedFileRecord"
+        client_view_url: { type: string, nullable: true }
+        image_service_url: { type: string, nullable: true }
+    V2BisqueImportResponse:
+      type: object
+      required: [file_count, uploaded, imports]
+      properties:
+        file_count: { type: integer }
+        uploaded:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadedFileRecord"
+        imports:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueImportRecord"
+    V2BisqueUploadRecord:
+      type: object
+      required: [resource_uri]
+      properties:
+        file_id: { type: string, nullable: true }
+        artifact_id: { type: string, nullable: true }
+        resource_uri: { type: string }
+        name: { type: string, nullable: true }
+        resource_uniq: { type: string, nullable: true }
+    V2BisqueUploadResponse:
+      type: object
+      required: [count, uploads]
+      properties:
+        count: { type: integer }
+        uploads:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueUploadRecord"
     V2ResourceRecord:
       type: object
       required: [file_id, original_name, size_bytes, sha256, created_at, source_type, resource_kind, has_thumbnail]

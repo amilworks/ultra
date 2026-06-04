@@ -8,11 +8,33 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { AlertTriangle, RefreshCw, RotateCcw, Shield, StopCircle, Trash2, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  Building2,
+  CheckCircle2,
+  LayoutDashboard,
+  RefreshCw,
+  RotateCcw,
+  Shield,
+  StopCircle,
+  Trash2,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ChartContainer,
   ChartLegend,
@@ -25,11 +47,12 @@ import { formatBytes } from "@/lib/format";
 import type {
   AdminCreateOrganizationRequest,
   AdminCreateUserRequest,
+  AdminActivityPeriod,
   AdminIssueRecord,
   AdminOrganization,
-  AdminQueueConsumerDiagnostic,
   AdminOverviewResponse,
   AdminRunRecord,
+  AdminUserStatus,
   AdminUserSummary,
   RunEvent,
 } from "../types";
@@ -49,6 +72,7 @@ type AdminConsoleProps = {
   runCancellingById: Record<string, boolean>;
   runRequeueingById?: Record<string, boolean>;
   userDeletingById?: Record<string, boolean>;
+  userUpdatingById?: Record<string, boolean>;
   deletingConversationKey: string | null;
   activeRunEventRunId: string | null;
   runEventsById: Record<string, RunEvent[]>;
@@ -67,11 +91,14 @@ type AdminConsoleProps = {
   onCreateOrganization: (payload: AdminCreateOrganizationRequest) => Promise<void> | void;
   onCreateUser: (payload: AdminCreateUserRequest) => Promise<void> | void;
   onDeleteUser: (userId: string) => Promise<void> | void;
+  onUpdateUserStatus?: (userId: string, status: AdminUserStatus) => Promise<void> | void;
   onCancelRun: (runId: string) => void;
   onRequeueRun?: (runId: string) => void;
   onDeleteConversation: (conversationId: string, userId: string) => void;
   onInspectRunEvents: (runId: string) => void;
 };
+
+type AdminConsolePage = "overview" | "users";
 
 const statusOptions = [
   { value: "", label: "All statuses" },
@@ -93,6 +120,20 @@ const toolChartConfig = {
   failed: { label: "Failed", color: "var(--chart-5)" },
 };
 
+const activityPeriodOrder = ["Daily", "Weekly", "Monthly", "Total"];
+
+const activityMetricRows: Array<{
+  label: string;
+  value: (period: AdminActivityPeriod) => number;
+}> = [
+  { label: "Messages", value: (period) => period.messages },
+  { label: "Tool calls", value: (period) => period.tool_calls },
+  { label: "Active users", value: (period) => period.active_users },
+  { label: "Runs", value: (period) => period.runs },
+  { label: "Failed runs", value: (period) => period.failed_runs },
+  { label: "Artifacts", value: (period) => period.artifacts },
+];
+
 const countFormatter = new Intl.NumberFormat();
 
 const formatClock = (iso: string): string => {
@@ -105,22 +146,6 @@ const formatClock = (iso: string): string => {
 
 const formatCount = (value: number | null | undefined): string =>
   countFormatter.format(Number.isFinite(Number(value)) ? Number(value) : 0);
-
-const isWorkerQueueConsumer = (consumer: AdminQueueConsumerDiagnostic): boolean => {
-  const role = (consumer.role ?? "").toLowerCase();
-  const name = consumer.name.toLowerCase();
-  const subject = (consumer.subject ?? "").toLowerCase();
-  if (role === "event_ingest" || name.includes("event-ingest")) {
-    return false;
-  }
-  return (
-    role === "deepagents" ||
-    role === "rarespot" ||
-    role.includes("worker") ||
-    name.includes("worker") ||
-    subject.endsWith(".jobs")
-  );
-};
 
 const formatDateTime = (iso: string | null | undefined): string => {
   if (!iso) {
@@ -268,6 +293,17 @@ const issueSeverityBadgeClass = (severity: string): string => {
   return "border-border bg-muted/60 text-muted-foreground";
 };
 
+const userStatusBadgeClass = (status: string): string => {
+  const normalized = status.toLowerCase();
+  if (normalized === "active") {
+    return "admin-runtime-good";
+  }
+  if (normalized === "disabled") {
+    return "border-destructive/45 bg-destructive/10 text-destructive";
+  }
+  return "border-border bg-muted/60 text-muted-foreground";
+};
+
 export function AdminConsole({
   overview,
   organizations,
@@ -283,6 +319,7 @@ export function AdminConsole({
   runCancellingById,
   runRequeueingById = {},
   userDeletingById = {},
+  userUpdatingById = {},
   deletingConversationKey,
   activeRunEventRunId,
   runEventsById,
@@ -301,11 +338,13 @@ export function AdminConsole({
   onCreateOrganization,
   onCreateUser,
   onDeleteUser,
+  onUpdateUserStatus,
   onCancelRun,
   onRequeueRun,
   onDeleteConversation,
   onInspectRunEvents,
 }: AdminConsoleProps) {
+  const [activePage, setActivePage] = useState<AdminConsolePage>("overview");
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserName, setNewUserName] = useState("");
   const [newUserRole, setNewUserRole] = useState("researcher");
@@ -389,15 +428,19 @@ export function AdminConsole({
   );
   const kpis = overview?.kpis;
   const queue = overview?.queue;
-  const workers = overview?.workers ?? [];
-  const activeWorkerCount = workers.filter((worker) => worker.active && !worker.stale).length;
-  const activeWorkerConsumerCount =
-    queue?.consumers?.filter((consumer) => consumer.active && isWorkerQueueConsumer(consumer)).length ?? 0;
   const activeUserShare =
     kpis && kpis.total_users > 0 ? (kpis.active_users_24h / kpis.total_users) * 100 : 0;
   const messagesPerActiveUser =
     kpis && kpis.active_users_24h > 0 ? kpis.messages_last_24h / kpis.active_users_24h : 0;
   const runtime = overview?.runtime;
+  const activityByLabel = useMemo(() => {
+    const periods = new Map<string, AdminActivityPeriod>();
+    for (const period of overview?.activity ?? []) {
+      periods.set(period.label, period);
+    }
+    return periods;
+  }, [overview]);
+  const monthlyActivity = activityByLabel.get("Monthly");
   const organizationOptions = useMemo(() => {
     const seen = new Set<string>();
     const records = organizations.filter((org) => {
@@ -420,6 +463,45 @@ export function AdminConsole({
     }
     return records;
   }, [organizations]);
+  const userDirectoryStats = useMemo(() => {
+    const orgIDs = new Set<string>();
+    let active = 0;
+    let disabled = 0;
+    let pending = 0;
+    let admin = 0;
+    for (const org of organizationOptions) {
+      if (org.org_id) {
+        orgIDs.add(org.org_id);
+      }
+    }
+    for (const user of users) {
+      const status = String(user.status || "observed").toLowerCase();
+      const role = String(user.role || "observed").toLowerCase();
+      if (status === "active" || status === "observed") {
+        active += 1;
+      }
+      if (status === "disabled") {
+        disabled += 1;
+      }
+      if (status === "pending") {
+        pending += 1;
+      }
+      if (role === "admin") {
+        admin += 1;
+      }
+      if (user.org_id) {
+        orgIDs.add(user.org_id);
+      }
+    }
+    return {
+      active,
+      admin,
+      disabled,
+      pending,
+      organizations: orgIDs.size,
+      visibleUsers: users.length,
+    };
+  }, [organizationOptions, users]);
 
   return (
     <section className="admin-console mx-auto flex-1 overflow-y-auto px-3 py-6 sm:px-6 sm:py-8">
@@ -451,6 +533,31 @@ export function AdminConsole({
 
         {error ? <p className="admin-error-banner">{error}</p> : null}
 
+        <Tabs
+          value={activePage}
+          onValueChange={(value) => setActivePage(value as AdminConsolePage)}
+          className="admin-page-tabs"
+        >
+          <TabsList className="admin-page-tabs-list">
+            <TabsTrigger
+              value="overview"
+              className="admin-page-tab"
+              onClick={() => setActivePage("overview")}
+            >
+              <LayoutDashboard className="size-4" />
+              Overview
+            </TabsTrigger>
+            <TabsTrigger
+              value="users"
+              className="admin-page-tab"
+              onClick={() => setActivePage("users")}
+            >
+              <Users className="size-4" />
+              Users Management
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="overview" className="admin-page-panel">
         <Card className="admin-runtime-card">
           <CardHeader>
             <div className="admin-card-title-row">
@@ -507,64 +614,51 @@ export function AdminConsole({
           </CardContent>
         </Card>
 
-        <Card className="admin-runtime-card">
+        <Card className="admin-runtime-card admin-activity-card">
           <CardHeader>
             <div className="admin-card-title-row">
               <div>
-                <CardTitle>Workers</CardTitle>
-                <CardDescription>Durable Deep Agents and tool-worker liveness heartbeats.</CardDescription>
+                <CardTitle>Activity</CardTitle>
+                <CardDescription>Usage across prompts, tool work, users, runs, and outputs.</CardDescription>
               </div>
-              <Badge
-                variant="outline"
-                className={
-                  activeWorkerCount > 0 || activeWorkerConsumerCount > 0
-                    ? "admin-runtime-good"
-                    : "admin-runtime-warn"
-                }
-              >
-                {loadingOverview
-                  ? "…"
-                  : activeWorkerCount > 0
-                    ? `${formatCount(activeWorkerCount)} active`
-                    : activeWorkerConsumerCount > 0
-                      ? `${formatCount(activeWorkerConsumerCount)} consumer${activeWorkerConsumerCount === 1 ? "" : "s"} active`
-                      : "0 active"}
+              <Badge variant="outline" className="admin-runtime-good">
+                {loadingOverview ? "…" : `${formatCount(monthlyActivity?.active_users ?? 0)} monthly active`}
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="admin-queue-panel">
-            {!loadingOverview && workers.length ? (
-              <div className="admin-queue-consumer-list">
-                {workers.map((worker) => (
-                  <article key={worker.worker_id} className="admin-queue-consumer">
-                    <div className="admin-queue-consumer-heading">
-                      <div>
-                        <strong>{worker.worker_id}</strong>
-                        <span>
-                          {worker.worker_kind || "worker"} • {worker.hostname || "host unknown"}
-                        </span>
-                      </div>
-                      <Badge variant="outline" className={worker.active && !worker.stale ? "admin-runtime-good" : "admin-runtime-warn"}>
-                        {worker.stale ? "stale" : worker.status || "unknown"}
-                      </Badge>
-                    </div>
-                    <p>
-                      {worker.current_run_id ? `Running ${worker.current_run_id}` : "Idle"} • heartbeat{" "}
-                      {formatDuration(worker.heartbeat_age_seconds)} ago
-                    </p>
-                    {worker.version ? <p>Version: {worker.version}</p> : null}
-                  </article>
-                ))}
+          <CardContent className="admin-activity-panel">
+            <div className="admin-activity-grid" role="table" aria-label="Platform activity metrics">
+              <div className="admin-activity-header admin-activity-metric" role="columnheader">
+                Metric
               </div>
-            ) : (
-              <p className="admin-kpi-footnote">
-                {loadingOverview
-                  ? "Loading worker heartbeats…"
-                  : activeWorkerConsumerCount > 0
-                    ? `No app-level worker heartbeats yet. ${formatCount(activeWorkerConsumerCount)} active NATS worker consumer${activeWorkerConsumerCount === 1 ? "" : "s"} ${activeWorkerConsumerCount === 1 ? "is" : "are"} ready to pull jobs.`
-                    : "No worker heartbeats yet."}
-              </p>
-            )}
+              {activityPeriodOrder.map((label) => {
+                const period = activityByLabel.get(label);
+                return (
+                  <div key={label} className="admin-activity-header" role="columnheader">
+                    <strong>{label}</strong>
+                    <span>{period?.window ?? "—"}</span>
+                  </div>
+                );
+              })}
+              {activityMetricRows.map((row) => (
+                <Fragment key={row.label}>
+                  <div className="admin-activity-metric" role="rowheader">
+                    {row.label}
+                  </div>
+                  {activityPeriodOrder.map((label) => {
+                    const period = activityByLabel.get(label);
+                    return (
+                      <div key={`${row.label}-${label}`} className="admin-activity-value" role="cell">
+                        {loadingOverview || !period ? "…" : formatCount(row.value(period))}
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              ))}
+            </div>
+            <p className="admin-kpi-footnote">
+              Tool calls count started invocations; failed runs and artifacts help track research throughput.
+            </p>
           </CardContent>
         </Card>
 
@@ -803,163 +897,7 @@ export function AdminConsole({
           </Card>
         </div>
 
-        <div className="admin-data-grid">
-          <Card className="admin-users-card">
-            <CardHeader>
-              <div className="admin-card-title-row">
-                <div className="flex items-center gap-2">
-                  <Users className="size-4" />
-                  <CardTitle>Users</CardTitle>
-                </div>
-                <Button type="button" variant="ghost" size="sm" onClick={onRefreshUsers}>
-                  <RefreshCw className={cn("size-4", loadingUsers && "animate-spin")} />
-                </Button>
-              </div>
-              <CardDescription>Per-user utilization and latest activity.</CardDescription>
-              <Input
-                value={userQuery}
-                onChange={(event) => onUserQueryChange(event.target.value)}
-                placeholder="Filter by user, email, role, or org"
-                className="admin-filter-input"
-              />
-              <div className="admin-card-title-row">
-                <span className="admin-section-label">Organizations</span>
-                <Button type="button" variant="ghost" size="sm" onClick={onRefreshOrganizations}>
-                  <RefreshCw className={cn("size-4", loadingOrganizations && "animate-spin")} />
-                </Button>
-              </div>
-              <form className="admin-create-org-form" onSubmit={submitNewOrganization}>
-                <Input
-                  value={newOrgID}
-                  onChange={(event) => setNewOrgID(event.target.value)}
-                  placeholder="org-id"
-                  aria-label="New org id"
-                  className="admin-filter-input"
-                />
-                <Input
-                  value={newOrgName}
-                  onChange={(event) => setNewOrgName(event.target.value)}
-                  placeholder="Organization name"
-                  aria-label="New org name"
-                  className="admin-filter-input"
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  disabled={creatingOrganization || loadingOrganizations}
-                >
-                  {creatingOrganization ? "Creating…" : "Create org"}
-                </Button>
-              </form>
-              {createOrganizationError ? (
-                <p className="admin-error-text">{createOrganizationError}</p>
-              ) : null}
-              <form className="admin-create-user-form" onSubmit={submitNewUser}>
-                <Input
-                  value={newUserEmail}
-                  onChange={(event) => setNewUserEmail(event.target.value)}
-                  placeholder="email@institution.edu"
-                  aria-label="New user email"
-                  className="admin-filter-input"
-                />
-                <Input
-                  value={newUserName}
-                  onChange={(event) => setNewUserName(event.target.value)}
-                  placeholder="Display name"
-                  aria-label="New user display name"
-                  className="admin-filter-input"
-                />
-                <Input
-                  value={newUserRole}
-                  onChange={(event) => setNewUserRole(event.target.value)}
-                  placeholder="Role"
-                  aria-label="New user role"
-                  className="admin-filter-input"
-                />
-                <select
-                  value={newUserOrg}
-                  onChange={(event) => setNewUserOrg(event.target.value)}
-                  aria-label="New user org"
-                  className="admin-filter-input"
-                >
-                  {organizationOptions.map((org) => (
-                    <option key={org.org_id} value={org.org_id}>
-                      {org.name ? `${org.name} (${org.org_id})` : org.org_id}
-                    </option>
-                  ))}
-                </select>
-                <Button type="submit" size="sm" disabled={creatingUser || loadingUsers}>
-                  {creatingUser ? "Creating…" : "Create user"}
-                </Button>
-              </form>
-              {createUserError ? <p className="admin-error-text">{createUserError}</p> : null}
-            </CardHeader>
-            <CardContent className="admin-table-wrap">
-              {loadingUsers ? <p className="admin-empty">Loading users…</p> : null}
-              {!loadingUsers && users.length === 0 ? (
-                <p className="admin-empty">No users matched the current filter.</p>
-              ) : null}
-              {!loadingUsers && users.length > 0 ? (
-                <table className="admin-table">
-                  <thead>
-                    <tr>
-                      <th>User</th>
-                      <th>Role</th>
-                      <th>Status</th>
-                      <th>Runs</th>
-                      <th>Failed</th>
-                      <th>Uploads</th>
-                      <th>Storage</th>
-                      <th>Last Activity</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((row) => {
-                      const disabled = String(row.status || "").toLowerCase() === "disabled";
-                      const deleting = Boolean(userDeletingById[row.user_id]);
-                      return (
-                        <tr key={row.user_id}>
-                          <td>
-                            <div className="admin-user-cell">
-                              <span className="font-mono text-xs">{row.user_id}</span>
-                              {row.display_name ? <span>{row.display_name}</span> : null}
-                              {row.email ? <span className="admin-user-email">{row.email}</span> : null}
-                            </div>
-                          </td>
-                          <td>
-                            <Badge variant="outline">{row.role || "observed"}</Badge>
-                          </td>
-                          <td>
-                            <Badge variant="outline">{row.status || "observed"}</Badge>
-                          </td>
-                          <td>{row.runs_total}</td>
-                          <td>{row.runs_failed}</td>
-                          <td>{row.uploads}</td>
-                          <td>{formatBytes(row.storage_bytes)}</td>
-                          <td>{formatDateTime(row.last_activity_at)}</td>
-                          <td>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              aria-label={`Deactivate user ${row.user_id}`}
-                              disabled={disabled || deleting}
-                              onClick={() => onDeleteUser(row.user_id)}
-                            >
-                              <Trash2 className="size-4" />
-                              {deleting ? "Deactivating…" : disabled ? "Disabled" : "Deactivate"}
-                            </Button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ) : null}
-            </CardContent>
-          </Card>
-
+        <div className="admin-data-grid admin-data-grid-single">
           <Card className="admin-issues-card">
             <CardHeader>
               <div className="admin-card-title-row">
@@ -1214,6 +1152,387 @@ export function AdminConsole({
             ) : null}
           </CardContent>
         </Card>
+          </TabsContent>
+
+          <TabsContent value="users" className="admin-page-panel">
+            <Card className="admin-users-hero-card">
+              <CardHeader>
+                <div className="admin-card-title-row">
+                  <div>
+                    <p className="admin-section-label">Admin / WorkOS</p>
+                    <h3 className="admin-subpage-title">Users Management</h3>
+                    <CardDescription>
+                      WorkOS AuthKit signs users in. This page maintains Ultra roles,
+                      organization mapping, and disabled-state controls for authenticated identities.
+                    </CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="admin-refresh-button"
+                    onClick={() => {
+                      onRefreshOrganizations();
+                      onRefreshUsers();
+                    }}
+                    disabled={loadingOrganizations || loadingUsers}
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "size-4",
+                        (loadingOrganizations || loadingUsers) && "animate-spin"
+                      )}
+                    />
+                    Refresh directory
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="admin-user-stat-grid">
+                <div className="admin-user-stat">
+                  <span>Visible users</span>
+                  <strong>{loadingUsers ? "…" : formatCount(userDirectoryStats.visibleUsers)}</strong>
+                </div>
+                <div className="admin-user-stat">
+                  <span>Active or observed</span>
+                  <strong>{loadingUsers ? "…" : formatCount(userDirectoryStats.active)}</strong>
+                </div>
+                <div className="admin-user-stat">
+                  <span>Admins</span>
+                  <strong>{loadingUsers ? "…" : formatCount(userDirectoryStats.admin)}</strong>
+                </div>
+                <div className="admin-user-stat">
+                  <span>Pending review</span>
+                  <strong>{loadingUsers ? "…" : formatCount(userDirectoryStats.pending)}</strong>
+                </div>
+                <div className="admin-user-stat">
+                  <span>Organizations</span>
+                  <strong>{loadingOrganizations ? "…" : formatCount(userDirectoryStats.organizations)}</strong>
+                </div>
+              </CardContent>
+            </Card>
+
+            <div className="admin-users-management-grid">
+              <Card className="admin-users-directory-card">
+                <CardHeader>
+                  <div className="admin-card-title-row">
+                    <div className="flex items-center gap-2">
+                      <Users className="size-4" />
+                      <CardTitle>Account Directory</CardTitle>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Refresh users"
+                      onClick={onRefreshUsers}
+                    >
+                      <RefreshCw className={cn("size-4", loadingUsers && "animate-spin")} />
+                    </Button>
+                  </div>
+                  <CardDescription>
+                    Search users by identity, role, status, organization, or local account id.
+                  </CardDescription>
+                  <Input
+                    value={userQuery}
+                    onChange={(event) => onUserQueryChange(event.target.value)}
+                    placeholder="Filter by user, email, role, or org"
+                    aria-label="Filter users"
+                    className="admin-filter-input"
+                  />
+                </CardHeader>
+                <CardContent className="admin-table-wrap">
+                  {loadingUsers ? <p className="admin-empty">Loading users…</p> : null}
+                  {!loadingUsers && users.length === 0 ? (
+                    <p className="admin-empty">No users matched the current filter.</p>
+                  ) : null}
+                  {!loadingUsers && users.length > 0 ? (
+                    <table className="admin-table admin-users-table">
+                      <thead>
+                        <tr>
+                          <th>User</th>
+                          <th>WorkOS identity</th>
+                          <th>Role</th>
+                          <th>Organization</th>
+                          <th>Status</th>
+                          <th>Activity</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {users.map((row) => {
+                          const normalizedStatus = String(row.status || "observed").toLowerCase();
+                          const pending = normalizedStatus === "pending";
+                          const disabled = normalizedStatus === "disabled";
+                          const rejected = normalizedStatus === "rejected";
+                          const deleting = Boolean(userDeletingById[row.user_id]);
+                          const updating = Boolean(userUpdatingById[row.user_id]);
+                          return (
+                            <tr key={row.user_id}>
+                              <td>
+                                <div className="admin-user-cell">
+                                  <span className="admin-user-name">
+                                    {row.display_name || row.user_id}
+                                  </span>
+                                  <span className="font-mono text-xs">{row.user_id}</span>
+                                </div>
+                              </td>
+                              <td>
+                                <span className="admin-user-email">
+                                  {row.email || "Email unavailable"}
+                                </span>
+                              </td>
+                              <td>
+                                <Badge variant="outline">{row.role || "observed"}</Badge>
+                              </td>
+                              <td className="font-mono text-xs">{row.org_id || "local-org"}</td>
+                              <td>
+                                <Badge
+                                  variant="outline"
+                                  className={userStatusBadgeClass(row.status || "observed")}
+                                >
+                                  {row.status || "observed"}
+                                </Badge>
+                              </td>
+                              <td>
+                                <div className="admin-user-activity">
+                                  <span>{formatCount(row.runs_total)} runs</span>
+                                  <span>{formatCount(row.runs_failed)} failed</span>
+                                  <span>{formatCount(row.uploads)} uploads</span>
+                                  <span>{formatBytes(row.storage_bytes)}</span>
+                                  <span>{formatDateTime(row.last_activity_at)}</span>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="admin-user-actions">
+                                  {pending && onUpdateUserStatus ? (
+                                    <>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        aria-label={`Approve user ${row.user_id}`}
+                                        disabled={updating}
+                                        onClick={() => onUpdateUserStatus(row.user_id, "active")}
+                                      >
+                                        <CheckCircle2 className="size-4" />
+                                        {updating ? "Updating…" : "Approve"}
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        aria-label={`Reject user ${row.user_id}`}
+                                        disabled={updating}
+                                        onClick={() => onUpdateUserStatus(row.user_id, "rejected")}
+                                      >
+                                        <StopCircle className="size-4" />
+                                        Reject
+                                      </Button>
+                                    </>
+                                  ) : null}
+                                  {(disabled || rejected) && onUpdateUserStatus ? (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      aria-label={`Re-enable user ${row.user_id}`}
+                                      disabled={updating}
+                                      onClick={() => onUpdateUserStatus(row.user_id, "active")}
+                                    >
+                                      <CheckCircle2 className="size-4" />
+                                      {updating ? "Updating…" : "Re-enable"}
+                                    </Button>
+                                  ) : null}
+                                  {!pending && !disabled && !rejected ? (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      aria-label={`Deactivate user ${row.user_id}`}
+                                      disabled={deleting || updating}
+                                      onClick={() => onDeleteUser(row.user_id)}
+                                    >
+                                      <Trash2 className="size-4" />
+                                      {deleting ? "Deactivating…" : "Deactivate"}
+                                    </Button>
+                                  ) : null}
+                                  {pending && !onUpdateUserStatus ? (
+                                    <span className="admin-user-action-note">Awaiting review</span>
+                                  ) : null}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  ) : null}
+                </CardContent>
+              </Card>
+
+              <div className="admin-users-side-panel">
+                <Card className="admin-management-form-card">
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <UserPlus className="size-4" />
+                      <CardTitle>Create User</CardTitle>
+                    </div>
+                    <CardDescription>
+                      Add an Ultra account record for a WorkOS-authenticated identity.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <form className="admin-create-user-form" onSubmit={submitNewUser}>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-user-email">Email</Label>
+                        <Input
+                          id="admin-new-user-email"
+                          value={newUserEmail}
+                          onChange={(event) => setNewUserEmail(event.target.value)}
+                          placeholder="email@institution.edu"
+                          aria-label="New user email"
+                        />
+                      </div>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-user-name">Display name</Label>
+                        <Input
+                          id="admin-new-user-name"
+                          value={newUserName}
+                          onChange={(event) => setNewUserName(event.target.value)}
+                          placeholder="Jane Researcher"
+                          aria-label="New user display name"
+                        />
+                      </div>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-user-role">Role</Label>
+                        <Select
+                          value={newUserRole}
+                          onValueChange={(value) => setNewUserRole(value)}
+                        >
+                          <SelectTrigger
+                            id="admin-new-user-role"
+                            aria-label="New user role"
+                            className="admin-select-trigger"
+                          >
+                            <SelectValue placeholder="Select role" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="researcher">Researcher</SelectItem>
+                              <SelectItem value="admin">Admin</SelectItem>
+                              <SelectItem value="observer">Observer</SelectItem>
+                              <SelectItem value="observed">Observed</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-user-org">Organization</Label>
+                        <Select
+                          value={newUserOrg}
+                          onValueChange={(value) => setNewUserOrg(value)}
+                        >
+                          <SelectTrigger
+                            id="admin-new-user-org"
+                            aria-label="New user org"
+                            className="admin-select-trigger"
+                          >
+                            <SelectValue placeholder="Select organization" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {organizationOptions.map((org) => (
+                                <SelectItem key={org.org_id} value={org.org_id}>
+                                  {org.name ? `${org.name} (${org.org_id})` : org.org_id}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button type="submit" size="sm" disabled={creatingUser || loadingUsers}>
+                        <UserPlus className="size-4" />
+                        {creatingUser ? "Creating…" : "Create user"}
+                      </Button>
+                    </form>
+                    {createUserError ? <p className="admin-error-text">{createUserError}</p> : null}
+                  </CardContent>
+                </Card>
+
+                <Card className="admin-management-form-card">
+                  <CardHeader>
+                    <div className="admin-card-title-row">
+                      <div className="flex items-center gap-2">
+                        <Building2 className="size-4" />
+                        <CardTitle>Organizations</CardTitle>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label="Refresh organizations"
+                        onClick={onRefreshOrganizations}
+                      >
+                        <RefreshCw className={cn("size-4", loadingOrganizations && "animate-spin")} />
+                      </Button>
+                    </div>
+                    <CardDescription>
+                      Maintain the organization ids used for WorkOS-backed role scoping.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="admin-org-management-content">
+                    <form className="admin-create-org-form" onSubmit={submitNewOrganization}>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-org-id">Organization id</Label>
+                        <Input
+                          id="admin-new-org-id"
+                          value={newOrgID}
+                          onChange={(event) => setNewOrgID(event.target.value)}
+                          placeholder="org-id"
+                          aria-label="New org id"
+                        />
+                      </div>
+                      <div className="admin-form-field">
+                        <Label htmlFor="admin-new-org-name">Name</Label>
+                        <Input
+                          id="admin-new-org-name"
+                          value={newOrgName}
+                          onChange={(event) => setNewOrgName(event.target.value)}
+                          placeholder="Organization name"
+                          aria-label="New org name"
+                        />
+                      </div>
+                      <Button
+                        type="submit"
+                        size="sm"
+                        disabled={creatingOrganization || loadingOrganizations}
+                      >
+                        <Building2 className="size-4" />
+                        {creatingOrganization ? "Creating…" : "Create org"}
+                      </Button>
+                    </form>
+                    {createOrganizationError ? (
+                      <p className="admin-error-text">{createOrganizationError}</p>
+                    ) : null}
+                    <div className="admin-org-list" aria-label="Organizations">
+                      {organizationOptions.map((org) => (
+                        <article key={org.org_id} className="admin-org-row">
+                          <div>
+                            <strong>{org.name || org.org_id}</strong>
+                            <span>{org.org_id}</span>
+                          </div>
+                          <Badge variant="outline" className={userStatusBadgeClass(org.status || "active")}>
+                            {org.status || "active"}
+                          </Badge>
+                        </article>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          </TabsContent>
+        </Tabs>
       </div>
     </section>
   );

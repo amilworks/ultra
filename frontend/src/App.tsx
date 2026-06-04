@@ -4,6 +4,7 @@ import {
   memo,
   type CSSProperties,
   type ComponentType,
+  type FormEvent,
   type MutableRefObject,
   useCallback,
   useEffect,
@@ -37,6 +38,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -85,6 +92,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -134,6 +142,7 @@ import {
   loadAdminOverview,
   loadAdminRuns,
   loadAdminUsers,
+  updateAdminUserStatus,
 } from "./features/admin/client";
 import {
   listRunArtifacts,
@@ -155,6 +164,15 @@ import {
   shouldDropHydratedLegacy404Message,
   shouldRecoverRunResultMessage,
 } from "./features/chat/run-recovery";
+import {
+  findReusableBlankDraftConversation,
+  shouldShowConversationInHistory,
+  shouldPersistConversationSnapshot,
+} from "./features/chat/conversation-draft";
+import {
+  fallbackConversationTitleFromText,
+  resolveConversationTitle,
+} from "./features/chat/conversation-title";
 import { shouldKeepOptimisticConversationAfterHydration } from "./features/chat/stale-conversation";
 import {
   loadComposerResources,
@@ -173,9 +191,11 @@ import type {
   AdminOrganization,
   AdminOverviewResponse,
   AdminRunRecord,
+  AdminUserStatus,
   AdminUserSummary,
   AssistantContract,
   ArtifactRecord,
+  BisqueAuthSessionResponse,
   ChatMessage,
   ConversationRecord,
   ProgressEvent,
@@ -190,7 +210,6 @@ import type {
 import { AuthScreen } from "./components/auth/AuthScreen";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { InlineDataQuickPreview } from "./components/chat/InlineDataQuickPreview";
-import { AboutBisqueHoverCard } from "./components/chat/AboutBisqueHoverCard";
 import { ChatRunSteps } from "./components/chat/ChatRunSteps";
 import { ComposerSlashMenu } from "./components/chat/ComposerSlashMenu";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
@@ -221,6 +240,8 @@ import {
   FolderOpen,
   ImageIcon,
   Images,
+  Info,
+  Layers3,
   Laptop,
   Link2,
   LogOut,
@@ -238,18 +259,72 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash,
+  Unlink,
   UserRound,
   X,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
+import { Toaster, toast } from "sonner";
 
 type UiRole = "user" | "assistant";
 type ThemePreference = "system" | "light" | "dark";
-type AuthMode = "bisque" | "guest";
+type AuthMode = "bisque" | "guest" | "workos";
+type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
-type ActivePanel = "chat" | "resources" | "admin" | "training";
+type ActivePanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
 type ConversationPreferredPanel = "chat";
 type ComposerIntelligenceMode = "high" | "pro";
+type BisqueResourceCounts = {
+  image: number;
+  dataset: number;
+  table: number;
+};
+
+type WorkOSRedirectScreenProps = {
+  checking: boolean;
+  loading: boolean;
+  errorMessage?: string | null;
+  onRetry: () => Promise<void> | void;
+};
+
+function WorkOSRedirectScreen({
+  checking,
+  loading,
+  errorMessage,
+  onRetry,
+}: WorkOSRedirectScreenProps) {
+  const title = checking
+    ? "Checking your session"
+    : errorMessage
+      ? "Unable to open WorkOS"
+      : "Opening WorkOS sign in";
+  const message =
+    errorMessage ||
+    "Taking you directly to the BisQue Ultra sign-in page.";
+  const canRetry = !checking && !loading && Boolean(errorMessage);
+
+  return (
+    <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
+      <section
+        className="grid w-full max-w-sm gap-4 rounded-2xl border bg-card p-6 text-center shadow-sm"
+        aria-live="polite"
+      >
+        <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          <BisqueMarkIcon className="size-5" />
+        </div>
+        <div className="grid gap-1">
+          <h1 className="text-base font-semibold tracking-normal">{title}</h1>
+          <p className="text-sm leading-6 text-muted-foreground">{message}</p>
+        </div>
+        {canRetry ? (
+          <Button type="button" className="h-9 rounded-xl" onClick={() => void onRetry()}>
+            Try again
+          </Button>
+        ) : null}
+      </section>
+    </main>
+  );
+}
 
 type RunImageArtifact = {
   path: string;
@@ -278,6 +353,20 @@ type ScientificFigureCard = {
   previewable: boolean;
 };
 
+const formatBisqueShortcutLabel = (
+  count: number | null | undefined,
+  singular: string,
+  plural: string
+): string => {
+  if (!Number.isFinite(count)) {
+    return plural;
+  }
+  const normalizedCount = Math.max(0, Math.floor(Number(count)));
+  return `${normalizedCount.toLocaleString()} ${
+    normalizedCount === 1 ? singular : plural
+  }`;
+};
+
 const lazyNamed = <TModule extends Record<string, unknown>>(
   loader: () => Promise<TModule>,
   exportName: keyof TModule
@@ -304,6 +393,10 @@ const LazyAdminConsole = lazyNamed(
 const LazyTrainingDashboard = lazyNamed(
   () => import("./components/TrainingDashboard"),
   "TrainingDashboard"
+);
+const LazyScientificViewerPage = lazyNamed(
+  () => import("./components/ScientificViewerPage"),
+  "ScientificViewerPage"
 );
 const LazyResourceBrowser = lazyNamed(
   () => import("./components/ResourceBrowser"),
@@ -584,22 +677,15 @@ function CollapsedSidebarRail({
   onOpenResources,
   onOpenRecent,
 }: CollapsedSidebarRailProps) {
-  const { setOpen } = useSidebar();
   const [recentsOpen, setRecentsOpen] = useState(false);
 
   return (
     <nav className="app-collapsed-sidebar-rail" aria-label="Collapsed navigation">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="app-collapsed-sidebar-logo-button"
+      <SidebarTrigger
+        className="app-collapsed-sidebar-toggle"
         aria-label="Expand sidebar"
         title="Expand sidebar"
-        onClick={() => setOpen(true)}
-      >
-        <BisqueMarkIcon className="app-collapsed-sidebar-logo-icon" />
-      </Button>
+      />
 
       <div className="app-collapsed-sidebar-actions" role="list">
         <Button
@@ -769,6 +855,7 @@ const mobileSidebarKeepOpenProps = {
 
 const CONVERSATION_QUERY_PARAM = "conversation";
 const CONVERSATION_PAGE_SIZE = 25;
+const RESOURCE_PAGE_SIZE = 50;
 const SCROLL_RESTORE_BOTTOM_THRESHOLD_PX = 280;
 
 const captureConversationScrollMemory = (
@@ -1757,6 +1844,12 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
   const preferredPanel = normalizeConversationPanel(
     hydrated ? String(state.preferredPanel || "").trim().toLowerCase() : record.preferred_panel
   );
+  const messages = hydrated ? toUiMessages(state.messages, updatedAt) : [];
+  const titleSeed = hydrated
+    ? [...messages].reverse().find((message) => message.role === "user")?.content ??
+      messages[messages.length - 1]?.content ??
+      String(record.preview || "")
+    : String(record.preview || "");
   const uploadedFiles = hydrated ? toUploadedFileRecords(state.uploadedFiles) : [];
   const uploadedFileIdSet = new Set(uploadedFiles.map((file) => file.file_id));
   const stagedUploadFileIds = hydrated
@@ -1764,7 +1857,7 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     : [];
   return {
     id: conversationId,
-    title: normalizeConversationTitle(String(record.title || "New conversation")),
+    title: resolveConversationTitle(record.title, titleSeed),
     createdAt,
     updatedAt,
     hydrated,
@@ -1776,7 +1869,7 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
         : 0,
     historyRunning: Boolean(record.running),
     prompt: hydrated ? String(state.prompt || "") : "",
-    messages: hydrated ? toUiMessages(state.messages, updatedAt) : [],
+    messages,
     pendingFiles: [],
     uploadedFiles,
     stagedUploadFileIds,
@@ -1836,54 +1929,54 @@ const mergeConversationPage = (
   return [...optimisticOnly, ...merged].sort((a, b) => b.updatedAt - a.updatedAt);
 };
 
-const conversationToRecord = (conversation: ConversationState): ConversationRecord => ({
-  conversation_id: conversation.id,
-  title: normalizeConversationTitle(conversation.title || "New conversation"),
-  created_at_ms: conversation.createdAt,
-  updated_at_ms: conversation.updatedAt,
-  preview: conversation.hydrated
-    ? summarizePrompt(
-        [...conversation.messages].reverse().find((message) => message.role === "user")?.content ??
-          conversation.messages[conversation.messages.length - 1]?.content ??
-          "",
-        160
-      )
-    : conversation.historyPreview,
-  message_count: conversation.hydrated
-    ? conversation.messages.length
-    : conversation.historyMessageCount,
-  preferred_panel: conversation.preferredPanel,
-  running: conversation.hydrated ? conversation.sending : conversation.historyRunning,
-  state: {
-    preferredPanel: normalizeConversationPanel(conversation.preferredPanel),
-    prompt: "",
-    messages: conversation.messages.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      createdAt: message.createdAt,
-      runId: message.runId,
-      durationSeconds: message.durationSeconds,
-      progressEvents: message.progressEvents ?? [],
-      runEvents: message.runEvents ?? [],
-      responseMetadata: message.responseMetadata ?? null,
-      uploadedFileNames: message.uploadedFileNames ?? [],
-      runArtifacts: message.runArtifacts ?? [],
-      quickPreviewFileIds: message.quickPreviewFileIds ?? [],
-      resolvedBisqueResources: message.resolvedBisqueResources ?? [],
-    })),
-    uploadedFiles: conversation.uploadedFiles,
-    stagedUploadFileIds: conversation.stagedUploadFileIds,
-    activeSelectionContext: conversation.activeSelectionContext,
-    failedUploadPreviewIds: conversation.failedUploadPreviewIds,
-    bisqueLinksByFileId: conversation.bisqueLinksByFileId,
-    composerWorkflowPreset: conversation.composerWorkflowPreset,
-    selectionImportPending: false,
-    sending: Boolean(conversation.sending),
-    chatError: conversation.chatError,
-    streamingMessageId: conversation.streamingMessageId,
-  },
-});
+const conversationToRecord = (conversation: ConversationState): ConversationRecord => {
+  const previewSource = conversation.hydrated
+    ? [...conversation.messages].reverse().find((message) => message.role === "user")?.content ??
+      conversation.messages[conversation.messages.length - 1]?.content ??
+      ""
+    : conversation.historyPreview;
+  return {
+    conversation_id: conversation.id,
+    title: resolveConversationTitle(conversation.title, previewSource),
+    created_at_ms: conversation.createdAt,
+    updated_at_ms: conversation.updatedAt,
+    preview: conversation.hydrated ? summarizePrompt(previewSource, 160) : conversation.historyPreview,
+    message_count: conversation.hydrated
+      ? conversation.messages.length
+      : conversation.historyMessageCount,
+    preferred_panel: conversation.preferredPanel,
+    running: conversation.hydrated ? conversation.sending : conversation.historyRunning,
+    state: {
+      preferredPanel: normalizeConversationPanel(conversation.preferredPanel),
+      prompt: "",
+      messages: conversation.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        runId: message.runId,
+        durationSeconds: message.durationSeconds,
+        progressEvents: message.progressEvents ?? [],
+        runEvents: message.runEvents ?? [],
+        responseMetadata: message.responseMetadata ?? null,
+        uploadedFileNames: message.uploadedFileNames ?? [],
+        runArtifacts: message.runArtifacts ?? [],
+        quickPreviewFileIds: message.quickPreviewFileIds ?? [],
+        resolvedBisqueResources: message.resolvedBisqueResources ?? [],
+      })),
+      uploadedFiles: conversation.uploadedFiles,
+      stagedUploadFileIds: conversation.stagedUploadFileIds,
+      activeSelectionContext: conversation.activeSelectionContext,
+      failedUploadPreviewIds: conversation.failedUploadPreviewIds,
+      bisqueLinksByFileId: conversation.bisqueLinksByFileId,
+      composerWorkflowPreset: conversation.composerWorkflowPreset,
+      selectionImportPending: false,
+      sending: Boolean(conversation.sending),
+      chatError: conversation.chatError,
+      streamingMessageId: conversation.streamingMessageId,
+    },
+  };
+};
 
 type StreamController = {
   iterable: AsyncIterable<string>;
@@ -2892,19 +2985,7 @@ const summarizePrompt = (value: string, maxLen = 46): string => {
 };
 
 const summarizeConversationTitle = (value: string, maxWords = 4): string => {
-  const singleLine = value.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "");
-  if (!singleLine) {
-    return "New conversation";
-  }
-  const words = singleLine.split(" ").filter(Boolean).slice(0, Math.max(1, maxWords));
-  if (words.length === 0) {
-    return "New conversation";
-  }
-  const title = words.join(" ");
-  if (title.length <= 52) {
-    return title;
-  }
-  return `${title.slice(0, 51)}…`;
+  return fallbackConversationTitleFromText(value, maxWords);
 };
 
 const normalizeConversationTitle = (value: string): string => {
@@ -3071,6 +3152,17 @@ const toBisqueClientViewUrl = (urlValue: string | null | undefined): string | nu
 
 const normalizeApiError = (error: unknown): string => {
   if (error instanceof ApiError) {
+    if (
+      error.detail &&
+      typeof error.detail === "object" &&
+      !Array.isArray(error.detail)
+    ) {
+      const detail = error.detail as Record<string, unknown>;
+      const detailMessage = String(detail.message ?? detail.error ?? "").trim();
+      if (detailMessage) {
+        return detailMessage;
+      }
+    }
     if (typeof error.detail === "string") {
       return `${error.message}: ${error.detail}`;
     }
@@ -3080,6 +3172,34 @@ const normalizeApiError = (error: unknown): string => {
     return error.message;
   }
   return String(error);
+};
+
+const accountApprovalMessageFromSession = (
+  session: Pick<
+    BisqueAuthSessionResponse,
+    "account_status" | "account_email" | "message" | "authenticated"
+  >
+): string | null => {
+  const explicitMessage = String(session.message ?? "").trim();
+  if (explicitMessage) {
+    return explicitMessage;
+  }
+  const status = String(session.account_status ?? "").trim().toLowerCase();
+  const accountEmail = String(session.account_email ?? "").trim();
+  const accountLabel = accountEmail ? ` for ${accountEmail}` : "";
+  if (status === "pending") {
+    return `Your account request${accountLabel} is pending administrator approval.`;
+  }
+  if (status === "disabled") {
+    return `This account${accountLabel} has been disabled. Contact an administrator for access.`;
+  }
+  if (status === "rejected") {
+    return `This account request${accountLabel} was not approved. Contact an administrator for details.`;
+  }
+  if (status && !session.authenticated) {
+    return `This account${accountLabel} is ${status} and cannot access the platform yet.`;
+  }
+  return null;
 };
 
 const isBisqueAuthApiError = (error: unknown): boolean => {
@@ -8747,7 +8867,13 @@ const getAccountDisplayName = (
   if (trimmedUser) {
     return trimmedUser;
   }
-  return authMode === "guest" ? "Guest" : "BisQue user";
+  if (authMode === "guest") {
+    return "Guest";
+  }
+  if (authMode === "workos") {
+    return "WorkOS user";
+  }
+  return "BisQue user";
 };
 
 const getAccountSubtitle = (
@@ -8756,6 +8882,9 @@ const getAccountSubtitle = (
 ): string => {
   if (authMode === "guest") {
     return "Guest access";
+  }
+  if (authMode === "workos") {
+    return authIsAdmin ? "WorkOS admin" : "WorkOS account";
   }
   if (authIsAdmin) {
     return "Admin account";
@@ -8877,6 +9006,7 @@ type AppSettingsDialogProps = {
   authUser: string | null;
   authMode: AuthMode | null;
   authIsAdmin: boolean;
+  bisqueCredentialsLinked: boolean;
   themePreference: ThemePreference;
   resolvedTheme: "light" | "dark";
   bisqueNavLinks: BisqueNavLinks | null;
@@ -8885,6 +9015,10 @@ type AppSettingsDialogProps = {
   onOpenTraining: () => void;
   onOpenAdmin: () => void;
   onLogout: () => Promise<void>;
+  onUnlinkBisqueAccount: () => Promise<void>;
+  onLinkBisqueAccount: (payload: { username: string; password: string }) => Promise<{
+    imageCount: number;
+  }>;
 };
 
 function AppSettingsDialog({
@@ -8893,6 +9027,7 @@ function AppSettingsDialog({
   authUser,
   authMode,
   authIsAdmin,
+  bisqueCredentialsLinked,
   themePreference,
   resolvedTheme,
   bisqueNavLinks,
@@ -8901,11 +9036,29 @@ function AppSettingsDialog({
   onOpenTraining,
   onOpenAdmin,
   onLogout,
+  onUnlinkBisqueAccount,
+  onLinkBisqueAccount,
 }: AppSettingsDialogProps) {
   const accountName = getAccountDisplayName(authUser, authMode);
   const accountSubtitle = getAccountSubtitle(authMode, authIsAdmin);
   const initials = getAccountInitials(accountName);
   const resolvedThemeLabel = resolvedTheme === "dark" ? "Dark" : "Light";
+  const [bisqueUsername, setBisqueUsername] = useState(() =>
+    authMode === "bisque" ? authUser ?? "" : ""
+  );
+  const [bisquePassword, setBisquePassword] = useState("");
+  const [bisqueLinking, setBisqueLinking] = useState(false);
+  const [bisqueUnlinking, setBisqueUnlinking] = useState(false);
+  const [bisqueLinkError, setBisqueLinkError] = useState<string | null>(null);
+  const [bisqueImageCount, setBisqueImageCount] = useState<number | null>(null);
+  const bisqueLinked = Boolean(bisqueCredentialsLinked && authUser);
+  const bisqueRootHref = bisqueNavLinks?.home ?? DEFAULT_BISQUE_BROWSER_URL;
+
+  useEffect(() => {
+    if (authMode === "bisque" && authUser) {
+      setBisqueUsername(authUser);
+    }
+  }, [authMode, authUser]);
 
   const runAndClose = (action: () => void): void => {
     onOpenChange(false);
@@ -8915,6 +9068,52 @@ function AppSettingsDialog({
   const logoutAndClose = (): void => {
     onOpenChange(false);
     void onLogout();
+  };
+
+  const submitBisqueLink = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const username = bisqueUsername.trim();
+    if (!username || !bisquePassword) {
+      setBisqueLinkError("Enter your BisQue username and password.");
+      return;
+    }
+    setBisqueLinking(true);
+    setBisqueLinkError(null);
+    try {
+      const result = await onLinkBisqueAccount({
+        username,
+        password: bisquePassword,
+      });
+      setBisquePassword("");
+      setBisqueImageCount(result.imageCount);
+    } catch (error) {
+      const message = normalizeApiError(error);
+      setBisqueLinkError(message);
+      toast.error("Could not link BisQue account", {
+        description: message,
+      });
+      setBisquePassword("");
+    } finally {
+      setBisqueLinking(false);
+    }
+  };
+
+  const unlinkBisqueAccount = async (): Promise<void> => {
+    setBisqueUnlinking(true);
+    setBisqueLinkError(null);
+    setBisquePassword("");
+    setBisqueImageCount(null);
+    try {
+      await onUnlinkBisqueAccount();
+    } catch (error) {
+      const message = normalizeApiError(error);
+      setBisqueLinkError(message);
+      toast.error("Could not unlink BisQue account", {
+        description: message,
+      });
+    } finally {
+      setBisqueUnlinking(false);
+    }
   };
 
   return (
@@ -8951,6 +9150,10 @@ function AppSettingsDialog({
               <TabsTrigger value="bisque" className="app-settings-nav-item">
                 <Database data-icon="inline-start" aria-hidden="true" />
                 BisQue
+              </TabsTrigger>
+              <TabsTrigger value="about" className="app-settings-nav-item">
+                <Info data-icon="inline-start" aria-hidden="true" />
+                About
               </TabsTrigger>
             </TabsList>
           </aside>
@@ -9054,13 +9257,109 @@ function AppSettingsDialog({
             <TabsContent value="bisque" className="app-settings-tab-content">
               <div className="app-settings-panel-heading">
                 <h2>BisQue</h2>
-                <p>Jump into the production BisQue instance or local Ultra panels.</p>
+                <p>Link your BisQue account or jump into production resources.</p>
               </div>
+              <Separator />
+              <form className="app-settings-bisque-link-form" onSubmit={submitBisqueLink}>
+                <div className="app-settings-row">
+                  <div className="app-settings-row-copy">
+                    <div className="app-settings-row-title">Linked account</div>
+                    <p>
+                      Store a local session so Ultra can query, download, and upload
+                      BisQue data during autonomous runs.
+                    </p>
+                  </div>
+                </div>
+                {bisqueLinked && authUser ? (
+                  <Alert className="app-settings-bisque-linked-alert">
+                    <Check data-icon="inline-start" aria-hidden="true" />
+                    <AlertTitle>BisQue account linked</AlertTitle>
+                    <AlertDescription>
+                      <span>
+                        Signed in as <strong>{authUser}</strong>
+                        {bisqueImageCount != null
+                          ? `. Found ${bisqueImageCount.toLocaleString()} image${
+                              bisqueImageCount === 1 ? "" : "s"
+                            }.`
+                          : "."}
+                      </span>
+                      <AlertAction>
+                        <Button asChild variant="outline" size="sm">
+                          <a href={bisqueRootHref} target="_blank" rel="noreferrer">
+                            Open BisQue
+                            <ExternalLink data-icon="inline-end" aria-hidden="true" />
+                          </a>
+                        </Button>
+                      </AlertAction>
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                  <div className="app-settings-bisque-credential-grid">
+                    <div className="app-settings-field">
+                      <Label htmlFor="settings-bisque-username">Username</Label>
+                      <Input
+                        id="settings-bisque-username"
+                        value={bisqueUsername}
+                        onChange={(event) => setBisqueUsername(event.target.value)}
+                        autoComplete="username"
+                        disabled={bisqueLinking}
+                      />
+                    </div>
+                    <div className="app-settings-field">
+                      <Label htmlFor="settings-bisque-password">Password</Label>
+                      <Input
+                        id="settings-bisque-password"
+                        type="password"
+                        value={bisquePassword}
+                        onChange={(event) => setBisquePassword(event.target.value)}
+                        autoComplete="current-password"
+                        disabled={bisqueLinking}
+                      />
+                    </div>
+                  </div>
+                )}
+                {bisqueLinkError ? (
+                  <SystemMessage variant="error" fill>
+                    {bisqueLinkError}
+                  </SystemMessage>
+                ) : null}
+                {bisqueImageCount != null && !bisqueLinkError && !bisqueLinked ? (
+                  <div className="app-settings-bisque-link-status">
+                    <Check data-icon="inline-start" aria-hidden="true" />
+                    BisQue account linked. Found {bisqueImageCount.toLocaleString()} image
+                    {bisqueImageCount === 1 ? "" : "s"}.
+                  </div>
+                ) : null}
+                <div className="app-settings-action-row">
+                  {bisqueLinked ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={bisqueUnlinking}
+                      onClick={() => {
+                        void unlinkBisqueAccount();
+                      }}
+                    >
+                      <Unlink data-icon="inline-start" aria-hidden="true" />
+                      {bisqueUnlinking ? "Unlinking..." : "Unlink account"}
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      disabled={bisqueLinking || !bisqueUsername.trim() || !bisquePassword}
+                    >
+                      <Link2 data-icon="inline-start" aria-hidden="true" />
+                      {bisqueLinking ? "Testing account..." : "Link account"}
+                    </Button>
+                  )}
+                </div>
+              </form>
               <Separator />
               <div className="app-settings-row">
                 <div className="app-settings-row-copy">
                   <div className="app-settings-row-title">BisQue production</div>
-                  <p>Open UCSB BisQue in a new browser tab.</p>
+                  <p>Open the configured BisQue instance in a new browser tab.</p>
                 </div>
                 {bisqueNavLinks ? (
                   <Button asChild variant="outline" size="sm">
@@ -9135,6 +9434,89 @@ function AppSettingsDialog({
                 </div>
               </div>
             </TabsContent>
+
+            <TabsContent value="about" className="app-settings-tab-content">
+              <div className="app-settings-panel-heading">
+                <h2>About</h2>
+                <p>Project background, links, and workspace context.</p>
+              </div>
+              <Alert className="app-settings-about-alert">
+                <Info data-icon="inline-start" aria-hidden="true" />
+                <AlertTitle>Created within the UCSB Vision Research Lab</AlertTitle>
+                <AlertDescription>
+                  BisQue Ultra was created by Amil Khan, a PhD student in the
+                  UCSB Vision Research Lab. The lab is led by Professor B.S.
+                  Manjunath in the Department of Electrical and Computer
+                  Engineering, with research spanning computer vision, image
+                  processing, and machine learning applications.
+                </AlertDescription>
+              </Alert>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Project links</div>
+                  <p>Open the source repository or public project website.</p>
+                </div>
+                <div className="app-settings-inline-actions">
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href="https://github.com/amilworks/ultra"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      GitHub
+                    </a>
+                  </Button>
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href="https://amilworks.github.io/ultra_website/"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      Website
+                    </a>
+                  </Button>
+                </div>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Platform</div>
+                  <p>
+                    A scientific imaging workbench for reproducible, tool-guided
+                    analysis with BisQue-backed data management, a Go control plane,
+                    Deep Agents execution, and long-running workflow visibility.
+                  </p>
+                </div>
+              </div>
+              <Separator />
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Contact us</div>
+                  <p>Reach out to the creator through public project channels.</p>
+                </div>
+                <div className="app-settings-inline-actions">
+                  <Button asChild variant="outline" size="sm">
+                    <a href="https://github.com/amilworks" target="_blank" rel="noreferrer">
+                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      Creator
+                    </a>
+                  </Button>
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href="https://github.com/amilworks/ultra/issues"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      Issues
+                    </a>
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
           </section>
         </Tabs>
       </DialogContent>
@@ -9157,13 +9539,19 @@ export function App() {
     const fallbackRoot = inferBisqueRootFromUrl(DEFAULT_BISQUE_BROWSER_URL);
     return fallbackRoot ? buildBisqueNavLinks(fallbackRoot) : null;
   });
+  const [bisqueResourceCounts, setBisqueResourceCounts] =
+    useState<BisqueResourceCounts | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
   const [authUser, setAuthUser] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [authProvider, setAuthProvider] = useState<AuthProvider>("local");
   const [authIsAdmin, setAuthIsAdmin] = useState(false);
+  const [bisqueCredentialsLinked, setBisqueCredentialsLinked] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
+  const hostedAuthRedirectAttemptedRef = useRef(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const isPhoneView = useBreakpoint(641);
 
@@ -9189,10 +9577,14 @@ export function App() {
     null
   );
   const [resources, setResources] = useState<ResourceRecord[]>([]);
+  const [resourceTotalCount, setResourceTotalCount] = useState(0);
   const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [resourcesLoadingMore, setResourcesLoadingMore] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const resourceListKeyRef = useRef("");
   const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
+  const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
   const [composerResources, setComposerResources] = useState<ResourceRecord[]>([]);
   const [composerResourcesLoading, setComposerResourcesLoading] = useState(false);
@@ -9241,6 +9633,7 @@ export function App() {
     {}
   );
   const [adminUserDeletingById, setAdminUserDeletingById] = useState<Record<string, boolean>>({});
+  const [adminUserUpdatingById, setAdminUserUpdatingById] = useState<Record<string, boolean>>({});
   const [adminDeletingConversationKey, setAdminDeletingConversationKey] = useState<string | null>(
     null
   );
@@ -9281,6 +9674,60 @@ export function App() {
     () => new ApiClient({ baseUrl: apiBaseUrl, apiKey }),
     [apiBaseUrl, apiKey]
   );
+
+  useEffect(() => {
+    if (
+      authStatus !== "authenticated" ||
+      (authMode !== "bisque" && authMode !== "workos") ||
+      !bisqueCredentialsLinked ||
+      !bisqueNavLinks
+    ) {
+      setBisqueResourceCounts(null);
+      return;
+    }
+
+    let isCancelled = false;
+    setBisqueResourceCounts(null);
+
+    void Promise.all([
+      apiClient.searchBisqueResources({
+        resourceType: "image",
+        scope: "owner",
+        limit: 1,
+        countAll: true,
+      }),
+      apiClient.searchBisqueResources({
+        resourceType: "dataset",
+        scope: "owner",
+        limit: 1,
+        countAll: true,
+      }),
+      apiClient.searchBisqueResources({
+        resourceType: "table",
+        scope: "owner",
+        limit: 1,
+        countAll: true,
+      }),
+    ])
+      .then(([imageSearch, datasetSearch, tableSearch]) => {
+        if (!isCancelled) {
+          setBisqueResourceCounts({
+            image: Math.max(0, Math.floor(Number(imageSearch.count) || 0)),
+            dataset: Math.max(0, Math.floor(Number(datasetSearch.count) || 0)),
+            table: Math.max(0, Math.floor(Number(tableSearch.count) || 0)),
+          });
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setBisqueResourceCounts(null);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [apiClient, authMode, authStatus, bisqueCredentialsLinked, bisqueNavLinks]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -9410,36 +9857,59 @@ export function App() {
     let isCancelled = false;
     setAuthStatus("checking");
     setAuthError(null);
+    setAuthNotice(null);
     void apiClient
       .getBisqueSession()
       .then((session) => {
         if (isCancelled) {
           return;
         }
+        const nextAuthProvider: AuthProvider =
+          session.provider === "workos" || session.mode === "workos" ? "workos" : "local";
+        setAuthProvider(nextAuthProvider);
         const sessionBisqueRoot = String(session.bisque_root ?? "").trim();
         if (sessionBisqueRoot) {
           setBisqueNavLinks(buildBisqueNavLinks(sessionBisqueRoot));
         }
         if (session.authenticated) {
+          const sessionUser =
+            String(session.username ?? "").trim() ||
+            String(session.user?.email ?? "").trim() ||
+            String(session.user?.username ?? "").trim() ||
+            String(session.user?.id ?? "").trim() ||
+            null;
           setAuthStatus("authenticated");
-          setAuthUser(String(session.username ?? "").trim() || null);
-          setAuthMode(session.mode === "guest" ? "guest" : "bisque");
+          setAuthUser(sessionUser);
+          setAuthMode(
+            session.mode === "guest"
+              ? "guest"
+              : session.mode === "workos"
+                ? "workos"
+                : "bisque"
+          );
           setAuthIsAdmin(Boolean(session.is_admin));
+          setBisqueCredentialsLinked(Boolean(session.bisque_linked));
+          setAuthNotice(null);
           return;
         }
         setAuthStatus("unauthenticated");
         setAuthUser(null);
         setAuthMode(null);
         setAuthIsAdmin(false);
+        setBisqueCredentialsLinked(false);
+        setAuthNotice(accountApprovalMessageFromSession(session));
       })
       .catch(() => {
         if (isCancelled) {
           return;
         }
+        setAuthProvider("local");
         setAuthStatus("unauthenticated");
         setAuthUser(null);
         setAuthMode(null);
         setAuthIsAdmin(false);
+        setBisqueCredentialsLinked(false);
+        setAuthNotice(null);
       });
     return () => {
       isCancelled = true;
@@ -9456,6 +9926,7 @@ export function App() {
       return;
     }
     setAuthError(authErrorParam);
+    setAuthNotice(null);
     params.delete("auth_error");
     const nextQuery = params.toString();
     const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
@@ -9611,7 +10082,7 @@ export function App() {
     }
     const timeoutId = window.setTimeout(() => {
       const records = conversations
-        .filter((conversation) => conversation.hydrated)
+        .filter(shouldPersistConversationSnapshot)
         .map(conversationToRecord);
       const previousHashes = persistedConversationHashesRef.current;
       const nextHashes: Record<string, string> = {};
@@ -9672,36 +10143,61 @@ export function App() {
   }, [apiClient]);
 
   useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedResourceQuery(resourceQuery);
+    }, 180);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [resourceQuery]);
+
+  useEffect(() => {
     if (authStatus !== "authenticated") {
+      resourceListKeyRef.current = "";
       setResources([]);
+      setResourceTotalCount(0);
       setResourcesError(null);
       setResourcesLoading(false);
+      setResourcesLoadingMore(false);
       return;
     }
     let cancelled = false;
+    const activeQuery = debouncedResourceQuery.trim();
+    const activeResourceListKey = [
+      activeQuery,
+      resourceKindFilter,
+      resourceSourceFilter,
+      String(resourceRefreshToken),
+    ].join("\u0000");
+    resourceListKeyRef.current = activeResourceListKey;
     setResourcesLoading(true);
+    setResourcesLoadingMore(false);
     setResourcesError(null);
+    setResources([]);
     void loadLibraryResources(apiClient, {
-      limit: 500,
-      query: resourceQuery.trim() || undefined,
+      limit: RESOURCE_PAGE_SIZE,
+      offset: 0,
+      query: activeQuery || undefined,
       kind: resourceKindFilter,
       source: resourceSourceFilter,
     })
       .then((payload) => {
-        if (cancelled) {
+        if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
           return;
         }
         setResources(payload.resources);
+        setResourceTotalCount(Math.max(0, Math.floor(Number(payload.count) || 0)));
       })
       .catch((error) => {
-        if (cancelled) {
+        if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
           return;
         }
         setResources([]);
+        setResourceTotalCount(0);
         setResourcesError(normalizeApiError(error));
       })
       .finally(() => {
-        if (cancelled) {
+        if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
           return;
         }
         setResourcesLoading(false);
@@ -9712,8 +10208,8 @@ export function App() {
   }, [
     apiClient,
     authStatus,
+    debouncedResourceQuery,
     resourceKindFilter,
-    resourceQuery,
     resourceRefreshToken,
     resourceSourceFilter,
   ]);
@@ -10127,6 +10623,27 @@ export function App() {
   );
 
   const createNewConversation = useCallback((): void => {
+    const reusableBlankDraft = findReusableBlankDraftConversation(
+      conversations,
+      activeConversation?.id ?? activeConversationId
+    );
+    if (reusableBlankDraft) {
+      rememberActiveConversationScrollPosition();
+      flushSync(() => {
+        setActiveConversationId(reusableBlankDraft.id);
+        setActivePanel("chat");
+        setViewerOpen(false);
+        setResourceViewerContext(null);
+        setComposerResourcePickerOpen(false);
+        setComposerResourcePickerSelection({});
+        setActiveComposerResourceId(null);
+        setComposerResourceQuery("");
+        setDismissedSlashPrompt(null);
+        setUiErrorBanner(null);
+      });
+      return;
+    }
+
     const nextConversation = createConversationState();
     optimisticConversationIdsRef.current.add(nextConversation.id);
     rememberActiveConversationScrollPosition();
@@ -10143,7 +10660,12 @@ export function App() {
       setDismissedSlashPrompt(null);
       setUiErrorBanner(null);
     });
-  }, [rememberActiveConversationScrollPosition]);
+  }, [
+    activeConversation?.id,
+    activeConversationId,
+    conversations,
+    rememberActiveConversationScrollPosition,
+  ]);
 
   const openResourcesPanel = useCallback((): void => {
     rememberActiveConversationScrollPosition();
@@ -10156,6 +10678,14 @@ export function App() {
   const openTrainingPanel = useCallback((): void => {
     rememberActiveConversationScrollPosition();
     setActivePanel("training");
+    setViewerOpen(false);
+    setResourceViewerContext(null);
+    setResourceRefreshToken((value) => value + 1);
+  }, [rememberActiveConversationScrollPosition]);
+
+  const openScientificViewerPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
+    setActivePanel("scientific-viewer");
     setViewerOpen(false);
     setResourceViewerContext(null);
     setResourceRefreshToken((value) => value + 1);
@@ -10421,19 +10951,27 @@ export function App() {
   }): Promise<void> => {
     setAuthSubmitting(true);
     setAuthError(null);
+    setAuthNotice(null);
     try {
       const session = await apiClient.loginBisque(payload);
       if (!session.authenticated) {
         throw new Error("Authentication did not complete.");
       }
       setAuthUser(String(session.username ?? payload.username).trim() || payload.username);
-      setAuthMode("bisque");
+      setAuthMode(session.mode === "workos" ? "workos" : "bisque");
+      setAuthProvider(
+        session.provider === "workos" || session.mode === "workos" ? "workos" : "local"
+      );
       setAuthIsAdmin(Boolean(session.is_admin));
+      setBisqueCredentialsLinked(Boolean(session.bisque_linked));
       setAuthStatus("authenticated");
+      setAuthNotice(null);
     } catch (error) {
       setAuthStatus("unauthenticated");
       setAuthUser(null);
+      setAuthMode(null);
       setAuthIsAdmin(false);
+      setBisqueCredentialsLinked(false);
       setAuthError(normalizeApiError(error));
       throw error;
     } finally {
@@ -10441,33 +10979,129 @@ export function App() {
     }
   };
 
-  const continueAsGuest = async (payload: {
-    name: string;
-    email: string;
-    affiliation: string;
-  }): Promise<void> => {
-    if (!authGuestEnabled) {
-      const message = "Guest access is disabled. Sign in with your BisQue username and password.";
-      setAuthError(message);
-      throw new Error(message);
-    }
+  const startHostedAuth = useCallback(async (): Promise<void> => {
     setAuthSubmitting(true);
     setAuthError(null);
+    setAuthNotice(null);
     try {
-      const session = await apiClient.continueAsGuest(payload);
-      if (!session.authenticated) {
-        throw new Error("Guest session did not initialize.");
+      const session = await apiClient.startHostedAuth();
+      const authorizationUrl = String(session.authorization_url ?? "").trim();
+      if (!authorizationUrl) {
+        throw new Error("Hosted sign-in did not return an authorization URL.");
       }
-      setAuthUser(String(session.username ?? payload.name).trim() || payload.name);
-      setAuthMode("guest");
-      setAuthIsAdmin(Boolean(session.is_admin));
-      setAuthStatus("authenticated");
+      if (typeof window !== "undefined") {
+        window.location.assign(authorizationUrl);
+      }
     } catch (error) {
       setAuthStatus("unauthenticated");
       setAuthUser(null);
       setAuthMode(null);
       setAuthIsAdmin(false);
+      setBisqueCredentialsLinked(false);
       setAuthError(normalizeApiError(error));
+      throw error;
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }, [apiClient]);
+
+  const retryHostedAuth = useCallback(async (): Promise<void> => {
+    hostedAuthRedirectAttemptedRef.current = false;
+    await startHostedAuth();
+  }, [startHostedAuth]);
+
+  useEffect(() => {
+    if (authProvider !== "workos") {
+      hostedAuthRedirectAttemptedRef.current = false;
+      return;
+    }
+    if (authStatus !== "unauthenticated") {
+      return;
+    }
+    if (authError || hostedAuthRedirectAttemptedRef.current) {
+      return;
+    }
+    hostedAuthRedirectAttemptedRef.current = true;
+    void startHostedAuth().catch(() => {
+      // startHostedAuth stores the visible auth error state.
+    });
+  }, [authError, authProvider, authStatus, startHostedAuth]);
+
+  const linkBisqueAccountFromSettings = useCallback(
+    async (payload: { username: string; password: string }): Promise<{ imageCount: number }> => {
+      const session = await apiClient.loginBisque(payload);
+      if (!session.authenticated) {
+        throw new Error("Authentication did not complete.");
+      }
+      if (!session.bisque_linked) {
+        throw new Error("BisQue account link did not return a credential-backed session.");
+      }
+      const sessionBisqueRoot = String(session.bisque_root ?? "").trim();
+      if (sessionBisqueRoot) {
+        setBisqueNavLinks(buildBisqueNavLinks(sessionBisqueRoot));
+      }
+      setAuthUser(String(session.username ?? payload.username).trim() || payload.username);
+      setAuthMode(session.mode === "workos" ? "workos" : "bisque");
+      setAuthProvider(
+        session.provider === "workos" || session.mode === "workos" ? "workos" : "local"
+      );
+      setAuthIsAdmin(Boolean(session.is_admin));
+      setBisqueCredentialsLinked(Boolean(session.bisque_linked));
+      setAuthStatus("authenticated");
+      setAuthError(null);
+
+      const search = await apiClient.searchBisqueResources({
+        resourceType: "image",
+        scope: "owner",
+        limit: 1,
+        countAll: true,
+      });
+      const imageCount = Math.max(0, Number(search.count) || 0);
+      toast.success("Successfully linked BisQue account", {
+        description: `Found ${imageCount.toLocaleString()} image${
+          imageCount === 1 ? "" : "s"
+        } on BisQue.`,
+      });
+      return { imageCount };
+    },
+    [apiClient]
+  );
+
+  const requestAccount = async (payload: {
+    name: string;
+    email: string;
+    affiliation: string;
+  }): Promise<void> => {
+    if (!authGuestEnabled) {
+      const message = "Account requests are disabled. Sign in with your BisQue username and password.";
+      setAuthError(message);
+      throw new Error(message);
+    }
+    setAuthSubmitting(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      const session = await apiClient.requestAccount(payload);
+      if (session.authenticated) {
+        throw new Error("Account request unexpectedly returned an authenticated session.");
+      }
+      setAuthUser(null);
+      setAuthMode(null);
+      setAuthIsAdmin(false);
+      setBisqueCredentialsLinked(false);
+      setAuthStatus("unauthenticated");
+      setAuthNotice(
+        accountApprovalMessageFromSession(session) ||
+          "Your account request is pending administrator approval."
+      );
+    } catch (error) {
+      setAuthStatus("unauthenticated");
+      setAuthUser(null);
+      setAuthMode(null);
+      setAuthIsAdmin(false);
+      setBisqueCredentialsLinked(false);
+      setAuthError(normalizeApiError(error));
+      setAuthNotice(null);
       throw error;
     } finally {
       setAuthSubmitting(false);
@@ -10479,7 +11113,10 @@ export function App() {
     setAuthUser(null);
     setAuthMode(null);
     setAuthIsAdmin(false);
+    setBisqueCredentialsLinked(false);
     setAuthError(null);
+    setAuthNotice(null);
+    setBisqueResourceCounts(null);
     setComposerDraftsByConversationId({});
     setConversations([]);
     setActiveConversationId(null);
@@ -10505,11 +11142,21 @@ export function App() {
   };
 
   const logoutBisque = async (): Promise<void> => {
+    let logoutUrl = "";
     try {
-      await apiClient.logoutBisque();
+      const session = await apiClient.logoutBisque();
+      logoutUrl = String(session.logout_url ?? "").trim();
     } catch {
       // If logout endpoint fails, still clear local auth view state.
     }
+    clearAuthViewState();
+    if (logoutUrl && typeof window !== "undefined") {
+      window.location.assign(logoutUrl);
+    }
+  };
+
+  const unlinkBisqueAccount = async (): Promise<void> => {
+    await apiClient.unlinkBisqueAccount();
     clearAuthViewState();
   };
 
@@ -11167,9 +11814,78 @@ export function App() {
     });
   }, [composerResourcePickerOpen, composerResources]);
 
-  const refreshResources = (): void => {
+  const refreshResources = useCallback((): void => {
     setResourceRefreshToken((value) => value + 1);
-  };
+  }, []);
+
+  const resourceHasMore = resources.length < resourceTotalCount;
+
+  const loadMoreResources = useCallback((): void => {
+    if (
+      authStatus !== "authenticated" ||
+      resourcesLoading ||
+      resourcesLoadingMore ||
+      resources.length >= resourceTotalCount
+    ) {
+      return;
+    }
+    const offset = resources.length;
+    const activeQuery = debouncedResourceQuery.trim();
+    const activeResourceListKey = [
+      activeQuery,
+      resourceKindFilter,
+      resourceSourceFilter,
+      String(resourceRefreshToken),
+    ].join("\u0000");
+    setResourcesLoadingMore(true);
+    void loadLibraryResources(apiClient, {
+      limit: RESOURCE_PAGE_SIZE,
+      offset,
+      query: activeQuery || undefined,
+      kind: resourceKindFilter,
+      source: resourceSourceFilter,
+    })
+      .then((payload) => {
+        if (resourceListKeyRef.current !== activeResourceListKey) {
+          return;
+        }
+        setResources((previous) => {
+          const seen = new Set(previous.map((resource) => resource.file_id));
+          const merged = [...previous];
+          payload.resources.forEach((resource) => {
+            if (!seen.has(resource.file_id)) {
+              seen.add(resource.file_id);
+              merged.push(resource);
+            }
+          });
+          return merged;
+        });
+        setResourceTotalCount(Math.max(0, Math.floor(Number(payload.count) || 0)));
+      })
+      .catch((error) => {
+        if (resourceListKeyRef.current !== activeResourceListKey) {
+          return;
+        }
+        setResourcesError(normalizeApiError(error));
+      })
+      .finally(() => {
+        if (resourceListKeyRef.current !== activeResourceListKey) {
+          return;
+        }
+        setResourcesLoadingMore(false);
+      });
+  }, [
+    apiClient,
+    authStatus,
+    debouncedResourceQuery,
+    resourceKindFilter,
+    resourceRefreshToken,
+    resourceSourceFilter,
+    resourceTotalCount,
+    resources.length,
+    resourcesLoading,
+    resourcesLoadingMore,
+  ]);
 
   const refreshAdminConsole = (): void => {
     setAdminRefreshToken((value) => value + 1);
@@ -11215,6 +11931,30 @@ export function App() {
       setAdminError(normalizeApiError(error));
     } finally {
       setAdminUserDeletingById((previous) => {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
+  const updateAdminConsoleUserStatus = async (
+    userId: string,
+    status: AdminUserStatus
+  ): Promise<void> => {
+    const key = String(userId || "").trim();
+    if (!key) {
+      return;
+    }
+    setAdminUserUpdatingById((previous) => ({ ...previous, [key]: true }));
+    try {
+      await updateAdminUserStatus(apiClient, key, status);
+      setAdminError(null);
+      refreshAdminConsole();
+    } catch (error) {
+      setAdminError(normalizeApiError(error));
+    } finally {
+      setAdminUserUpdatingById((previous) => {
         const next = { ...previous };
         delete next[key];
         return next;
@@ -11355,7 +12095,10 @@ export function App() {
       uploadedFiles: uniqueByFileId(selectedFiles),
       bisqueLinksByFileId: selectedLinksByFileId,
     });
-    setViewerOpen(true);
+    rememberActiveConversationScrollPosition();
+    setActivePanel("scientific-viewer");
+    setViewerOpen(false);
+    setResourceRefreshToken((value) => value + 1);
   };
 
   const openResourceInViewer = (resource: ResourceRecord): void => {
@@ -13458,6 +14201,7 @@ export function App() {
 
   const historyItems: HistoryItem[] = useMemo(() => {
     return [...conversations]
+      .filter(shouldShowConversationInHistory)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((conversation) => {
         const panel = normalizeConversationPanel(conversation.preferredPanel);
@@ -13525,7 +14269,6 @@ export function App() {
     }))
     .filter((group) => group.conversations.length > 0);
   const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
-  const activeConversationTitle = activeConversation?.title ?? "New conversation";
   const pendingReuseCandidate = pendingReusePrompt?.candidate ?? null;
   const pendingReuseToolLabels = pendingReuseCandidate
     ? pendingReuseCandidate.toolNames
@@ -13550,25 +14293,31 @@ export function App() {
       : "Filename match"
     : null;
   const pendingReuseMatchCount = pendingReuseCandidate?.suggestions.length ?? 0;
-  const headerTitle =
-    activePanel === "resources"
-      ? "Resource browser"
-      : activePanel === "admin"
-        ? "Admin console"
-        : activePanel === "training"
-          ? "Model training"
-          : activeConversationTitle;
 
   if (authStatus !== "authenticated") {
+    if (authStatus === "checking" || authProvider === "workos") {
+      return (
+        <WorkOSRedirectScreen
+          checking={authStatus === "checking"}
+          loading={authSubmitting || authStatus === "checking"}
+          errorMessage={authStatus === "checking" ? null : authError}
+          onRetry={retryHostedAuth}
+        />
+      );
+    }
+
     return (
       <AuthScreen
+        authProvider={authProvider}
         bisqueRoot={bisqueRootForAuth}
         bisqueHomeUrl={bisqueNavLinks?.home ?? undefined}
         allowGuest={authGuestEnabled}
-        loading={authSubmitting || authStatus === "checking"}
-        errorMessage={authStatus === "checking" ? null : authError}
+        loading={authSubmitting}
+        errorMessage={authError}
+        statusMessage={authNotice}
         onAuthenticate={authenticateBisque}
-        onContinueGuest={continueAsGuest}
+        onStartHostedAuth={startHostedAuth}
+        onRequestAccount={requestAccount}
       />
     );
   }
@@ -13587,7 +14336,7 @@ export function App() {
           onOpenResources={openResourcesPanel}
           onOpenRecent={openHistoryItem}
         />
-        <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-start gap-2 px-3 py-4">
+        <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
           <div className="flex min-w-0 flex-row items-center gap-2 px-1">
             <div className="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
               <BisqueMarkIcon className="size-4" />
@@ -13596,6 +14345,11 @@ export function App() {
               BisQue Ultra
             </div>
           </div>
+          <SidebarTrigger
+            className="app-sidebar-trigger app-sidebar-header-trigger shrink-0"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          />
         </SidebarHeader>
         <SidebarContent className="app-sidebar-content overflow-hidden pt-4">
           <div className="app-sidebar-static">
@@ -13683,6 +14437,18 @@ export function App() {
                   <span>Admin</span>
                 </Button>
               ) : null}
+              <Button
+                variant={activePanel === "scientific-viewer" ? "secondary" : "ghost"}
+                className="app-resource-browser-button group/scientific-viewer mb-1 flex w-full items-center justify-between gap-2"
+                onClick={openScientificViewerPanel}
+                title="Scientific Viewer"
+                {...mobileSidebarCloseProps}
+              >
+                <span className="flex items-center gap-2">
+                  <Layers3 data-icon="inline-start" aria-hidden="true" />
+                  <span>Scientific Viewer</span>
+                </span>
+              </Button>
             </div>
             <div className="app-sidebar-history-search md:hidden">
               <SidebarInput
@@ -13737,7 +14503,13 @@ export function App() {
                           {...mobileSidebarCloseProps}
                         >
                           <Images className="size-4" />
-                          <span>View Images</span>
+                          <span>
+                            {formatBisqueShortcutLabel(
+                              bisqueResourceCounts?.image,
+                              "Image",
+                              "Images"
+                            )}
+                          </span>
                         </a>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -13750,7 +14522,13 @@ export function App() {
                           {...mobileSidebarCloseProps}
                         >
                           <Database className="size-4" />
-                          <span>View Datasets</span>
+                          <span>
+                            {formatBisqueShortcutLabel(
+                              bisqueResourceCounts?.dataset,
+                              "Dataset",
+                              "Datasets"
+                            )}
+                          </span>
                         </a>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -13763,7 +14541,13 @@ export function App() {
                           {...mobileSidebarCloseProps}
                         >
                           <Table2 className="size-4" />
-                          <span>View Tables</span>
+                          <span>
+                            {formatBisqueShortcutLabel(
+                              bisqueResourceCounts?.table,
+                              "Table",
+                              "Tables"
+                            )}
+                          </span>
                         </a>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -13934,6 +14718,7 @@ export function App() {
         authUser={authUser}
         authMode={authMode}
         authIsAdmin={authIsAdmin}
+        bisqueCredentialsLinked={bisqueCredentialsLinked}
         themePreference={themePreference}
         resolvedTheme={resolvedTheme}
         bisqueNavLinks={bisqueNavLinks}
@@ -13942,27 +14727,12 @@ export function App() {
         onOpenTraining={openTrainingPanel}
         onOpenAdmin={openAdminPanel}
         onLogout={logoutBisque}
+        onUnlinkBisqueAccount={unlinkBisqueAccount}
+        onLinkBisqueAccount={linkBisqueAccountFromSettings}
       />
 
       <SidebarInset ref={sidebarInsetRef}>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
-          <header className="app-shell-header bg-background z-10 flex w-full shrink-0 items-center gap-2 border-b px-3 sm:px-4">
-            <SidebarTrigger className="app-sidebar-trigger -ml-1 shrink-0" />
-            <div className="app-header-title text-foreground flex min-w-0 flex-1 items-center gap-2">
-              <span className="app-header-title-text">{headerTitle}</span>
-              <div className="app-header-meta">
-                {activePanel === "chat" && authMode === "guest" ? (
-                  <Badge variant="secondary">Guest</Badge>
-                ) : null}
-                {activePanel === "chat" && activeSending ? (
-                  <RunningStatusPill className="app-header-running" />
-                ) : null}
-              </div>
-            </div>
-            <div className="ml-auto shrink-0">
-              <AboutBisqueHoverCard />
-            </div>
-          </header>
           {uiErrorBanner ? (
             <div className="bg-background z-10 shrink-0 px-4 pt-3">
               <SystemMessage variant="error" fill>
@@ -13995,6 +14765,7 @@ export function App() {
                 runCancellingById={adminRunCancellingById}
                 runRequeueingById={adminRunRequeueingById}
                 userDeletingById={adminUserDeletingById}
+                userUpdatingById={adminUserUpdatingById}
                 deletingConversationKey={adminDeletingConversationKey}
                 activeRunEventRunId={activeAdminRunEventRunId}
                 runEventsById={adminRunEventsById}
@@ -14014,6 +14785,9 @@ export function App() {
                 onCreateUser={createAdminConsoleUser}
                 onDeleteUser={(userId: string) => {
                   void deleteAdminConsoleUser(userId);
+                }}
+                onUpdateUserStatus={(userId: string, status: AdminUserStatus) => {
+                  void updateAdminConsoleUserStatus(userId, status);
                 }}
                 onCancelRun={(runId: string) => {
                   void cancelAdminRun(runId);
@@ -14040,7 +14814,10 @@ export function App() {
             >
               <LazyResourceBrowser
                 resources={resources}
+                totalCount={resourceTotalCount}
                 loading={resourcesLoading}
+                loadingMore={resourcesLoadingMore}
+                hasMore={resourceHasMore}
                 error={resourcesError}
                 query={resourceQuery}
                 kindFilter={resourceKindFilter}
@@ -14050,6 +14827,7 @@ export function App() {
                 onKindFilterChange={setResourceKindFilter}
                 onSourceFilterChange={setResourceSourceFilter}
                 onRefresh={refreshResources}
+                onLoadMore={loadMoreResources}
                 onOpenResource={openResourceInViewer}
                 onUseInChat={addResourceToActiveConversation}
                 onDeleteResource={(resource: ResourceRecord) => {
@@ -14075,6 +14853,23 @@ export function App() {
                 resourcesLoading={resourcesLoading}
                 resourcesError={resourcesError}
                 isAdmin={authIsAdmin}
+              />
+            </Suspense>
+          ) : activePanel === "scientific-viewer" ? (
+            <Suspense
+              fallback={
+                <PanelLoadingState
+                  title="Loading scientific viewer..."
+                  subtitle="The imaging workspace loads on demand so the main chat stays fast."
+                />
+              }
+            >
+              <LazyScientificViewerPage
+                uploadedFiles={viewerUploadedFiles}
+                bisqueLinksByFileId={viewerBisqueLinksByFileId}
+                apiClient={apiClient}
+                onUseHdf5DatasetInChat={useHdf5DatasetInChat}
+                onOpenResources={openResourcesPanel}
               />
             </Suspense>
           ) : (
@@ -14735,6 +15530,12 @@ export function App() {
           </AlertDialogContent>
         </AlertDialog>
       </SidebarInset>
+      <Toaster
+        theme={resolvedTheme}
+        richColors
+        position="bottom-right"
+        toastOptions={{ duration: 4200 }}
+      />
     </SidebarProvider>
   );
 }

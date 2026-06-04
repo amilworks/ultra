@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
+import os
 import re
 import sys
 import time
@@ -16,10 +18,20 @@ class ControlPlaneClient:
     def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = request.build_opener(request.HTTPCookieProcessor(self.cookie_jar))
 
     def create_thread(self, *, title: str) -> dict[str, Any]:
         payload = self._request("POST", "/v2/threads", {"title": title, "messages": []})
         return _unwrap(payload, "thread")
+
+    def login_bisque_account(self, *, username: str, password: str) -> dict[str, Any]:
+        payload = self._request(
+            "POST",
+            "/v2/auth/login",
+            {"username": username, "password": password},
+        )
+        return dict(payload) if isinstance(payload, dict) else {"authenticated": False}
 
     def get_thread(self, thread_id: str) -> dict[str, Any]:
         payload = self._request("GET", f"/v2/threads/{parse.quote(thread_id, safe='')}")
@@ -131,7 +143,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-Role", "researcher")
         for key, value in (headers or {}).items():
             req.add_header(key, value)
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+        with self.opener.open(req, timeout=self.timeout_seconds) as response:
             body = response.read().decode("utf-8")
         return json.loads(body) if body else {}
 
@@ -140,7 +152,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-User-Id", "local-user")
         req.add_header("X-Ultra-Org-Id", "local-org")
         req.add_header("X-Ultra-Role", "researcher")
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+        with self.opener.open(req, timeout=self.timeout_seconds) as response:
             return response.read()
 
     def _request_multipart(self, path: str, files: list[Path]) -> dict[str, Any]:
@@ -171,7 +183,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-User-Id", "local-user")
         req.add_header("X-Ultra-Org-Id", "local-org")
         req.add_header("X-Ultra-Role", "researcher")
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
+        with self.opener.open(req, timeout=self.timeout_seconds) as response:
             response_body = response.read().decode("utf-8")
         return json.loads(response_body) if response_body else {}
 
@@ -328,6 +340,11 @@ def trace_prompt(
             terminal_ms = elapsed_ms
             break
         time.sleep(poll_interval_seconds)
+    if terminal_ms is not None:
+        run = client.get_run(run_id)
+        final_events = client.list_run_events(run_id)
+        if final_events:
+            events = final_events
     artifacts = client.list_run_artifacts(run_id)
     downloads = _verify_downloads(client, artifacts) if verify_downloads else {}
     linked_artifacts = (
@@ -355,6 +372,7 @@ def trace_prompt(
 
 def run_trace(args: argparse.Namespace) -> dict[str, Any]:
     client = ControlPlaneClient(args.base_url, timeout_seconds=args.http_timeout)
+    bisque_session = _login_bisque_from_args(client, args)
     file_ids = client.upload_files(args.upload_file) if args.upload_file else []
     thread = client.create_thread(title=args.title)
     thread_id = str(thread["thread_id"])
@@ -375,6 +393,8 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
     }
     if file_ids:
         result["uploaded_file_ids"] = file_ids
+    if bisque_session:
+        result["bisque_session"] = bisque_session
     followups = _followup_prompts(args)
     followup_summaries: list[dict[str, Any]] = []
     previous_run = first_run
@@ -428,25 +448,22 @@ def evaluate_trace_requirements(
                 f"{label} run {run_id} response_len={response_len} "
                 f"below min_response_chars={min_response_chars}"
             )
-        artifact_count = int(summary.get("artifact_count") or 0)
+        artifacts = _summary_artifacts(summary)
+        artifact_count = len(artifacts)
         if artifact_count < min_artifacts:
             issues.append(
                 f"{label} run {run_id} artifact_count={artifact_count} "
                 f"below min_artifacts={min_artifacts}"
             )
         if require_downloads:
-            artifacts = summary.get("artifacts") or []
-            if isinstance(artifacts, list):
-                for artifact in artifacts:
-                    if not isinstance(artifact, dict):
-                        continue
-                    if artifact.get("download_ok") is not False:
-                        continue
-                    artifact_id = artifact.get("artifact_id") or "<unknown>"
-                    issues.append(
-                        f"{label} run {run_id} artifact {artifact_id} "
-                        "download verification failed"
-                    )
+            for artifact in artifacts:
+                if artifact.get("download_ok") is not False:
+                    continue
+                artifact_id = artifact.get("artifact_id") or "<unknown>"
+                issues.append(
+                    f"{label} run {run_id} artifact {artifact_id} "
+                    "download verification failed"
+                )
     return issues
 
 
@@ -860,6 +877,109 @@ def evaluate_tool_capability_trace_quality(
     }
 
 
+def evaluate_bisque_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 800 for turn in turns)
+    search_ok = _trace_has_tool(turns, {"bisque_search_resources"})
+    download_ok = _trace_has_tool(turns, {"bisque_download_resource"})
+    upload_ok = _trace_has_tool(
+        turns,
+        {"bisque_upload_workspace_files", "bisque_upload_files"},
+    )
+    analysis_ok = _trace_has_tool(
+        turns,
+        {
+            "execute",
+            "stage_uploaded_files_for_analysis",
+            "stage_artifact_for_analysis",
+            "read_file",
+            "write_file",
+        },
+    )
+    artifacts_ok = _trace_has_bisque_analysis_artifacts(turns)
+    downloads_verified = _trace_artifact_downloads_verified(turns)
+    followup_context_ok = len(turns) <= 1 or all(
+        _turn_uses_bisque_followup_context(turn) for turn in turns[1:]
+    )
+    response_mentions_upload = _trace_mentions_bisque_upload(turns)
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.25
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 1.0
+    else:
+        issues.append("one or more responses are too short for BisQue analysis")
+    if search_ok:
+        score += 1.25
+    else:
+        issues.append("missing BisQue search tool evidence")
+    if download_ok:
+        score += 1.5
+    else:
+        issues.append("missing BisQue download/import tool evidence")
+    if analysis_ok:
+        score += 1.25
+    else:
+        issues.append("missing code execution or staged analysis evidence")
+    if upload_ok:
+        score += 1.5
+    else:
+        issues.append("missing BisQue upload tool evidence")
+    if artifacts_ok:
+        score += 1.0
+    else:
+        issues.append("missing durable image/report/code analysis artifacts")
+    if downloads_verified:
+        score += 0.75
+    else:
+        issues.append("artifact download verification failed or was not captured")
+    if followup_context_ok:
+        score += 1.0
+    else:
+        issues.append("follow-ups did not reuse prior BisQue/image/artifact context")
+    if response_mentions_upload:
+        score += 0.5
+    else:
+        issues.append("response does not mention uploaded BisQue resources")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "bisque_search": search_ok,
+            "bisque_download": download_ok,
+            "analysis_tools": analysis_ok,
+            "bisque_upload": upload_ok,
+            "analysis_artifacts": artifacts_ok,
+            "downloaded_artifacts": downloads_verified,
+            "followup_context": followup_context_ok,
+            "response_mentions_upload": response_mentions_upload,
+        },
+    }
+
+
 def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     turns = _trace_turn_summaries(result)
     manifests = _trace_tool_capability_manifests(turns)
@@ -1120,6 +1240,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tool-capability-quality", action="store_true")
     parser.add_argument("--require-tool-capability-quality", action="store_true")
     parser.add_argument("--min-tool-capability-quality-score", type=float, default=8.5)
+    parser.add_argument("--bisque-quality", action="store_true")
+    parser.add_argument("--require-bisque-quality", action="store_true")
+    parser.add_argument("--min-bisque-quality-score", type=float, default=8.5)
+    parser.add_argument(
+        "--bisque-username-env",
+        default="",
+        help="Environment variable containing a BisQue username for linked-account traces.",
+    )
+    parser.add_argument(
+        "--bisque-password-env",
+        default="",
+        help="Environment variable containing a BisQue password for linked-account traces.",
+    )
     parser.add_argument("--capability-matrix", action="store_true")
     parser.add_argument("--expected-rarespot-tile-size", type=int, default=512)
     parser.add_argument("--expected-rarespot-tile-overlap", type=float, default=0.25)
@@ -1183,6 +1316,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
         if args.capability_matrix:
             result["capability_matrix"] = build_tool_capability_matrix(result)
+        if args.bisque_quality or args.require_bisque_quality:
+            bisque_quality = evaluate_bisque_trace_quality(
+                result,
+                min_score=args.min_bisque_quality_score,
+            )
+            result["bisque_quality"] = bisque_quality
+            if args.require_bisque_quality and not bisque_quality["passed"]:
+                issues.extend(
+                    f"bisque quality: {issue}" for issue in bisque_quality["issues"]
+                )
         if args.thread_quality or args.require_thread_quality:
             thread_quality = evaluate_thread_trace_quality(
                 result,
@@ -1218,6 +1361,41 @@ def _followup_prompts(args: argparse.Namespace) -> list[str]:
     if isinstance(raw, list | tuple):
         return [str(item) for item in raw if str(item).strip()]
     return [str(raw)] if str(raw).strip() else []
+
+
+def _login_bisque_from_args(
+    client: ControlPlaneClient,
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    username_env = str(getattr(args, "bisque_username_env", "") or "").strip()
+    password_env = str(getattr(args, "bisque_password_env", "") or "").strip()
+    if not username_env and not password_env:
+        return None
+    if not username_env or not password_env:
+        raise ValueError(
+            "both --bisque-username-env and --bisque-password-env are required"
+        )
+    username = str(os.environ.get(username_env) or "").strip()
+    password = str(os.environ.get(password_env) or "")
+    if not username:
+        raise ValueError(f"BisQue username env var {username_env} is empty")
+    if not password:
+        raise ValueError(f"BisQue password env var {password_env} is empty")
+    session = client.login_bisque_account(username=username, password=password)
+    user = session.get("user")
+    username_from_session = ""
+    if isinstance(user, dict):
+        username_from_session = str(
+            user.get("username")
+            or user.get("name")
+            or user.get("email")
+            or ""
+        ).strip()
+    return {
+        "authenticated": bool(session.get("authenticated")),
+        "mode": str(session.get("mode") or ""),
+        "username": username_from_session or username,
+    }
 
 
 def _event_sequence(event: dict[str, Any]) -> int:
@@ -1406,6 +1584,18 @@ def _summarize_artifact(
     }
 
 
+def _summary_artifacts(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for key in ("artifacts", "linked_artifacts"):
+        raw_artifacts = summary.get(key) or []
+        if not isinstance(raw_artifacts, list):
+            continue
+        artifacts.extend(
+            artifact for artifact in raw_artifacts if isinstance(artifact, dict)
+        )
+    return artifacts
+
+
 def summarize_thread_record(thread: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "thread_id": thread.get("thread_id"),
@@ -1488,6 +1678,26 @@ def _trace_has_code_and_analysis_artifacts(turns: list[dict[str, Any]]) -> bool:
     return saw_code and saw_analysis_artifact
 
 
+def _trace_has_bisque_analysis_artifacts(turns: list[dict[str, Any]]) -> bool:
+    saw_visual_or_report = False
+    saw_code = False
+    for artifact in _trace_artifacts(turns):
+        kind = str(artifact.get("kind") or "").lower()
+        path = str(artifact.get("path") or "").lower()
+        mime_type = str(artifact.get("mime_type") or "").lower()
+        if kind == "code" or path.endswith((".py", ".ipynb", ".r", ".jl")):
+            saw_code = True
+            continue
+        if (
+            kind in {"figure", "image", "report", "table", "dataset"}
+            or mime_type.startswith("image/")
+            or mime_type in {"text/markdown", "text/csv", "application/json"}
+            or path.endswith((".png", ".jpg", ".jpeg", ".gif", ".csv", ".json", ".md"))
+        ):
+            saw_visual_or_report = True
+    return saw_visual_or_report and saw_code
+
+
 def _trace_artifact_downloads_verified(turns: list[dict[str, Any]]) -> bool:
     artifacts = _trace_artifacts(turns)
     return bool(artifacts) and all(artifact.get("download_ok") is True for artifact in artifacts)
@@ -1511,6 +1721,30 @@ def _tool_autonomy_followups_use_prior_context(turns: list[dict[str, Any]]) -> b
         if not any(str(tool_name) in context_tools for tool_name in tool_names):
             return False
     return True
+
+
+def _turn_uses_bisque_followup_context(turn: dict[str, Any]) -> bool:
+    tool_names = turn.get("tool_names") or []
+    if not isinstance(tool_names, list):
+        return False
+    context_tools = {
+        "artifact_manifest",
+        "stage_artifact_for_analysis",
+        "stage_uploaded_files_for_analysis",
+        "read_file",
+        "grep",
+        "glob",
+        "ls",
+    }
+    return any(str(tool_name) in context_tools for tool_name in tool_names)
+
+
+def _trace_mentions_bisque_upload(turns: list[dict[str, Any]]) -> bool:
+    combined = "\n".join(_turn_text(turn) for turn in turns).lower()
+    return bool(
+        re.search(r"\bbisque\b", combined)
+        and re.search(r"\bupload(?:ed|s|ing)?\b|/data_service/", combined)
+    )
 
 
 def _trace_has_autonomy_analysis_content(turns: list[dict[str, Any]]) -> bool:
@@ -1868,14 +2102,15 @@ def _summarize_linked_artifacts(
 def _artifact_ids_from_text(text: str) -> list[str]:
     ids: list[str] = []
     seen: set[str] = set()
-    href_text = re.sub(r"!?\[[^\]]*\]\(([^)]+)\)", r" \1 ", text)
-    for match in re.finditer(r"/v2/artifacts/([^/\]\)\s]+)/download", href_text):
-        artifact_id = parse.unquote(match.group(1))
-        if "..." in artifact_id or "…" in artifact_id:
-            continue
-        if artifact_id and artifact_id not in seen:
-            seen.add(artifact_id)
-            ids.append(artifact_id)
+    hrefs = re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", text)
+    for searchable in (text, *hrefs):
+        for match in re.finditer(r"/v2/artifacts/([^/\]`)>\s]+)/download", searchable):
+            artifact_id = parse.unquote(match.group(1))
+            if "..." in artifact_id or "…" in artifact_id:
+                continue
+            if artifact_id and artifact_id not in seen:
+                seen.add(artifact_id)
+                ids.append(artifact_id)
     return ids
 
 

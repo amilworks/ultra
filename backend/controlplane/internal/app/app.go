@@ -139,6 +139,53 @@ func New(cfg config.Config) (*App, error) {
 			return nil
 		})
 	}
+	bisqueService := httpapi.NewBisqueService(httpapi.BisqueServiceConfig{
+		RootURL:       cfg.BisqueRootURL,
+		DevUsername:   cfg.BisqueUsername,
+		DevPassword:   cfg.BisquePassword,
+		AllowedRoots:  []string{cfg.BisqueRootURL},
+		UploadRoot:    cfg.UploadRoot,
+		MaxImportSize: cfg.BisqueMaxImportBytes,
+	})
+	bisqueCredentialStore := httpapi.NewBisqueCredentialStore()
+	if strings.TrimSpace(cfg.SecretEncryptionKey) != "" {
+		cipher, err := httpapi.NewBisqueCredentialCipherFromString(cfg.SecretEncryptionKey, cfg.SecretEncryptionKeyID)
+		if err != nil {
+			for _, closeFn := range closeFns {
+				closeFn()
+			}
+			return nil, err
+		}
+		persistentCredentials, ok := controlStore.(httpapi.BisquePersistentCredentialStore)
+		if !ok {
+			for _, closeFn := range closeFns {
+				closeFn()
+			}
+			return nil, fmt.Errorf("control store does not support persistent BisQue credentials")
+		}
+		bisqueCredentialStore = httpapi.NewPersistentBisqueCredentialStore(persistentCredentials, cipher, cfg.BisqueRootURL)
+	}
+	var workOSAuth *httpapi.WorkOSAuth
+	if strings.EqualFold(strings.TrimSpace(cfg.AuthProvider), "workos") {
+		auth, err := httpapi.NewWorkOSAuth(httpapi.WorkOSAuthConfig{
+			Enabled:              true,
+			ClientID:             cfg.WorkOSClientID,
+			APIKey:               cfg.WorkOSAPIKey,
+			RedirectURI:          cfg.WorkOSRedirectURI,
+			PostLoginRedirectURI: cfg.WorkOSPostLoginRedirectURI,
+			LogoutRedirectURI:    cfg.WorkOSLogoutRedirectURI,
+			CookiePassword:       cfg.WorkOSCookiePassword,
+			CookieSecure:         cfg.WorkOSCookieSecure,
+			BaseURL:              cfg.WorkOSBaseURL,
+		})
+		if err != nil {
+			for _, closeFn := range closeFns {
+				closeFn()
+			}
+			return nil, err
+		}
+		workOSAuth = auth
+	}
 	var start func(context.Context) error
 	if len(startFns) > 0 {
 		start = func(ctx context.Context) error {
@@ -151,15 +198,18 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	handler := httpapi.NewRouter(httpapi.ServerDeps{
-		Version:          cfg.AppVersion,
-		Runs:             runService,
-		Store:            controlStore,
-		Bus:              runEvents,
-		ArtifactRoot:     cfg.ArtifactRoot,
-		UploadRoot:       cfg.UploadRoot,
-		DevAdminEnabled:  cfg.DevAdminEnabled,
-		Runtime:          runtime,
-		QueueDiagnostics: natsBus,
+		Version:           cfg.AppVersion,
+		Runs:              runService,
+		Store:             controlStore,
+		Bus:               runEvents,
+		ArtifactRoot:      cfg.ArtifactRoot,
+		UploadRoot:        cfg.UploadRoot,
+		DevAdminEnabled:   cfg.DevAdminEnabled,
+		Runtime:           runtime,
+		QueueDiagnostics:  natsBus,
+		Bisque:            bisqueService,
+		BisqueCredentials: bisqueCredentialStore,
+		WorkOS:            workOSAuth,
 	})
 	return &App{
 		Handler:   handler,

@@ -12,6 +12,13 @@ from deepagents.backends.sandbox import BaseSandbox
 from ultra_deepagents.code_execution.paths import resolve_workspace_file
 
 
+MATPLOTLIBRC = """\
+backend: Agg
+figure.dpi: 300
+savefig.dpi: 300
+"""
+
+
 @dataclass(frozen=True)
 class DockerSandboxConfig:
     image: str
@@ -39,6 +46,7 @@ class DockerSandboxBackend(BaseSandbox):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         if self.outputs_dir is not None:
             self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_matplotlib_config()
         try:
             os.chmod(self.workspace_dir, 0o777)
             if self.outputs_dir is not None:
@@ -49,6 +57,17 @@ class DockerSandboxBackend(BaseSandbox):
     @property
     def id(self) -> str:
         return f"docker:{self.workspace_dir.resolve()}"
+
+    def _ensure_matplotlib_config(self) -> None:
+        config_dir = self.workspace_dir / ".cache" / "matplotlib"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        for path in (self.workspace_dir / "matplotlibrc", config_dir / "matplotlibrc"):
+            path.write_text(MATPLOTLIBRC)
+        for path in (self.workspace_dir / ".cache", config_dir):
+            try:
+                os.chmod(path, 0o777)
+            except OSError:
+                pass
 
     def build_docker_command(self, command: str) -> list[str]:
         workspace_mount = f"{self.workspace_dir.resolve()}:/workspace:rw"

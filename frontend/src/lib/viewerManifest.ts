@@ -21,6 +21,22 @@ const toFiniteNumber = (value: unknown, fallback: number): number => {
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
+const toBoolean = (value: unknown, fallback: boolean): boolean => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") {
+      return true;
+    }
+    if (normalized === "false") {
+      return false;
+    }
+  }
+  return fallback;
+};
+
 const toPositiveInt = (value: unknown, fallback: number): number => {
   const numeric = Math.max(1, Math.round(toFiniteNumber(value, fallback)));
   return Number.isFinite(numeric) ? numeric : Math.max(1, fallback);
@@ -274,11 +290,11 @@ const normalizeServiceUrls = (source: UnknownRecord, fileId: string) => {
     preview: String(source.preview ?? `/v2/uploads/${fileSegment}/preview`),
     display: source.display == null ? undefined : String(source.display),
     slice: String(source.slice ?? `/v2/uploads/${fileSegment}/slice`),
-    tile: String(source.tile ?? `/v1/uploads/${fileSegment}/tiles`),
-    atlas: String(source.atlas ?? `/v1/uploads/${fileSegment}/atlas`),
+    tile: String(source.tile ?? `/v2/uploads/${fileSegment}/tiles`),
+    atlas: String(source.atlas ?? `/v2/uploads/${fileSegment}/atlas`),
     scalar_volume:
       source.scalar_volume == null ? undefined : String(source.scalar_volume),
-    histogram: String(source.histogram ?? `/v1/uploads/${fileSegment}/histogram`),
+    histogram: String(source.histogram ?? `/v2/uploads/${fileSegment}/histogram`),
   };
 };
 
@@ -409,6 +425,16 @@ const normalizeDisplayDefaults = (
       : (phys.channel_colors ?? []).map((entry) => entry.hex),
     time_index: clampNonNegativeInt(merged.time_index, selectedIndices.T),
     z_index: clampNonNegativeInt(merged.z_index, selectedIndices.Z),
+    scalar_colormap: String(merged.scalar_colormap ?? "grayscale"),
+    volume_signal_floor:
+      merged.volume_signal_floor == null ? 0 : Math.max(0, Math.min(0.95, toFiniteNumber(merged.volume_signal_floor, 0))),
+    volume_density:
+      merged.volume_density == null ? 1 : Math.max(0.1, Math.min(3, toFiniteNumber(merged.volume_density, 1))),
+    volume_lighting: toBoolean(merged.volume_lighting, false),
+    volume_lighting_strength:
+      merged.volume_lighting_strength == null
+        ? 0.65
+        : Math.max(0, Math.min(1, toFiniteNumber(merged.volume_lighting_strength, 0.65))),
     volume_channel:
       merged.volume_channel == null ? clampNonNegativeInt(selectedIndices.C, 0) : clampNonNegativeInt(merged.volume_channel, selectedIndices.C),
   };

@@ -17,7 +17,7 @@ import (
 type Store interface {
 	CreateThread(context.Context, domain.CreateThreadInput) (domain.ThreadRecord, error)
 	GetThread(context.Context, string) (domain.ThreadRecord, error)
-	ListThreads(context.Context, int) ([]domain.ThreadRecord, error)
+	ListThreads(context.Context, int, int, string) (domain.ThreadListPage, error)
 	ListThreadMessages(context.Context, string) ([]domain.ThreadMessage, error)
 	AppendThreadMessage(context.Context, domain.ThreadMessage) (domain.ThreadMessage, error)
 	CreateRun(context.Context, domain.CreateRunInput) (domain.RunRecord, error)
@@ -76,6 +76,7 @@ type CreateRunRequest struct {
 	ResourceDescriptors []domain.JSONMap
 	IdempotencyKey      string
 	Metadata            domain.JSONMap
+	JobMetadata         domain.JSONMap
 }
 
 type CancelRunRequest struct {
@@ -231,7 +232,7 @@ func jobForRun(run domain.RunRecord, req CreateRunRequest, resourceDescriptors [
 		Budgets:             cloneMap(req.Budgets),
 		Benchmark:           cloneMap(req.Benchmark),
 		ResourceDescriptors: copyJSONMaps(resourceDescriptors),
-		Metadata:            metadata,
+		Metadata:            mergeJobMetadata(metadata, req.JobMetadata),
 	}
 }
 
@@ -311,6 +312,14 @@ func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRe
 	run = s.markRunJobDispatched(ctx, run)
 	_ = s.bus.PublishRunEvent(ctx, acceptedEvent)
 	return run, nil
+}
+
+func mergeJobMetadata(metadata domain.JSONMap, jobMetadata domain.JSONMap) domain.JSONMap {
+	merged := cloneMap(metadata)
+	for key, value := range jobMetadata {
+		merged[key] = value
+	}
+	return merged
 }
 
 func (s *Service) appendAcceptedRunEvent(ctx context.Context, run domain.RunRecord, recoveredDispatch bool) (domain.RunEventRecord, error) {
@@ -1193,8 +1202,15 @@ func commonTranscriptPrefixLen(existing []domain.ThreadMessage, incoming []domai
 }
 
 func sameTranscriptMessage(left domain.ThreadMessage, right domain.ThreadMessage) bool {
-	return strings.TrimSpace(left.Role) == strings.TrimSpace(right.Role) &&
-		left.Content == right.Content
+	leftRole := strings.TrimSpace(left.Role)
+	rightRole := strings.TrimSpace(right.Role)
+	if !strings.EqualFold(leftRole, rightRole) {
+		return false
+	}
+	if strings.EqualFold(leftRole, "assistant") {
+		return true
+	}
+	return left.Content == right.Content
 }
 
 func cloneMap(value domain.JSONMap) domain.JSONMap {

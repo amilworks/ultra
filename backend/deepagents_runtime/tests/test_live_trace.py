@@ -6,6 +6,7 @@ from ultra_deepagents.live_trace import (
     artifact_download_urls,
     build_tool_capability_matrix,
     build_followup_messages,
+    evaluate_bisque_trace_quality,
     evaluate_paper_trace_quality,
     evaluate_rarespot_trace_quality,
     evaluate_thread_trace_quality,
@@ -206,6 +207,146 @@ def test_run_trace_records_visible_thread_transcript_after_completion(monkeypatc
     assert result["thread_messages"]["run_ids"] == ["run-1", "run-1", "run-2", "run-2"]
 
 
+def test_trace_prompt_refreshes_events_after_terminal_status():
+    class FakeClient:
+        def __init__(self) -> None:
+            self.event_calls = 0
+
+        def create_run(self, **kwargs):
+            return {"run_id": "run-terminal"}
+
+        def get_run(self, run_id: str):
+            assert run_id == "run-terminal"
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-1",
+                "goal": "terminal event",
+                "status": "succeeded",
+                "response_text": "complete",
+            }
+
+        def list_run_events(self, run_id: str):
+            self.event_calls += 1
+            if self.event_calls == 1:
+                return [
+                    {
+                        "event_kind": "run.started",
+                        "sequence": 1,
+                        "payload": {},
+                    }
+                ]
+            return [
+                {
+                    "event_kind": "run.started",
+                    "sequence": 1,
+                    "payload": {},
+                },
+                {
+                    "event_kind": "run.completed",
+                    "sequence": 2,
+                    "payload": {"response_text": "complete"},
+                },
+            ]
+
+        def list_run_artifacts(self, run_id: str):
+            return []
+
+    from ultra_deepagents.live_trace import trace_prompt
+
+    _, summary = trace_prompt(
+        FakeClient(),
+        thread_id="thread-1",
+        prompt="terminal event",
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    assert summary["event_counts"]["run.completed"] == 1
+    assert summary["terminal_event_kind"] == "run.completed"
+
+
+def test_run_trace_logs_into_bisque_with_env_credentials(monkeypatch):
+    import argparse
+
+    from ultra_deepagents import live_trace
+
+    monkeypatch.setenv("ULTRA_TEST_BISQUE_USERNAME", "linked-user")
+    monkeypatch.setenv("ULTRA_TEST_BISQUE_PASSWORD", "secret-password")
+    calls: list[tuple[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
+            self.base_url = base_url
+            self.timeout_seconds = timeout_seconds
+
+        def login_bisque_account(self, *, username: str, password: str):
+            calls.append(("login", {"username": username, "password": password}))
+            return {
+                "authenticated": True,
+                "mode": "bisque",
+                "user": {"username": username},
+            }
+
+        def upload_files(self, paths):
+            calls.append(("upload_files", paths))
+            return []
+
+        def create_thread(self, *, title: str):
+            calls.append(("create_thread", title))
+            return {"thread_id": "thread-bisque"}
+
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "latest_run_id": "run-1"}
+
+        def list_thread_messages(self, thread_id: str):
+            return [
+                {"role": "user", "content": "Use BisQue.", "run_id": "run-1"},
+                {"role": "assistant", "content": "Uploaded to BisQue.", "run_id": "run-1"},
+            ]
+
+    def fake_trace_prompt(client, **kwargs):
+        calls.append(("trace_prompt", kwargs["prompt"]))
+        return (
+            {"run_id": "run-1", "response_text": "Uploaded to BisQue."},
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "response_len": 1000,
+                "artifact_count": 1,
+                "artifacts": [{"artifact_id": "artifact-1", "download_ok": True}],
+            },
+        )
+
+    monkeypatch.setattr(live_trace, "ControlPlaneClient", FakeClient)
+    monkeypatch.setattr(live_trace, "trace_prompt", fake_trace_prompt)
+
+    result = live_trace.run_trace(
+        argparse.Namespace(
+            base_url="http://control.test",
+            http_timeout=3,
+            upload_file=[],
+            title="bisque trace",
+            prompt="Use BisQue.",
+            followup=[],
+            timeout=300,
+            poll_interval=1,
+            verify_downloads=True,
+            bisque_username_env="ULTRA_TEST_BISQUE_USERNAME",
+            bisque_password_env="ULTRA_TEST_BISQUE_PASSWORD",
+        )
+    )
+
+    assert calls[0] == (
+        "login",
+        {"username": "linked-user", "password": "secret-password"},
+    )
+    assert result["bisque_session"] == {
+        "authenticated": True,
+        "mode": "bisque",
+        "username": "linked-user",
+    }
+
+
 def test_evaluate_thread_trace_quality_scores_clean_multiturn_transcript():
     result = {
         "thread": {"thread_id": "thread-1", "latest_run_id": "run-2"},
@@ -222,6 +363,89 @@ def test_evaluate_thread_trace_quality_scores_clean_multiturn_transcript():
     }
 
     quality = evaluate_thread_trace_quality(result)
+
+    assert quality["passed"] is True
+    assert quality["score"] >= 8.5
+    assert quality["issues"] == []
+
+
+def test_evaluate_bisque_trace_quality_scores_multiturn_download_analyze_upload():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 2200,
+            "response_preview": (
+                "Searched the linked BisQue account, recovered after failed image "
+                "candidates, imported EnrNE_Day2_Run1__0210.JPG, computed RGB "
+                "channel means, saved a histogram figure and markdown report, "
+                "then uploaded generated outputs back to BisQue data_service URIs."
+            ),
+            "tool_names": [
+                "bisque_search_resources",
+                "bisque_download_resource",
+                "stage_uploaded_files_for_analysis",
+                "execute",
+                "bisque_upload_workspace_files",
+            ],
+            "artifacts": [
+                {
+                    "artifact_id": "artifact-figure",
+                    "kind": "figure",
+                    "mime_type": "image/png",
+                    "download_ok": True,
+                },
+                {
+                    "artifact_id": "artifact-report",
+                    "kind": "report",
+                    "mime_type": "text/markdown",
+                    "download_ok": True,
+                },
+                {
+                    "artifact_id": "artifact-code",
+                    "kind": "code",
+                    "path": "analyze_bisque_image.py",
+                    "download_ok": True,
+                },
+            ],
+        },
+        "followups": [
+            {
+                "run_id": "run-2",
+                "status": "succeeded",
+                "response_len": 1600,
+                "response_preview": (
+                    "Reused the same BisQue image and prior artifacts, produced an "
+                    "additional RGB histogram comparison figure, and uploaded the "
+                    "new figure to a BisQue data_service resource."
+                ),
+                "tool_names": [
+                    "artifact_manifest",
+                    "stage_artifact_for_analysis",
+                    "stage_uploaded_files_for_analysis",
+                    "read_file",
+                    "execute",
+                    "bisque_upload_workspace_files",
+                ],
+                "artifacts": [
+                    {
+                        "artifact_id": "artifact-followup-figure",
+                        "kind": "figure",
+                        "mime_type": "image/png",
+                        "download_ok": True,
+                    },
+                    {
+                        "artifact_id": "artifact-followup-code",
+                        "kind": "code",
+                        "path": "compare_rgb_histograms.py",
+                        "download_ok": True,
+                    },
+                ],
+            }
+        ],
+    }
+
+    quality = evaluate_bisque_trace_quality(result)
 
     assert quality["passed"] is True
     assert quality["score"] >= 8.5
@@ -1239,6 +1463,18 @@ def test_artifact_ids_from_text_ignores_shortened_markdown_link_labels():
     ]
 
 
+def test_artifact_ids_from_text_extracts_markdown_labels_with_download_href():
+    assert _artifact_ids_from_text(
+        "Overlay: "
+        "[`/v2/artifacts/artifact_run_1234567890abcdef_rarespot_000004/download`](download) "
+        "CSV: "
+        "[`/v2/artifacts/artifact_run_1234567890abcdef_rarespot_000002/download`](download)"
+    ) == [
+        "artifact_run_1234567890abcdef_rarespot_000004",
+        "artifact_run_1234567890abcdef_rarespot_000002",
+    ]
+
+
 def test_control_plane_client_paginates_run_events_with_cursor():
     client = ControlPlaneClient("http://control.test")
     calls: list[str] = []
@@ -1359,6 +1595,29 @@ def test_evaluate_trace_requirements_reports_actionable_failures():
         "followup run run-2 response_len=0 below min_response_chars=50",
         "followup run run-2 artifact_count=0 below min_artifacts=2",
     ]
+
+
+def test_evaluate_trace_requirements_counts_linked_artifacts():
+    issues = evaluate_trace_requirements(
+        {
+            "prompt": {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "response_len": 200,
+                "artifact_count": 0,
+                "artifacts": [],
+                "linked_artifacts": [
+                    {"artifact_id": "overlay", "kind": "image", "download_ok": True},
+                    {"artifact_id": "csv", "kind": "csv", "download_ok": True},
+                ],
+            },
+        },
+        min_artifacts=2,
+        min_response_chars=50,
+        require_downloads=True,
+    )
+
+    assert issues == []
 
 
 def test_evaluate_trace_requirements_checks_every_followup_turn():

@@ -326,7 +326,8 @@ def wait_for_rarespot_run(
             run_response = client.get(f"{base_url}/v2/runs/{run_id}")
             run_response.raise_for_status()
             last_run = dict(run_response.json())
-            if last_run.get("status") in {"succeeded", "failed", "canceled"}:
+            status = str(last_run.get("status") or "")
+            if status in {"succeeded", "failed", "canceled"}:
                 artifact_response = client.get(f"{base_url}/v2/runs/{run_id}/artifacts")
                 artifact_response.raise_for_status()
                 artifacts_payload = artifact_response.json()
@@ -340,9 +341,28 @@ def wait_for_rarespot_run(
                 if terminal_summary:
                     summary = {**summary, **terminal_summary}
                 artifact_descriptors = normalize_artifact_descriptors(artifacts)
+                if status != "succeeded":
+                    error = rarespot_terminal_error(
+                        status=status,
+                        run=last_run,
+                        terminal_summary=terminal_summary,
+                    )
+                    return {
+                        "run_id": run_id,
+                        "status": status,
+                        "error": error,
+                        "configuration": summary.get("configuration", {}),
+                        "counts_by_class": {},
+                        "confidence_summary": {},
+                        "top_spectral_review_candidates": [],
+                        "artifact_ids": [artifact.get("artifact_id") for artifact in artifact_descriptors],
+                        "artifacts": artifact_descriptors,
+                        "key_artifacts": select_key_artifacts(artifact_descriptors),
+                        "final_answer_hint": rarespot_failure_final_answer_hint(status=status, error=error),
+                    }
                 return {
                     "run_id": run_id,
-                    "status": last_run.get("status"),
+                    "status": status,
                     "configuration": summary.get("configuration", {}),
                     "counts_by_class": summary.get("counts_by_class", {}),
                     "confidence_summary": summary.get("confidence_summary", {}),
@@ -367,6 +387,35 @@ def wait_for_rarespot_run(
         "artifact_ids": [],
         "final_answer_hint": "RareSpot inference did not reach a terminal status before the tool timeout.",
     }
+
+
+def rarespot_terminal_error(
+    *,
+    status: str,
+    run: dict[str, Any],
+    terminal_summary: dict[str, Any],
+) -> str:
+    for source in (terminal_summary, run):
+        for key in ("error", "reason", "message"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return f"RareSpot run {status}."
+
+
+def rarespot_failure_final_answer_hint(*, status: str, error: str) -> str:
+    if status == "canceled":
+        prefix = "RareSpot inference was canceled"
+    else:
+        prefix = "RareSpot inference failed"
+    suffix = f": {error}" if error else "."
+    return (
+        f"{prefix}{suffix} "
+        "Do not claim production detections, counts, overlays, CSVs, or reports from this run. "
+        "Do not run sandbox heuristic replacement or ad hoc CV fallback as if it were RareSpot. "
+        "Report the production inference failure honestly and ask the operator to fix the "
+        "RareSpot runtime, weights, or input configuration before retrying."
+    )
 
 
 def normalize_artifact_descriptors(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -422,11 +471,12 @@ def fetch_terminal_event_summary(client: Any, *, base_url: str, run_id: str) -> 
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("event_kind") != "run.completed":
+        if event.get("event_kind") not in {"run.completed", "run.failed", "run.canceled"}:
             continue
         payload = event.get("payload")
         if isinstance(payload, dict):
             terminal_payload = payload
+            terminal_payload.setdefault("terminal_event_kind", event.get("event_kind"))
     return terminal_payload
 
 

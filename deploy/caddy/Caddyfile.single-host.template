@@ -13,6 +13,24 @@ ${ULTRA_PUBLIC_HOST} {
         -Server
     }
 
+    handle /v2/* {
+        reverse_proxy 127.0.0.1:8000 {
+            flush_interval -1
+        }
+    }
+
+    handle /v1/health {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle /v1/config* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle /v1/session* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
     handle /v1/* {
         reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
     }

@@ -29,6 +29,7 @@ frontend/.playwright-cli/
 .worktrees/
 .viewer-cache/
 .codex-artifacts/
+legacy/
 data/
 runs/
 output/
@@ -36,6 +37,9 @@ outputs/
 downloads/
 downloaded_*/
 repro_reports/
+
+# Local reference checkouts
+bqapi/
 
 # Local database / volume exports
 sqlite:/

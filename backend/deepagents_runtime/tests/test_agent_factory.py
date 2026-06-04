@@ -138,6 +138,10 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     assert isinstance(backend, DockerSandboxBackend)
     assert backend.workspace_dir == tmp_path / "workspace"
     assert backend.outputs_dir == tmp_path / "artifacts"
+    matplotlibrc = (tmp_path / "workspace" / "matplotlibrc").read_text()
+    mpl_config_rc = (tmp_path / "workspace" / ".cache" / "matplotlib" / "matplotlibrc").read_text()
+    assert "savefig.dpi: 300" in matplotlibrc
+    assert "savefig.dpi: 300" in mpl_config_rc
     assert backend.config.image == "bisque-ultra-codeexec:test"
     assert backend.config.network == "none"
     assert backend.config.cpus == 3.5
@@ -243,6 +247,9 @@ def test_text_only_system_prompt_guides_inline_plot_captions_and_updates():
 
     assert "caption immediately after each figure" in prompt.lower()
     assert "not all at the end" in prompt.lower()
+    assert "savefig.dpi" in prompt
+    assert "dpi=300" in prompt
+    assert "publication-quality" in prompt.lower()
     assert "error bars" in prompt.lower()
     assert "do not call read_file on image" in prompt.lower()
 

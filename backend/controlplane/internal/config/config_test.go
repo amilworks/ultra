@@ -71,6 +71,43 @@ func TestLoadRunRecoveryCanBeConfigured(t *testing.T) {
 	}
 }
 
+func TestLoadBisqueIntegrationConfig(t *testing.T) {
+	t.Setenv("ULTRA_CONTROL_BISQUE_ROOT_URL", "https://bisque.example.org")
+	t.Setenv("ULTRA_CONTROL_BISQUE_USERNAME", "ada")
+	t.Setenv("ULTRA_CONTROL_BISQUE_PASSWORD", "secret")
+	t.Setenv("ULTRA_CONTROL_BISQUE_MAX_IMPORT_BYTES", "12345")
+	t.Setenv("ULTRA_CONTROL_SECRET_ENCRYPTION_KEY", "01234567890123456789012345678901")
+	t.Setenv("ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID", "bisque-test-key")
+
+	cfg := Load()
+	if cfg.BisqueRootURL != "https://bisque.example.org" {
+		t.Fatalf("BisqueRootURL = %q", cfg.BisqueRootURL)
+	}
+	if cfg.BisqueUsername != "ada" || cfg.BisquePassword != "secret" {
+		t.Fatalf("Bisque credentials were not loaded")
+	}
+	if cfg.BisqueMaxImportBytes != 12345 {
+		t.Fatalf("BisqueMaxImportBytes = %d, want 12345", cfg.BisqueMaxImportBytes)
+	}
+	if cfg.SecretEncryptionKey != "01234567890123456789012345678901" || cfg.SecretEncryptionKeyID != "bisque-test-key" {
+		t.Fatalf("secret encryption config = %q/%q, want explicit test key", cfg.SecretEncryptionKey, cfg.SecretEncryptionKeyID)
+	}
+}
+
+func TestLoadBisqueIntegrationConfigAcceptsSharedBisqueUserFallback(t *testing.T) {
+	t.Setenv("BISQUE_ROOT", "https://bisque.example.org")
+	t.Setenv("BISQUE_USER", "shared-user")
+	t.Setenv("BISQUE_PASSWORD", "shared-secret")
+
+	cfg := Load()
+	if cfg.BisqueRootURL != "https://bisque.example.org" {
+		t.Fatalf("BisqueRootURL = %q", cfg.BisqueRootURL)
+	}
+	if cfg.BisqueUsername != "shared-user" || cfg.BisquePassword != "shared-secret" {
+		t.Fatalf("BisQue fallback credentials = %q/%t, want shared env values", cfg.BisqueUsername, cfg.BisquePassword != "")
+	}
+}
+
 func TestLoadUsesRunStorePathAsDatabaseFallback(t *testing.T) {
 	t.Setenv("ULTRA_CONTROL_DATABASE_URL", "")
 	t.Setenv("RUN_STORE_PATH", "postgresql://postgres:postgres@127.0.0.1:55432/ultra")
@@ -108,12 +145,86 @@ func TestValidateRequiresDurableBackendsInProduction(t *testing.T) {
 
 func TestValidateAllowsProductionWithPostgresAndNATS(t *testing.T) {
 	cfg := Config{
+		Environment:          "production",
+		DatabaseURL:          "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:              "nats://127.0.0.1:4222",
+		AuthProvider:         "workos",
+		WorkOSClientID:       "client_test",
+		WorkOSAPIKey:         "sk_test",
+		WorkOSRedirectURI:    "https://ultra.example.org/v2/auth/workos/callback",
+		WorkOSCookiePassword: "workos-cookie-password-for-production-test",
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidateRequiresWorkOSInProduction(t *testing.T) {
+	cfg := Config{
 		Environment: "production",
 		DatabaseURL: "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
 		NATSURL:     "nats://127.0.0.1:4222",
 	}
 
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("Validate() error = nil, want WorkOS auth config error")
+	}
+	text := err.Error()
+	for _, want := range []string{
+		"ULTRA_CONTROL_AUTH_PROVIDER=workos",
+		"ULTRA_CONTROL_WORKOS_CLIENT_ID",
+		"ULTRA_CONTROL_WORKOS_API_KEY",
+		"ULTRA_CONTROL_WORKOS_REDIRECT_URI",
+		"ULTRA_CONTROL_WORKOS_COOKIE_PASSWORD",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Validate() error = %q, want mention %s", text, want)
+		}
+	}
+}
+
+func TestValidateAllowsExplicitDevAuthInProduction(t *testing.T) {
+	cfg := Config{
+		Environment:              "production",
+		DatabaseURL:              "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:                  "nats://127.0.0.1:4222",
+		AuthProvider:             "dev",
+		AllowDevAuthInProduction: true,
+		DevAdminEnabled:          true,
+		SecretEncryptionKey:      "01234567890123456789012345678901",
+		SecretEncryptionKeyID:    "dev-auth-production-cutover-test",
+	}
+
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want nil", err)
+		t.Fatalf("Validate() error = %v, want nil with explicit dev-auth production override", err)
+	}
+}
+
+func TestValidateRequiresSecretEncryptionKeyWhenBisqueIsConfiguredInProduction(t *testing.T) {
+	cfg := Config{
+		Environment:          "production",
+		DatabaseURL:          "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:              "nats://127.0.0.1:4222",
+		BisqueRootURL:        "https://bisque.example.org",
+		AuthProvider:         "workos",
+		WorkOSClientID:       "client_test",
+		WorkOSAPIKey:         "sk_test",
+		WorkOSRedirectURI:    "https://ultra.example.org/v2/auth/workos/callback",
+		WorkOSCookiePassword: "workos-cookie-password-for-production-test",
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("Validate() error = nil, want BisQue secret-key error")
+	}
+	if !strings.Contains(err.Error(), "ULTRA_CONTROL_SECRET_ENCRYPTION_KEY") {
+		t.Fatalf("Validate() error = %q, want secret encryption key requirement", err.Error())
+	}
+
+	cfg.SecretEncryptionKey = "01234567890123456789012345678901"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil with BisQue secret key", err)
 	}
 }

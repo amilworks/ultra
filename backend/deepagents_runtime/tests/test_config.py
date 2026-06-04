@@ -144,6 +144,7 @@ def test_runtime_settings_load_rarespot_worker_identity(monkeypatch):
 
 
 def test_runtime_settings_load_rarespot_defaults(monkeypatch):
+    monkeypatch.delenv("YOLOV5_RARESPOT_WEIGHTS", raising=False)
     monkeypatch.delenv("PRAIRIE_FIXED_CONF_THRESHOLD", raising=False)
     monkeypatch.delenv("PRAIRIE_FIXED_IOU_THRESHOLD", raising=False)
     monkeypatch.delenv("PRAIRIE_FIXED_IMGSZ", raising=False)
@@ -158,6 +159,7 @@ def test_runtime_settings_load_rarespot_defaults(monkeypatch):
     assert settings.rarespot_nats_jobs_subject == "ultra.runs.rarespot.jobs"
     assert settings.rarespot_nats_ack_wait_seconds == 120.0
     assert settings.rarespot_nats_ack_progress_interval_seconds == 30.0
+    assert settings.rarespot_weights_path == "data/models/yolo/RareSpotWeights.pt"
     assert (
         settings.rarespot_nats_ack_progress_interval_seconds
         < settings.rarespot_nats_ack_wait_seconds

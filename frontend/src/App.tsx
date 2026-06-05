@@ -272,7 +272,6 @@ type AuthMode = "bisque" | "guest" | "workos";
 type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
 type ActivePanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
-type ConversationPreferredPanel = "chat";
 type ComposerIntelligenceMode = "high" | "pro";
 type BisqueResourceCounts = {
   image: number;
@@ -657,7 +656,6 @@ type HistoryItem = {
   period: HistoryPeriod;
   running: boolean;
   messageCount: number;
-  panel: ConversationPreferredPanel;
 };
 
 type CollapsedSidebarRailProps = {
@@ -775,7 +773,6 @@ type ConversationState = {
   createdAt: number;
   updatedAt: number;
   hydrated: boolean;
-  preferredPanel: ConversationPreferredPanel;
   historyPreview: string;
   historyMessageCount: number;
   historyRunning: boolean;
@@ -1109,11 +1106,6 @@ const NEW_CHAT_SHORTCUT_KEY = "k";
 const RESOURCES_SHORTCUT_KEY = "e";
 const TRAINING_SHORTCUT_KEY = "t";
 const GO_TO_BISQUE_SHORTCUT_KEY = "o";
-
-const normalizeConversationPanel = (
-  panel: string | null | undefined
-): ConversationPreferredPanel =>
-  panel === "chat" ? "chat" : "chat";
 
 const isEditableEventTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof Element)) {
@@ -1514,7 +1506,6 @@ const createConversationState = (): ConversationState => {
     createdAt: now,
     updatedAt: now,
     hydrated: true,
-    preferredPanel: "chat",
     historyPreview: "",
     historyMessageCount: 0,
     historyRunning: false,
@@ -1841,9 +1832,6 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
   const state = (record.state || {}) as Record<string, unknown>;
   const hydrated = Object.keys(state).length > 0;
   const conversationId = String(record.conversation_id || makeId());
-  const preferredPanel = normalizeConversationPanel(
-    hydrated ? String(state.preferredPanel || "").trim().toLowerCase() : record.preferred_panel
-  );
   const messages = hydrated ? toUiMessages(state.messages, updatedAt) : [];
   const titleSeed = hydrated
     ? [...messages].reverse().find((message) => message.role === "user")?.content ??
@@ -1861,7 +1849,6 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     createdAt,
     updatedAt,
     hydrated,
-    preferredPanel,
     historyPreview: String(record.preview || "").trim(),
     historyMessageCount:
       typeof record.message_count === "number" && Number.isFinite(record.message_count)
@@ -1913,7 +1900,6 @@ const mergeConversationPage = (
         title: candidate.title,
         createdAt: candidate.createdAt,
         updatedAt: candidate.updatedAt,
-        preferredPanel: candidate.preferredPanel,
         historyPreview: candidate.historyPreview,
         historyMessageCount: candidate.historyMessageCount,
         historyRunning: candidate.historyRunning,
@@ -1944,10 +1930,9 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
     message_count: conversation.hydrated
       ? conversation.messages.length
       : conversation.historyMessageCount,
-    preferred_panel: conversation.preferredPanel,
+    preferred_panel: "chat",
     running: conversation.hydrated ? conversation.sending : conversation.historyRunning,
     state: {
-      preferredPanel: normalizeConversationPanel(conversation.preferredPanel),
       prompt: "",
       messages: conversation.messages.map((message) => ({
         id: message.id,
@@ -9525,11 +9510,7 @@ function AppSettingsDialog({
 }
 
 export function App() {
-  const [apiBaseUrl] = useLocalStorageState<string>(
-    "bisque.frontend.apiBaseUrl",
-    DEFAULT_API_BASE_URL
-  );
-  const [apiKey] = useState<string>(() => DEFAULT_API_KEY);
+  const apiBaseUrl = DEFAULT_API_BASE_URL;
   const [themePreference, setThemePreference] = useLocalStorageState<ThemePreference>(
     "bisque.frontend.themePreference",
     "system"
@@ -9671,8 +9652,8 @@ export function App() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   const apiClient = useMemo(
-    () => new ApiClient({ baseUrl: apiBaseUrl, apiKey }),
-    [apiBaseUrl, apiKey]
+    () => new ApiClient({ baseUrl: apiBaseUrl, apiKey: DEFAULT_API_KEY }),
+    [apiBaseUrl]
   );
 
   useEffect(() => {
@@ -13596,7 +13577,6 @@ export function App() {
           };
           updateConversation(conversation.id, (current) => ({
             ...current,
-            preferredPanel: "chat",
             title:
               current.messages.some((message) => message.role === "user")
                 ? current.title
@@ -13705,7 +13685,6 @@ export function App() {
     clearComposerDraft(conversationId);
     updateConversation(conversationId, (current) => ({
       ...current,
-      preferredPanel: "chat",
       title: isFirstUserMessage ? fallbackTitle : current.title,
       updatedAt: Date.now(),
       prompt: "",
@@ -14204,7 +14183,6 @@ export function App() {
       .filter(shouldShowConversationInHistory)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((conversation) => {
-        const panel = normalizeConversationPanel(conversation.preferredPanel);
         const latestUserTurn = conversation.hydrated
           ? [...conversation.messages]
               .reverse()
@@ -14229,7 +14207,6 @@ export function App() {
           messageCount: conversation.hydrated
             ? conversation.messages.length
             : conversation.historyMessageCount,
-          panel,
         };
       });
   }, [conversations]);
@@ -14237,7 +14214,7 @@ export function App() {
   const openHistoryItem = useCallback(
     (conversation: HistoryItem): void => {
       rememberActiveConversationScrollPosition();
-      setActivePanel(conversation.panel);
+      setActivePanel("chat");
       setActiveConversationId(conversation.id);
       setViewerOpen(false);
       setResourceViewerContext(null);
@@ -14651,7 +14628,7 @@ export function App() {
 	                          <>
 	                            <SidebarMenuButton
 	                              isActive={
-	                                activePanel === conversation.panel &&
+	                                activePanel === "chat" &&
 	                                conversation.id === activeConversation?.id
 	                              }
 	                              className="app-history-button group/history h-auto py-2"

@@ -32,4 +32,23 @@ describe("sidebar collapse layout", () => {
     ).toBe(true);
     expect(stylesSource).toMatch(/\.hero-title-welcome\s*\{[^}]*font-weight:\s*300;/s);
   });
+
+  it("keeps a mobile-visible trigger for the sidebar sheet", () => {
+    expect(appSource).toMatch(/className="app-mobile-shell-bar md:hidden"/);
+    expect(appSource).toMatch(/className="app-mobile-sidebar-trigger"/);
+    expect(appSource).toMatch(/aria-label="Open navigation"/);
+    expect(stylesSource).toMatch(/\.app-mobile-shell-bar\s*\{[^}]*min-height:/s);
+    expect(stylesSource).toMatch(
+      /\.app-mobile-sidebar-trigger\[data-slot="sidebar-trigger"\]\s*\{[^}]*width:\s*2\.35rem;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-sidebar\[data-mobile="true"\] \.app-sidebar-content\s*\{[^}]*overflow-y:\s*auto;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-sidebar\[data-mobile="true"\] \.app-sidebar-history-scroll\s*\{[^}]*overflow:\s*visible;/s
+    );
+    expect(stylesSource).toMatch(
+      /@media \(min-width:\s*768px\)\s*\{[^}]*\.app-mobile-shell-bar\s*\{[^}]*display:\s*none;/s
+    );
+  });
 });

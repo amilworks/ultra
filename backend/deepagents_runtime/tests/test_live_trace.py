@@ -880,6 +880,7 @@ def test_evaluate_tool_capability_trace_quality_scores_known_tool_surface():
                         {"name": "ls"},
                         {"name": "glob"},
                         {"name": "grep"},
+                        {"name": "write_todos"},
                     ],
                     "registered_tools": [
                         "artifact_manifest",
@@ -951,6 +952,7 @@ def test_build_tool_capability_matrix_summarizes_available_and_used_categories()
                         {"name": "ls"},
                         {"name": "glob"},
                         {"name": "grep"},
+                        {"name": "write_todos"},
                     ],
                     "registered_tools": [
                         "artifact_manifest",

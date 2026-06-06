@@ -99,6 +99,103 @@ func TestPostgresStoreRejectsDuplicateRunIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreTenantScopedQueriesFilterByUser(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	store := NewPostgresStore(pool)
+	suffix := domain.NewID("tenant")
+	aliceID := "alice-" + suffix
+	bobID := "bob-" + suffix
+	aliceThread, err := store.CreateThread(ctx, domain.CreateThreadInput{
+		UserID:          aliceID,
+		Title:           "Alice Postgres thread",
+		InitialMessages: []domain.ThreadMessage{{Role: "user", Content: "alice message"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread alice: %v", err)
+	}
+	aliceRun, err := store.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: aliceThread.ThreadID,
+		UserID:   aliceID,
+		Goal:     "alice postgres run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "alice postgres run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun alice: %v", err)
+	}
+	if _, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		RunID:     aliceRun.RunID,
+		ThreadID:  aliceThread.ThreadID,
+		EventKind: "message.delta",
+		Message:   "alice trace",
+	}); err != nil {
+		t.Fatalf("AppendRunEvent alice: %v", err)
+	}
+	aliceArtifact, err := store.CreateArtifact(ctx, domain.CreateArtifactInput{
+		RunID:    aliceRun.RunID,
+		ThreadID: aliceThread.ThreadID,
+		Kind:     "report",
+		Path:     "alice.md",
+	})
+	if err != nil {
+		t.Fatalf("CreateArtifact alice: %v", err)
+	}
+	bobThread, err := store.CreateThread(ctx, domain.CreateThreadInput{UserID: bobID, Title: "Bob Postgres thread"})
+	if err != nil {
+		t.Fatalf("CreateThread bob: %v", err)
+	}
+	if _, err := store.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: bobThread.ThreadID,
+		UserID:   bobID,
+		Goal:     "bob postgres run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "bob postgres run"}},
+	}); err != nil {
+		t.Fatalf("CreateRun bob: %v", err)
+	}
+
+	alicePage, err := store.ListThreadsForUser(ctx, aliceID, 10, 0, "")
+	if err != nil {
+		t.Fatalf("ListThreadsForUser alice: %v", err)
+	}
+	if alicePage.TotalCount != 1 || len(alicePage.Threads) != 1 || alicePage.Threads[0].ThreadID != aliceThread.ThreadID {
+		t.Fatalf("alice threads = %+v, want only alice thread", alicePage)
+	}
+	if _, err := store.GetThreadForUser(ctx, aliceThread.ThreadID, bobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetThreadForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListThreadMessagesForUser(ctx, aliceThread.ThreadID, bobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListThreadMessagesForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetRunForUser(ctx, aliceRun.RunID, bobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetRunForUser bob err = %v, want ErrNotFound", err)
+	}
+	bobRuns, err := store.ListRunsForUser(ctx, bobID, "", "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListRunsForUser bob: %v", err)
+	}
+	if len(bobRuns) != 1 || bobRuns[0].UserID != bobID {
+		t.Fatalf("bob runs = %+v, want only bob run", bobRuns)
+	}
+	if _, err := store.ListRunEventsForUser(ctx, aliceRun.RunID, bobID, 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListRunEventsForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListRunArtifactsForUser(ctx, aliceRun.RunID, bobID, 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListRunArtifactsForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetArtifactForUser(ctx, aliceArtifact.ArtifactID, bobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetArtifactForUser bob err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestPostgresStoreCompleteRunRepairsSucceededRunMissingResponseText(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {

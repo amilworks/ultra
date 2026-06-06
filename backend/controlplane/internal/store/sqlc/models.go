@@ -29,6 +29,23 @@ type ControlArtifact struct {
 	Metadata      []byte             `json:"metadata"`
 }
 
+type ControlBisqueCredential struct {
+	SessionID          string             `json:"session_id"`
+	UserID             string             `json:"user_id"`
+	OrgID              pgtype.Text        `json:"org_id"`
+	RootUrl            string             `json:"root_url"`
+	Username           string             `json:"username"`
+	PasswordCiphertext string             `json:"password_ciphertext"`
+	PasswordNonce      string             `json:"password_nonce"`
+	PasswordKeyID      string             `json:"password_key_id"`
+	PasswordAlgorithm  string             `json:"password_algorithm"`
+	Status             string             `json:"status"`
+	LastVerifiedAt     pgtype.Timestamptz `json:"last_verified_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
 type ControlOrganization struct {
 	OrgID     string             `json:"org_id"`
 	Name      string             `json:"name"`

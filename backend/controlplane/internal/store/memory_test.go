@@ -125,6 +125,97 @@ func TestMemoryStoreListThreadsPaginatesWithTotalCount(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreTenantScopedQueriesFilterByUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+
+	aliceThread, err := store.CreateThread(ctx, domain.CreateThreadInput{
+		UserID:          "alice",
+		Title:           "Alice thread",
+		InitialMessages: []domain.ThreadMessage{{Role: "user", Content: "alice message"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread alice: %v", err)
+	}
+	aliceRun, err := store.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: aliceThread.ThreadID,
+		UserID:   "alice",
+		Goal:     "alice run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "alice run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun alice: %v", err)
+	}
+	aliceEvent, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		RunID:     aliceRun.RunID,
+		ThreadID:  aliceThread.ThreadID,
+		EventKind: "message.delta",
+		Message:   "alice trace",
+	})
+	if err != nil {
+		t.Fatalf("AppendRunEvent alice: %v", err)
+	}
+	aliceArtifact, err := store.CreateArtifact(ctx, domain.CreateArtifactInput{
+		RunID:    aliceRun.RunID,
+		ThreadID: aliceThread.ThreadID,
+		Kind:     "report",
+		Path:     "alice.md",
+	})
+	if err != nil {
+		t.Fatalf("CreateArtifact alice: %v", err)
+	}
+
+	bobThread, err := store.CreateThread(ctx, domain.CreateThreadInput{UserID: "bob", Title: "Bob thread"})
+	if err != nil {
+		t.Fatalf("CreateThread bob: %v", err)
+	}
+	if _, err := store.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: bobThread.ThreadID,
+		UserID:   "bob",
+		Goal:     "bob run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "bob run"}},
+	}); err != nil {
+		t.Fatalf("CreateRun bob: %v", err)
+	}
+
+	alicePage, err := store.ListThreadsForUser(ctx, "alice", 10, 0, "")
+	if err != nil {
+		t.Fatalf("ListThreadsForUser alice: %v", err)
+	}
+	if alicePage.TotalCount != 1 || len(alicePage.Threads) != 1 || alicePage.Threads[0].ThreadID != aliceThread.ThreadID {
+		t.Fatalf("alice threads = %+v, want only alice thread", alicePage)
+	}
+	if _, err := store.GetThreadForUser(ctx, aliceThread.ThreadID, "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetThreadForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListThreadMessagesForUser(ctx, aliceThread.ThreadID, "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListThreadMessagesForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetRunForUser(ctx, aliceRun.RunID, "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetRunForUser bob err = %v, want ErrNotFound", err)
+	}
+	bobRuns, err := store.ListRunsForUser(ctx, "bob", "", "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListRunsForUser bob: %v", err)
+	}
+	if len(bobRuns) != 1 || bobRuns[0].UserID != "bob" {
+		t.Fatalf("bob runs = %+v, want only bob run", bobRuns)
+	}
+	if _, err := store.ListRunEventsForUser(ctx, aliceRun.RunID, "bob", 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListRunEventsForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListRunEventsAfterForUser(ctx, aliceRun.RunID, "bob", aliceEvent.Sequence-1, 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListRunEventsAfterForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListRunArtifactsForUser(ctx, aliceRun.RunID, "bob", 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListRunArtifactsForUser bob err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetArtifactForUser(ctx, aliceArtifact.ArtifactID, "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetArtifactForUser bob err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestMemoryStoreCreateAndListUserAccounts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -16,14 +16,21 @@ import (
 
 type Store interface {
 	CreateThread(context.Context, domain.CreateThreadInput) (domain.ThreadRecord, error)
+	UpdateThreadForUser(context.Context, domain.UpdateThreadInput) (domain.ThreadRecord, error)
+	ApplyGeneratedThreadTitle(context.Context, domain.ApplyGeneratedThreadTitleInput) (domain.ThreadRecord, error)
 	GetThread(context.Context, string) (domain.ThreadRecord, error)
+	GetThreadForUser(context.Context, string, string) (domain.ThreadRecord, error)
 	ListThreads(context.Context, int, int, string) (domain.ThreadListPage, error)
+	ListThreadsForUser(context.Context, string, int, int, string) (domain.ThreadListPage, error)
 	ListThreadMessages(context.Context, string) ([]domain.ThreadMessage, error)
+	ListThreadMessagesForUser(context.Context, string, string) ([]domain.ThreadMessage, error)
 	AppendThreadMessage(context.Context, domain.ThreadMessage) (domain.ThreadMessage, error)
 	CreateRun(context.Context, domain.CreateRunInput) (domain.RunRecord, error)
 	FindRunByIdempotencyKey(context.Context, string, string, string) (domain.RunRecord, bool, error)
 	GetRun(context.Context, string) (domain.RunRecord, error)
+	GetRunForUser(context.Context, string, string) (domain.RunRecord, error)
 	ListRuns(context.Context, string, string, int, int) ([]domain.RunRecord, error)
+	ListRunsForUser(context.Context, string, string, string, int, int) ([]domain.RunRecord, error)
 	UpdateRunStatus(context.Context, string, domain.RunStatus, string, string) (domain.RunRecord, error)
 	CompleteRun(context.Context, domain.CompleteRunInput) (domain.RunRecord, error)
 	GetRunLease(context.Context, string) (domain.RunLeaseRecord, bool, error)
@@ -34,10 +41,14 @@ type Store interface {
 	AppendRunEvent(context.Context, domain.AppendRunEventInput) (domain.RunEventRecord, error)
 	GetRunEvent(context.Context, string) (domain.RunEventRecord, bool, error)
 	ListRunEvents(context.Context, string, int) ([]domain.RunEventRecord, error)
+	ListRunEventsForUser(context.Context, string, string, int) ([]domain.RunEventRecord, error)
 	ListRunEventsAfter(context.Context, string, int64, int) ([]domain.RunEventRecord, error)
+	ListRunEventsAfterForUser(context.Context, string, string, int64, int) ([]domain.RunEventRecord, error)
 	CreateArtifact(context.Context, domain.CreateArtifactInput) (domain.ArtifactRecord, error)
 	ListRunArtifacts(context.Context, string, int) ([]domain.ArtifactRecord, error)
+	ListRunArtifactsForUser(context.Context, string, string, int) ([]domain.ArtifactRecord, error)
 	GetArtifact(context.Context, string) (domain.ArtifactRecord, error)
+	GetArtifactForUser(context.Context, string, string) (domain.ArtifactRecord, error)
 }
 
 type runDispatchMarker interface {
@@ -697,6 +708,17 @@ func (s *Service) applyRunEventSideEffects(ctx context.Context, input domain.App
 		}); err != nil {
 			return err
 		}
+		conversationTitle := stringFromPayload(input.Payload, "conversation_title")
+		if conversationTitle != "" && input.ThreadID != "" {
+			if _, err := s.store.ApplyGeneratedThreadTitle(ctx, domain.ApplyGeneratedThreadTitleInput{
+				ThreadID:   input.ThreadID,
+				RunID:      input.RunID,
+				Title:      conversationTitle,
+				Generation: jsonMapFromPayload(input.Payload, "title_generation"),
+			}); err != nil {
+				return err
+			}
+		}
 	case "run.failed":
 		errorText := stringFromPayload(input.Payload, "error")
 		if errorText == "" {
@@ -1235,6 +1257,17 @@ func isTerminalRunEventKind(eventKind string) bool {
 
 func stringFromPayload(payload domain.JSONMap, key string) string {
 	return strings.TrimSpace(anyString(payload[key]))
+}
+
+func jsonMapFromPayload(payload domain.JSONMap, key string) domain.JSONMap {
+	switch value := payload[key].(type) {
+	case domain.JSONMap:
+		return value
+	case map[string]any:
+		return domain.JSONMap(value)
+	default:
+		return domain.JSONMap{}
+	}
 }
 
 func int64FromPayload(payload domain.JSONMap, key string) int64 {

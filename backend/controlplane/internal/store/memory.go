@@ -430,6 +430,55 @@ func (s *MemoryStore) GetThread(ctx context.Context, threadID string) (domain.Th
 	return thread, nil
 }
 
+func (s *MemoryStore) GetThreadForUser(ctx context.Context, threadID string, userID string) (domain.ThreadRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	thread, ok := s.threads[threadID]
+	if !ok || thread.UserID != userID {
+		return domain.ThreadRecord{}, ErrNotFound
+	}
+	return thread, nil
+}
+
+func (s *MemoryStore) UpdateThreadForUser(ctx context.Context, input domain.UpdateThreadInput) (domain.ThreadRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thread, ok := s.threads[input.ThreadID]
+	if !ok || thread.UserID != input.UserID {
+		return domain.ThreadRecord{}, ErrNotFound
+	}
+	if title := normalizedThreadTitle(input.Title); title != "" {
+		thread.Title = title
+	}
+	thread.Metadata = mergeThreadMetadata(thread.Metadata, mapOrEmpty(input.Metadata))
+	thread.UpdatedAt = domain.Now()
+	s.threads[input.ThreadID] = thread
+	return thread, nil
+}
+
+func (s *MemoryStore) ApplyGeneratedThreadTitle(ctx context.Context, input domain.ApplyGeneratedThreadTitleInput) (domain.ThreadRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thread, ok := s.threads[input.ThreadID]
+	if !ok {
+		return domain.ThreadRecord{}, ErrNotFound
+	}
+	title := normalizedThreadTitle(input.Title)
+	if title == "" || !generatedThreadTitleEligible(thread) {
+		return thread, nil
+	}
+	now := domain.Now()
+	previousTitle := thread.Title
+	thread.Title = title
+	thread.Metadata = generatedThreadTitleMetadata(thread.Metadata, input, previousTitle, now)
+	thread.UpdatedAt = now
+	s.threads[input.ThreadID] = thread
+	return thread, nil
+}
+
 func (s *MemoryStore) ListThreads(ctx context.Context, limit int, offset int, status string) (domain.ThreadListPage, error) {
 	_ = ctx
 	s.mu.RLock()
@@ -469,10 +518,64 @@ func (s *MemoryStore) ListThreads(ctx context.Context, limit int, offset int, st
 	}, nil
 }
 
+func (s *MemoryStore) ListThreadsForUser(ctx context.Context, userID string, limit int, offset int, status string) (domain.ThreadListPage, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	threads := make([]domain.ThreadRecord, 0, len(s.threads))
+	status = strings.TrimSpace(status)
+	for _, thread := range s.threads {
+		if thread.UserID != userID {
+			continue
+		}
+		if status != "" && string(thread.Status) != status {
+			continue
+		}
+		threads = append(threads, thread)
+	}
+	sort.Slice(threads, func(i, j int) bool {
+		return threads[i].UpdatedAt.After(threads[j].UpdatedAt)
+	})
+	totalCount := len(threads)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = totalCount
+	}
+	if offset >= len(threads) {
+		threads = []domain.ThreadRecord{}
+	} else {
+		end := offset + limit
+		if end > len(threads) {
+			end = len(threads)
+		}
+		threads = threads[offset:end]
+	}
+	return domain.ThreadListPage{
+		Threads:    threads,
+		TotalCount: totalCount,
+		Limit:      limit,
+		Offset:     offset,
+	}, nil
+}
+
 func (s *MemoryStore) ListThreadMessages(ctx context.Context, threadID string) ([]domain.ThreadMessage, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	messages := append([]domain.ThreadMessage(nil), s.messages[threadID]...)
+	return messages, nil
+}
+
+func (s *MemoryStore) ListThreadMessagesForUser(ctx context.Context, threadID string, userID string) ([]domain.ThreadMessage, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	thread, ok := s.threads[threadID]
+	if !ok || thread.UserID != userID {
+		return nil, ErrNotFound
+	}
 	messages := append([]domain.ThreadMessage(nil), s.messages[threadID]...)
 	return messages, nil
 }
@@ -588,12 +691,59 @@ func (s *MemoryStore) GetRun(ctx context.Context, runID string) (domain.RunRecor
 	return run, nil
 }
 
+func (s *MemoryStore) GetRunForUser(ctx context.Context, runID string, userID string) (domain.RunRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	run, ok := s.runs[runID]
+	if !ok || run.UserID != userID {
+		return domain.RunRecord{}, ErrNotFound
+	}
+	return run, nil
+}
+
 func (s *MemoryStore) ListRuns(ctx context.Context, threadID string, status string, limit int, offset int) ([]domain.RunRecord, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	runs := make([]domain.RunRecord, 0, len(s.runs))
 	for _, run := range s.runs {
+		if threadID != "" && run.ThreadID != threadID {
+			continue
+		}
+		if status != "" && string(run.Status) != status {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	sort.Slice(runs, func(i, j int) bool {
+		return runs[i].UpdatedAt.After(runs[j].UpdatedAt)
+	})
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(runs) {
+		return []domain.RunRecord{}, nil
+	}
+	runs = runs[offset:]
+	return take(runs, limit), nil
+}
+
+func (s *MemoryStore) ListRunsForUser(ctx context.Context, userID string, threadID string, status string, limit int, offset int) ([]domain.RunRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if threadID != "" {
+		thread, ok := s.threads[threadID]
+		if !ok || thread.UserID != userID {
+			return nil, ErrNotFound
+		}
+	}
+	runs := make([]domain.RunRecord, 0, len(s.runs))
+	for _, run := range s.runs {
+		if run.UserID != userID {
+			continue
+		}
 		if threadID != "" && run.ThreadID != threadID {
 			continue
 		}
@@ -877,10 +1027,51 @@ func (s *MemoryStore) ListRunEvents(ctx context.Context, runID string, limit int
 	return events, nil
 }
 
+func (s *MemoryStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	run, ok := s.runs[runID]
+	if !ok || run.UserID != userID {
+		return nil, ErrNotFound
+	}
+	events := append([]domain.RunEventRecord(nil), s.events[runID]...)
+	if limit > 0 && len(events) > limit {
+		events = events[len(events)-limit:]
+	}
+	return events, nil
+}
+
 func (s *MemoryStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	source := s.events[runID]
+	capacity := len(source)
+	if limit > 0 && limit < capacity {
+		capacity = limit
+	}
+	events := make([]domain.RunEventRecord, 0, capacity)
+	for _, event := range source {
+		if event.Sequence <= afterSequence {
+			continue
+		}
+		events = append(events, event)
+		if limit > 0 && len(events) >= limit {
+			break
+		}
+	}
+	return events, nil
+}
+
+func (s *MemoryStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	run, ok := s.runs[runID]
+	if !ok || run.UserID != userID {
+		return nil, ErrNotFound
+	}
 	source := s.events[runID]
 	capacity := len(source)
 	if limit > 0 && limit < capacity {
@@ -954,12 +1145,47 @@ func (s *MemoryStore) ListRunArtifacts(ctx context.Context, runID string, limit 
 	return take(artifacts, limit), nil
 }
 
+func (s *MemoryStore) ListRunArtifactsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.ArtifactRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	run, ok := s.runs[runID]
+	if !ok || run.UserID != userID {
+		return nil, ErrNotFound
+	}
+	artifacts := []domain.ArtifactRecord{}
+	for _, artifact := range s.artifacts {
+		if artifact.RunID == runID {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	sort.Slice(artifacts, func(i, j int) bool {
+		return artifacts[i].CreatedAt.After(artifacts[j].CreatedAt)
+	})
+	return take(artifacts, limit), nil
+}
+
 func (s *MemoryStore) GetArtifact(ctx context.Context, artifactID string) (domain.ArtifactRecord, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	artifact, ok := s.artifacts[artifactID]
 	if !ok {
+		return domain.ArtifactRecord{}, ErrNotFound
+	}
+	return artifact, nil
+}
+
+func (s *MemoryStore) GetArtifactForUser(ctx context.Context, artifactID string, userID string) (domain.ArtifactRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	artifact, ok := s.artifacts[artifactID]
+	if !ok {
+		return domain.ArtifactRecord{}, ErrNotFound
+	}
+	run, ok := s.runs[artifact.RunID]
+	if !ok || run.UserID != userID {
 		return domain.ArtifactRecord{}, ErrNotFound
 	}
 	return artifact, nil

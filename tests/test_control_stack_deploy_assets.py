@@ -104,3 +104,67 @@ def test_staging_env_example_documents_required_control_stack_settings() -> None
 
     for key in required_keys:
         assert key in env
+
+
+def test_default_deepagents_sandbox_includes_medical_and_bioimaging_stack() -> None:
+    dockerfile = read_repo_file("deploy/docker/deepagents-sandbox.Dockerfile")
+
+    required_system_packages = [
+        "build-essential",
+        "cmake",
+        "dcm2niix",
+        "dcmtk",
+        "default-jre-headless",
+        "libopenslide0",
+        "libvips42",
+        "openslide-tools",
+        "pkg-config",
+    ]
+    required_python_packages = [
+        "SimpleITK",
+        "bioio",
+        "bioio-bioformats",
+        "bioio-czi",
+        "bioio-dv",
+        "bioio-imageio",
+        "bioio-lif",
+        "bioio-nd2",
+        "bioio-ome-tiff",
+        "bioio-ome-zarr",
+        "bioio-sldy",
+        "bioio-tiff-glob",
+        "bioio-tifffile",
+        "connected-components-3d",
+        "dask[array]",
+        "dicom2nifti",
+        "dipy",
+        "highdicom",
+        "imagecodecs",
+        "itk",
+        "mrcfile",
+        "monai",
+        "nilearn",
+        "numpy==1.26.4",
+        "ome-types",
+        "ome-zarr",
+        "opencv-python-headless==4.10.0.84",
+        "openslide-python",
+        "pydicom",
+        "pynrrd",
+        "pylibjpeg",
+        "pylibjpeg-libjpeg",
+        "pylibjpeg-openjpeg",
+        "pylibjpeg-rle",
+        "pyvips",
+        "roifile",
+        "rt-utils",
+        "torchio",
+        "xarray",
+        "zarr",
+    ]
+
+    for package in required_system_packages:
+        assert package in dockerfile
+    for package in required_python_packages:
+        assert package in dockerfile
+    assert "--no-deps rt-utils" in dockerfile

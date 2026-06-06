@@ -28,13 +28,13 @@ func TestRunEventsStreamEmitsRunEventEnvelope(t *testing.T) {
 	service := runcontrol.NewService(mem, bus)
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "stream"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "stream"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "stream",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "stream"}},
 	})
@@ -83,13 +83,13 @@ func TestRunEventsStreamDoesNotMissEventBetweenReplayAndSubscription(t *testing.
 	bus := eventbus.NewMemoryBus()
 	service := runcontrol.NewService(mem, bus)
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "stream race"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "stream race"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "stream race",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "stream race"}},
 	})
@@ -150,13 +150,13 @@ func TestRunEventsStreamCatchesUpPersistedEventsWithoutLocalFanout(t *testing.T)
 	service := runcontrol.NewService(mem, bus)
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "cross instance stream"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "cross instance stream"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "cross instance stream",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "cross instance stream"}},
 	})
@@ -237,13 +237,13 @@ func TestRunEventsStreamRespectsAfterSequenceReplayCursor(t *testing.T) {
 	service := runcontrol.NewService(mem, bus)
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "stream cursor"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "stream cursor"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "stream cursor",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "stream cursor"}},
 	})
@@ -293,13 +293,13 @@ func TestRunEventsStreamPagesFullCursorReplayBeforeLiveStreaming(t *testing.T) {
 	service := runcontrol.NewService(mem, bus)
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "long replay"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "long replay"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "long replay",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "long replay"}},
 	})
@@ -349,13 +349,13 @@ func TestRunEventsStreamCapsReplayPageSizeWhileRecoveringFullCursor(t *testing.T
 	storeWithLimits := &listRunEventsHookStore{Store: mem}
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: storeWithLimits, Bus: bus})
 
-	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "bounded replay"})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "bounded replay"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
-		UserID:   "user-1",
+		UserID:   "local-user",
 		Goal:     "bounded replay",
 		Messages: []domain.ThreadMessage{{Role: "user", Content: "bounded replay"}},
 	})

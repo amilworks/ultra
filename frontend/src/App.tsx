@@ -196,6 +196,7 @@ import type {
   AssistantContract,
   ArtifactRecord,
   BisqueAuthSessionResponse,
+  ChatResponse,
   ChatMessage,
   ConversationRecord,
   ProgressEvent,
@@ -2969,7 +2970,7 @@ const summarizePrompt = (value: string, maxLen = 46): string => {
   return `${singleLine.slice(0, maxLen - 1)}…`;
 };
 
-const summarizeConversationTitle = (value: string, maxWords = 4): string => {
+const summarizeConversationTitle = (value: string, maxWords = 6): string => {
   return fallbackConversationTitleFromText(value, maxWords);
 };
 
@@ -3595,6 +3596,31 @@ const toRecord = (value: unknown): Record<string, unknown> | null => {
     return null;
   }
   return value as Record<string, unknown>;
+};
+
+const generatedConversationTitleFromResponse = (
+  response: ChatResponse | null | undefined
+): string | null => {
+  const metadata = toRecord(response?.metadata);
+  const title = normalizeConversationTitle(String(metadata?.conversation_title ?? ""));
+  return title === "New conversation" ? null : title;
+};
+
+const shouldApplyGeneratedConversationTitle = (
+  currentTitle: string,
+  generatedTitle: string,
+  temporaryTitle?: string
+): boolean => {
+  const current = normalizeConversationTitle(currentTitle);
+  if (current === generatedTitle) {
+    return false;
+  }
+  if (current === "New conversation") {
+    return true;
+  }
+  return Boolean(
+    temporaryTitle && current === normalizeConversationTitle(temporaryTitle)
+  );
 };
 
 const humanizeScientificLabel = (value: string): string => {
@@ -10526,6 +10552,37 @@ export function App() {
     );
   }, []);
 
+  const applyGeneratedConversationTitle = useCallback(
+    (
+      conversationId: string,
+      response: ChatResponse | null | undefined,
+      temporaryTitle?: string
+    ): void => {
+      const generatedTitle = generatedConversationTitleFromResponse(response);
+      if (!generatedTitle) {
+        return;
+      }
+      updateConversation(conversationId, (conversation) => {
+        if (
+          !conversation.messages.some((message) => message.role === "user") ||
+          !shouldApplyGeneratedConversationTitle(
+            conversation.title,
+            generatedTitle,
+            temporaryTitle
+          )
+        ) {
+          return conversation;
+        }
+        return {
+          ...conversation,
+          title: generatedTitle,
+          updatedAt: Date.now(),
+        };
+      });
+    },
+    [updateConversation]
+  );
+
   const updateActiveConversation = useCallback((
     updater: (conversation: ConversationState) => ConversationState
   ): void => {
@@ -10903,7 +10960,8 @@ export function App() {
         updatedAt: Date.now(),
       };
       const savedRecord = await apiClient.upsertConversation(
-        conversationToRecord(renamedConversation)
+        conversationToRecord(renamedConversation),
+        { titleSource: "manual" }
       );
       const savedConversation = conversationFromRecord(savedRecord);
       setConversations((previous) =>
@@ -13118,6 +13176,7 @@ export function App() {
                 }
                 const recoveredText =
                   response.response_text?.trim() || "No response text returned.";
+                applyGeneratedConversationTitle(target.conversationId, response);
                 updateConversation(target.conversationId, (conversation) => ({
                   ...conversation,
                   sending: false,
@@ -13188,6 +13247,7 @@ export function App() {
           }
 
           const recoveredText = payload.result.response_text?.trim() || "No response text returned.";
+          applyGeneratedConversationTitle(target.conversationId, payload.result);
           updateConversation(target.conversationId, (conversation) => ({
             ...conversation,
             sending: false,
@@ -13228,7 +13288,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [apiClient, runRecoveryTargets]);
+  }, [apiClient, applyGeneratedConversationTitle, runRecoveryTargets]);
 
   const setActivePromptValue = (
     nextValue: string | ((previous: string) => string)
@@ -13338,46 +13398,6 @@ export function App() {
       stopActiveConversation,
     ]
   );
-
-  const requestConversationTitle = async (
-    conversationId: string,
-    messages: ChatMessage[],
-    fallbackSeed: string
-  ): Promise<void> => {
-    try {
-      const payload = await apiClient.chatTitle({
-        messages,
-        max_words: 4,
-      });
-      const nextTitle = summarizeConversationTitle(payload.title, 4);
-      updateConversation(conversationId, (conversation) => {
-        if (!conversation.messages.some((message) => message.role === "user")) {
-          return conversation;
-        }
-        if (conversation.title === nextTitle) {
-          return conversation;
-        }
-        return {
-          ...conversation,
-          title: nextTitle,
-        };
-      });
-    } catch {
-      const fallbackTitle = summarizeConversationTitle(fallbackSeed, 4);
-      updateConversation(conversationId, (conversation) => {
-        if (!conversation.messages.some((message) => message.role === "user")) {
-          return conversation;
-        }
-        if (conversation.title && conversation.title !== "New conversation") {
-          return conversation;
-        }
-        return {
-          ...conversation,
-          title: fallbackTitle,
-        };
-      });
-    }
-  };
 
   const handleSubmit = async (): Promise<void> => {
     const conversation = activeConversation;
@@ -13580,20 +13600,13 @@ export function App() {
             title:
               current.messages.some((message) => message.role === "user")
                 ? current.title
-                : summarizeConversationTitle(promptForModel, 4),
+                : summarizeConversationTitle(promptForModel),
             updatedAt: Date.now(),
             prompt: "",
             messages: [...current.messages, userMessage, assistantMessage],
           }));
           clearComposerDraft(conversation.id);
           requestChatScrollToBottom();
-          if (isFirstUserMessage) {
-            void requestConversationTitle(
-              conversation.id,
-              [...toChatWire(conversation.messages), { role: "user", content: promptForModel }],
-              promptForModel
-            );
-          }
           return;
         }
       } catch (error) {
@@ -13681,7 +13694,7 @@ export function App() {
     stopRequestedConversationIdsRef.current.delete(conversationId);
     activeChatAbortControllersRef.current.delete(conversationId);
     const nextMessages = [...conversation.messages, userMessage];
-    const fallbackTitle = summarizeConversationTitle(promptForModel, 4);
+    const fallbackTitle = summarizeConversationTitle(promptForModel);
     clearComposerDraft(conversationId);
     updateConversation(conversationId, (current) => ({
       ...current,
@@ -13698,13 +13711,6 @@ export function App() {
       sending: true,
     }));
     requestChatScrollToBottom();
-    if (isFirstUserMessage) {
-      void requestConversationTitle(
-        conversationId,
-        [...toChatWire(conversation.messages), { role: "user", content: promptForModel }],
-        promptForModel
-      );
-    }
 
     let streamController: StreamController | null = null;
     let chatAbortController: AbortController | null = null;
@@ -13932,6 +13938,7 @@ export function App() {
 
       const assistantText =
         response.response_text?.trim() || streamedText.trim() || "No response text returned.";
+      applyGeneratedConversationTitle(conversationId, response, fallbackTitle);
       const responseToolResultCards = buildToolResultCards(
         response.progress_events ?? [],
         [],
@@ -14029,6 +14036,7 @@ export function App() {
           const assistantText =
             fallbackResponse.response_text?.trim() ||
             "No response text returned.";
+          applyGeneratedConversationTitle(conversationId, fallbackResponse, fallbackTitle);
           const fallbackToolResultCards = buildToolResultCards(
             fallbackResponse.progress_events ?? [],
             [],
@@ -14710,6 +14718,15 @@ export function App() {
 
       <SidebarInset ref={sidebarInsetRef}>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="app-mobile-shell-bar md:hidden">
+            <SidebarTrigger
+              className="app-mobile-sidebar-trigger"
+              aria-label="Open navigation"
+              title="Open navigation"
+            />
+            <div className="app-mobile-shell-brand">BisQue Ultra</div>
+          </div>
+
           {uiErrorBanner ? (
             <div className="bg-background z-10 shrink-0 px-4 pt-3">
               <SystemMessage variant="error" fill>

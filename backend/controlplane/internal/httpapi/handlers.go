@@ -130,6 +130,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/threads", deps.handleListThreads)
 			r.Post("/threads", deps.handleCreateThread)
 			r.Get("/threads/{thread_id}", deps.handleGetThread)
+			r.Put("/threads/{thread_id}", deps.handleUpsertThread)
 			r.Get("/threads/{thread_id}/messages", deps.handleListThreadMessages)
 			r.Post("/threads/{thread_id}/runs", deps.handleCreateRun)
 			r.Post("/uploads", deps.handleUploadFiles)
@@ -1241,6 +1242,11 @@ type createThreadRequest struct {
 	InitialMessages []domain.ThreadMessage `json:"initial_messages"`
 }
 
+type upsertThreadRequest struct {
+	Title    string         `json:"title"`
+	Metadata map[string]any `json:"metadata"`
+}
+
 type createRunRequest struct {
 	UserID              string                 `json:"user_id"`
 	Goal                string                 `json:"goal"`
@@ -1656,9 +1662,10 @@ func (deps ServerDeps) handleListThreads(w http.ResponseWriter, r *http.Request)
 	if !deps.ready(w) {
 		return
 	}
+	principal := deps.principalFromRequest(r, "")
 	limit := clampLimit(parseLimit(r, 100), 500)
 	offset := parseOffset(r)
-	page, err := deps.Store.ListThreads(r.Context(), limit, offset, strings.TrimSpace(r.URL.Query().Get("status")))
+	page, err := deps.Store.ListThreadsForUser(r.Context(), principal.UserID, limit, offset, strings.TrimSpace(r.URL.Query().Get("status")))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1699,7 +1706,30 @@ func (deps ServerDeps) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
 	}
-	thread, err := deps.Store.GetThread(r.Context(), chi.URLParam(r, "thread_id"))
+	principal := deps.principalFromRequest(r, "")
+	thread, err := deps.Store.GetThreadForUser(r.Context(), chi.URLParam(r, "thread_id"), principal.UserID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+func (deps ServerDeps) handleUpsertThread(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	var req upsertThreadRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	thread, err := deps.Store.UpdateThreadForUser(r.Context(), domain.UpdateThreadInput{
+		ThreadID: chi.URLParam(r, "thread_id"),
+		UserID:   principal.UserID,
+		Title:    req.Title,
+		Metadata: metadataWithPrincipal(domain.JSONMap(req.Metadata), principal),
+	})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -1712,7 +1742,8 @@ func (deps ServerDeps) handleListThreadMessages(w http.ResponseWriter, r *http.R
 		return
 	}
 	threadID := chi.URLParam(r, "thread_id")
-	messages, err := deps.Store.ListThreadMessages(r.Context(), threadID)
+	principal := deps.principalFromRequest(r, "")
+	messages, err := deps.Store.ListThreadMessagesForUser(r.Context(), threadID, principal.UserID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -1729,8 +1760,13 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := deps.principalFromRequest(r, req.UserID)
+	threadID := chi.URLParam(r, "thread_id")
+	if _, err := deps.Store.GetThreadForUser(r.Context(), threadID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	run, err := deps.Runs.CreateRun(r.Context(), runcontrol.CreateRunRequest{
-		ThreadID:            chi.URLParam(r, "thread_id"),
+		ThreadID:            threadID,
 		UserID:              principal.UserID,
 		Goal:                req.Goal,
 		Messages:            req.Messages,
@@ -2397,9 +2433,10 @@ func (deps ServerDeps) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
 	}
+	principal := deps.principalFromRequest(r, "")
 	threadID := strings.TrimSpace(r.URL.Query().Get("thread_id"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	runs, err := deps.Store.ListRuns(r.Context(), threadID, status, parseLimit(r, 100), parseOffset(r))
+	runs, err := deps.Store.ListRunsForUser(r.Context(), principal.UserID, threadID, status, parseLimit(r, 100), parseOffset(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -2411,7 +2448,8 @@ func (deps ServerDeps) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
 	}
-	run, err := deps.Store.GetRun(r.Context(), chi.URLParam(r, "run_id"))
+	principal := deps.principalFromRequest(r, "")
+	run, err := deps.Store.GetRunForUser(r.Context(), chi.URLParam(r, "run_id"), principal.UserID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -3734,6 +3772,11 @@ func (deps ServerDeps) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	run, err := deps.Runs.CancelRun(r.Context(), runcontrol.CancelRunRequest{
 		RunID:    runID,
 		Reason:   req.Reason,
@@ -3758,8 +3801,14 @@ func (deps ServerDeps) handleAcquireRunLease(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, errors.New("worker_id is required"))
 		return
 	}
+	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	lease, err := deps.Runs.AcquireRunLease(r.Context(), runcontrol.AcquireRunLeaseRequest{
-		RunID:    chi.URLParam(r, "run_id"),
+		RunID:    runID,
 		WorkerID: req.WorkerID,
 		TTL:      leaseTTL(req),
 	})
@@ -3782,8 +3831,14 @@ func (deps ServerDeps) handleRenewRunLease(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, errors.New("lease_token is required"))
 		return
 	}
+	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	lease, err := deps.Runs.RenewRunLease(r.Context(), runcontrol.RenewRunLeaseRequest{
-		RunID:      chi.URLParam(r, "run_id"),
+		RunID:      runID,
 		LeaseToken: req.LeaseToken,
 		TTL:        leaseTTL(req),
 	})
@@ -3806,8 +3861,14 @@ func (deps ServerDeps) handleReleaseRunLease(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, errors.New("lease_token is required"))
 		return
 	}
+	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	if err := deps.Runs.ReleaseRunLease(r.Context(), runcontrol.ReleaseRunLeaseRequest{
-		RunID:      chi.URLParam(r, "run_id"),
+		RunID:      runID,
 		LeaseToken: req.LeaseToken,
 	}); err != nil {
 		writeStoreError(w, err)
@@ -3821,18 +3882,23 @@ func (deps ServerDeps) handleListRunEvents(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
 	limit := clampLimit(parseLimit(r, 500), runEventMaxPageLimit)
 	afterSequence, hasAfterSequence := parseAfterSequence(r)
 	if r.URL.Query().Get("stream") == "true" {
+		if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		deps.streamRunEvents(w, r, runID, afterSequence, hasAfterSequence, limit)
 		return
 	}
 	var events []domain.RunEventRecord
 	var err error
 	if hasAfterSequence {
-		events, err = deps.Store.ListRunEventsAfter(r.Context(), runID, afterSequence, limit)
+		events, err = deps.Store.ListRunEventsAfterForUser(r.Context(), runID, principal.UserID, afterSequence, limit)
 	} else {
-		events, err = deps.Store.ListRunEvents(r.Context(), runID, limit)
+		events, err = deps.Store.ListRunEventsForUser(r.Context(), runID, principal.UserID, limit)
 	}
 	if err != nil {
 		writeStoreError(w, err)
@@ -3977,7 +4043,8 @@ func (deps ServerDeps) handleListRunArtifacts(w http.ResponseWriter, r *http.Req
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
-	artifacts, err := deps.Store.ListRunArtifacts(r.Context(), runID, parseLimit(r, 500))
+	principal := deps.principalFromRequest(r, "")
+	artifacts, err := deps.Store.ListRunArtifactsForUser(r.Context(), runID, principal.UserID, parseLimit(r, 500))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -3989,7 +4056,8 @@ func (deps ServerDeps) handleGetArtifact(w http.ResponseWriter, r *http.Request)
 	if !deps.ready(w) {
 		return
 	}
-	artifact, err := deps.Store.GetArtifact(r.Context(), chi.URLParam(r, "artifact_id"))
+	principal := deps.principalFromRequest(r, "")
+	artifact, err := deps.Store.GetArtifactForUser(r.Context(), chi.URLParam(r, "artifact_id"), principal.UserID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -4006,12 +4074,13 @@ func (deps ServerDeps) handleDownloadRunArtifactByPath(w http.ResponseWriter, r 
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
 	if path == "" {
 		writeError(w, http.StatusBadRequest, errors.New("path query parameter is required"))
 		return
 	}
-	artifacts, err := deps.Store.ListRunArtifacts(r.Context(), runID, 5000)
+	artifacts, err := deps.Store.ListRunArtifactsForUser(r.Context(), runID, principal.UserID, 5000)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -4033,7 +4102,8 @@ func (deps ServerDeps) handleDownloadArtifact(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact root is not configured"})
 		return
 	}
-	artifact, err := deps.Store.GetArtifact(r.Context(), chi.URLParam(r, "artifact_id"))
+	principal := deps.principalFromRequest(r, "")
+	artifact, err := deps.Store.GetArtifactForUser(r.Context(), chi.URLParam(r, "artifact_id"), principal.UserID)
 	if err != nil {
 		writeStoreError(w, err)
 		return

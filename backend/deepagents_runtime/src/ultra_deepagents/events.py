@@ -141,7 +141,18 @@ def normalize_artifact_created(
     ).to_dict()
 
 
-def normalize_run_completed(context: AgentRunContext, response_text: str) -> dict[str, Any]:
+def normalize_run_completed(
+    context: AgentRunContext,
+    response_text: str,
+    *,
+    conversation_title: str = "",
+    title_generation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {"response_text": response_text}
+    if conversation_title.strip():
+        payload["conversation_title"] = conversation_title.strip()
+    if title_generation:
+        payload["title_generation"] = _json_safe_payload(title_generation)
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,
@@ -151,7 +162,7 @@ def normalize_run_completed(context: AgentRunContext, response_text: str) -> dic
         agent_role="coordinator",
         level="info",
         message=response_text,
-        payload={"response_text": response_text},
+        payload=payload,
     ).to_dict()
 
 

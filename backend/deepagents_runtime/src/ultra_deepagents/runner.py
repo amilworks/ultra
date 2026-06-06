@@ -28,6 +28,7 @@ from ultra_deepagents.events import (
     normalize_subagent_message_delta,
     normalize_tool_call,
 )
+from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
     ingest_pdf_file,
@@ -42,6 +43,7 @@ from ultra_deepagents.rarespot.tools import (
     wait_for_rarespot_run,
 )
 from ultra_deepagents.schemas import RunJobEnvelope
+from ultra_deepagents.title_generation import generate_conversation_title
 
 PublishEvent = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -521,6 +523,7 @@ async def run_job(
     *,
     publish_event: PublishEvent,
     agent_factory: Callable[..., Any] = build_research_agent,
+    title_model_factory: Callable[[RuntimeSettings], Any] | None = None,
 ) -> str:
     workspace_dir = Path(settings.workspace_root).expanduser() / job.run_id
     artifact_dir = Path(settings.artifact_root).expanduser() / job.run_id
@@ -701,7 +704,24 @@ async def run_job(
         raise
 
     _write_workspace_lease(context, status="succeeded")
-    await publish_event(sequencer.stamp(normalize_run_completed(context, response_text)))
+    title_result = await generate_conversation_title(
+        settings=settings,
+        goal=job.goal,
+        messages=list(job.messages or [{"role": "user", "content": job.goal}]),
+        response_text=response_text,
+        artifact_events=artifact_events,
+        model_factory=title_model_factory or build_chat_model,
+    )
+    await publish_event(
+        sequencer.stamp(
+            normalize_run_completed(
+                context,
+                response_text,
+                conversation_title=title_result.title,
+                title_generation=title_result.to_payload(),
+            )
+        )
+    )
     return response_text
 
 

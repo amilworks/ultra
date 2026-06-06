@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS control_bisque_credentials (
 
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_threads_user_status_updated_idx ON control_threads(user_id, status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
   ON control_runs(thread_id, user_id, (metadata->>'idempotency_key'))
   WHERE COALESCE(metadata->>'idempotency_key', '') <> '';

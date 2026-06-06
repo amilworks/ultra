@@ -746,12 +746,17 @@ class NATSDeepAgentsWorker:
         current_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        heartbeat_metadata = {
+            "active_tasks": len(self._active_tasks),
+            "max_concurrency": max(1, self.settings.worker_max_concurrency),
+        }
+        heartbeat_metadata.update(metadata or {})
         try:
             await self._worker_heartbeat(
                 self.settings,
                 status=status,
                 current_run_id=current_run_id,
-                metadata=metadata or {},
+                metadata=heartbeat_metadata,
             )
         except asyncio.CancelledError:
             raise

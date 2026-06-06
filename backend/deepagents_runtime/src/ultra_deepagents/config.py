@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from socket import gethostname
 
 
+DEFAULT_WORKER_MAX_CONCURRENCY = 2
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     openai_base_url: str
@@ -15,6 +18,8 @@ class RuntimeSettings:
     model_stream_idle_timeout_seconds: float = 0.0
     model_stream_idle_max_recoveries: int = 2
     max_retries: int = 1
+    title_generation_enabled: bool = False
+    title_generation_timeout_seconds: float = 8.0
     langgraph_recursion_limit: int = 1000
     sandbox_image: str = "bisque-ultra-codeexec:py311"
     sandbox_network: str = "none"
@@ -30,7 +35,7 @@ class RuntimeSettings:
     nats_events_subject: str = "ultra.runs.events"
     nats_cancel_subject: str = "ultra.runs.cancel"
     nats_worker_durable: str = "ultra-deepagents-worker"
-    worker_max_concurrency: int = 1
+    worker_max_concurrency: int = DEFAULT_WORKER_MAX_CONCURRENCY
     worker_ack_wait_seconds: float = 300.0
     worker_ack_progress_interval_seconds: float = 60.0
     worker_max_deliver: int = 5
@@ -87,6 +92,14 @@ class RuntimeSettings:
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", "2")),
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
+            title_generation_enabled=_env_bool(
+                "ULTRA_DEEPAGENTS_TITLE_GENERATION_ENABLED",
+                True,
+            ),
+            title_generation_timeout_seconds=max(
+                0.0,
+                float(os.getenv("ULTRA_DEEPAGENTS_TITLE_GENERATION_TIMEOUT_SECONDS", "8")),
+            ),
             langgraph_recursion_limit=max(
                 1,
                 int(os.getenv("ULTRA_DEEPAGENTS_RECURSION_LIMIT", "1000")),
@@ -135,7 +148,12 @@ class RuntimeSettings:
             ),
             worker_max_concurrency=max(
                 1,
-                int(os.getenv("ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY", "1")),
+                int(
+                    os.getenv(
+                        "ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY",
+                        str(DEFAULT_WORKER_MAX_CONCURRENCY),
+                    )
+                ),
             ),
             worker_ack_wait_seconds=float(
                 os.getenv("ULTRA_DEEPAGENTS_WORKER_ACK_WAIT_SECONDS", "300")

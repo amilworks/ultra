@@ -139,6 +139,42 @@ class FakeConfigAwareStreamingAgent:
         }
 
 
+class FakeConversationTitleResponse:
+    content = '{"title": "RareSpot Prairie Dog Analysis"}'
+
+
+class FakeConversationTitleModel:
+    async def ainvoke(self, messages):
+        joined = "\n".join(str(message.get("content", "")) for message in messages)
+        assert "Run RareSpot on this prairie dog image" in joined
+        assert "RareSpot completed with burrow overlays." in joined
+        return FakeConversationTitleResponse()
+
+
+class FakeRareSpotCompletionAgent:
+    async def astream_events(self, payload, config=None, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert "Run RareSpot on this prairie dog image" in payload["messages"][0]["content"]
+        assert config == {"recursion_limit": 1000}
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {
+                            "role": "assistant",
+                            "content": "RareSpot completed with burrow overlays.",
+                        },
+                    ]
+                },
+            },
+        }
+
+
 class FakeToolLifecycleAgent:
     async def astream_events(self, payload, *, context=None, version=None):
         assert version == "v3"
@@ -923,6 +959,51 @@ def test_run_job_passes_configured_langgraph_recursion_limit(tmp_path: Path):
     assert result == "Hello with high recursion limit."
     assert [event["event_kind"] for event in events] == ["run.started", "run.completed"]
     assert events[-1]["payload"]["response_text"] == result
+
+
+def test_run_job_includes_generated_conversation_title_in_completed_event(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            title_generation_enabled=True,
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Run RareSpot on this prairie dog image and summarize burrow detections.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Run RareSpot on this prairie dog image and summarize burrow detections.",
+                }
+            ],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeRareSpotCompletionAgent(),
+            title_model_factory=lambda _settings: FakeConversationTitleModel(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["conversation_title"] == "RareSpot Prairie Dog Analysis"
+    assert events[-1]["payload"]["title_generation"] == {
+        "strategy": "llm",
+        "model": "deepseek_v4",
+    }
 
 
 def test_run_job_publishes_tool_lifecycle_without_polluting_response(tmp_path: Path):
@@ -2343,9 +2424,9 @@ def test_worker_posts_control_plane_heartbeats_around_compute(tmp_path: Path):
     assert message.acked == 1
     assert [call["status"] for call in heartbeat_calls] == ["busy", "idle"]
     assert heartbeat_calls[0]["current_run_id"] == "run-1"
-    assert heartbeat_calls[0]["metadata"] == {"active_tasks": 1}
+    assert heartbeat_calls[0]["metadata"] == {"active_tasks": 1, "max_concurrency": 2}
     assert heartbeat_calls[1]["current_run_id"] is None
-    assert heartbeat_calls[1]["metadata"] == {"active_tasks": 0}
+    assert heartbeat_calls[1]["metadata"] == {"active_tasks": 0, "max_concurrency": 2}
 
 
 def test_control_plane_worker_heartbeat_posts_json(monkeypatch):

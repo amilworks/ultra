@@ -85,6 +85,22 @@ def test_runtime_settings_default_to_higher_autonomous_continuation_guard(monkey
     assert settings.completion_max_continuations == 8
 
 
+def test_runtime_settings_default_to_two_worker_slots(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY", raising=False)
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.worker_max_concurrency == 2
+
+
+def test_runtime_settings_load_worker_max_concurrency(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY", "4")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.worker_max_concurrency == 4
+
+
 def test_runtime_settings_default_to_high_langgraph_recursion_limit(monkeypatch):
     monkeypatch.delenv("ULTRA_DEEPAGENTS_RECURSION_LIMIT", raising=False)
 

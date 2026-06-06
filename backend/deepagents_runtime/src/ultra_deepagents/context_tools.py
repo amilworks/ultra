@@ -205,6 +205,11 @@ def build_tool_capability_manifest(registered_tools: Iterable[Any]) -> dict[str,
                 "category": "filesystem",
                 "purpose": "Search text files under the active backend routes.",
             },
+            {
+                "name": "write_todos",
+                "category": "planning",
+                "purpose": "Track multi-step task progress during autonomous work.",
+            },
         ],
         "registered_tools": registered_tool_names,
         "selected_tool_names": (

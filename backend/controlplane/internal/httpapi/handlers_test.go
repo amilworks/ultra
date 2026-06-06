@@ -863,6 +863,71 @@ func TestV2ThreadAndRunCreationDefaultsLocalDevPrincipal(t *testing.T) {
 	}
 }
 
+func TestV2ThreadUpsertIsTenantScopedAndPersistsManualTitleState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
+
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
+		UserID: "alice",
+		Title:  "Initial automatic title",
+		Metadata: domain.JSONMap{
+			"frontend_bridge": "v2-chat",
+			"conversation_id": "conversation-alice",
+			"title_state": domain.JSONMap{
+				"source": "auto",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/v2/threads/"+thread.ThreadID,
+		strings.NewReader(`{"title":"Manual ecology review","metadata":{"conversation_id":"conversation-alice","title_state":{"source":"manual","updated_by":"user"}}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "alice")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upsert status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated domain.ThreadRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated thread: %v", err)
+	}
+	if updated.Title != "Manual ecology review" {
+		t.Fatalf("updated title = %q, want manual title", updated.Title)
+	}
+	titleState, ok := updated.Metadata["title_state"].(map[string]any)
+	if !ok || titleState["source"] != "manual" || titleState["updated_by"] != "user" {
+		t.Fatalf("title_state = %+v, want manual metadata", updated.Metadata["title_state"])
+	}
+	if updated.Metadata["frontend_bridge"] != "v2-chat" {
+		t.Fatalf("metadata = %+v, want existing frontend_bridge preserved", updated.Metadata)
+	}
+
+	bobReq := httptest.NewRequest(
+		http.MethodPut,
+		"/v2/threads/"+thread.ThreadID,
+		strings.NewReader(`{"title":"Bob should not write"}`),
+	)
+	bobReq.Header.Set("Content-Type", "application/json")
+	bobReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobRec := httptest.NewRecorder()
+	router.ServeHTTP(bobRec, bobReq)
+	if bobRec.Code != http.StatusNotFound {
+		t.Fatalf("bob upsert status = %d body=%s, want 404", bobRec.Code, bobRec.Body.String())
+	}
+}
+
 func TestV2ListRunsHandler(t *testing.T) {
 	t.Parallel()
 
@@ -900,6 +965,7 @@ func TestV2ListRunsHandler(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/runs?limit=20&status=queued", nil)
+	req.Header.Set("X-Ultra-User-Id", "user-1")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -915,6 +981,145 @@ func TestV2ListRunsHandler(t *testing.T) {
 	}
 	if response.Count != 1 || len(response.Runs) != 1 || response.Runs[0].RunID != first.RunID {
 		t.Fatalf("runs = %+v, want queued first run only", response)
+	}
+}
+
+func TestV2UserRoutesAreScopedToRequestPrincipal(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	artifactRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:      "test-version",
+		Runs:         service,
+		Store:        mem,
+		Bus:          bus,
+		ArtifactRoot: artifactRoot,
+	})
+
+	aliceThread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
+		UserID:          "alice",
+		Title:           "alice thread",
+		InitialMessages: []domain.ThreadMessage{{Role: "user", Content: "secret prompt"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread alice: %v", err)
+	}
+	aliceRun, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: aliceThread.ThreadID,
+		UserID:   "alice",
+		Goal:     "secret run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "secret run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun alice: %v", err)
+	}
+	if _, err := mem.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		RunID:     aliceRun.RunID,
+		ThreadID:  aliceThread.ThreadID,
+		EventKind: "message.delta",
+		Message:   "private trace",
+	}); err != nil {
+		t.Fatalf("AppendRunEvent alice: %v", err)
+	}
+	reportPath := filepath.Join(artifactRoot, aliceRun.RunID, "report.md")
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll artifact: %v", err)
+	}
+	if err := os.WriteFile(reportPath, []byte("alice report"), 0o644); err != nil {
+		t.Fatalf("WriteFile artifact: %v", err)
+	}
+	aliceArtifact, err := mem.CreateArtifact(ctx, domain.CreateArtifactInput{
+		RunID:    aliceRun.RunID,
+		ThreadID: aliceThread.ThreadID,
+		Kind:     "report",
+		Path:     "report.md",
+		MimeType: "text/markdown",
+	})
+	if err != nil {
+		t.Fatalf("CreateArtifact alice: %v", err)
+	}
+
+	bobThread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "bob", Title: "bob thread"})
+	if err != nil {
+		t.Fatalf("CreateThread bob: %v", err)
+	}
+	if _, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: bobThread.ThreadID,
+		UserID:   "bob",
+		Goal:     "bob run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "bob run"}},
+	}); err != nil {
+		t.Fatalf("CreateRun bob: %v", err)
+	}
+
+	listThreads := httptest.NewRequest(http.MethodGet, "/v2/threads?limit=20", nil)
+	listThreads.Header.Set("X-Ultra-User-Id", "bob")
+	listThreadsRec := httptest.NewRecorder()
+	router.ServeHTTP(listThreadsRec, listThreads)
+	if listThreadsRec.Code != http.StatusOK {
+		t.Fatalf("bob list threads status = %d body=%s", listThreadsRec.Code, listThreadsRec.Body.String())
+	}
+	var threadList struct {
+		TotalCount int                   `json:"total_count"`
+		Threads    []domain.ThreadRecord `json:"threads"`
+	}
+	if err := json.Unmarshal(listThreadsRec.Body.Bytes(), &threadList); err != nil {
+		t.Fatalf("decode bob thread list: %v", err)
+	}
+	if threadList.TotalCount != 1 || len(threadList.Threads) != 1 || threadList.Threads[0].UserID != "bob" {
+		t.Fatalf("bob thread list = %+v, want only bob thread", threadList)
+	}
+
+	listRuns := httptest.NewRequest(http.MethodGet, "/v2/runs?limit=20", nil)
+	listRuns.Header.Set("X-Ultra-User-Id", "bob")
+	listRunsRec := httptest.NewRecorder()
+	router.ServeHTTP(listRunsRec, listRuns)
+	if listRunsRec.Code != http.StatusOK {
+		t.Fatalf("bob list runs status = %d body=%s", listRunsRec.Code, listRunsRec.Body.String())
+	}
+	var runList struct {
+		Runs []domain.RunRecord `json:"runs"`
+	}
+	if err := json.Unmarshal(listRunsRec.Body.Bytes(), &runList); err != nil {
+		t.Fatalf("decode bob run list: %v", err)
+	}
+	if len(runList.Runs) != 1 || runList.Runs[0].UserID != "bob" {
+		t.Fatalf("bob run list = %+v, want only bob run", runList)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "get thread", method: http.MethodGet, path: "/v2/threads/" + aliceThread.ThreadID},
+		{name: "list messages", method: http.MethodGet, path: "/v2/threads/" + aliceThread.ThreadID + "/messages"},
+		{name: "create run", method: http.MethodPost, path: "/v2/threads/" + aliceThread.ThreadID + "/runs", body: `{"goal":"steal work"}`},
+		{name: "get run", method: http.MethodGet, path: "/v2/runs/" + aliceRun.RunID},
+		{name: "list events", method: http.MethodGet, path: "/v2/runs/" + aliceRun.RunID + "/events?limit=10"},
+		{name: "cancel run", method: http.MethodPost, path: "/v2/runs/" + aliceRun.RunID + "/cancel", body: `{"reason":"not mine"}`},
+		{name: "acquire lease", method: http.MethodPost, path: "/v2/runs/" + aliceRun.RunID + "/lease", body: `{"worker_id":"not-mine","ttl_seconds":60}`},
+		{name: "list artifacts", method: http.MethodGet, path: "/v2/runs/" + aliceRun.RunID + "/artifacts"},
+		{name: "download artifact path", method: http.MethodGet, path: "/v2/runs/" + aliceRun.RunID + "/artifacts/download?path=report.md"},
+		{name: "get artifact", method: http.MethodGet, path: "/v2/artifacts/" + aliceArtifact.ArtifactID},
+		{name: "download artifact", method: http.MethodGet, path: "/v2/artifacts/" + aliceArtifact.ArtifactID + "/download"},
+	} {
+		body := strings.NewReader(tc.body)
+		req := httptest.NewRequest(tc.method, tc.path, body)
+		req.Header.Set("X-Ultra-User-Id", "bob")
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d body=%s, want 404 for another user's object", tc.name, rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -1193,6 +1398,7 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 
 	claim := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(`{"worker_id":"worker-a","ttl_seconds":60}`))
 	claim.Header.Set("Content-Type", "application/json")
+	claim.Header.Set("X-Ultra-User-Id", "user-1")
 	claimRec := httptest.NewRecorder()
 	router.ServeHTTP(claimRec, claim)
 	if claimRec.Code != http.StatusOK {
@@ -1208,6 +1414,7 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 
 	competing := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(`{"worker_id":"worker-b","ttl_seconds":60}`))
 	competing.Header.Set("Content-Type", "application/json")
+	competing.Header.Set("X-Ultra-User-Id", "user-1")
 	competingRec := httptest.NewRecorder()
 	router.ServeHTTP(competingRec, competing)
 	if competingRec.Code != http.StatusConflict {
@@ -1217,6 +1424,7 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 	renewBody := `{"lease_token":"` + lease.LeaseToken + `","ttl_seconds":120}`
 	renew := httptest.NewRequest(http.MethodPatch, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(renewBody))
 	renew.Header.Set("Content-Type", "application/json")
+	renew.Header.Set("X-Ultra-User-Id", "user-1")
 	renewRec := httptest.NewRecorder()
 	router.ServeHTTP(renewRec, renew)
 	if renewRec.Code != http.StatusOK {
@@ -1226,6 +1434,7 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 	releaseBody := `{"lease_token":"` + lease.LeaseToken + `"}`
 	release := httptest.NewRequest(http.MethodDelete, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(releaseBody))
 	release.Header.Set("Content-Type", "application/json")
+	release.Header.Set("X-Ultra-User-Id", "user-1")
 	releaseRec := httptest.NewRecorder()
 	router.ServeHTTP(releaseRec, release)
 	if releaseRec.Code != http.StatusOK {
@@ -1234,6 +1443,7 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 
 	reclaim := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(`{"worker_id":"worker-b","ttl_seconds":60}`))
 	reclaim.Header.Set("Content-Type", "application/json")
+	reclaim.Header.Set("X-Ultra-User-Id", "user-1")
 	reclaimRec := httptest.NewRecorder()
 	router.ServeHTTP(reclaimRec, reclaim)
 	if reclaimRec.Code != http.StatusOK {
@@ -4130,6 +4340,7 @@ func TestV2BisqueUploadPostsArtifactToBisque(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/upload", strings.NewReader(`{"artifact_ids":["`+artifact.ArtifactID+`"]}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "user-1")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -4635,6 +4846,7 @@ func TestListRunEventsSupportsAfterSequenceCursor(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/events?limit=2&after_sequence=3", nil)
+	req.Header.Set("X-Ultra-User-Id", "user-1")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -4683,6 +4895,7 @@ func TestCancelRunPublishesCanceledEventAndCancelSignal(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/cancel", strings.NewReader(`{"reason":"user requested"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "user-1")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -4827,6 +5040,7 @@ func TestArtifactDownloadServesFilesUnderArtifactRootAndRejectsTraversal(t *test
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/artifacts/"+artifact.ArtifactID+"/download", nil)
+	req.Header.Set("X-Ultra-User-Id", "user-1")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -4840,6 +5054,7 @@ func TestArtifactDownloadServesFilesUnderArtifactRootAndRejectsTraversal(t *test
 	}
 
 	pathReq := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/artifacts/download?path=report.md", nil)
+	pathReq.Header.Set("X-Ultra-User-Id", "user-1")
 	pathRec := httptest.NewRecorder()
 	router.ServeHTTP(pathRec, pathReq)
 	if pathRec.Code != http.StatusOK {
@@ -4860,6 +5075,7 @@ func TestArtifactDownloadServesFilesUnderArtifactRootAndRejectsTraversal(t *test
 		t.Fatalf("CreateArtifact traversal: %v", err)
 	}
 	traversalReq := httptest.NewRequest(http.MethodGet, "/v2/artifacts/"+traversal.ArtifactID+"/download", nil)
+	traversalReq.Header.Set("X-Ultra-User-Id", "user-1")
 	traversalRec := httptest.NewRecorder()
 	router.ServeHTTP(traversalRec, traversalReq)
 	if traversalRec.Code != http.StatusBadRequest {

@@ -82,8 +82,26 @@ SELECT COUNT(*) FROM control_threads
 WHERE ($1::text = '' OR status = $1)
 `
 
-func (q *Queries) CountThreads(ctx context.Context, status string) (int64, error) {
-	row := q.db.QueryRow(ctx, countThreads, status)
+func (q *Queries) CountThreads(ctx context.Context, dollar_1 string) (int64, error) {
+	row := q.db.QueryRow(ctx, countThreads, dollar_1)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countThreadsForUser = `-- name: CountThreadsForUser :one
+SELECT COUNT(*) FROM control_threads
+WHERE user_id = $1
+  AND ($2::text = '' OR status = $2)
+`
+
+type CountThreadsForUserParams struct {
+	UserID  string `json:"user_id"`
+	Column2 string `json:"column_2"`
+}
+
+func (q *Queries) CountThreadsForUser(ctx context.Context, arg CountThreadsForUserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countThreadsForUser, arg.UserID, arg.Column2)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -303,6 +321,45 @@ func (q *Queries) GetArtifact(ctx context.Context, artifactID string) (ControlAr
 	return i, err
 }
 
+const getArtifactForUser = `-- name: GetArtifactForUser :one
+SELECT a.artifact_id, a.run_id, a.thread_id, a.kind, a.path, a.source_path, a.preview_path, a.title, a.result_group_id, a.mime_type, a.size_bytes, a.sha256, a.storage_uri, a.tool_name, a.category, a.created_at, a.updated_at, a.metadata
+FROM control_artifacts a
+JOIN control_runs r ON r.run_id = a.run_id
+WHERE a.artifact_id = $1
+  AND r.user_id = $2
+`
+
+type GetArtifactForUserParams struct {
+	ArtifactID string `json:"artifact_id"`
+	UserID     string `json:"user_id"`
+}
+
+func (q *Queries) GetArtifactForUser(ctx context.Context, arg GetArtifactForUserParams) (ControlArtifact, error) {
+	row := q.db.QueryRow(ctx, getArtifactForUser, arg.ArtifactID, arg.UserID)
+	var i ControlArtifact
+	err := row.Scan(
+		&i.ArtifactID,
+		&i.RunID,
+		&i.ThreadID,
+		&i.Kind,
+		&i.Path,
+		&i.SourcePath,
+		&i.PreviewPath,
+		&i.Title,
+		&i.ResultGroupID,
+		&i.MimeType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.ToolName,
+		&i.Category,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const getRun = `-- name: GetRun :one
 SELECT run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata FROM control_runs WHERE run_id = $1
 `
@@ -364,12 +421,78 @@ func (q *Queries) GetRunEvent(ctx context.Context, eventID string) (ControlRunEv
 	return i, err
 }
 
+const getRunForUser = `-- name: GetRunForUser :one
+SELECT run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata FROM control_runs WHERE run_id = $1 AND user_id = $2
+`
+
+type GetRunForUserParams struct {
+	RunID  string `json:"run_id"`
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) GetRunForUser(ctx context.Context, arg GetRunForUserParams) (ControlRun, error) {
+	row := q.db.QueryRow(ctx, getRunForUser, arg.RunID, arg.UserID)
+	var i ControlRun
+	err := row.Scan(
+		&i.RunID,
+		&i.ThreadID,
+		&i.UserID,
+		&i.Goal,
+		&i.Status,
+		&i.WorkflowKind,
+		&i.Mode,
+		&i.CurrentNode,
+		&i.ParentRunID,
+		&i.PlannerVersion,
+		&i.AgentRole,
+		&i.TraceGroupID,
+		&i.CheckpointID,
+		&i.CheckpointState,
+		&i.BudgetState,
+		&i.ResponseText,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const getThread = `-- name: GetThread :one
 SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads WHERE thread_id = $1
 `
 
 func (q *Queries) GetThread(ctx context.Context, threadID string) (ControlThread, error) {
 	row := q.db.QueryRow(ctx, getThread, threadID)
+	var i ControlThread
+	err := row.Scan(
+		&i.ThreadID,
+		&i.UserID,
+		&i.Title,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LatestRunID,
+		&i.CheckpointID,
+		&i.Summary,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getThreadForUser = `-- name: GetThreadForUser :one
+SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads WHERE thread_id = $1 AND user_id = $2
+`
+
+type GetThreadForUserParams struct {
+	ThreadID string `json:"thread_id"`
+	UserID   string `json:"user_id"`
+}
+
+func (q *Queries) GetThreadForUser(ctx context.Context, arg GetThreadForUserParams) (ControlThread, error) {
+	row := q.db.QueryRow(ctx, getThreadForUser, arg.ThreadID, arg.UserID)
 	var i ControlThread
 	err := row.Scan(
 		&i.ThreadID,
@@ -436,6 +559,61 @@ type ListRunArtifactsParams struct {
 
 func (q *Queries) ListRunArtifacts(ctx context.Context, arg ListRunArtifactsParams) ([]ControlArtifact, error) {
 	rows, err := q.db.Query(ctx, listRunArtifacts, arg.RunID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlArtifact
+	for rows.Next() {
+		var i ControlArtifact
+		if err := rows.Scan(
+			&i.ArtifactID,
+			&i.RunID,
+			&i.ThreadID,
+			&i.Kind,
+			&i.Path,
+			&i.SourcePath,
+			&i.PreviewPath,
+			&i.Title,
+			&i.ResultGroupID,
+			&i.MimeType,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.StorageUri,
+			&i.ToolName,
+			&i.Category,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunArtifactsForUser = `-- name: ListRunArtifactsForUser :many
+SELECT a.artifact_id, a.run_id, a.thread_id, a.kind, a.path, a.source_path, a.preview_path, a.title, a.result_group_id, a.mime_type, a.size_bytes, a.sha256, a.storage_uri, a.tool_name, a.category, a.created_at, a.updated_at, a.metadata
+FROM control_artifacts a
+JOIN control_runs r ON r.run_id = a.run_id
+WHERE a.run_id = $1
+  AND r.user_id = $2
+ORDER BY a.created_at DESC
+LIMIT $3
+`
+
+type ListRunArtifactsForUserParams struct {
+	RunID  string `json:"run_id"`
+	UserID string `json:"user_id"`
+	Limit  int32  `json:"limit"`
+}
+
+func (q *Queries) ListRunArtifactsForUser(ctx context.Context, arg ListRunArtifactsForUserParams) ([]ControlArtifact, error) {
+	rows, err := q.db.Query(ctx, listRunArtifactsForUser, arg.RunID, arg.UserID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -572,6 +750,121 @@ func (q *Queries) ListRunEventsAfter(ctx context.Context, arg ListRunEventsAfter
 	return items, nil
 }
 
+const listRunEventsAfterForUser = `-- name: ListRunEventsAfterForUser :many
+SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+FROM control_run_events e
+JOIN control_runs r ON r.run_id = e.run_id
+WHERE e.run_id = $1
+  AND r.user_id = $2
+  AND e.sequence_number > $3
+ORDER BY e.sequence_number ASC
+LIMIT $4
+`
+
+type ListRunEventsAfterForUserParams struct {
+	RunID          string `json:"run_id"`
+	UserID         string `json:"user_id"`
+	SequenceNumber int64  `json:"sequence_number"`
+	Limit          int32  `json:"limit"`
+}
+
+func (q *Queries) ListRunEventsAfterForUser(ctx context.Context, arg ListRunEventsAfterForUserParams) ([]ControlRunEvent, error) {
+	rows, err := q.db.Query(ctx, listRunEventsAfterForUser,
+		arg.RunID,
+		arg.UserID,
+		arg.SequenceNumber,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlRunEvent
+	for rows.Next() {
+		var i ControlRunEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.SequenceNumber,
+			&i.RunID,
+			&i.ThreadID,
+			&i.EventKind,
+			&i.EventType,
+			&i.NodeName,
+			&i.TaskID,
+			&i.CheckpointID,
+			&i.ScopeID,
+			&i.AgentRole,
+			&i.Level,
+			&i.Ts,
+			&i.Message,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunEventsForUser = `-- name: ListRunEventsForUser :many
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM (
+  SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+  FROM control_run_events e
+  JOIN control_runs r ON r.run_id = e.run_id
+  WHERE e.run_id = $1
+    AND r.user_id = $2
+  ORDER BY e.sequence_number DESC
+  LIMIT $3
+) recent_events
+ORDER BY sequence_number ASC
+`
+
+type ListRunEventsForUserParams struct {
+	RunID  string `json:"run_id"`
+	UserID string `json:"user_id"`
+	Limit  int32  `json:"limit"`
+}
+
+func (q *Queries) ListRunEventsForUser(ctx context.Context, arg ListRunEventsForUserParams) ([]ControlRunEvent, error) {
+	rows, err := q.db.Query(ctx, listRunEventsForUser, arg.RunID, arg.UserID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlRunEvent
+	for rows.Next() {
+		var i ControlRunEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.SequenceNumber,
+			&i.RunID,
+			&i.ThreadID,
+			&i.EventKind,
+			&i.EventType,
+			&i.NodeName,
+			&i.TaskID,
+			&i.CheckpointID,
+			&i.ScopeID,
+			&i.AgentRole,
+			&i.Level,
+			&i.Ts,
+			&i.Message,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRuns = `-- name: ListRuns :many
 SELECT run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata FROM control_runs
 WHERE ($1::text = '' OR thread_id = $1)
@@ -591,6 +884,72 @@ func (q *Queries) ListRuns(ctx context.Context, arg ListRunsParams) ([]ControlRu
 	rows, err := q.db.Query(ctx, listRuns,
 		arg.Column1,
 		arg.Column2,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlRun
+	for rows.Next() {
+		var i ControlRun
+		if err := rows.Scan(
+			&i.RunID,
+			&i.ThreadID,
+			&i.UserID,
+			&i.Goal,
+			&i.Status,
+			&i.WorkflowKind,
+			&i.Mode,
+			&i.CurrentNode,
+			&i.ParentRunID,
+			&i.PlannerVersion,
+			&i.AgentRole,
+			&i.TraceGroupID,
+			&i.CheckpointID,
+			&i.CheckpointState,
+			&i.BudgetState,
+			&i.ResponseText,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunsForUser = `-- name: ListRunsForUser :many
+SELECT run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata FROM control_runs
+WHERE user_id = $1
+  AND ($2::text = '' OR thread_id = $2)
+  AND ($3::text = '' OR status = $3)
+ORDER BY updated_at DESC
+LIMIT $4 OFFSET $5
+`
+
+type ListRunsForUserParams struct {
+	UserID  string `json:"user_id"`
+	Column2 string `json:"column_2"`
+	Column3 string `json:"column_3"`
+	Limit   int32  `json:"limit"`
+	Offset  int32  `json:"offset"`
+}
+
+func (q *Queries) ListRunsForUser(ctx context.Context, arg ListRunsForUserParams) ([]ControlRun, error) {
+	rows, err := q.db.Query(ctx, listRunsForUser,
+		arg.UserID,
+		arg.Column2,
+		arg.Column3,
 		arg.Limit,
 		arg.Offset,
 	)
@@ -667,6 +1026,48 @@ func (q *Queries) ListThreadMessages(ctx context.Context, threadID string) ([]Co
 	return items, nil
 }
 
+const listThreadMessagesForUser = `-- name: ListThreadMessagesForUser :many
+SELECT m.message_id, m.thread_id, m.role, m.content, m.created_at, m.metadata, m.run_id
+FROM control_thread_messages m
+JOIN control_threads t ON t.thread_id = m.thread_id
+WHERE m.thread_id = $1
+  AND t.user_id = $2
+ORDER BY m.created_at ASC
+`
+
+type ListThreadMessagesForUserParams struct {
+	ThreadID string `json:"thread_id"`
+	UserID   string `json:"user_id"`
+}
+
+func (q *Queries) ListThreadMessagesForUser(ctx context.Context, arg ListThreadMessagesForUserParams) ([]ControlThreadMessage, error) {
+	rows, err := q.db.Query(ctx, listThreadMessagesForUser, arg.ThreadID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlThreadMessage
+	for rows.Next() {
+		var i ControlThreadMessage
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.ThreadID,
+			&i.Role,
+			&i.Content,
+			&i.CreatedAt,
+			&i.Metadata,
+			&i.RunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listThreads = `-- name: ListThreads :many
 SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads
 WHERE ($1::text = '' OR status = $1)
@@ -675,13 +1076,64 @@ LIMIT $2 OFFSET $3
 `
 
 type ListThreadsParams struct {
-	Status string `json:"status"`
-	Limit  int32  `json:"limit"`
-	Offset int32  `json:"offset"`
+	Column1 string `json:"column_1"`
+	Limit   int32  `json:"limit"`
+	Offset  int32  `json:"offset"`
 }
 
 func (q *Queries) ListThreads(ctx context.Context, arg ListThreadsParams) ([]ControlThread, error) {
-	rows, err := q.db.Query(ctx, listThreads, arg.Status, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listThreads, arg.Column1, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlThread
+	for rows.Next() {
+		var i ControlThread
+		if err := rows.Scan(
+			&i.ThreadID,
+			&i.UserID,
+			&i.Title,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LatestRunID,
+			&i.CheckpointID,
+			&i.Summary,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listThreadsForUser = `-- name: ListThreadsForUser :many
+SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata FROM control_threads
+WHERE user_id = $1
+  AND ($2::text = '' OR status = $2)
+ORDER BY updated_at DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListThreadsForUserParams struct {
+	UserID  string `json:"user_id"`
+	Column2 string `json:"column_2"`
+	Limit   int32  `json:"limit"`
+	Offset  int32  `json:"offset"`
+}
+
+func (q *Queries) ListThreadsForUser(ctx context.Context, arg ListThreadsForUserParams) ([]ControlThread, error) {
+	rows, err := q.db.Query(ctx, listThreadsForUser,
+		arg.UserID,
+		arg.Column2,
+		arg.Limit,
+		arg.Offset,
+	)
 	if err != nil {
 		return nil, err
 	}

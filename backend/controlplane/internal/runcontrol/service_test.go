@@ -676,6 +676,99 @@ func TestServiceIngestRunCompletedPersistsAssistantMessageOnce(t *testing.T) {
 	}
 }
 
+func TestServiceIngestRunCompletedAppliesFirstGeneratedThreadTitle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Run RareSpot on this prairie dog image and summarize burrow detections.",
+		Metadata: domain.JSONMap{
+			"frontend_bridge": "v2-chat",
+			"title_state": domain.JSONMap{
+				"source":   "auto",
+				"strategy": "initial_request",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run RareSpot on this prairie dog image and summarize burrow detections.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run RareSpot on this prairie dog image and summarize burrow detections."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-title-completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload: domain.JSONMap{
+			"response_text":      "RareSpot completed.",
+			"conversation_title": "RareSpot Prairie Dog Analysis",
+			"title_generation":   domain.JSONMap{"strategy": "llm", "model": "deepseek_v4"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+
+	updated, err := mem.GetThread(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if updated.Title != "RareSpot Prairie Dog Analysis" {
+		t.Fatalf("thread title = %q, want generated title", updated.Title)
+	}
+	titleState, ok := updated.Metadata["title_state"].(domain.JSONMap)
+	if !ok {
+		t.Fatalf("title_state = %#v, want metadata map", updated.Metadata["title_state"])
+	}
+	if titleState["source"] != "generated" || titleState["run_id"] != run.RunID || titleState["strategy"] != "llm" {
+		t.Fatalf("title_state = %+v, want generated metadata for run", titleState)
+	}
+
+	secondRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Follow up.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Follow up."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun second: %v", err)
+	}
+	drainJobs(bus)
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-title-second-completed",
+		RunID:     secondRun.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload: domain.JSONMap{
+			"response_text":      "Second run done.",
+			"conversation_title": "Generic Follow Up",
+			"title_generation":   domain.JSONMap{"strategy": "llm", "model": "deepseek_v4"},
+		},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent second completed: %v", err)
+	}
+	sticky, err := mem.GetThread(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("GetThread sticky: %v", err)
+	}
+	if sticky.Title != "RareSpot Prairie Dog Analysis" {
+		t.Fatalf("thread title after second completion = %q, want first generated title to stay sticky", sticky.Title)
+	}
+}
+
 func TestServiceIngestRunEventIsIdempotentForDuplicateWorkerEvents(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

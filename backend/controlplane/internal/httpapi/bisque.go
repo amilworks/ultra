@@ -528,9 +528,10 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, errors.New("at least one file_id or artifact_id is required"))
 		return
 	}
+	principal := deps.principalFromRequest(r, "")
 	uploads := make([]BisqueUploadRecord, 0, len(req.FileIDs)+len(req.ArtifactIDs))
 	for _, fileID := range req.FileIDs {
-		record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), fileID)
+		record, path, err := findUploadResourceForRequest(root, principal, fileID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -551,7 +552,7 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact root is not configured"})
 			return
 		}
-		artifact, err := deps.Store.GetArtifact(r.Context(), artifactID)
+		artifact, err := deps.Store.GetArtifactForUser(r.Context(), artifactID, principal.UserID)
 		if err != nil {
 			writeStoreError(w, err)
 			return

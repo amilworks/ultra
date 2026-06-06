@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/bisque-ultra-github-hero.png" alt="BisQue Ultra scientific AI workbench hero" width="100%" />
+</p>
+
 <h1 align="center">BisQue Ultra</h1>
 
 <p align="center">

@@ -119,6 +119,10 @@ export type RunStreamOptions = ChatStreamOptions & {
   afterSequence?: number;
 };
 
+export type UpsertConversationOptions = {
+  titleSource?: "manual";
+};
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
@@ -156,6 +160,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const V2_CHAT_THREAD_MAP_STORAGE_KEY = "bisque-ultra:v2-chat-thread-map";
 const V2_CONVERSATION_STATE_METADATA_KEY = "frontend_state";
+const V2_TITLE_STATE_METADATA_KEY = "title_state";
 
 const asPlainString = (value: unknown): string => String(value ?? "");
 
@@ -214,12 +219,92 @@ const isDefaultConversationTitle = (value: unknown): boolean => {
   return normalized.length === 0 || normalized === "New conversation";
 };
 
-const fallbackConversationTitleFromSeed = (value: string, maxWords = 4): string => {
+const TITLE_STOP_WORDS = new Set([
+  "a",
+  "about",
+  "also",
+  "analyze",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "build",
+  "by",
+  "calculate",
+  "can",
+  "compare",
+  "compute",
+  "could",
+  "create",
+  "durable",
+  "explain",
+  "find",
+  "for",
+  "from",
+  "generate",
+  "how",
+  "i",
+  "in",
+  "into",
+  "is",
+  "it",
+  "latest",
+  "list",
+  "make",
+  "me",
+  "of",
+  "on",
+  "or",
+  "our",
+  "please",
+  "produce",
+  "real",
+  "run",
+  "show",
+  "that",
+  "the",
+  "this",
+  "to",
+  "train",
+  "using",
+  "visualize",
+  "we",
+  "what",
+  "with",
+  "would",
+  "write",
+  "you",
+]);
+
+const normalizeTitleWord = (word: string): string => {
+  const trimmed = word.replace(/^[^\w]+|[^\w]+$/g, "");
+  if (!trimmed) {
+    return "";
+  }
+  if (/[A-Z]/.test(trimmed.slice(1)) || /\d|[.+/#-]/.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1).toLowerCase()}`;
+};
+
+const fallbackConversationTitleFromSeed = (value: string, maxWords = 6): string => {
   const singleLine = value.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "");
   if (!singleLine) {
     return "New conversation";
   }
-  const words = singleLine.split(" ").filter(Boolean).slice(0, Math.max(1, maxWords));
+  const candidates =
+    singleLine
+      .match(/[A-Za-z0-9][A-Za-z0-9.+/#-]*/g)
+      ?.map(normalizeTitleWord)
+      .filter(Boolean) ?? [];
+  const keywords = candidates.filter(
+    (word) =>
+      !TITLE_STOP_WORDS.has(word.toLowerCase()) &&
+      (word.length > 1 || /^[A-Z]$/.test(word) || /\d/.test(word))
+  );
+  const words = (keywords.length > 0 ? keywords : candidates).slice(0, Math.max(1, maxWords));
   const title = words.join(" ").trim();
   return title || "New conversation";
 };
@@ -230,7 +315,7 @@ const conversationTitleFromStoredOrSeed = (
 ): string => {
   const normalized = asTrimmedString(storedTitle).replace(/\s+/g, " ").replace(/^["'`]+|["'`]+$/g, "");
   const title = isDefaultConversationTitle(normalized)
-    ? fallbackConversationTitleFromSeed(fallbackSeed, 4)
+    ? fallbackConversationTitleFromSeed(fallbackSeed)
     : normalized;
   return title.length <= 120 ? title : `${title.slice(0, 119)}...`;
 };
@@ -286,6 +371,14 @@ const v2ConversationMetadataFromRecord = (record: ConversationRecord): Record<st
   [V2_CONVERSATION_STATE_METADATA_KEY]: record.state ?? {},
 });
 
+const withManualTitleState = (metadata: Record<string, unknown>): Record<string, unknown> => ({
+  ...metadata,
+  [V2_TITLE_STATE_METADATA_KEY]: {
+    source: "manual",
+    updated_at_ms: Date.now(),
+  },
+});
+
 const lastUserMessageContent = (request: ChatRequest): string => {
   for (let idx = request.messages.length - 1; idx >= 0; idx -= 1) {
     const message = request.messages[idx];
@@ -298,7 +391,8 @@ const lastUserMessageContent = (request: ChatRequest): string => {
 
 const chatTitleFromRequest = (request: ChatRequest): string => {
   const raw = asTrimmedString(request.goal) || lastUserMessageContent(request) || "New conversation";
-  return raw.length > 80 ? `${raw.slice(0, 77).trimEnd()}...` : raw;
+  const title = fallbackConversationTitleFromSeed(raw);
+  return title.length > 80 ? `${title.slice(0, 77).trimEnd()}...` : title;
 };
 
 const chatTitleFromMessages = (request: ChatTitleRequest): string => {
@@ -314,9 +408,7 @@ const chatTitleFromMessages = (request: ChatTitleRequest): string => {
       break;
     }
   }
-  const words = raw.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-  const title = words.slice(0, maxWords).join(" ").trim();
-  return title || "New conversation";
+  return fallbackConversationTitleFromSeed(raw, maxWords);
 };
 
 const stateMessagesFromState = (state: Record<string, unknown>): Array<Record<string, unknown>> =>
@@ -477,7 +569,15 @@ const normalizeV2RunResponse = (
     metadata?: Record<string, unknown> | null;
   }
 ): ChatResponse => {
-  const metadata = isRecord(run.metadata) ? run.metadata : fallback.metadata;
+  const runMetadata = isRecord(run.metadata) ? run.metadata : null;
+  const fallbackMetadata = fallback.metadata ?? null;
+  const metadata =
+    runMetadata || fallbackMetadata
+      ? {
+          ...(fallbackMetadata ?? {}),
+          ...(runMetadata ?? {}),
+        }
+      : null;
   return {
     run_id: asTrimmedString(run.run_id) || fallback.runId,
     model: asTrimmedString(run.model) || "deep_agents",
@@ -888,10 +988,15 @@ export class ApiClient {
     };
   }
 
-  private async upsertV2Conversation(record: ConversationRecord): Promise<ConversationRecord> {
+  private async upsertV2Conversation(
+    record: ConversationRecord,
+    options?: UpsertConversationOptions
+  ): Promise<ConversationRecord> {
     const conversationId = asTrimmedString(record.conversation_id);
     const threadId = this.v2ThreadMap().get(conversationId);
-    const metadata = v2ConversationMetadataFromRecord(record);
+    const baseMetadata = v2ConversationMetadataFromRecord(record);
+    const metadata =
+      options?.titleSource === "manual" ? withManualTitleState(baseMetadata) : baseMetadata;
 
     if (threadId) {
       const response = await fetch(
@@ -1050,6 +1155,10 @@ export class ApiClient {
         metadata: {
           conversation_id: conversationId,
           frontend_bridge: "v2-chat",
+          [V2_TITLE_STATE_METADATA_KEY]: {
+            source: "auto",
+            strategy: "initial_request",
+          },
         },
       }),
     });
@@ -3262,8 +3371,11 @@ export class ApiClient {
     return this.getV2Conversation(conversationId);
   }
 
-  async upsertConversation(record: ConversationRecord): Promise<ConversationRecord> {
-    return this.upsertV2Conversation(record);
+  async upsertConversation(
+    record: ConversationRecord,
+    options?: UpsertConversationOptions
+  ): Promise<ConversationRecord> {
+    return this.upsertV2Conversation(record, options);
   }
 
   async deleteConversation(conversationId: string): Promise<{ deleted: boolean; conversation_id: string }> {

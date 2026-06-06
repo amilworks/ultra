@@ -179,7 +179,7 @@ describe("ApiClient V2 chat bridge", () => {
       if (url.includes("/v2/runs/run_v2_123/events") && url.includes("stream=true")) {
         const body = [
           'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"message.delta","level":"info","payload":{"delta":"Hello"}}\n\n',
-          'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"run.completed","level":"info","payload":{"response_text":"Hello"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"run.completed","level":"info","payload":{"response_text":"Hello","conversation_title":"Matplotlib Plot Setup","title_generation":{"strategy":"llm","model":"gpt-title"}}}\n\n',
         ].join("");
         return new Response(encoder.encode(body), {
           status: 200,
@@ -228,6 +228,13 @@ describe("ApiClient V2 chat bridge", () => {
 
     expect(response.run_id).toBe("run_v2_123");
     expect(response.response_text).toBe("Hello");
+    expect(response.metadata).toMatchObject({
+      conversation_title: "Matplotlib Plot Setup",
+      title_generation: {
+        strategy: "llm",
+        model: "gpt-title",
+      },
+    });
     expect(tokens).toEqual(["Hello"]);
     expect(runStarts).toEqual(["run_v2_123"]);
     expect(runEvents).toEqual(["message.delta", "run.completed"]);
@@ -237,6 +244,18 @@ describe("ApiClient V2 chat bridge", () => {
       "https://ultra.example.org/v2/runs/run_v2_123/events?stream=true&after_sequence=0",
       "https://ultra.example.org/v2/runs/run_v2_123",
     ]);
+    const [, threadCreateInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(threadCreateInit.body))).toMatchObject({
+      title: "Plot",
+      metadata: {
+        conversation_id: "conversation-local-123",
+        frontend_bridge: "v2-chat",
+        title_state: {
+          source: "auto",
+          strategy: "initial_request",
+        },
+      },
+    });
   });
 
   it("resumes an existing V2 run stream after the last hydrated event sequence", async () => {
@@ -386,7 +405,7 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
-  it("generates chat titles locally instead of calling legacy V1 title endpoint", async () => {
+  it("returns only a temporary local title without calling legacy V1 title endpoints", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -397,7 +416,7 @@ describe("ApiClient V2 chat bridge", () => {
     });
 
     expect(response).toEqual({
-      title: "create a matplotlib y",
+      title: "Matplotlib Y X 2",
       model: "frontend-local",
       strategy: "fallback",
     });
@@ -948,7 +967,7 @@ describe("ApiClient V2 chat bridge", () => {
     expect(response.conversations).toMatchObject([
       {
         conversation_id: "conversation-local-default-title",
-        title: "Run prairie dog detection",
+        title: "Prairie Dog Detection Image Discuss Results",
         preview: "Run prairie dog detection on this image and discuss the results.",
         message_count: 2,
       },
@@ -1091,6 +1110,64 @@ describe("ApiClient V2 chat bridge", () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/threads/thread_v2_123",
     ]);
+  });
+
+  it("marks explicit sidebar renames as manual title updates", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({ "conversation-local-123": "thread_v2_123" })
+    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads/thread_v2_123") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_v2_123",
+            title: "Manual ecology review",
+            status: "active",
+            created_at: "2026-05-31T11:16:00Z",
+            updated_at: "2026-05-31T11:17:00Z",
+            metadata: {
+              conversation_id: "conversation-local-123",
+              title_state: {
+                source: "manual",
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await client.upsertConversation(
+      {
+        conversation_id: "conversation-local-123",
+        title: "Manual ecology review",
+        created_at_ms: Date.parse("2026-05-31T11:16:00Z"),
+        updated_at_ms: Date.parse("2026-05-31T11:17:00Z"),
+        preview: "Run RareSpot analysis on prairie dog imagery",
+        message_count: 2,
+        preferred_panel: "chat",
+        running: false,
+        state: {},
+      },
+      { titleSource: "manual" }
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      title: "Manual ecology review",
+      metadata: {
+        conversation_id: "conversation-local-123",
+        title_state: {
+          source: "manual",
+        },
+      },
+    });
   });
 
   it("persists terminal chat state through V2 thread metadata", async () => {

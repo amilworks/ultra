@@ -17,6 +17,10 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated sqlc queries: %v", err)
 	}
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
 
 	sourceText := string(source)
 	generatedText := string(generated)
@@ -45,6 +49,21 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 			source: "-- name: ListThreads :many",
 			gen:    "type ListThreadsParams struct",
 		},
+		{
+			name:   "tenant thread list query",
+			source: "-- name: ListThreadsForUser :many",
+			gen:    "func (q *Queries) ListThreadsForUser",
+		},
+		{
+			name:   "tenant run list query",
+			source: "-- name: ListRunsForUser :many",
+			gen:    "func (q *Queries) ListRunsForUser",
+		},
+		{
+			name:   "tenant artifact lookup query",
+			source: "-- name: GetArtifactForUser :one",
+			gen:    "func (q *Queries) GetArtifactForUser",
+		},
 	} {
 		if !strings.Contains(sourceText, expectation.source) {
 			t.Fatalf("queries.sql missing %s marker %q", expectation.name, expectation.source)
@@ -52,5 +71,8 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 		if !strings.Contains(generatedText, expectation.gen) {
 			t.Fatalf("generated sqlc missing %s marker %q", expectation.name, expectation.gen)
 		}
+	}
+	if !strings.Contains(string(schema), "control_threads_user_status_updated_idx") {
+		t.Fatalf("schema.sql missing tenant thread owner/status/update index")
 	}
 }

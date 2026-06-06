@@ -434,6 +434,103 @@ func (s *PostgresStore) GetThread(ctx context.Context, threadID string) (domain.
 	return threadFromRow(row), nil
 }
 
+func (s *PostgresStore) GetThreadForUser(ctx context.Context, threadID string, userID string) (domain.ThreadRecord, error) {
+	row, err := s.queries.GetThreadForUser(ctx, sqlc.GetThreadForUserParams{
+		ThreadID: threadID,
+		UserID:   userID,
+	})
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	return threadFromRow(row), nil
+}
+
+func (s *PostgresStore) UpdateThreadForUser(ctx context.Context, input domain.UpdateThreadInput) (domain.ThreadRecord, error) {
+	now := domain.Now()
+	row, err := s.pool.Query(ctx, `
+UPDATE control_threads
+SET title = COALESCE(NULLIF($3, ''), title),
+    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+    updated_at = $5
+WHERE thread_id = $1 AND user_id = $2
+RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata`,
+		input.ThreadID,
+		input.UserID,
+		normalizedThreadTitle(input.Title),
+		jsonBytes(mapOrEmpty(input.Metadata)),
+		now,
+	)
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	defer row.Close()
+	thread, err := pgx.CollectOneRow(row, pgx.RowToStructByName[sqlc.ControlThread])
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	return threadFromRow(thread), nil
+}
+
+func (s *PostgresStore) ApplyGeneratedThreadTitle(ctx context.Context, input domain.ApplyGeneratedThreadTitleInput) (domain.ThreadRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ThreadRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	row, err := lockedControlThread(ctx, tx, input.ThreadID)
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	thread := threadFromRow(row)
+	title := normalizedThreadTitle(input.Title)
+	if title == "" || !generatedThreadTitleEligible(thread) {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.ThreadRecord{}, err
+		}
+		return thread, nil
+	}
+	now := domain.Now()
+	metadata := generatedThreadTitleMetadata(thread.Metadata, input, thread.Title, now)
+	updated, err := tx.Query(ctx, `
+UPDATE control_threads
+SET title = $2,
+    metadata = $3,
+    updated_at = $4
+WHERE thread_id = $1
+RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata`,
+		input.ThreadID,
+		title,
+		jsonBytes(metadata),
+		now,
+	)
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	defer updated.Close()
+	updatedThread, err := pgx.CollectOneRow(updated, pgx.RowToStructByName[sqlc.ControlThread])
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ThreadRecord{}, err
+	}
+	return threadFromRow(updatedThread), nil
+}
+
+func lockedControlThread(ctx context.Context, tx pgx.Tx, threadID string) (sqlc.ControlThread, error) {
+	rows, err := tx.Query(ctx, `
+SELECT thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata
+FROM control_threads
+WHERE thread_id = $1
+FOR UPDATE`, threadID)
+	if err != nil {
+		return sqlc.ControlThread{}, err
+	}
+	defer rows.Close()
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[sqlc.ControlThread])
+}
+
 func (s *PostgresStore) ListThreads(ctx context.Context, limit int, offset int, status string) (domain.ThreadListPage, error) {
 	resolvedLimit := limit32(limit, 100)
 	resolvedOffset := max(offset, 0)
@@ -443,9 +540,41 @@ func (s *PostgresStore) ListThreads(ctx context.Context, limit int, offset int, 
 		return domain.ThreadListPage{}, err
 	}
 	rows, err := s.queries.ListThreads(ctx, sqlc.ListThreadsParams{
-		Status: resolvedStatus,
-		Limit:  resolvedLimit,
-		Offset: int32(resolvedOffset),
+		Column1: resolvedStatus,
+		Limit:   resolvedLimit,
+		Offset:  int32(resolvedOffset),
+	})
+	if err != nil {
+		return domain.ThreadListPage{}, err
+	}
+	threads := make([]domain.ThreadRecord, 0, len(rows))
+	for _, row := range rows {
+		threads = append(threads, threadFromRow(row))
+	}
+	return domain.ThreadListPage{
+		Threads:    threads,
+		TotalCount: int(totalCount),
+		Limit:      int(resolvedLimit),
+		Offset:     resolvedOffset,
+	}, nil
+}
+
+func (s *PostgresStore) ListThreadsForUser(ctx context.Context, userID string, limit int, offset int, status string) (domain.ThreadListPage, error) {
+	resolvedLimit := limit32(limit, 100)
+	resolvedOffset := max(offset, 0)
+	resolvedStatus := strings.TrimSpace(status)
+	totalCount, err := s.queries.CountThreadsForUser(ctx, sqlc.CountThreadsForUserParams{
+		UserID:  userID,
+		Column2: resolvedStatus,
+	})
+	if err != nil {
+		return domain.ThreadListPage{}, err
+	}
+	rows, err := s.queries.ListThreadsForUser(ctx, sqlc.ListThreadsForUserParams{
+		UserID:  userID,
+		Column2: resolvedStatus,
+		Limit:   resolvedLimit,
+		Offset:  int32(resolvedOffset),
 	})
 	if err != nil {
 		return domain.ThreadListPage{}, err
@@ -464,6 +593,24 @@ func (s *PostgresStore) ListThreads(ctx context.Context, limit int, offset int, 
 
 func (s *PostgresStore) ListThreadMessages(ctx context.Context, threadID string) ([]domain.ThreadMessage, error) {
 	rows, err := s.queries.ListThreadMessages(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]domain.ThreadMessage, 0, len(rows))
+	for _, row := range rows {
+		messages = append(messages, threadMessageFromRow(row))
+	}
+	return messages, nil
+}
+
+func (s *PostgresStore) ListThreadMessagesForUser(ctx context.Context, threadID string, userID string) ([]domain.ThreadMessage, error) {
+	if _, err := s.GetThreadForUser(ctx, threadID, userID); err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListThreadMessagesForUser(ctx, sqlc.ListThreadMessagesForUserParams{
+		ThreadID: threadID,
+		UserID:   userID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -609,10 +756,44 @@ func (s *PostgresStore) GetRun(ctx context.Context, runID string) (domain.RunRec
 	return runFromRow(row), nil
 }
 
+func (s *PostgresStore) GetRunForUser(ctx context.Context, runID string, userID string) (domain.RunRecord, error) {
+	row, err := s.queries.GetRunForUser(ctx, sqlc.GetRunForUserParams{
+		RunID:  runID,
+		UserID: userID,
+	})
+	if err != nil {
+		return domain.RunRecord{}, mapPgError(err)
+	}
+	return runFromRow(row), nil
+}
+
 func (s *PostgresStore) ListRuns(ctx context.Context, threadID string, status string, limit int, offset int) ([]domain.RunRecord, error) {
 	rows, err := s.queries.ListRuns(ctx, sqlc.ListRunsParams{
 		Column1: threadID,
 		Column2: status,
+		Limit:   limit32(limit, 100),
+		Offset:  int32(max(offset, 0)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]domain.RunRecord, 0, len(rows))
+	for _, row := range rows {
+		runs = append(runs, runFromRow(row))
+	}
+	return runs, nil
+}
+
+func (s *PostgresStore) ListRunsForUser(ctx context.Context, userID string, threadID string, status string, limit int, offset int) ([]domain.RunRecord, error) {
+	if strings.TrimSpace(threadID) != "" {
+		if _, err := s.GetThreadForUser(ctx, threadID, userID); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := s.queries.ListRunsForUser(ctx, sqlc.ListRunsForUserParams{
+		UserID:  userID,
+		Column2: strings.TrimSpace(threadID),
+		Column3: strings.TrimSpace(status),
 		Limit:   limit32(limit, 100),
 		Offset:  int32(max(offset, 0)),
 	})
@@ -1058,9 +1239,48 @@ func (s *PostgresStore) ListRunEvents(ctx context.Context, runID string, limit i
 	return events, nil
 }
 
+func (s *PostgresStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {
+	if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListRunEventsForUser(ctx, sqlc.ListRunEventsForUserParams{
+		RunID:  runID,
+		UserID: userID,
+		Limit:  limit32(limit, 500),
+	})
+	if err != nil {
+		return nil, err
+	}
+	events := make([]domain.RunEventRecord, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, runEventFromRow(row))
+	}
+	return events, nil
+}
+
 func (s *PostgresStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
 	rows, err := s.queries.ListRunEventsAfter(ctx, sqlc.ListRunEventsAfterParams{
 		RunID:          runID,
+		SequenceNumber: afterSequence,
+		Limit:          limit32(limit, 500),
+	})
+	if err != nil {
+		return nil, err
+	}
+	events := make([]domain.RunEventRecord, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, runEventFromRow(row))
+	}
+	return events, nil
+}
+
+func (s *PostgresStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
+	if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListRunEventsAfterForUser(ctx, sqlc.ListRunEventsAfterForUserParams{
+		RunID:          runID,
+		UserID:         userID,
 		SequenceNumber: afterSequence,
 		Limit:          limit32(limit, 500),
 	})
@@ -1135,8 +1355,38 @@ func (s *PostgresStore) ListRunArtifacts(ctx context.Context, runID string, limi
 	return artifacts, nil
 }
 
+func (s *PostgresStore) ListRunArtifactsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.ArtifactRecord, error) {
+	if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListRunArtifactsForUser(ctx, sqlc.ListRunArtifactsForUserParams{
+		RunID:  runID,
+		UserID: userID,
+		Limit:  limit32(limit, 500),
+	})
+	if err != nil {
+		return nil, err
+	}
+	artifacts := make([]domain.ArtifactRecord, 0, len(rows))
+	for _, row := range rows {
+		artifacts = append(artifacts, artifactFromRow(row))
+	}
+	return artifacts, nil
+}
+
 func (s *PostgresStore) GetArtifact(ctx context.Context, artifactID string) (domain.ArtifactRecord, error) {
 	row, err := s.queries.GetArtifact(ctx, artifactID)
+	if err != nil {
+		return domain.ArtifactRecord{}, mapPgError(err)
+	}
+	return artifactFromRow(row), nil
+}
+
+func (s *PostgresStore) GetArtifactForUser(ctx context.Context, artifactID string, userID string) (domain.ArtifactRecord, error) {
+	row, err := s.queries.GetArtifactForUser(ctx, sqlc.GetArtifactForUserParams{
+		ArtifactID: artifactID,
+		UserID:     userID,
+	})
 	if err != nil {
 		return domain.ArtifactRecord{}, mapPgError(err)
 	}

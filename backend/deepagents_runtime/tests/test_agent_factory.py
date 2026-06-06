@@ -98,7 +98,7 @@ def test_tool_capability_manifest_describes_builtin_storage_and_registered_tools
         for tool in manifest["deepagents_builtin_tools"]
         if isinstance(tool, dict)
     }
-    assert {"execute", "write_file", "read_file", "edit_file", "ls", "glob", "grep"}.issubset(
+    assert {"execute", "write_file", "read_file", "edit_file", "ls", "glob", "grep", "write_todos"}.issubset(
         builtin_names
     )
     assert manifest["registered_tools"] == [

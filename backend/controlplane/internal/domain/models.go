@@ -255,6 +255,20 @@ type CreateThreadInput struct {
 	InitialMessages []ThreadMessage
 }
 
+type UpdateThreadInput struct {
+	ThreadID string
+	UserID   string
+	Title    string
+	Metadata JSONMap
+}
+
+type ApplyGeneratedThreadTitleInput struct {
+	ThreadID   string
+	RunID      string
+	Title      string
+	Generation JSONMap
+}
+
 type CreateRunInput struct {
 	ThreadID     string
 	UserID       string

@@ -1407,8 +1407,64 @@ body {
 }
 
 .app-main-shell {
+  position: relative;
   height: 100%;
   min-height: 0;
+}
+
+.app-mobile-shell-bar {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  min-height: calc(3.25rem + env(safe-area-inset-top, 0px));
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.65rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 76%, transparent);
+  background: color-mix(in oklab, var(--background) 96%, var(--bg-panel) 4%);
+  padding:
+    calc(0.55rem + env(safe-area-inset-top, 0px))
+    max(0.75rem, env(safe-area-inset-right, 0px))
+    0.55rem
+    max(0.75rem, env(safe-area-inset-left, 0px));
+}
+
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] {
+  width: 2.35rem;
+  height: 2.35rem;
+  border: 1px solid color-mix(in oklab, var(--line) 72%, transparent);
+  border-radius: 0.85rem;
+  background: color-mix(in oklab, var(--bg-panel-strong) 88%, var(--background) 12%);
+  color: var(--text-main);
+  box-shadow: 0 8px 24px rgba(12, 12, 12, 0.08);
+}
+
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:hover,
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:focus-visible {
+  background: color-mix(in oklab, var(--bg-panel-strong) 78%, var(--accent) 22%);
+}
+
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.app-mobile-shell-brand {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 430;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .app-mobile-shell-bar {
+    display: none;
+  }
 }
 
 .app-composer-shell {
@@ -6754,12 +6810,17 @@ details {
   }
 
   .app-sidebar[data-mobile="true"] .app-sidebar-content {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding-top: 0.25rem !important;
   }
 
   .app-sidebar[data-mobile="true"] .app-sidebar-history-scroll {
+    flex: 0 0 auto;
+    min-height: auto;
+    overflow: visible;
     padding-bottom: 0.9rem;
-    overscroll-behavior: contain;
   }
 
   .app-sidebar[data-mobile="true"] .app-sidebar-shortcut-hint {

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/bisque-ultra-github-hero.png" alt="BisQue Ultra scientific AI workbench hero" width="100%" />
+  <img src=".github/assets/bisque-ultra-github-hero.jpg" alt="BisQue Ultra rocket hero image" width="100%" />
 </p>
 
 <h1 align="center">BisQue Ultra</h1>
@@ -12,7 +12,7 @@
   <a href="#what-you-are-launching">What you launch</a> ·
   <a href="#before-you-start">Before you start</a> ·
   <a href="#step-1-create-your-local-env">Set your environment</a> ·
-  <a href="#step-2-choose-an-inference-engine">Choose vLLM or Ollama</a> ·
+  <a href="#step-2-choose-an-openai-compatible-model-endpoint">Choose a model endpoint</a> ·
   <a href="#step-4-start-the-control-stack">Start the control stack</a>
 </p>
 
@@ -24,7 +24,7 @@ Production deployment and operator runbooks are intentionally kept in private in
 
 ## What You Are Launching
 
-You are starting five layers:
+You are starting six layers:
 
 1. An existing BisQue deployment provides image, dataset, table, and metadata services.
 2. `backend/controlplane/` serves the BisQue Ultra API on `http://127.0.0.1:8000`.
@@ -52,21 +52,15 @@ You also need one model backend:
 
 ## The Fastest Mental Model for Configuration
 
-BisQue Ultra resolves model settings in this order:
+BisQue Ultra keeps the active worker model contract deliberately simple: the Deep Agents runtime reads an OpenAI-compatible endpoint from `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KEY`.
 
-1. `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` override everything.
-2. If `LLM_PROVIDER=ollama`, the app falls back to `OLLAMA_BASE_URL` and `OLLAMA_MODEL`.
-3. Otherwise, the app falls back to `OPENAI_BASE_URL` and `OPENAI_MODEL`.
-4. Code-generation tools can use a different model family through `CODEGEN_PROVIDER`, `CODEGEN_BASE_URL`, and `CODEGEN_MODEL`.
+That design matters. It means you can keep the orchestration stable while changing only one layer:
 
-That design matters. It means you can keep the whole app stable while changing only one layer:
+- vLLM for chat and tool reasoning
+- Ollama through its OpenAI-compatible `/v1` route
+- a remote OpenAI-compatible server today, another tomorrow
 
-- vLLM for all chat and tool reasoning
-- Ollama for all chat and tool reasoning
-- vLLM for reasoning but Ollama for code generation
-- one remote OpenAI-compatible server today, another tomorrow
-
-The application code does not need to know which story you chose. It only needs a working OpenAI-compatible endpoint.
+The public env template still includes provider-oriented knobs such as `LLM_PROVIDER`, `LLM_*`, `OLLAMA_*`, and `CODEGEN_*` for local tooling and future routing work. For the production-like Go + Deep Agents stack in this repo, set the `OPENAI_*` values explicitly; those are the values passed to the worker.
 
 ## Step 1: Create Your Local `.env`
 
@@ -86,7 +80,7 @@ The public template is now local-first. It no longer points to an internal lab s
 
 You do not need to fill every variable. The important moves are to set the BisQue URL you actually use and decide which inference engine should answer model requests.
 
-## Step 2: Choose an Inference Engine
+## Step 2: Choose an OpenAI-Compatible Model Endpoint
 
 ### Option A: vLLM
 
@@ -105,7 +99,6 @@ vllm serve openai/gpt-oss-120b \
 Then keep this shape in `.env`:
 
 ```bash
-LLM_PROVIDER=vllm
 OPENAI_BASE_URL=http://localhost:8001/v1
 OPENAI_MODEL=gpt-oss-120b
 OPENAI_API_KEY=EMPTY
@@ -133,28 +126,12 @@ ollama pull qwen2.5:14b-instruct
 Then set:
 
 ```bash
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434/v1
-OLLAMA_MODEL=qwen2.5:14b-instruct
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL=qwen2.5:14b-instruct
+OPENAI_API_KEY=EMPTY
 ```
 
 The `/v1` suffix matters here too. BisQue Ultra uses an OpenAI client under the hood. It does not talk to Ollama’s older native endpoints directly. That single design choice is why the same backend can pivot between Ollama and vLLM without changing the orchestration code.
-
-### Option C: One Model for Reasoning, Another for Code
-
-Sometimes the strongest chat model is not the cheapest model for long code-execution loops. This repo supports that split explicitly:
-
-```bash
-LLM_PROVIDER=vllm
-OPENAI_BASE_URL=http://localhost:8001/v1
-OPENAI_MODEL=gpt-oss-120b
-
-CODEGEN_PROVIDER=ollama
-CODEGEN_BASE_URL=http://localhost:11434/v1
-CODEGEN_MODEL=qwen2.5:14b-instruct
-```
-
-That split is not cosmetic. It lets you keep expensive scientific reasoning on the stronger model while routing repair-style code generation to a cheaper local model.
 
 ## Step 3: Install Dependencies
 
@@ -279,7 +256,8 @@ then your request model may need to be `openai/gpt-oss-120b` unless you set `--s
 Make sure you are pointing at the OpenAI-compatible route:
 
 ```bash
-OLLAMA_BASE_URL=http://localhost:11434/v1
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL=qwen2.5:14b-instruct
 ```
 
 not just:

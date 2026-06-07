@@ -8,7 +8,7 @@ if [ -z "$RELEASE_SHA" ]; then
 fi
 
 ULTRA_RELEASE_ROOT="${ULTRA_RELEASE_ROOT:-/srv/ultra}"
-RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA/frontend"
+RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA/frontend/dist"
 CURRENT_LINK="$ULTRA_RELEASE_ROOT/frontend-current"
 
 if [ ! -d "$RELEASE_DIR" ]; then

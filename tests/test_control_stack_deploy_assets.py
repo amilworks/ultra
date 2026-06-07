@@ -40,6 +40,13 @@ def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
     assert "/v2/admin/overview" in script
 
 
+def test_frontend_deploy_points_web_root_at_built_dist() -> None:
+    script = read_repo_file("scripts/deploy_ultra_frontend.sh")
+
+    assert 'RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA/frontend/dist"' in script
+    assert 'CURRENT_LINK="$ULTRA_RELEASE_ROOT/frontend-current"' in script
+
+
 def test_systemd_units_run_go_control_and_deepagents_workers() -> None:
     control = read_repo_file("deploy/systemd/ultra-control.service")
     deepagents = read_repo_file("deploy/systemd/ultra-deepagents-worker.service")

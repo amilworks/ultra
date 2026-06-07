@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
@@ -55,6 +55,9 @@ deploy-control-stack: ## Deploy Go control plane + Deep Agents worker stack (set
 		exit 1; \
 	fi; \
 	./scripts/deploy_ultra_control_stack.sh "$$release"
+
+release-artifact: ## Build immutable Go control + frontend release tarball
+	./scripts/build_ultra_release_artifact.sh
 
 test: ## Run tests with pytest
 	uv run pytest

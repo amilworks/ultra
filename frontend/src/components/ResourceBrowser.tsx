@@ -47,6 +47,8 @@ type ResourceBrowserProps = {
   onSourceFilterChange: (value: ResourceSourceFilter) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
+  onUploadFiles?: (files: File[]) => void;
+  uploading?: boolean;
   onOpenResource: (resource: ResourceRecord) => void;
   onUseInChat: (resource: ResourceRecord) => void;
   onDeleteResource: (resource: ResourceRecord) => void;
@@ -141,6 +143,8 @@ export function ResourceBrowser({
   onSourceFilterChange,
   onRefresh,
   onLoadMore,
+  onUploadFiles,
+  uploading = false,
   onOpenResource,
   onUseInChat,
   onDeleteResource,
@@ -150,6 +154,7 @@ export function ResourceBrowser({
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [failedThumbnailIds, setFailedThumbnailIds] = useState<Record<string, true>>({});
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const cardResources = useMemo(() => resources, [resources]);
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
@@ -188,17 +193,50 @@ export function ResourceBrowser({
               <CardTitle className="resource-browser-title">Resources</CardTitle>
               <p className="resource-browser-result-summary">{resultSummary}</p>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="resource-browser-refresh"
-              onClick={onRefresh}
-              disabled={loading || loadingMore}
-            >
-              <RefreshCw data-icon="inline-start" className={cn((loading || loadingMore) && "animate-spin")} />
-              <span className="resource-browser-refresh-label">Refresh</span>
-            </Button>
+            <div className="resource-browser-header-actions">
+              <input
+                ref={uploadInputRef}
+                aria-label="Upload resource files"
+                className="sr-only"
+                multiple
+                type="file"
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                  if (files.length > 0) {
+                    onUploadFiles?.(files);
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="resource-browser-upload"
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={uploading || loading}
+              >
+                {uploading ? (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                ) : (
+                  <Upload data-icon="inline-start" />
+                )}
+                <span className="resource-browser-upload-label">
+                  {uploading ? "Uploading..." : "Upload"}
+                </span>
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="resource-browser-refresh"
+                onClick={onRefresh}
+                disabled={loading || loadingMore}
+              >
+                <RefreshCw data-icon="inline-start" className={cn((loading || loadingMore) && "animate-spin")} />
+                <span className="resource-browser-refresh-label">Refresh</span>
+              </Button>
+            </div>
           </div>
           <div className="resource-browser-controls">
             <div className="resource-browser-toolbar">

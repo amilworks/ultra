@@ -16,32 +16,38 @@ var (
 	ErrConflict = errors.New("already exists")
 )
 
+const defaultResourceRetention = 30 * 24 * time.Hour
+
 type MemoryStore struct {
-	mu        sync.RWMutex
-	threads   map[string]domain.ThreadRecord
-	messages  map[string][]domain.ThreadMessage
-	runs      map[string]domain.RunRecord
-	events    map[string][]domain.RunEventRecord
-	artifacts map[string]domain.ArtifactRecord
-	users     map[string]domain.UserAccount
-	orgs      map[string]domain.Organization
-	bisque    map[string]domain.BisqueCredentialRecord
-	leases    map[string]domain.RunLeaseRecord
-	workers   map[string]domain.WorkerHeartbeatRecord
+	mu             sync.RWMutex
+	threads        map[string]domain.ThreadRecord
+	messages       map[string][]domain.ThreadMessage
+	runs           map[string]domain.RunRecord
+	events         map[string][]domain.RunEventRecord
+	artifacts      map[string]domain.ArtifactRecord
+	resources      map[string]domain.ResourceRecord
+	resourceEvents []domain.ResourceEventRecord
+	users          map[string]domain.UserAccount
+	orgs           map[string]domain.Organization
+	bisque         map[string]domain.BisqueCredentialRecord
+	leases         map[string]domain.RunLeaseRecord
+	workers        map[string]domain.WorkerHeartbeatRecord
 }
 
 func NewMemoryStore() *MemoryStore {
 	store := &MemoryStore{
-		threads:   map[string]domain.ThreadRecord{},
-		messages:  map[string][]domain.ThreadMessage{},
-		runs:      map[string]domain.RunRecord{},
-		events:    map[string][]domain.RunEventRecord{},
-		artifacts: map[string]domain.ArtifactRecord{},
-		users:     map[string]domain.UserAccount{},
-		orgs:      map[string]domain.Organization{},
-		bisque:    map[string]domain.BisqueCredentialRecord{},
-		leases:    map[string]domain.RunLeaseRecord{},
-		workers:   map[string]domain.WorkerHeartbeatRecord{},
+		threads:        map[string]domain.ThreadRecord{},
+		messages:       map[string][]domain.ThreadMessage{},
+		runs:           map[string]domain.RunRecord{},
+		events:         map[string][]domain.RunEventRecord{},
+		artifacts:      map[string]domain.ArtifactRecord{},
+		resources:      map[string]domain.ResourceRecord{},
+		resourceEvents: []domain.ResourceEventRecord{},
+		users:          map[string]domain.UserAccount{},
+		orgs:           map[string]domain.Organization{},
+		bisque:         map[string]domain.BisqueCredentialRecord{},
+		leases:         map[string]domain.RunLeaseRecord{},
+		workers:        map[string]domain.WorkerHeartbeatRecord{},
 	}
 	store.orgs["local-org"] = defaultLocalOrganization(domain.Now())
 	return store
@@ -1020,11 +1026,7 @@ func (s *MemoryStore) ListRunEvents(ctx context.Context, runID string, limit int
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	events := append([]domain.RunEventRecord(nil), s.events[runID]...)
-	if limit > 0 && len(events) > limit {
-		events = events[len(events)-limit:]
-	}
-	return events, nil
+	return cloneLatestRunEventsPage(s.events[runID], limit), nil
 }
 
 func (s *MemoryStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {
@@ -1035,33 +1037,14 @@ func (s *MemoryStore) ListRunEventsForUser(ctx context.Context, runID string, us
 	if !ok || run.UserID != userID {
 		return nil, ErrNotFound
 	}
-	events := append([]domain.RunEventRecord(nil), s.events[runID]...)
-	if limit > 0 && len(events) > limit {
-		events = events[len(events)-limit:]
-	}
-	return events, nil
+	return cloneLatestRunEventsPage(s.events[runID], limit), nil
 }
 
 func (s *MemoryStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	source := s.events[runID]
-	capacity := len(source)
-	if limit > 0 && limit < capacity {
-		capacity = limit
-	}
-	events := make([]domain.RunEventRecord, 0, capacity)
-	for _, event := range source {
-		if event.Sequence <= afterSequence {
-			continue
-		}
-		events = append(events, event)
-		if limit > 0 && len(events) >= limit {
-			break
-		}
-	}
-	return events, nil
+	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit), nil
 }
 
 func (s *MemoryStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
@@ -1072,22 +1055,28 @@ func (s *MemoryStore) ListRunEventsAfterForUser(ctx context.Context, runID strin
 	if !ok || run.UserID != userID {
 		return nil, ErrNotFound
 	}
-	source := s.events[runID]
-	capacity := len(source)
-	if limit > 0 && limit < capacity {
-		capacity = limit
+	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit), nil
+}
+
+func cloneLatestRunEventsPage(source []domain.RunEventRecord, limit int) []domain.RunEventRecord {
+	if limit > 0 && len(source) > limit {
+		source = source[len(source)-limit:]
 	}
-	events := make([]domain.RunEventRecord, 0, capacity)
-	for _, event := range source {
-		if event.Sequence <= afterSequence {
-			continue
-		}
-		events = append(events, event)
-		if limit > 0 && len(events) >= limit {
-			break
-		}
+	return append([]domain.RunEventRecord(nil), source...)
+}
+
+func cloneRunEventsPageAfter(source []domain.RunEventRecord, afterSequence int64, limit int) []domain.RunEventRecord {
+	start := sort.Search(len(source), func(index int) bool {
+		return source[index].Sequence > afterSequence
+	})
+	if start >= len(source) {
+		return []domain.RunEventRecord{}
 	}
-	return events, nil
+	end := len(source)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	return append([]domain.RunEventRecord(nil), source[start:end]...)
 }
 
 func (s *MemoryStore) CreateArtifact(ctx context.Context, input domain.CreateArtifactInput) (domain.ArtifactRecord, error) {
@@ -1189,6 +1178,292 @@ func (s *MemoryStore) GetArtifactForUser(ctx context.Context, artifactID string,
 		return domain.ArtifactRecord{}, ErrNotFound
 	}
 	return artifact, nil
+}
+
+func (s *MemoryStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if resourceID == "" {
+		resourceID = domain.NewID("file")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	sourceType := strings.TrimSpace(input.SourceType)
+	if sourceType == "" {
+		sourceType = "upload"
+	}
+	resourceKind := strings.TrimSpace(input.ResourceKind)
+	if resourceKind == "" {
+		resourceKind = "file"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		if existing, ok := s.resources[resourceID]; ok && !existing.CreatedAt.IsZero() {
+			createdAt = existing.CreatedAt
+		} else {
+			createdAt = now
+		}
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	resource := domain.ResourceRecord{
+		ResourceID:         resourceID,
+		OriginalName:       strings.TrimSpace(input.OriginalName),
+		ContentType:        strings.TrimSpace(input.ContentType),
+		SizeBytes:          input.SizeBytes,
+		SHA256:             strings.TrimSpace(input.SHA256),
+		StorageURI:         strings.TrimSpace(input.StorageURI),
+		StoragePath:        strings.TrimSpace(input.StoragePath),
+		SourceType:         sourceType,
+		ResourceKind:       resourceKind,
+		SourceURI:          strings.TrimSpace(input.SourceURI),
+		ProjectID:          strings.TrimSpace(input.ProjectID),
+		OwnerUserID:        ownerUserID,
+		OwnerOrgID:         strings.TrimSpace(input.OwnerOrgID),
+		OwnerRole:          strings.TrimSpace(input.OwnerRole),
+		Status:             status,
+		CreatedAt:          createdAt.UTC(),
+		UpdatedAt:          updatedAt.UTC(),
+		DeletedAt:          input.DeletedAt,
+		RetentionExpiresAt: input.RetentionExpiresAt,
+		Metadata:           mapOrEmpty(input.Metadata),
+	}
+	s.resources[resource.ResourceID] = resource
+	return resource, nil
+}
+
+func (s *MemoryStore) GetResourceForUser(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	resource, ok := s.resources[strings.TrimSpace(resourceID)]
+	if !ok || !resourceVisibleToOwner(resource, userID, orgID) || strings.TrimSpace(resource.Status) != "active" {
+		return domain.ResourceRecord{}, ErrNotFound
+	}
+	return resource, nil
+}
+
+func (s *MemoryStore) ListResourcesForUser(ctx context.Context, input domain.ResourceListInput) (domain.ResourceListPage, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	query := strings.ToLower(strings.TrimSpace(input.Query))
+	kind := strings.TrimSpace(input.Kind)
+	source := strings.TrimSpace(input.Source)
+	projectID := strings.TrimSpace(input.ProjectID)
+	resources := make([]domain.ResourceRecord, 0, len(s.resources))
+	for _, resource := range s.resources {
+		if !resourceVisibleToOwner(resource, input.UserID, input.OrgID) {
+			continue
+		}
+		if strings.TrimSpace(resource.Status) != status {
+			continue
+		}
+		if kind != "" && resource.ResourceKind != kind {
+			continue
+		}
+		if source != "" && resource.SourceType != source {
+			continue
+		}
+		if projectID != "" && resource.ProjectID != projectID {
+			continue
+		}
+		if query != "" && !resourceRecordMatchesQuery(resource, query) {
+			continue
+		}
+		resources = append(resources, resource)
+	}
+	sort.Slice(resources, func(i, j int) bool {
+		if resources[i].CreatedAt.Equal(resources[j].CreatedAt) {
+			return resources[i].ResourceID < resources[j].ResourceID
+		}
+		return resources[i].CreatedAt.After(resources[j].CreatedAt)
+	})
+	total := len(resources)
+	offset := input.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(resources) {
+		resources = []domain.ResourceRecord{}
+	} else {
+		resources = resources[offset:]
+	}
+	resources = take(resources, input.Limit)
+	return domain.ResourceListPage{
+		Resources:  resources,
+		TotalCount: total,
+		Limit:      input.Limit,
+		Offset:     input.Offset,
+	}, nil
+}
+
+func (s *MemoryStore) ListResources(ctx context.Context, limit int, offset int) ([]domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	resources := make([]domain.ResourceRecord, 0, len(s.resources))
+	for _, resource := range s.resources {
+		resources = append(resources, resource)
+	}
+	sort.Slice(resources, func(i, j int) bool {
+		if resources[i].CreatedAt.Equal(resources[j].CreatedAt) {
+			return resources[i].ResourceID < resources[j].ResourceID
+		}
+		return resources[i].CreatedAt.After(resources[j].CreatedAt)
+	})
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(resources) {
+		return []domain.ResourceRecord{}, nil
+	}
+	return take(resources[offset:], limit), nil
+}
+
+func (s *MemoryStore) SoftDeleteResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, deletedAt time.Time) (domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resource, ok := s.resources[strings.TrimSpace(resourceID)]
+	if !ok || !resourceVisibleToOwner(resource, userID, orgID) || strings.TrimSpace(resource.Status) == "deleted" {
+		return domain.ResourceRecord{}, ErrNotFound
+	}
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	resource.Status = "deleted"
+	resource.DeletedAt = deletedAt.UTC()
+	resource.RetentionExpiresAt = resource.DeletedAt.Add(defaultResourceRetention)
+	resource.UpdatedAt = resource.DeletedAt
+	s.resources[resource.ResourceID] = resource
+	return resource, nil
+}
+
+func (s *MemoryStore) RestoreResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, restoredAt time.Time) (domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resource, ok := s.resources[strings.TrimSpace(resourceID)]
+	if !ok || !resourceVisibleToOwner(resource, userID, orgID) {
+		return domain.ResourceRecord{}, ErrNotFound
+	}
+	if restoredAt.IsZero() {
+		restoredAt = domain.Now()
+	}
+	resource.Status = "active"
+	resource.DeletedAt = time.Time{}
+	resource.RetentionExpiresAt = time.Time{}
+	resource.UpdatedAt = restoredAt.UTC()
+	s.resources[resource.ResourceID] = resource
+	return resource, nil
+}
+
+func (s *MemoryStore) ResourceStorageStats(ctx context.Context) (domain.ResourceStorageStats, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var stats domain.ResourceStorageStats
+	for _, resource := range s.resources {
+		if strings.TrimSpace(resource.Status) != "active" {
+			continue
+		}
+		stats.TotalResources++
+		stats.TotalBytes += resource.SizeBytes
+	}
+	return stats, nil
+}
+
+func (s *MemoryStore) CreateResourceEvent(ctx context.Context, input domain.AppendResourceEventInput) (domain.ResourceEventRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.resources[strings.TrimSpace(input.ResourceID)]; !ok {
+		return domain.ResourceEventRecord{}, ErrNotFound
+	}
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	record := domain.ResourceEventRecord{
+		EventID:     eventID,
+		ResourceID:  strings.TrimSpace(input.ResourceID),
+		ActorUserID: strings.TrimSpace(input.ActorUserID),
+		ActorOrgID:  strings.TrimSpace(input.ActorOrgID),
+		EventType:   strings.TrimSpace(input.EventType),
+		TS:          ts.UTC(),
+		Metadata:    mapOrEmpty(input.Metadata),
+	}
+	s.resourceEvents = append(s.resourceEvents, record)
+	return record, nil
+}
+
+func (s *MemoryStore) ListResourceEvents(ctx context.Context, resourceID string, limit int) ([]domain.ResourceEventRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.resources[strings.TrimSpace(resourceID)]; !ok {
+		return nil, ErrNotFound
+	}
+	events := make([]domain.ResourceEventRecord, 0, len(s.resourceEvents))
+	for _, event := range s.resourceEvents {
+		if event.ResourceID == strings.TrimSpace(resourceID) {
+			events = append(events, event)
+		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].TS.Equal(events[j].TS) {
+			return events[i].EventID < events[j].EventID
+		}
+		return events[i].TS.After(events[j].TS)
+	})
+	return take(events, limit), nil
+}
+
+func resourceVisibleToOwner(resource domain.ResourceRecord, userID string, orgID string) bool {
+	if strings.TrimSpace(resource.OwnerUserID) != strings.TrimSpace(userID) {
+		return false
+	}
+	ownerOrgID := strings.TrimSpace(resource.OwnerOrgID)
+	return ownerOrgID == "" || ownerOrgID == strings.TrimSpace(orgID)
+}
+
+func resourceRecordMatchesQuery(resource domain.ResourceRecord, query string) bool {
+	candidates := []string{
+		resource.ResourceID,
+		resource.OriginalName,
+		resource.SourceURI,
+		resource.ContentType,
+		resource.ResourceKind,
+		resource.SourceType,
+		resource.ProjectID,
+		resource.SHA256,
+	}
+	for _, candidate := range candidates {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(candidate)), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func mapOrEmpty(value domain.JSONMap) domain.JSONMap {

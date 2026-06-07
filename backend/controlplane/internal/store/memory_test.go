@@ -216,6 +216,118 @@ func TestMemoryStoreTenantScopedQueriesFilterByUser(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreResourceCatalogFiltersSoftDeletesAndRestores(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	createdAt := time.Now().Add(-time.Hour).UTC()
+	resource, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_alice",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		OwnerRole:    "researcher",
+		OriginalName: "cells.ome.tiff",
+		ContentType:  "image/tiff",
+		SizeBytes:    128,
+		SHA256:       "abc123",
+		StorageURI:   "file:///srv/ultra/shared/uploads/file_alice__cells.ome.tiff",
+		StoragePath:  "file_alice__cells.ome.tiff",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		ProjectID:    "project-ct",
+		Status:       "active",
+		CreatedAt:    createdAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	if resource.ResourceID != "file_alice" || resource.Status != "active" {
+		t.Fatalf("resource = %+v, want active file_alice", resource)
+	}
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_bob",
+		OwnerUserID:  "bob",
+		OwnerOrgID:   "org-a",
+		OriginalName: "other.csv",
+		SizeBytes:    64,
+		SourceType:   "upload",
+		ResourceKind: "table",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource bob: %v", err)
+	}
+
+	page, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		Query:     "ome",
+		Kind:      "image",
+		Source:    "upload",
+		ProjectID: "project-ct",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser alice: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Resources) != 1 || page.Resources[0].ResourceID != "file_alice" {
+		t.Fatalf("alice resources = %+v, want only alice image", page)
+	}
+	if page.Resources[0].ProjectID != "project-ct" {
+		t.Fatalf("alice project_id = %q, want project-ct", page.Resources[0].ProjectID)
+	}
+	wrongProject, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice", OrgID: "org-a", ProjectID: "project-other", Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser wrong project: %v", err)
+	}
+	if wrongProject.TotalCount != 0 || len(wrongProject.Resources) != 0 {
+		t.Fatalf("wrong project resources = %+v, want none", wrongProject)
+	}
+	if _, err := store.GetResourceForUser(ctx, "file_alice", "bob", "org-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetResourceForUser bob err = %v, want ErrNotFound", err)
+	}
+
+	deleted, err := store.SoftDeleteResourceForUser(ctx, "file_alice", "alice", "org-a", time.Now())
+	if err != nil {
+		t.Fatalf("SoftDeleteResourceForUser: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt.IsZero() || deleted.RetentionExpiresAt.IsZero() {
+		t.Fatalf("deleted = %+v, want deleted status with retention expiry", deleted)
+	}
+	deletedPage, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{UserID: "alice", OrgID: "org-a", Limit: 20})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser after delete: %v", err)
+	}
+	if deletedPage.TotalCount != 0 || len(deletedPage.Resources) != 0 {
+		t.Fatalf("deleted resources = %+v, want no active rows", deletedPage)
+	}
+	stats, err := store.ResourceStorageStats(ctx)
+	if err != nil {
+		t.Fatalf("ResourceStorageStats: %v", err)
+	}
+	if stats.TotalResources != 1 || stats.TotalBytes != 64 {
+		t.Fatalf("stats = %+v, want only bob active resource", stats)
+	}
+
+	restored, err := store.RestoreResourceForUser(ctx, "file_alice", "alice", "org-a", time.Now())
+	if err != nil {
+		t.Fatalf("RestoreResourceForUser: %v", err)
+	}
+	if restored.Status != "active" || !restored.DeletedAt.IsZero() || !restored.RetentionExpiresAt.IsZero() {
+		t.Fatalf("restored = %+v, want active with empty retention fields", restored)
+	}
+	if _, err := store.CreateResourceEvent(ctx, domain.AppendResourceEventInput{
+		ResourceID:  "file_alice",
+		ActorUserID: "alice",
+		ActorOrgID:  "org-a",
+		EventType:   "resource.restored",
+	}); err != nil {
+		t.Fatalf("CreateResourceEvent: %v", err)
+	}
+}
+
 func TestMemoryStoreCreateAndListUserAccounts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -90,6 +91,34 @@ type workerHeartbeatStore interface {
 	ListWorkerHeartbeats(context.Context, int) ([]domain.WorkerHeartbeatRecord, error)
 }
 
+type resourceCatalogStore interface {
+	UpsertResource(context.Context, domain.UpsertResourceInput) (domain.ResourceRecord, error)
+	GetResourceForUser(context.Context, string, string, string) (domain.ResourceRecord, error)
+	ListResourcesForUser(context.Context, domain.ResourceListInput) (domain.ResourceListPage, error)
+	SoftDeleteResourceForUser(context.Context, string, string, string, time.Time) (domain.ResourceRecord, error)
+	RestoreResourceForUser(context.Context, string, string, string, time.Time) (domain.ResourceRecord, error)
+	ResourceStorageStats(context.Context) (domain.ResourceStorageStats, error)
+}
+
+type resourceCatalogAdminStore interface {
+	ListResources(context.Context, int, int) ([]domain.ResourceRecord, error)
+}
+
+type resourceEventStore interface {
+	CreateResourceEvent(context.Context, domain.AppendResourceEventInput) (domain.ResourceEventRecord, error)
+}
+
+type resourceEventLogStore interface {
+	ListResourceEvents(context.Context, string, int) ([]domain.ResourceEventRecord, error)
+}
+
+type uploadCatalogMigrationState struct {
+	once sync.Once
+	err  error
+}
+
+var uploadCatalogMigrations sync.Map
+
 const (
 	adminStaleRunThreshold       = 5 * time.Minute
 	adminWorkerStaleThreshold    = 3 * time.Minute
@@ -151,6 +180,8 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/resources", deps.handleListResources)
 			r.Get("/resources/{file_id}", deps.handleGetResource)
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
+			r.Post("/resources/{file_id}/restore", deps.handleRestoreResource)
+			r.Get("/resources/{file_id}/events", deps.handleListResourceEvents)
 			r.Get("/resources/{file_id}/thumbnail", deps.handleServeUpload)
 			r.Get("/runs", deps.handleListRuns)
 			r.Get("/runs/{run_id}", deps.handleGetRun)
@@ -163,12 +194,14 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/runs/{run_id}/artifacts/download", deps.handleDownloadRunArtifactByPath)
 			r.Get("/artifacts/{artifact_id}", deps.handleGetArtifact)
 			r.Get("/artifacts/{artifact_id}/download", deps.handleDownloadArtifact)
+			r.Post("/artifacts/{artifact_id}/promote-resource", deps.handlePromoteArtifactResource)
 			r.Post("/workers/heartbeat", deps.handleWorkerHeartbeat)
 			r.Group(func(r chi.Router) {
 				if deps.WorkOS.Enabled() {
 					r.Use(deps.requireWorkOSAdmin)
 				}
 				r.Get("/admin/overview", deps.handleAdminOverview)
+				r.Post("/admin/resources/reconcile", deps.handleAdminReconcileResources)
 				r.Get("/admin/orgs", deps.handleAdminOrganizations)
 				r.Post("/admin/orgs", deps.handleAdminCreateOrganization)
 				r.Get("/admin/users", deps.handleAdminUsers)
@@ -1322,6 +1355,7 @@ type uploadedFileRecord struct {
 	SHA256       string          `json:"sha256"`
 	CreatedAt    string          `json:"created_at"`
 	SourceURI    string          `json:"source_uri,omitempty"`
+	ProjectID    string          `json:"project_id,omitempty"`
 	PreviewURL   string          `json:"preview_url,omitempty"`
 	Principal    principalRecord `json:"principal,omitempty"`
 }
@@ -1360,6 +1394,7 @@ type resourceRecord struct {
 	SourceType    string          `json:"source_type"`
 	ResourceKind  string          `json:"resource_kind"`
 	SourceURI     string          `json:"source_uri,omitempty"`
+	ProjectID     string          `json:"project_id,omitempty"`
 	HasThumbnail  bool            `json:"has_thumbnail"`
 	ThumbnailURL  string          `json:"thumbnail_url,omitempty"`
 	PreviewURL    string          `json:"preview_url,omitempty"`
@@ -1381,6 +1416,34 @@ type resourcesResponse struct {
 
 type resourceResponse struct {
 	Resource resourceRecord `json:"resource"`
+}
+
+type resourceEventsResponse struct {
+	ResourceID string                       `json:"resource_id"`
+	Count      int                          `json:"count"`
+	Events     []domain.ResourceEventRecord `json:"events"`
+}
+
+type promoteArtifactResourceRequest struct {
+	OriginalName string `json:"original_name"`
+	ProjectID    string `json:"project_id"`
+}
+
+type resourceReconcileIssue struct {
+	IssueType   string `json:"issue_type"`
+	Severity    string `json:"severity"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Message     string `json:"message"`
+	ExpectedSHA string `json:"expected_sha,omitempty"`
+	ActualSHA   string `json:"actual_sha,omitempty"`
+}
+
+type resourceReconcileResponse struct {
+	CheckedAt  string                   `json:"checked_at"`
+	IssueCount int                      `json:"issue_count"`
+	Summary    map[string]int           `json:"summary"`
+	Issues     []resourceReconcileIssue `json:"issues"`
 }
 
 type adminPlatformKPIs struct {
@@ -1503,6 +1566,20 @@ type adminUserSummary struct {
 	LastActivityAt *string `json:"last_activity_at,omitempty"`
 }
 
+type resourceAccountingSummary struct {
+	ActiveResources      int
+	SoftDeletedResources int
+	ActiveBytes          int64
+	Users                map[string]resourceOwnerAccounting
+	Orgs                 map[string]resourceOwnerAccounting
+	Projects             map[string]resourceOwnerAccounting
+}
+
+type resourceOwnerAccounting struct {
+	Uploads      int
+	StorageBytes int64
+}
+
 type adminRunRecord struct {
 	RunID                      string   `json:"run_id"`
 	UserID                     string   `json:"user_id,omitempty"`
@@ -1580,16 +1657,23 @@ type adminWorkerRecord struct {
 }
 
 type adminOverviewResponse struct {
-	GeneratedAt  string                 `json:"generated_at"`
-	Runtime      RuntimeSummary         `json:"runtime"`
-	Queue        adminQueueDiagnostics  `json:"queue"`
-	KPIs         adminPlatformKPIs      `json:"kpis"`
-	Activity     []adminActivityPeriod  `json:"activity"`
-	UsageLast24h []adminUsageBucket     `json:"usage_last_24h"`
-	ToolUsage7d  []adminToolUsageRecord `json:"tool_usage_7d"`
-	Workers      []adminWorkerRecord    `json:"workers"`
-	TopUsers     []adminUserSummary     `json:"top_users"`
-	RecentIssues []adminIssueRecord     `json:"recent_issues"`
+	GeneratedAt      string                      `json:"generated_at"`
+	Runtime          RuntimeSummary              `json:"runtime"`
+	Queue            adminQueueDiagnostics       `json:"queue"`
+	KPIs             adminPlatformKPIs           `json:"kpis"`
+	Activity         []adminActivityPeriod       `json:"activity"`
+	UsageLast24h     []adminUsageBucket          `json:"usage_last_24h"`
+	ToolUsage7d      []adminToolUsageRecord      `json:"tool_usage_7d"`
+	Workers          []adminWorkerRecord         `json:"workers"`
+	TopUsers         []adminUserSummary          `json:"top_users"`
+	ResourceProjects []adminResourceOwnerSummary `json:"resource_projects"`
+	RecentIssues     []adminIssueRecord          `json:"recent_issues"`
+}
+
+type adminResourceOwnerSummary struct {
+	ID           string `json:"id"`
+	Uploads      int    `json:"uploads"`
+	StorageBytes int64  `json:"storage_bytes"`
 }
 
 type adminUserListResponse struct {
@@ -1598,8 +1682,19 @@ type adminUserListResponse struct {
 }
 
 type adminOrganizationListResponse struct {
-	Count         int                   `json:"count"`
-	Organizations []domain.Organization `json:"organizations"`
+	Count         int                        `json:"count"`
+	Organizations []adminOrganizationSummary `json:"organizations"`
+}
+
+type adminOrganizationSummary struct {
+	OrgID        string         `json:"org_id"`
+	Name         string         `json:"name,omitempty"`
+	Status       string         `json:"status,omitempty"`
+	CreatedAt    string         `json:"created_at,omitempty"`
+	UpdatedAt    string         `json:"updated_at,omitempty"`
+	Metadata     domain.JSONMap `json:"metadata"`
+	Uploads      int            `json:"uploads"`
+	StorageBytes int64          `json:"storage_bytes"`
 }
 
 type adminCreateOrganizationRequest struct {
@@ -1819,10 +1914,20 @@ func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request)
 	}
 
 	principal := deps.principalFromRequest(r, "")
+	projectID := strings.TrimSpace(r.FormValue("project_id"))
 	uploaded := make([]uploadedFileRecord, 0, len(r.MultipartForm.File["files"]))
 	for _, header := range r.MultipartForm.File["files"] {
-		record, err := saveUploadedFile(root, header, principal)
+		record, err := saveUploadedFile(root, header, principal, projectID)
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if err := deps.enforceResourceQuota(r.Context(), principal, record.ProjectID, record.SizeBytes); err != nil {
+			_ = removeUploadedFile(root, record.FileID)
+			writeResourceQuotaError(w, err)
+			return
+		}
+		if err := deps.catalogUploadedFile(r.Context(), root, record, "resource.uploaded"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -1837,15 +1942,43 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	principal := deps.principalFromRequest(r, "")
+	if catalog, ok := deps.resourceCatalogStore(); ok {
+		if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		page, err := catalog.ListResourcesForUser(r.Context(), domain.ResourceListInput{
+			UserID:    principal.UserID,
+			OrgID:     principal.OrgID,
+			Query:     strings.TrimSpace(r.URL.Query().Get("q")),
+			Kind:      strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind"))),
+			Source:    strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source"))),
+			ProjectID: strings.TrimSpace(r.URL.Query().Get("project_id")),
+			Status:    "active",
+			Offset:    parseOffset(r),
+			Limit:     parseLimit(r, 200),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		records := make([]resourceRecord, 0, len(page.Resources))
+		for _, resource := range page.Resources {
+			records = append(records, deps.resourceRecordFromCatalog(root, resource))
+		}
+		writeJSON(w, http.StatusOK, resourcesResponse{Count: page.TotalCount, Resources: records})
+		return
+	}
 	resources, err := listUploadResources(root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	principal := deps.principalFromRequest(r, "")
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
 	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	filtered := resources[:0]
 	for _, resource := range resources {
 		if !resourceVisibleToPrincipal(resource, principal) {
@@ -1858,6 +1991,9 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if source != "" && strings.ToLower(strings.TrimSpace(resource.SourceType)) != source {
+			continue
+		}
+		if projectID != "" && resource.ProjectID != projectID {
 			continue
 		}
 		filtered = append(filtered, resource)
@@ -1902,6 +2038,7 @@ func resourceMatchesQuery(resource resourceRecord, query string) bool {
 		resource.ResourceKind,
 		resource.SourceType,
 		resource.SHA256,
+		resource.ProjectID,
 	}
 	for _, candidate := range candidates {
 		if strings.Contains(strings.ToLower(strings.TrimSpace(candidate)), query) {
@@ -1917,7 +2054,7 @@ func (deps ServerDeps) handleGetResource(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, _, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, _, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -1932,7 +2069,22 @@ func (deps ServerDeps) handleDeleteResource(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	fileID := chi.URLParam(r, "file_id")
-	_, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), fileID)
+	principal := deps.principalFromRequest(r, "")
+	if catalog, ok := deps.resourceCatalogStore(); ok {
+		if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		record, err := catalog.SoftDeleteResourceForUser(r.Context(), fileID, principal.UserID, principal.OrgID, domain.Now())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		deps.recordResourceEvent(r.Context(), record.ResourceID, principal, "resource.deleted", nil)
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "soft_deleted": true, "file_id": fileID})
+		return
+	}
+	_, path, err := deps.findUploadResourceForRequest(r.Context(), root, principal, fileID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -1945,13 +2097,72 @@ func (deps ServerDeps) handleDeleteResource(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "file_id": fileID})
 }
 
+func (deps ServerDeps) handleRestoreResource(w http.ResponseWriter, r *http.Request) {
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	resource, err := catalog.RestoreResourceForUser(r.Context(), chi.URLParam(r, "file_id"), principal.UserID, principal.OrgID, domain.Now())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	deps.recordResourceEvent(r.Context(), resource.ResourceID, principal, "resource.restored", nil)
+	writeJSON(w, http.StatusOK, resourceResponse{Resource: deps.resourceRecordFromCatalog(root, resource)})
+}
+
+func (deps ServerDeps) handleListResourceEvents(w http.ResponseWriter, r *http.Request) {
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog is not configured"})
+		return
+	}
+	eventLog, ok := deps.Store.(resourceEventLogStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource event log is not configured"})
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	fileID := chi.URLParam(r, "file_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := catalog.GetResourceForUser(r.Context(), fileID, principal.UserID, principal.OrgID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	events, err := eventLog.ListResourceEvents(r.Context(), fileID, parseLimit(r, 200))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resourceEventsResponse{ResourceID: fileID, Count: len(events), Events: events})
+}
+
 func (deps ServerDeps) handleServeUpload(w http.ResponseWriter, r *http.Request) {
 	root, err := deps.resolvedUploadRoot()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -1986,7 +2197,7 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -2019,7 +2230,7 @@ func (deps ServerDeps) handleGetUploadHistogram(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -2068,7 +2279,7 @@ func (deps ServerDeps) handleGetUploadCaption(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -2103,7 +2314,7 @@ func (deps ServerDeps) handleGetUploadViewer(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	record, path, err := findUploadResourceForRequest(root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -2469,16 +2680,154 @@ func (deps ServerDeps) handleAdminOverview(w http.ResponseWriter, r *http.Reques
 	topUsers := take(data.Users, parseLimitParam(r, "top_users", 8))
 	recentIssues := take(data.Issues, parseLimitParam(r, "issue_limit", 12))
 	writeJSON(w, http.StatusOK, adminOverviewResponse{
-		GeneratedAt:  data.GeneratedAt,
-		Runtime:      deps.adminRuntimeSummary(),
-		Queue:        deps.adminQueueDiagnostics(r.Context()),
-		KPIs:         data.KPIs,
-		Activity:     data.Activity,
-		UsageLast24h: data.UsageLast24h,
-		ToolUsage7d:  data.ToolUsage7d,
-		Workers:      data.Workers,
-		TopUsers:     topUsers,
-		RecentIssues: recentIssues,
+		GeneratedAt:      data.GeneratedAt,
+		Runtime:          deps.adminRuntimeSummary(),
+		Queue:            deps.adminQueueDiagnostics(r.Context()),
+		KPIs:             data.KPIs,
+		Activity:         data.Activity,
+		UsageLast24h:     data.UsageLast24h,
+		ToolUsage7d:      data.ToolUsage7d,
+		Workers:          data.Workers,
+		TopUsers:         topUsers,
+		ResourceProjects: take(data.ResourceProjects, parseLimitParam(r, "resource_project_limit", 12)),
+		RecentIssues:     recentIssues,
+	})
+}
+
+func (deps ServerDeps) handleAdminReconcileResources(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	catalog, ok := deps.Store.(resourceCatalogAdminStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog snapshot is not configured"})
+		return
+	}
+	resources, err := catalog.ListResources(r.Context(), 10000, 0)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	uploads, err := listUploadResourceEntries(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	catalogByID := make(map[string]domain.ResourceRecord, len(resources))
+	for _, resource := range resources {
+		catalogByID[resource.ResourceID] = resource
+	}
+	uploadByID := make(map[string]uploadResourceEntry, len(uploads))
+	for _, upload := range uploads {
+		uploadByID[upload.FileID] = upload
+	}
+	issues := []resourceReconcileIssue{}
+	addIssue := func(issue resourceReconcileIssue) {
+		if issue.Severity == "" {
+			issue.Severity = "warning"
+		}
+		issues = append(issues, issue)
+	}
+	for _, upload := range uploads {
+		if _, ok := catalogByID[upload.FileID]; !ok {
+			addIssue(resourceReconcileIssue{
+				IssueType:  "missing_catalog_row",
+				Severity:   "warning",
+				ResourceID: upload.FileID,
+				Path:       filepath.Base(upload.Path),
+				Message:    "upload blob exists on NFS without a catalog row",
+			})
+		}
+		if _, err := os.Stat(uploadMetadataPath(root, upload.FileID)); err != nil && errors.Is(err, os.ErrNotExist) {
+			addIssue(resourceReconcileIssue{
+				IssueType:  "missing_sidecar",
+				Severity:   "warning",
+				ResourceID: upload.FileID,
+				Path:       filepath.Base(upload.Path),
+				Message:    "upload blob is missing its legacy sidecar metadata",
+			})
+		}
+	}
+	for _, resource := range resources {
+		if strings.TrimSpace(resource.Status) != "active" {
+			continue
+		}
+		path, err := resolveCatalogResourcePath(root, resource)
+		if err != nil {
+			addIssue(resourceReconcileIssue{
+				IssueType:  "missing_blob",
+				Severity:   "error",
+				ResourceID: resource.ResourceID,
+				Path:       resource.StoragePath,
+				Message:    "catalog row does not resolve to a blob under the upload root",
+			})
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			addIssue(resourceReconcileIssue{
+				IssueType:  "missing_blob",
+				Severity:   "error",
+				ResourceID: resource.ResourceID,
+				Path:       filepath.Base(path),
+				Message:    "catalog row points to a missing blob",
+			})
+			continue
+		}
+		if strings.TrimSpace(resource.SHA256) != "" {
+			actualSHA := ""
+			if upload, ok := uploadByID[resource.ResourceID]; ok && filepath.Clean(upload.Path) == filepath.Clean(path) {
+				actualSHA = upload.SHA256
+			}
+			if actualSHA == "" {
+				actualSHA, err = sha256File(path)
+			}
+			if err != nil {
+				addIssue(resourceReconcileIssue{
+					IssueType:  "checksum_unreadable",
+					Severity:   "error",
+					ResourceID: resource.ResourceID,
+					Path:       filepath.Base(path),
+					Message:    "blob could not be hashed",
+				})
+			} else if !strings.EqualFold(strings.TrimSpace(resource.SHA256), actualSHA) {
+				addIssue(resourceReconcileIssue{
+					IssueType:   "checksum_drift",
+					Severity:    "error",
+					ResourceID:  resource.ResourceID,
+					Path:        filepath.Base(path),
+					Message:     "blob checksum differs from catalog checksum",
+					ExpectedSHA: resource.SHA256,
+					ActualSHA:   actualSHA,
+				})
+			}
+		}
+		if resourceNeedsPreview(resource) {
+			if err := validatePreviewSource(path); err != nil {
+				addIssue(resourceReconcileIssue{
+					IssueType:  "failed_preview",
+					Severity:   "warning",
+					ResourceID: resource.ResourceID,
+					Path:       filepath.Base(path),
+					Message:    err.Error(),
+				})
+			}
+		}
+	}
+	summary := make(map[string]int)
+	for _, issue := range issues {
+		summary[issue.IssueType]++
+	}
+	writeJSON(w, http.StatusOK, resourceReconcileResponse{
+		CheckedAt:  domain.Now().Format(time.RFC3339Nano),
+		IssueCount: len(issues),
+		Summary:    summary,
+		Issues:     issues,
 	})
 }
 
@@ -2643,7 +2992,22 @@ func (deps ServerDeps) handleAdminOrganizations(w http.ResponseWriter, r *http.R
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, adminOrganizationListResponse{Count: len(records), Organizations: records})
+	accounting := deps.resourceAccounting(r.Context())
+	summaries := make([]adminOrganizationSummary, 0, len(records))
+	for _, record := range records {
+		usage := accounting.Orgs[record.OrgID]
+		summaries = append(summaries, adminOrganizationSummary{
+			OrgID:        record.OrgID,
+			Name:         record.Name,
+			Status:       record.Status,
+			CreatedAt:    record.CreatedAt.UTC().Format(time.RFC3339Nano),
+			UpdatedAt:    record.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			Metadata:     record.Metadata,
+			Uploads:      usage.Uploads,
+			StorageBytes: usage.StorageBytes,
+		})
+	}
+	writeJSON(w, http.StatusOK, adminOrganizationListResponse{Count: len(summaries), Organizations: summaries})
 }
 
 func (deps ServerDeps) handleAdminCreateOrganization(w http.ResponseWriter, r *http.Request) {
@@ -2886,14 +3250,15 @@ func (deps ServerDeps) handleAdminRequeueRun(w http.ResponseWriter, r *http.Requ
 }
 
 type adminSnapshot struct {
-	GeneratedAt  string
-	KPIs         adminPlatformKPIs
-	Activity     []adminActivityPeriod
-	UsageLast24h []adminUsageBucket
-	ToolUsage7d  []adminToolUsageRecord
-	Workers      []adminWorkerRecord
-	Users        []adminUserSummary
-	Issues       []adminIssueRecord
+	GeneratedAt      string
+	KPIs             adminPlatformKPIs
+	Activity         []adminActivityPeriod
+	UsageLast24h     []adminUsageBucket
+	ToolUsage7d      []adminToolUsageRecord
+	Workers          []adminWorkerRecord
+	Users            []adminUserSummary
+	ResourceProjects []adminResourceOwnerSummary
+	Issues           []adminIssueRecord
 }
 
 type adminActivityWindow struct {
@@ -3030,7 +3395,7 @@ func (deps ServerDeps) loadAdminSnapshot(ctx context.Context) (adminSnapshot, er
 	if err != nil {
 		return adminSnapshot{}, err
 	}
-	uploads, storageBytes := deps.uploadStats()
+	resourceAccounting := deps.resourceAccounting(ctx)
 	workers := []adminWorkerRecord{}
 	if workerStore, ok := deps.Store.(workerHeartbeatStore); ok {
 		records, err := workerStore.ListWorkerHeartbeats(ctx, 250)
@@ -3191,6 +3556,12 @@ func (deps ServerDeps) loadAdminSnapshot(ctx context.Context) (adminSnapshot, er
 		}
 	}
 
+	for userID, usage := range resourceAccounting.Users {
+		user := adminUser(users, userID)
+		user.Uploads += usage.Uploads
+		user.StorageBytes += usage.StorageBytes
+	}
+	resourceProjects := resourceOwnerSummaries(resourceAccounting.Projects)
 	userList := make([]adminUserSummary, 0, len(users))
 	for _, user := range users {
 		userList = append(userList, *user)
@@ -3234,9 +3605,9 @@ func (deps ServerDeps) loadAdminSnapshot(ctx context.Context) (adminSnapshot, er
 			RunningRuns:                runningRuns,
 			StaleRunningRuns:           staleRunningRuns,
 			FailedRuns24h:              runsFailed24h,
-			TotalUploads:               uploads,
-			SoftDeletedUploads:         0,
-			TotalStorageBytes:          storageBytes,
+			TotalUploads:               resourceAccounting.ActiveResources,
+			SoftDeletedUploads:         resourceAccounting.SoftDeletedResources,
+			TotalStorageBytes:          resourceAccounting.ActiveBytes,
 			AvgMessagesPerConversation: avgMessages,
 		},
 		Activity: activity.periods(),
@@ -3245,14 +3616,39 @@ func (deps ServerDeps) loadAdminSnapshot(ctx context.Context) (adminSnapshot, er
 			RunsTotal:     runs24h,
 			RunsSucceeded: runsSucceeded24h,
 			RunsFailed:    runsFailed24h,
-			Uploads:       uploads,
+			Uploads:       resourceAccounting.ActiveResources,
 			NewUsers:      len(userSeen24h),
 		}},
-		ToolUsage7d: toolList,
-		Workers:     workers,
-		Users:       userList,
-		Issues:      issueList,
+		ToolUsage7d:      toolList,
+		Workers:          workers,
+		Users:            userList,
+		ResourceProjects: resourceProjects,
+		Issues:           issueList,
 	}, nil
+}
+
+func resourceOwnerSummaries(values map[string]resourceOwnerAccounting) []adminResourceOwnerSummary {
+	summaries := make([]adminResourceOwnerSummary, 0, len(values))
+	for id, usage := range values {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		summaries = append(summaries, adminResourceOwnerSummary{
+			ID:           id,
+			Uploads:      usage.Uploads,
+			StorageBytes: usage.StorageBytes,
+		})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].StorageBytes == summaries[j].StorageBytes {
+			if summaries[i].Uploads == summaries[j].Uploads {
+				return summaries[i].ID < summaries[j].ID
+			}
+			return summaries[i].Uploads > summaries[j].Uploads
+		}
+		return summaries[i].StorageBytes > summaries[j].StorageBytes
+	})
+	return summaries
 }
 
 func adminWorkerRecords(workers []domain.WorkerHeartbeatRecord, now time.Time) []adminWorkerRecord {
@@ -3643,6 +4039,12 @@ func metadataStringSlice(value any) []string {
 }
 
 func (deps ServerDeps) uploadStats() (int, int64) {
+	if catalog, ok := deps.resourceCatalogStore(); ok {
+		stats, err := catalog.ResourceStorageStats(context.Background())
+		if err == nil {
+			return stats.TotalResources, stats.TotalBytes
+		}
+	}
 	root, err := deps.resolvedUploadRoot()
 	if err != nil {
 		return 0, 0
@@ -3656,6 +4058,289 @@ func (deps ServerDeps) uploadStats() (int, int64) {
 		size += resource.SizeBytes
 	}
 	return len(resources), size
+}
+
+type resourceQuotaError struct {
+	ScopeType        string `json:"scope_type"`
+	ScopeID          string `json:"scope_id"`
+	ProjectID        string `json:"project_id,omitempty"`
+	LimitResources   int    `json:"limit_resources,omitempty"`
+	CurrentResources int    `json:"current_resources"`
+	LimitBytes       int64  `json:"limit_bytes,omitempty"`
+	CurrentBytes     int64  `json:"current_bytes"`
+	RequestedBytes   int64  `json:"requested_bytes"`
+}
+
+func (err *resourceQuotaError) Error() string {
+	if err == nil {
+		return "resource quota exceeded"
+	}
+	scope := strings.TrimSpace(err.ScopeType)
+	if scope == "" {
+		scope = "resource"
+	}
+	if err.ScopeID != "" {
+		return fmt.Sprintf("%s resource quota exceeded for %s", scope, err.ScopeID)
+	}
+	return fmt.Sprintf("%s resource quota exceeded", scope)
+}
+
+func writeResourceQuotaError(w http.ResponseWriter, err error) {
+	var quotaErr *resourceQuotaError
+	if errors.As(err, &quotaErr) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": "resource_quota_exceeded",
+			"quota": quotaErr,
+		})
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err)
+}
+
+func (deps ServerDeps) enforceResourceQuota(ctx context.Context, principal requestPrincipal, projectID string, requestedBytes int64) error {
+	accounting := deps.resourceAccounting(ctx)
+	userID := strings.TrimSpace(principal.UserID)
+	if userID == "" {
+		userID = "local-user"
+	}
+	if accounts, ok := deps.Store.(accountStore); ok {
+		if account, found, err := accounts.GetUserByID(ctx, userID); err != nil {
+			return err
+		} else if found {
+			if err := checkResourceQuotaMetadata("user", userID, strings.TrimSpace(projectID), account.Metadata, accounting.Users[userID], requestedBytes); err != nil {
+				return err
+			}
+		}
+	}
+	orgID := strings.TrimSpace(principal.OrgID)
+	if orgID != "" {
+		if org, found, err := deps.organizationByID(ctx, orgID); err != nil {
+			return err
+		} else if found {
+			if err := checkResourceQuotaMetadata("org", orgID, strings.TrimSpace(projectID), org.Metadata, accounting.Orgs[orgID], requestedBytes); err != nil {
+				return err
+			}
+		}
+	}
+	if projectID = strings.TrimSpace(projectID); projectID != "" {
+		projectUsage := accounting.Projects[projectID]
+		if accounts, ok := deps.Store.(accountStore); ok {
+			if account, found, err := accounts.GetUserByID(ctx, userID); err != nil {
+				return err
+			} else if found {
+				if err := checkProjectResourceQuotaMetadata("project", projectID, account.Metadata, projectUsage, requestedBytes); err != nil {
+					return err
+				}
+			}
+		}
+		if orgID != "" {
+			if org, found, err := deps.organizationByID(ctx, orgID); err != nil {
+				return err
+			} else if found {
+				if err := checkProjectResourceQuotaMetadata("project", projectID, org.Metadata, projectUsage, requestedBytes); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (deps ServerDeps) organizationByID(ctx context.Context, orgID string) (domain.Organization, bool, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return domain.Organization{}, false, nil
+	}
+	orgs, ok := deps.Store.(organizationStore)
+	if !ok {
+		return domain.Organization{}, false, nil
+	}
+	records, err := orgs.ListOrganizations(ctx, 10000, "")
+	if err != nil {
+		return domain.Organization{}, false, err
+	}
+	for _, record := range records {
+		if strings.TrimSpace(record.OrgID) == orgID {
+			return record, true, nil
+		}
+	}
+	return domain.Organization{}, false, nil
+}
+
+func checkResourceQuotaMetadata(scopeType string, scopeID string, projectID string, metadata domain.JSONMap, usage resourceOwnerAccounting, requestedBytes int64) error {
+	quota := resourceQuotaFromMetadata(metadata)
+	if quota.limitResources <= 0 && quota.limitBytes <= 0 {
+		return nil
+	}
+	return checkResourceQuota(scopeType, scopeID, projectID, quota, usage, requestedBytes)
+}
+
+func checkProjectResourceQuotaMetadata(scopeType string, projectID string, metadata domain.JSONMap, usage resourceOwnerAccounting, requestedBytes int64) error {
+	quota, ok := projectResourceQuotaFromMetadata(metadata, projectID)
+	if !ok || (quota.limitResources <= 0 && quota.limitBytes <= 0) {
+		return nil
+	}
+	return checkResourceQuota(scopeType, projectID, projectID, quota, usage, requestedBytes)
+}
+
+type resourceQuotaLimits struct {
+	limitResources int
+	limitBytes     int64
+}
+
+func checkResourceQuota(scopeType string, scopeID string, projectID string, quota resourceQuotaLimits, usage resourceOwnerAccounting, requestedBytes int64) error {
+	if quota.limitResources > 0 && usage.Uploads+1 > quota.limitResources {
+		return &resourceQuotaError{
+			ScopeType:        scopeType,
+			ScopeID:          scopeID,
+			ProjectID:        projectID,
+			LimitResources:   quota.limitResources,
+			CurrentResources: usage.Uploads,
+			CurrentBytes:     usage.StorageBytes,
+			RequestedBytes:   requestedBytes,
+		}
+	}
+	if quota.limitBytes > 0 && usage.StorageBytes+requestedBytes > quota.limitBytes {
+		return &resourceQuotaError{
+			ScopeType:        scopeType,
+			ScopeID:          scopeID,
+			ProjectID:        projectID,
+			LimitBytes:       quota.limitBytes,
+			CurrentResources: usage.Uploads,
+			CurrentBytes:     usage.StorageBytes,
+			RequestedBytes:   requestedBytes,
+		}
+	}
+	return nil
+}
+
+func resourceQuotaFromMetadata(metadata domain.JSONMap) resourceQuotaLimits {
+	return resourceQuotaLimits{
+		limitResources: metadataInt(metadata, "resource_quota_count", "resource_max_count", "max_resources"),
+		limitBytes:     metadataInt64(metadata, "resource_quota_bytes", "resource_max_bytes", "max_resource_bytes"),
+	}
+}
+
+func projectResourceQuotaFromMetadata(metadata domain.JSONMap, projectID string) (resourceQuotaLimits, bool) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return resourceQuotaLimits{}, false
+	}
+	for _, key := range []string{"resource_project_quotas", "project_resource_quotas"} {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		quotas, ok := raw.(map[string]any)
+		if !ok {
+			if typed, ok := raw.(domain.JSONMap); ok {
+				quotas = map[string]any(typed)
+			}
+		}
+		if quotas == nil {
+			continue
+		}
+		payload, ok := quotas[projectID]
+		if !ok {
+			continue
+		}
+		switch typed := payload.(type) {
+		case map[string]any:
+			return resourceQuotaFromMetadata(domain.JSONMap(typed)), true
+		case domain.JSONMap:
+			return resourceQuotaFromMetadata(typed), true
+		}
+	}
+	return resourceQuotaLimits{}, false
+}
+
+func metadataInt(metadata domain.JSONMap, keys ...string) int {
+	value := metadataInt64(metadata, keys...)
+	if value <= 0 {
+		return 0
+	}
+	if value > int64(^uint(0)>>1) {
+		return int(^uint(0) >> 1)
+	}
+	return int(value)
+}
+
+func metadataInt64(metadata domain.JSONMap, keys ...string) int64 {
+	for _, key := range keys {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		switch typed := raw.(type) {
+		case int:
+			return int64(typed)
+		case int64:
+			return typed
+		case float64:
+			return int64(typed)
+		case json.Number:
+			parsed, _ := typed.Int64()
+			return parsed
+		case string:
+			parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+			if err == nil {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func (deps ServerDeps) resourceAccounting(ctx context.Context) resourceAccountingSummary {
+	accounting := resourceAccountingSummary{
+		Users:    map[string]resourceOwnerAccounting{},
+		Orgs:     map[string]resourceOwnerAccounting{},
+		Projects: map[string]resourceOwnerAccounting{},
+	}
+	if catalog, ok := deps.Store.(resourceCatalogAdminStore); ok {
+		resources, err := catalog.ListResources(ctx, 100000, 0)
+		if err == nil {
+			for _, resource := range resources {
+				switch strings.TrimSpace(resource.Status) {
+				case "deleted":
+					accounting.SoftDeletedResources++
+					continue
+				case "active":
+				default:
+					continue
+				}
+				accounting.ActiveResources++
+				accounting.ActiveBytes += resource.SizeBytes
+				userID := strings.TrimSpace(resource.OwnerUserID)
+				if userID == "" {
+					userID = "local-user"
+				}
+				owner := accounting.Users[userID]
+				owner.Uploads++
+				owner.StorageBytes += resource.SizeBytes
+				accounting.Users[userID] = owner
+				orgID := strings.TrimSpace(resource.OwnerOrgID)
+				if orgID != "" {
+					org := accounting.Orgs[orgID]
+					org.Uploads++
+					org.StorageBytes += resource.SizeBytes
+					accounting.Orgs[orgID] = org
+				}
+				projectID := strings.TrimSpace(resource.ProjectID)
+				if projectID != "" {
+					project := accounting.Projects[projectID]
+					project.Uploads++
+					project.StorageBytes += resource.SizeBytes
+					accounting.Projects[projectID] = project
+				}
+			}
+			return accounting
+		}
+	}
+	uploads, bytes := deps.uploadStats()
+	accounting.ActiveResources = uploads
+	accounting.ActiveBytes = bytes
+	return accounting
 }
 
 func (deps ServerDeps) handleTrainingModels(w http.ResponseWriter, r *http.Request) {
@@ -4111,6 +4796,92 @@ func (deps ServerDeps) handleDownloadArtifact(w http.ResponseWriter, r *http.Req
 	deps.serveArtifactRecord(w, r, artifact)
 }
 
+func (deps ServerDeps) handlePromoteArtifactResource(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog is not configured"})
+		return
+	}
+	if strings.TrimSpace(deps.ArtifactRoot) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact root is not configured"})
+		return
+	}
+	uploadRoot, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var req promoteArtifactResourceRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	principal := deps.principalFromRequest(r, "")
+	artifact, err := deps.Store.GetArtifactForUser(r.Context(), chi.URLParam(r, "artifact_id"), principal.UserID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	artifactPath, err := resolveArtifactDownloadPath(deps.ArtifactRoot, artifact)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	originalName := safeOriginalFilename(req.OriginalName)
+	if originalName == "upload.bin" && strings.TrimSpace(req.OriginalName) == "" {
+		originalName = artifactName(artifact, artifactPath)
+	}
+	record, err := copyFileIntoUploadRoot(uploadRoot, artifactPath, originalName, artifact.MimeType, principal, uploadMetadataRecord{
+		Principal:  principal.record(),
+		SourceURI:  "/v2/artifacts/" + artifact.ArtifactID,
+		SourceType: "artifact",
+		ProjectID:  strings.TrimSpace(req.ProjectID),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := deps.enforceResourceQuota(r.Context(), principal, record.ProjectID, record.SizeBytes); err != nil {
+		_ = removeUploadedFile(uploadRoot, record.FileID)
+		writeResourceQuotaError(w, err)
+		return
+	}
+	resourceRecord := resourceRecord{
+		FileID:        record.FileID,
+		OriginalName:  record.OriginalName,
+		ContentType:   record.ContentType,
+		SizeBytes:     record.SizeBytes,
+		SHA256:        record.SHA256,
+		CreatedAt:     record.CreatedAt,
+		SourceType:    "artifact",
+		ResourceKind:  resourceKindForContent(record.OriginalName, record.ContentType),
+		SourceURI:     record.SourceURI,
+		ProjectID:     strings.TrimSpace(req.ProjectID),
+		PreviewURL:    record.PreviewURL,
+		Principal:     principal.record(),
+		StagedLocally: true,
+		CacheReady:    true,
+	}
+	if err := deps.catalogResourceRecord(r.Context(), uploadRoot, resourceRecord, "resource.promoted"); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	resource, err := catalog.GetResourceForUser(r.Context(), record.FileID, principal.UserID, principal.OrgID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	deps.recordResourceEvent(r.Context(), resource.ResourceID, principal, "resource.artifact_promoted", domain.JSONMap{
+		"artifact_id": artifact.ArtifactID,
+		"run_id":      artifact.RunID,
+	})
+	writeJSON(w, http.StatusCreated, resourceResponse{Resource: deps.resourceRecordFromCatalog(uploadRoot, resource)})
+}
+
 func (deps ServerDeps) serveArtifactRecord(w http.ResponseWriter, r *http.Request, artifact domain.ArtifactRecord) {
 	path, err := resolveArtifactDownloadPath(deps.ArtifactRoot, artifact)
 	if err != nil {
@@ -4240,7 +5011,142 @@ func (deps ServerDeps) resolvedUploadRoot() (string, error) {
 	return filepath.Abs(filepath.Clean(root))
 }
 
-func saveUploadedFile(root string, header *multipart.FileHeader, principal requestPrincipal) (uploadedFileRecord, error) {
+func (deps ServerDeps) resourceCatalogStore() (resourceCatalogStore, bool) {
+	if deps.Store == nil {
+		return nil, false
+	}
+	catalog, ok := deps.Store.(resourceCatalogStore)
+	return catalog, ok
+}
+
+func (deps ServerDeps) ensureUploadCatalogMigrated(ctx context.Context, root string) error {
+	if _, ok := deps.resourceCatalogStore(); !ok {
+		return nil
+	}
+	stateValue, _ := uploadCatalogMigrations.LoadOrStore(root, &uploadCatalogMigrationState{})
+	state := stateValue.(*uploadCatalogMigrationState)
+	state.once.Do(func() {
+		state.err = deps.migrateUploadCatalog(ctx, root)
+	})
+	return state.err
+}
+
+func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) error {
+	resources, err := listUploadResources(root)
+	if err != nil {
+		return err
+	}
+	for _, record := range resources {
+		if err := deps.catalogResourceRecord(ctx, root, record, "resource.migrated"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (deps ServerDeps) catalogUploadedFile(ctx context.Context, root string, record uploadedFileRecord, eventType string) error {
+	resource, _, err := findUploadResource(root, record.FileID)
+	if err != nil {
+		return err
+	}
+	if record.SourceURI != "" {
+		resource.SourceURI = record.SourceURI
+	}
+	if record.Principal.UserID != "" {
+		resource.Principal = record.Principal
+	}
+	return deps.catalogResourceRecord(ctx, root, resource, eventType)
+}
+
+func (deps ServerDeps) catalogResourceRecord(ctx context.Context, root string, record resourceRecord, eventType string) error {
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		return nil
+	}
+	record.Principal = normalizedResourcePrincipal(record.Principal)
+	_, path, err := findUploadResource(root, record.FileID)
+	if err != nil {
+		return err
+	}
+	createdAt := parseResourceCreatedAt(record.CreatedAt)
+	input := domain.UpsertResourceInput{
+		ResourceID:   record.FileID,
+		OriginalName: record.OriginalName,
+		ContentType:  record.ContentType,
+		SizeBytes:    record.SizeBytes,
+		SHA256:       record.SHA256,
+		StorageURI:   fileStorageURI(path),
+		StoragePath:  filepath.Base(path),
+		SourceType:   record.SourceType,
+		ResourceKind: record.ResourceKind,
+		SourceURI:    record.SourceURI,
+		ProjectID:    record.ProjectID,
+		OwnerUserID:  record.Principal.UserID,
+		OwnerOrgID:   record.Principal.OrgID,
+		OwnerRole:    record.Principal.Role,
+		Status:       "active",
+		CreatedAt:    createdAt,
+		UpdatedAt:    domain.Now(),
+		Metadata: domain.JSONMap{
+			"source": "upload_store",
+		},
+	}
+	resource, err := catalog.UpsertResource(ctx, input)
+	if err != nil {
+		return err
+	}
+	deps.recordResourceEvent(ctx, resource.ResourceID, requestPrincipal{
+		UserID: record.Principal.UserID,
+		OrgID:  record.Principal.OrgID,
+		Role:   record.Principal.Role,
+	}, eventType, domain.JSONMap{"source_type": record.SourceType})
+	return nil
+}
+
+func normalizedResourcePrincipal(principal principalRecord) principalRecord {
+	principal.UserID = strings.TrimSpace(principal.UserID)
+	principal.OrgID = strings.TrimSpace(principal.OrgID)
+	principal.Role = strings.TrimSpace(principal.Role)
+	if principal.UserID == "" {
+		principal.UserID = "local-user"
+	}
+	if principal.Role == "" {
+		principal.Role = "researcher"
+	}
+	return principal
+}
+
+func parseResourceCreatedAt(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return domain.Now()
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return domain.Now()
+	}
+	return parsed.UTC()
+}
+
+func fileStorageURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: filepath.Clean(path)}).String()
+}
+
+func (deps ServerDeps) recordResourceEvent(ctx context.Context, resourceID string, principal requestPrincipal, eventType string, metadata domain.JSONMap) {
+	events, ok := deps.Store.(resourceEventStore)
+	if !ok || strings.TrimSpace(resourceID) == "" || strings.TrimSpace(eventType) == "" {
+		return
+	}
+	_, _ = events.CreateResourceEvent(ctx, domain.AppendResourceEventInput{
+		ResourceID:  resourceID,
+		ActorUserID: principal.UserID,
+		ActorOrgID:  principal.OrgID,
+		EventType:   eventType,
+		Metadata:    metadata,
+	})
+}
+
+func saveUploadedFile(root string, header *multipart.FileHeader, principal requestPrincipal, projectID string) (uploadedFileRecord, error) {
 	source, err := header.Open()
 	if err != nil {
 		return uploadedFileRecord{}, err
@@ -4275,7 +5181,7 @@ func saveUploadedFile(root string, header *multipart.FileHeader, principal reque
 	if info.Size() > 0 {
 		size = info.Size()
 	}
-	if err := writeUploadMetadata(root, fileID, principal); err != nil {
+	if err := writeUploadMetadataRecord(root, fileID, uploadMetadataRecord{Principal: principal.record(), ProjectID: strings.TrimSpace(projectID)}); err != nil {
 		_ = os.Remove(target)
 		return uploadedFileRecord{}, err
 	}
@@ -4287,8 +5193,109 @@ func saveUploadedFile(root string, header *multipart.FileHeader, principal reque
 		SHA256:       hex.EncodeToString(hasher.Sum(nil)),
 		CreatedAt:    info.ModTime().UTC().Format(time.RFC3339Nano),
 		PreviewURL:   "/v2/uploads/" + url.PathEscape(fileID) + "/preview",
+		ProjectID:    strings.TrimSpace(projectID),
 		Principal:    principal.record(),
 	}, nil
+}
+
+func copyFileIntoUploadRoot(root string, sourcePath string, originalName string, contentType string, principal requestPrincipal, metadata uploadMetadataRecord) (uploadedFileRecord, error) {
+	sourcePath = filepath.Clean(sourcePath)
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return uploadedFileRecord{}, err
+	}
+	defer source.Close()
+
+	fileID := domain.NewID("file")
+	if strings.TrimSpace(originalName) == "" {
+		originalName = filepath.Base(sourcePath)
+	}
+	originalName = safeOriginalFilename(originalName)
+	target := filepath.Join(root, fileID+"__"+originalName)
+	if !pathIsUnderRoot(root, target) {
+		return uploadedFileRecord{}, errUnsafeArtifactPath
+	}
+	destination, err := os.Create(target)
+	if err != nil {
+		return uploadedFileRecord{}, err
+	}
+	hasher := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(destination, hasher), source)
+	closeErr := destination.Close()
+	if copyErr != nil {
+		_ = os.Remove(target)
+		return uploadedFileRecord{}, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(target)
+		return uploadedFileRecord{}, closeErr
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return uploadedFileRecord{}, err
+	}
+	if info.Size() > 0 {
+		size = info.Size()
+	}
+	if metadata.Principal.UserID == "" {
+		metadata.Principal = principal.record()
+	}
+	if metadata.SourceType == "" {
+		metadata.SourceType = "upload"
+	}
+	if err := writeUploadMetadataRecord(root, fileID, metadata); err != nil {
+		_ = os.Remove(target)
+		return uploadedFileRecord{}, err
+	}
+	if strings.TrimSpace(contentType) == "" {
+		contentType = contentTypeForUpload(originalName, "")
+	}
+	return uploadedFileRecord{
+		FileID:       fileID,
+		OriginalName: originalName,
+		ContentType:  contentTypeForUpload(originalName, contentType),
+		SizeBytes:    size,
+		SHA256:       hex.EncodeToString(hasher.Sum(nil)),
+		CreatedAt:    info.ModTime().UTC().Format(time.RFC3339Nano),
+		SourceURI:    metadata.SourceURI,
+		ProjectID:    strings.TrimSpace(metadata.ProjectID),
+		PreviewURL:   "/v2/uploads/" + url.PathEscape(fileID) + "/preview",
+		Principal:    metadata.Principal,
+	}, nil
+}
+
+func removeUploadedFile(root string, fileID string) error {
+	if !safeUploadID(fileID) {
+		return errors.New("unsafe upload id")
+	}
+	var firstErr error
+	patterns := []string{
+		filepath.Join(root, fileID+"__*"),
+		filepath.Join(root, fileID),
+		filepath.Join(root, fileID+".*"),
+	}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, match := range matches {
+			resolved := filepath.Clean(match)
+			if !pathIsUnderRoot(root, resolved) {
+				continue
+			}
+			if err := os.Remove(resolved); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if err := os.Remove(uploadMetadataPath(root, fileID)); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 func uploadMetadataPath(root string, fileID string) string {
@@ -4303,6 +5310,7 @@ type uploadMetadataRecord struct {
 	Principal  principalRecord `json:"principal"`
 	SourceURI  string          `json:"source_uri,omitempty"`
 	SourceType string          `json:"source_type,omitempty"`
+	ProjectID  string          `json:"project_id,omitempty"`
 }
 
 func writeUploadMetadataRecord(root string, fileID string, payload uploadMetadataRecord) error {
@@ -4350,15 +5358,32 @@ func readUploadMetadata(root string, fileID string) uploadMetadataRecord {
 	return payload
 }
 
+type uploadResourceEntry struct {
+	resourceRecord
+	Path string
+}
+
 func listUploadResources(root string) ([]resourceRecord, error) {
-	entries, err := os.ReadDir(root)
+	entries, err := listUploadResourceEntries(root)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []resourceRecord{}, nil
-		}
 		return nil, err
 	}
 	resources := make([]resourceRecord, 0, len(entries))
+	for _, entry := range entries {
+		resources = append(resources, entry.resourceRecord)
+	}
+	return resources, nil
+}
+
+func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []uploadResourceEntry{}, nil
+		}
+		return nil, err
+	}
+	resources := make([]uploadResourceEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -4368,7 +5393,10 @@ func listUploadResources(root string) ([]resourceRecord, error) {
 		if err != nil {
 			continue
 		}
-		resources = append(resources, record)
+		resources = append(resources, uploadResourceEntry{
+			resourceRecord: record,
+			Path:           path,
+		})
 	}
 	sort.Slice(resources, func(i, j int) bool {
 		if resources[i].CreatedAt == resources[j].CreatedAt {
@@ -4412,7 +5440,25 @@ func findUploadResource(root string, fileID string) (resourceRecord, string, err
 	return resourceRecord{}, "", store.ErrNotFound
 }
 
-func findUploadResourceForRequest(root string, principal requestPrincipal, fileID string) (resourceRecord, string, error) {
+func (deps ServerDeps) findUploadResourceForRequest(ctx context.Context, root string, principal requestPrincipal, fileID string) (resourceRecord, string, error) {
+	if catalog, ok := deps.resourceCatalogStore(); ok {
+		if err := deps.ensureUploadCatalogMigrated(ctx, root); err != nil {
+			return resourceRecord{}, "", err
+		}
+		resource, err := catalog.GetResourceForUser(ctx, fileID, principal.UserID, principal.OrgID)
+		if err != nil {
+			return resourceRecord{}, "", err
+		}
+		record := deps.resourceRecordFromCatalog(root, resource)
+		path, err := resolveCatalogResourcePath(root, resource)
+		if err != nil {
+			return record, "", err
+		}
+		if _, err := os.Stat(path); err != nil {
+			return record, "", store.ErrNotFound
+		}
+		return record, path, nil
+	}
 	record, path, err := findUploadResource(root, fileID)
 	if err != nil {
 		return resourceRecord{}, "", err
@@ -4421,6 +5467,108 @@ func findUploadResourceForRequest(root string, principal requestPrincipal, fileI
 		return resourceRecord{}, "", store.ErrNotFound
 	}
 	return record, path, nil
+}
+
+func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.ResourceRecord) resourceRecord {
+	path, pathErr := resolveCatalogResourcePath(root, resource)
+	stagedLocally := false
+	if pathErr == nil {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			stagedLocally = true
+		}
+	}
+	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
+	contentType := resource.ContentType
+	if contentType == "" {
+		contentType = contentTypeForUpload(resource.OriginalName, "")
+	}
+	resourceKind := strings.TrimSpace(resource.ResourceKind)
+	if resourceKind == "" {
+		resourceKind = resourceKindForContent(resource.OriginalName, contentType)
+	}
+	sourceType := strings.TrimSpace(resource.SourceType)
+	if sourceType == "" {
+		sourceType = "upload"
+	}
+	return resourceRecord{
+		FileID:        resource.ResourceID,
+		OriginalName:  resource.OriginalName,
+		ContentType:   contentType,
+		SizeBytes:     resource.SizeBytes,
+		SHA256:        resource.SHA256,
+		CreatedAt:     resource.CreatedAt.UTC().Format(time.RFC3339Nano),
+		SourceType:    sourceType,
+		ResourceKind:  resourceKind,
+		SourceURI:     resource.SourceURI,
+		ProjectID:     resource.ProjectID,
+		HasThumbnail:  stagedLocally && strings.HasPrefix(contentType, "image/"),
+		ThumbnailURL:  previewURL,
+		PreviewURL:    previewURL,
+		CacheReady:    stagedLocally,
+		StagedLocally: stagedLocally,
+		Principal: principalRecord{
+			UserID: resource.OwnerUserID,
+			OrgID:  resource.OwnerOrgID,
+			Role:   resource.OwnerRole,
+		},
+	}
+}
+
+func resolveCatalogResourcePath(root string, resource domain.ResourceRecord) (string, error) {
+	candidates := []string{}
+	if strings.TrimSpace(resource.StorageURI) != "" {
+		if parsed, err := url.Parse(strings.TrimSpace(resource.StorageURI)); err == nil && parsed.Scheme == "file" {
+			candidates = append(candidates, parsed.Path)
+		}
+	}
+	if storagePath := strings.TrimSpace(resource.StoragePath); storagePath != "" {
+		if filepath.IsAbs(storagePath) {
+			candidates = append(candidates, storagePath)
+		} else {
+			candidates = append(candidates, filepath.Join(root, storagePath))
+		}
+	}
+	if strings.TrimSpace(resource.ResourceID) != "" && strings.TrimSpace(resource.OriginalName) != "" {
+		candidates = append(candidates, filepath.Join(root, resource.ResourceID+"__"+safeOriginalFilename(resource.OriginalName)))
+	}
+	for _, candidate := range candidates {
+		resolved := filepath.Clean(candidate)
+		if !pathIsUnderRoot(root, resolved) {
+			continue
+		}
+		return resolved, nil
+	}
+	return "", store.ErrNotFound
+}
+
+func resourceNeedsPreview(resource domain.ResourceRecord) bool {
+	contentType := strings.ToLower(strings.TrimSpace(resource.ContentType))
+	if strings.HasPrefix(contentType, "image/") {
+		return true
+	}
+	kind := strings.ToLower(strings.TrimSpace(resource.ResourceKind))
+	if kind == "image" {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(resource.OriginalName))
+	return strings.HasSuffix(name, ".png") ||
+		strings.HasSuffix(name, ".jpg") ||
+		strings.HasSuffix(name, ".jpeg") ||
+		strings.HasSuffix(name, ".gif") ||
+		strings.HasSuffix(name, ".tif") ||
+		strings.HasSuffix(name, ".tiff")
+}
+
+func validatePreviewSource(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, _, err := image.DecodeConfig(file); err != nil {
+		return fmt.Errorf("image preview source could not be decoded: %w", err)
+	}
+	return nil
 }
 
 func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
@@ -4460,6 +5608,7 @@ func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
 		SourceType:    sourceType,
 		ResourceKind:  resourceKindForContent(originalName, contentType),
 		SourceURI:     strings.TrimSpace(metadata.SourceURI),
+		ProjectID:     strings.TrimSpace(metadata.ProjectID),
 		HasThumbnail:  strings.HasPrefix(contentType, "image/"),
 		ThumbnailURL:  previewURL,
 		PreviewURL:    previewURL,

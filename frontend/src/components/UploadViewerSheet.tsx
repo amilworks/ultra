@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Layers3, RefreshCw } from "lucide-react";
+import { ExternalLink, FileText, Layers3, RefreshCw } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -146,6 +147,84 @@ const buildViewerStageMeta = (viewerInfo: UploadViewerInfo): string => {
     .join(" · ");
 };
 
+const isPdfUpload = (file: UploadedFileRecord | null | undefined): boolean => {
+  const contentType = String(file?.content_type ?? "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  const originalName = String(file?.original_name ?? "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    contentType === "application/pdf" ||
+    contentType === "application/x-pdf" ||
+    contentType.endsWith("+pdf") ||
+    originalName.endsWith(".pdf")
+  );
+};
+
+const formatDocumentFileSize = (bytes: number | null | undefined): string | null => {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
+    return null;
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < units.length - 1) {
+    value /= 1000;
+    unitIndex += 1;
+  }
+
+  if (unitIndex === 0) {
+    return `${Math.round(value)} ${units[unitIndex]}`;
+  }
+
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+};
+
+const buildPdfStageMeta = (file: UploadedFileRecord): string =>
+  ["Document", "PDF", formatDocumentFileSize(file.size_bytes)].filter(Boolean).join(" · ");
+
+function PdfViewerPanel({ file, apiClient }: { file: UploadedFileRecord; apiClient: ApiClient }) {
+  const pdfUrl = apiClient.uploadDisplayUrl(file.file_id);
+
+  return (
+    <section className="viewer-pdf-reader" aria-label="PDF reader" role="region">
+      <div className="viewer-stage-header viewer-pdf-header">
+        <div className="viewer-stage-heading">
+          <div className="viewer-pdf-title-row">
+            <FileText aria-hidden="true" />
+            <div className="viewer-stage-title viewer-pdf-title">{file.original_name}</div>
+            <Badge variant="secondary" className="viewer-pdf-badge">
+              PDF
+            </Badge>
+          </div>
+          <div className="viewer-stage-meta">{buildPdfStageMeta(file)}</div>
+        </div>
+        <div className="viewer-pdf-actions">
+          <Button asChild type="button" size="sm" variant="outline">
+            <a href={pdfUrl} target="_blank" rel="noreferrer">
+              <ExternalLink data-icon="inline-start" />
+              Open in tab
+            </a>
+          </Button>
+        </div>
+      </div>
+
+      <div className="viewer-pdf-shell">
+        <iframe
+          src={pdfUrl}
+          title={`PDF viewer for ${file.original_name}`}
+          className="viewer-pdf-frame"
+          loading="lazy"
+        />
+      </div>
+    </section>
+  );
+}
+
 export function UploadViewerWorkspace({
   uploadedFiles,
   bisqueLinksByFileId,
@@ -224,6 +303,7 @@ export function UploadViewerWorkspace({
   const selectedFile = selectedFileId
     ? uploadedFiles.find((file) => file.file_id === selectedFileId) ?? null
     : null;
+  const selectedFileIsPdf = isPdfUpload(selectedFile);
   const selectedViewerInfo = selectedFileId ? viewerInfoById[selectedFileId] ?? null : null;
   const selectedViewerError = selectedFileId ? viewerErrorById[selectedFileId] ?? null : null;
 
@@ -231,6 +311,7 @@ export function UploadViewerWorkspace({
     if (
       !active ||
       !selectedFileId ||
+      selectedFileIsPdf ||
       selectedViewerInfo ||
       selectedViewerError ||
       loadingFileIdRef.current === selectedFileId
@@ -312,7 +393,7 @@ export function UploadViewerWorkspace({
       }
       setLoadingFileId((current) => (current === activeFileId ? null : current));
     };
-  }, [active, apiClient, selectedFileId, selectedViewerError, selectedViewerInfo]);
+  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedViewerError, selectedViewerInfo]);
 
   const selectedIndices = selectedFileId ? viewerIndicesById[selectedFileId] ?? null : null;
 
@@ -406,6 +487,7 @@ export function UploadViewerWorkspace({
       className={cn(
         "viewer-workspace",
         !showFileStrip && "viewer-workspace-single-file",
+        selectedFileIsPdf && "viewer-workspace-document",
         selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
         className
       )}
@@ -439,6 +521,8 @@ export function UploadViewerWorkspace({
         <section className="viewer-stage">
           {!selectedFileId ? (
             <div className="viewer-empty">Select a file to start.</div>
+          ) : selectedFileIsPdf && selectedFile ? (
+            <PdfViewerPanel file={selectedFile} apiClient={apiClient} />
           ) : showBisqueFrame ? (
             <>
               <div className="viewer-stage-header">

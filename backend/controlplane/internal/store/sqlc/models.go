@@ -55,6 +55,39 @@ type ControlOrganization struct {
 	Metadata  []byte             `json:"metadata"`
 }
 
+type ControlResource struct {
+	ResourceID         string             `json:"resource_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	OriginalName       string             `json:"original_name"`
+	ContentType        pgtype.Text        `json:"content_type"`
+	SizeBytes          int64              `json:"size_bytes"`
+	Sha256             pgtype.Text        `json:"sha256"`
+	StorageUri         pgtype.Text        `json:"storage_uri"`
+	StoragePath        pgtype.Text        `json:"storage_path"`
+	SourceType         string             `json:"source_type"`
+	ResourceKind       string             `json:"resource_kind"`
+	SourceUri          pgtype.Text        `json:"source_uri"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
+	RetentionExpiresAt pgtype.Timestamptz `json:"retention_expires_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+type ControlResourceEvent struct {
+	EventID     string             `json:"event_id"`
+	ResourceID  string             `json:"resource_id"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	EventType   string             `json:"event_type"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Metadata    []byte             `json:"metadata"`
+}
+
 type ControlRun struct {
 	RunID           string             `json:"run_id"`
 	ThreadID        string             `json:"thread_id"`

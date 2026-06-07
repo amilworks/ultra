@@ -1232,17 +1232,10 @@ func (s *PostgresStore) ListRunEvents(ctx context.Context, runID string, limit i
 	if err != nil {
 		return nil, err
 	}
-	events := make([]domain.RunEventRecord, 0, len(rows))
-	for _, row := range rows {
-		events = append(events, runEventFromRow(row))
-	}
-	return events, nil
+	return runEventsFromRows(rows), nil
 }
 
 func (s *PostgresStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {
-	if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
-		return nil, err
-	}
 	rows, err := s.queries.ListRunEventsForUser(ctx, sqlc.ListRunEventsForUserParams{
 		RunID:  runID,
 		UserID: userID,
@@ -1251,11 +1244,12 @@ func (s *PostgresStore) ListRunEventsForUser(ctx context.Context, runID string, 
 	if err != nil {
 		return nil, err
 	}
-	events := make([]domain.RunEventRecord, 0, len(rows))
-	for _, row := range rows {
-		events = append(events, runEventFromRow(row))
+	if len(rows) == 0 {
+		if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+			return nil, err
+		}
 	}
-	return events, nil
+	return runEventsFromRows(rows), nil
 }
 
 func (s *PostgresStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
@@ -1267,17 +1261,10 @@ func (s *PostgresStore) ListRunEventsAfter(ctx context.Context, runID string, af
 	if err != nil {
 		return nil, err
 	}
-	events := make([]domain.RunEventRecord, 0, len(rows))
-	for _, row := range rows {
-		events = append(events, runEventFromRow(row))
-	}
-	return events, nil
+	return runEventsFromRows(rows), nil
 }
 
 func (s *PostgresStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
-	if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
-		return nil, err
-	}
 	rows, err := s.queries.ListRunEventsAfterForUser(ctx, sqlc.ListRunEventsAfterForUserParams{
 		RunID:          runID,
 		UserID:         userID,
@@ -1287,11 +1274,20 @@ func (s *PostgresStore) ListRunEventsAfterForUser(ctx context.Context, runID str
 	if err != nil {
 		return nil, err
 	}
+	if len(rows) == 0 {
+		if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+			return nil, err
+		}
+	}
+	return runEventsFromRows(rows), nil
+}
+
+func runEventsFromRows(rows []sqlc.ControlRunEvent) []domain.RunEventRecord {
 	events := make([]domain.RunEventRecord, 0, len(rows))
 	for _, row := range rows {
 		events = append(events, runEventFromRow(row))
 	}
-	return events, nil
+	return events
 }
 
 func (s *PostgresStore) CreateArtifact(ctx context.Context, input domain.CreateArtifactInput) (domain.ArtifactRecord, error) {
@@ -1393,6 +1389,218 @@ func (s *PostgresStore) GetArtifactForUser(ctx context.Context, artifactID strin
 	return artifactFromRow(row), nil
 }
 
+func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if resourceID == "" {
+		resourceID = domain.NewID("file")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	sourceType := strings.TrimSpace(input.SourceType)
+	if sourceType == "" {
+		sourceType = "upload"
+	}
+	resourceKind := strings.TrimSpace(input.ResourceKind)
+	if resourceKind == "" {
+		resourceKind = "file"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	row, err := s.queries.UpsertResource(ctx, sqlc.UpsertResourceParams{
+		ResourceID:         resourceID,
+		OwnerUserID:        ownerUserID,
+		OwnerOrgID:         nullableText(input.OwnerOrgID),
+		OwnerRole:          nullableText(input.OwnerRole),
+		OriginalName:       strings.TrimSpace(input.OriginalName),
+		ContentType:        nullableText(input.ContentType),
+		SizeBytes:          input.SizeBytes,
+		Sha256:             nullableText(input.SHA256),
+		StorageUri:         nullableText(input.StorageURI),
+		StoragePath:        nullableText(input.StoragePath),
+		SourceType:         sourceType,
+		ResourceKind:       resourceKind,
+		SourceUri:          nullableText(input.SourceURI),
+		ProjectID:          nullableText(input.ProjectID),
+		Status:             status,
+		CreatedAt:          timestamptz(createdAt),
+		UpdatedAt:          timestamptz(updatedAt),
+		DeletedAt:          nullableTimestamptz(input.DeletedAt),
+		RetentionExpiresAt: nullableTimestamptz(input.RetentionExpiresAt),
+		Metadata:           jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) GetResourceForUser(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	row, err := s.queries.GetResourceForUser(ctx, sqlc.GetResourceForUserParams{
+		ResourceID:  strings.TrimSpace(resourceID),
+		OwnerUserID: strings.TrimSpace(userID),
+		OwnerOrgID:  nullableText(orgID),
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.ResourceListInput) (domain.ResourceListPage, error) {
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	params := sqlc.ListResourcesForUserParams{
+		OwnerUserID: strings.TrimSpace(input.UserID),
+		OwnerOrgID:  nullableText(input.OrgID),
+		Status:      status,
+		Column4:     strings.TrimSpace(input.Kind),
+		Column5:     strings.TrimSpace(input.Source),
+		Column6:     strings.TrimSpace(input.ProjectID),
+		Column7:     strings.TrimSpace(input.Query),
+		Limit:       limit32(input.Limit, 200),
+		Offset:      offset32(input.Offset),
+	}
+	rows, err := s.queries.ListResourcesForUser(ctx, params)
+	if err != nil {
+		return domain.ResourceListPage{}, err
+	}
+	count, err := s.queries.CountResourcesForUser(ctx, sqlc.CountResourcesForUserParams{
+		OwnerUserID: params.OwnerUserID,
+		OwnerOrgID:  params.OwnerOrgID,
+		Status:      params.Status,
+		Column4:     params.Column4,
+		Column5:     params.Column5,
+		Column6:     params.Column6,
+		Column7:     params.Column7,
+	})
+	if err != nil {
+		return domain.ResourceListPage{}, err
+	}
+	resources := make([]domain.ResourceRecord, 0, len(rows))
+	for _, row := range rows {
+		resources = append(resources, resourceFromRow(row))
+	}
+	return domain.ResourceListPage{
+		Resources:  resources,
+		TotalCount: int(count),
+		Limit:      int(params.Limit),
+		Offset:     int(params.Offset),
+	}, nil
+}
+
+func (s *PostgresStore) ListResources(ctx context.Context, limit int, offset int) ([]domain.ResourceRecord, error) {
+	rows, err := s.queries.ListResources(ctx, sqlc.ListResourcesParams{
+		Limit:  limit32(limit, 1000),
+		Offset: offset32(offset),
+	})
+	if err != nil {
+		return nil, err
+	}
+	resources := make([]domain.ResourceRecord, 0, len(rows))
+	for _, row := range rows {
+		resources = append(resources, resourceFromRow(row))
+	}
+	return resources, nil
+}
+
+func (s *PostgresStore) SoftDeleteResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, deletedAt time.Time) (domain.ResourceRecord, error) {
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	row, err := s.queries.SoftDeleteResourceForUser(ctx, sqlc.SoftDeleteResourceForUserParams{
+		ResourceID:         strings.TrimSpace(resourceID),
+		OwnerUserID:        strings.TrimSpace(userID),
+		OwnerOrgID:         nullableText(orgID),
+		DeletedAt:          timestamptz(deletedAt),
+		RetentionExpiresAt: timestamptz(deletedAt.UTC().Add(defaultResourceRetention)),
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) RestoreResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, restoredAt time.Time) (domain.ResourceRecord, error) {
+	if restoredAt.IsZero() {
+		restoredAt = domain.Now()
+	}
+	row, err := s.queries.RestoreResourceForUser(ctx, sqlc.RestoreResourceForUserParams{
+		ResourceID:  strings.TrimSpace(resourceID),
+		OwnerUserID: strings.TrimSpace(userID),
+		OwnerOrgID:  nullableText(orgID),
+		UpdatedAt:   timestamptz(restoredAt),
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) ResourceStorageStats(ctx context.Context) (domain.ResourceStorageStats, error) {
+	row, err := s.queries.ResourceStorageStats(ctx)
+	if err != nil {
+		return domain.ResourceStorageStats{}, err
+	}
+	return domain.ResourceStorageStats{
+		TotalResources: int(row.TotalResources),
+		TotalBytes:     row.TotalBytes,
+	}, nil
+}
+
+func (s *PostgresStore) CreateResourceEvent(ctx context.Context, input domain.AppendResourceEventInput) (domain.ResourceEventRecord, error) {
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	row, err := s.queries.CreateResourceEvent(ctx, sqlc.CreateResourceEventParams{
+		EventID:     eventID,
+		ResourceID:  strings.TrimSpace(input.ResourceID),
+		ActorUserID: nullableText(input.ActorUserID),
+		ActorOrgID:  nullableText(input.ActorOrgID),
+		EventType:   strings.TrimSpace(input.EventType),
+		Ts:          timestamptz(ts),
+		Metadata:    jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.ResourceEventRecord{}, mapPgError(err)
+	}
+	return resourceEventFromRow(row), nil
+}
+
+func (s *PostgresStore) ListResourceEvents(ctx context.Context, resourceID string, limit int) ([]domain.ResourceEventRecord, error) {
+	rows, err := s.queries.ListResourceEvents(ctx, sqlc.ListResourceEventsParams{
+		ResourceID: strings.TrimSpace(resourceID),
+		Limit:      limit32(limit, 200),
+	})
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	events := make([]domain.ResourceEventRecord, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, resourceEventFromRow(row))
+	}
+	return events, nil
+}
+
 func threadFromRow(row sqlc.ControlThread) domain.ThreadRecord {
 	return domain.ThreadRecord{
 		ThreadID:     row.ThreadID,
@@ -1487,6 +1695,43 @@ func artifactFromRow(row sqlc.ControlArtifact) domain.ArtifactRecord {
 		CreatedAt:     timeValue(row.CreatedAt),
 		UpdatedAt:     timeValue(row.UpdatedAt),
 		Metadata:      jsonMap(row.Metadata),
+	}
+}
+
+func resourceFromRow(row sqlc.ControlResource) domain.ResourceRecord {
+	return domain.ResourceRecord{
+		ResourceID:         row.ResourceID,
+		OriginalName:       row.OriginalName,
+		ContentType:        textValue(row.ContentType),
+		SizeBytes:          row.SizeBytes,
+		SHA256:             textValue(row.Sha256),
+		StorageURI:         textValue(row.StorageUri),
+		StoragePath:        textValue(row.StoragePath),
+		SourceType:         row.SourceType,
+		ResourceKind:       row.ResourceKind,
+		SourceURI:          textValue(row.SourceUri),
+		ProjectID:          textValue(row.ProjectID),
+		OwnerUserID:        row.OwnerUserID,
+		OwnerOrgID:         textValue(row.OwnerOrgID),
+		OwnerRole:          textValue(row.OwnerRole),
+		Status:             row.Status,
+		CreatedAt:          timeValue(row.CreatedAt),
+		UpdatedAt:          timeValue(row.UpdatedAt),
+		DeletedAt:          timeValue(row.DeletedAt),
+		RetentionExpiresAt: timeValue(row.RetentionExpiresAt),
+		Metadata:           jsonMap(row.Metadata),
+	}
+}
+
+func resourceEventFromRow(row sqlc.ControlResourceEvent) domain.ResourceEventRecord {
+	return domain.ResourceEventRecord{
+		EventID:     row.EventID,
+		ResourceID:  row.ResourceID,
+		ActorUserID: textValue(row.ActorUserID),
+		ActorOrgID:  textValue(row.ActorOrgID),
+		EventType:   row.EventType,
+		TS:          timeValue(row.Ts),
+		Metadata:    jsonMap(row.Metadata),
 	}
 }
 
@@ -1670,6 +1915,13 @@ func timestamptz(value time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: value.UTC(), Valid: true}
 }
 
+func nullableTimestamptz(value time.Time) pgtype.Timestamptz {
+	if value.IsZero() {
+		return pgtype.Timestamptz{}
+	}
+	return timestamptz(value)
+}
+
 func timeValue(value pgtype.Timestamptz) time.Time {
 	if !value.Valid {
 		return time.Time{}
@@ -1690,4 +1942,11 @@ func limit32(limit int, fallback int32) int32 {
 		return fallback
 	}
 	return int32(limit)
+}
+
+func offset32(offset int) int32 {
+	if offset <= 0 {
+		return 0
+	}
+	return int32(offset)
 }

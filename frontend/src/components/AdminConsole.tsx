@@ -1520,6 +1520,9 @@ export function AdminConsole({
                           <div>
                             <strong>{org.name || org.org_id}</strong>
                             <span>{org.org_id}</span>
+                            <span>
+                              {formatCount(org.uploads ?? 0)} uploads · {formatBytes(org.storage_bytes ?? 0)}
+                            </span>
                           </div>
                           <Badge variant="outline" className={userStatusBadgeClass(org.status || "active")}>
                             {org.status || "active"}

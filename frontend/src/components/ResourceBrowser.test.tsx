@@ -49,6 +49,7 @@ const baseProps = {
   onSourceFilterChange: vi.fn(),
   onRefresh: vi.fn(),
   onLoadMore: vi.fn(),
+  onUploadFiles: vi.fn(),
   onOpenResource: vi.fn(),
   onUseInChat: vi.fn(),
   onDeleteResource: vi.fn(),
@@ -100,6 +101,41 @@ describe("ResourceBrowser", () => {
     });
 
     expect(onQueryChange).toHaveBeenCalledWith("nph");
+  });
+
+  it("passes selected files through the Resources upload control", () => {
+    const onUploadFiles = vi.fn();
+    render(<ResourceBrowser {...baseProps} onUploadFiles={onUploadFiles} />);
+
+    const file = new File(["hello"], "cells.ome.tiff", { type: "image/tiff" });
+    fireEvent.change(screen.getByLabelText("Upload resource files"), {
+      target: { files: [file] },
+    });
+
+    expect(onUploadFiles).toHaveBeenCalledTimes(1);
+    expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
+  });
+
+  it("routes browse, use-in-chat, and delete actions with the selected resource", () => {
+    const onOpenResource = vi.fn();
+    const onUseInChat = vi.fn();
+    const onDeleteResource = vi.fn();
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        onOpenResource={onOpenResource}
+        onUseInChat={onUseInChat}
+        onDeleteResource={onDeleteResource}
+      />
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Use in chat" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete resource" })[0]);
+
+    expect(onOpenResource).toHaveBeenCalledWith(imageResource);
+    expect(onUseInChat).toHaveBeenCalledWith(imageResource);
+    expect(onDeleteResource).toHaveBeenCalledWith(imageResource);
   });
 
   it("shows fixed-card skeletons while loading", () => {

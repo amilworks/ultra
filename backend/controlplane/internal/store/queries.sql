@@ -169,3 +169,131 @@ FROM control_artifacts a
 JOIN control_runs r ON r.run_id = a.run_id
 WHERE a.artifact_id = $1
   AND r.user_id = $2;
+
+-- name: UpsertResource :one
+INSERT INTO control_resources (
+  resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type,
+  size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind,
+  source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+)
+VALUES (
+  $1, $2, $3, $4, $5, $6,
+  $7, $8, $9, $10, $11, $12,
+  $13, $14, $15, $16, $17, $18, $19, $20
+)
+ON CONFLICT (resource_id) DO UPDATE SET
+  owner_user_id = EXCLUDED.owner_user_id,
+  owner_org_id = EXCLUDED.owner_org_id,
+  owner_role = EXCLUDED.owner_role,
+  original_name = EXCLUDED.original_name,
+  content_type = EXCLUDED.content_type,
+  size_bytes = EXCLUDED.size_bytes,
+  sha256 = EXCLUDED.sha256,
+  storage_uri = EXCLUDED.storage_uri,
+  storage_path = EXCLUDED.storage_path,
+  source_type = EXCLUDED.source_type,
+  resource_kind = EXCLUDED.resource_kind,
+  source_uri = EXCLUDED.source_uri,
+  project_id = EXCLUDED.project_id,
+  status = EXCLUDED.status,
+  updated_at = EXCLUDED.updated_at,
+  deleted_at = EXCLUDED.deleted_at,
+  retention_expires_at = EXCLUDED.retention_expires_at,
+  metadata = EXCLUDED.metadata
+RETURNING *;
+
+-- name: GetResourceForUser :one
+SELECT *
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active';
+
+-- name: ListResourcesForUser :many
+SELECT *
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND status = $3
+  AND ($4::text = '' OR resource_kind = $4)
+  AND ($5::text = '' OR source_type = $5)
+  AND ($6::text = '' OR project_id = $6)
+  AND (
+    $7::text = ''
+    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
+    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+  )
+ORDER BY created_at DESC, resource_id ASC
+LIMIT $8 OFFSET $9;
+
+-- name: ListResources :many
+SELECT *
+FROM control_resources
+ORDER BY created_at DESC, resource_id ASC
+LIMIT $1 OFFSET $2;
+
+-- name: CountResourcesForUser :one
+SELECT count(*)::bigint
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND status = $3
+  AND ($4::text = '' OR resource_kind = $4)
+  AND ($5::text = '' OR source_type = $5)
+  AND ($6::text = '' OR project_id = $6)
+  AND (
+    $7::text = ''
+    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
+    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+  );
+
+-- name: SoftDeleteResourceForUser :one
+UPDATE control_resources
+SET status = 'deleted',
+    deleted_at = $4,
+    retention_expires_at = $5,
+    updated_at = $4
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status <> 'deleted'
+RETURNING *;
+
+-- name: RestoreResourceForUser :one
+UPDATE control_resources
+SET status = 'active',
+    deleted_at = NULL,
+    retention_expires_at = NULL,
+    updated_at = $4
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+RETURNING *;
+
+-- name: ResourceStorageStats :one
+SELECT count(*)::bigint AS total_resources, COALESCE(sum(size_bytes), 0)::bigint AS total_bytes
+FROM control_resources
+WHERE status = 'active';
+
+-- name: CreateResourceEvent :one
+INSERT INTO control_resource_events (
+  event_id, resource_id, actor_user_id, actor_org_id, event_type, ts, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING *;
+
+-- name: ListResourceEvents :many
+SELECT *
+FROM control_resource_events
+WHERE resource_id = $1
+ORDER BY ts DESC, event_id ASC
+LIMIT $2;

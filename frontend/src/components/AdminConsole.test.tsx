@@ -115,6 +115,7 @@ const emptyOverview: AdminOverviewResponse = {
   tool_usage_7d: [],
   workers: [],
   top_users: [],
+  resource_projects: [],
   recent_issues: [],
 };
 

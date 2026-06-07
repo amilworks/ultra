@@ -9588,6 +9588,7 @@ export function App() {
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourcesLoadingMore, setResourcesLoadingMore] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [resourcesUploading, setResourcesUploading] = useState(false);
   const resourceListKeyRef = useRef("");
   const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
@@ -11856,6 +11857,26 @@ export function App() {
   const refreshResources = useCallback((): void => {
     setResourceRefreshToken((value) => value + 1);
   }, []);
+
+  const uploadResourceFiles = useCallback(
+    async (files: File[]): Promise<void> => {
+      const selectedFiles = files.filter((file) => file.size >= 0);
+      if (selectedFiles.length === 0 || resourcesUploading) {
+        return;
+      }
+      setResourcesUploading(true);
+      setResourcesError(null);
+      try {
+        await apiClient.uploadFiles(selectedFiles);
+        setResourceRefreshToken((value) => value + 1);
+      } catch (error) {
+        setResourcesError(normalizeApiError(error));
+      } finally {
+        setResourcesUploading(false);
+      }
+    },
+    [apiClient, resourcesUploading]
+  );
 
   const resourceHasMore = resources.length < resourceTotalCount;
 
@@ -14822,6 +14843,10 @@ export function App() {
                 onSourceFilterChange={setResourceSourceFilter}
                 onRefresh={refreshResources}
                 onLoadMore={loadMoreResources}
+                onUploadFiles={(files: File[]) => {
+                  void uploadResourceFiles(files);
+                }}
+                uploading={resourcesUploading}
                 onOpenResource={openResourceInViewer}
                 onUseInChat={addResourceToActiveConversation}
                 onDeleteResource={(resource: ResourceRecord) => {

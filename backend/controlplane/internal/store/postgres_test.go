@@ -196,6 +196,114 @@ func TestPostgresStoreTenantScopedQueriesFilterByUser(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreResourceCatalogFiltersSoftDeletesAndRestores(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	store := NewPostgresStore(pool)
+	suffix := domain.NewID("resource")
+	resourceID := "file_alice_" + suffix
+	bobResourceID := "file_bob_" + suffix
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   resourceID,
+		OwnerUserID:  "alice-" + suffix,
+		OwnerOrgID:   "org-a",
+		OwnerRole:    "researcher",
+		OriginalName: "cells.ome.tiff",
+		ContentType:  "image/tiff",
+		SizeBytes:    128,
+		SHA256:       "abc123",
+		StorageURI:   "file:///srv/ultra/shared/uploads/" + resourceID + "__cells.ome.tiff",
+		StoragePath:  resourceID + "__cells.ome.tiff",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		ProjectID:    "project-ct",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource alice: %v", err)
+	}
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   bobResourceID,
+		OwnerUserID:  "bob-" + suffix,
+		OwnerOrgID:   "org-a",
+		OriginalName: "other.csv",
+		SizeBytes:    64,
+		SourceType:   "upload",
+		ResourceKind: "table",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource bob: %v", err)
+	}
+
+	page, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:    "alice-" + suffix,
+		OrgID:     "org-a",
+		Query:     "ome",
+		Kind:      "image",
+		Source:    "upload",
+		ProjectID: "project-ct",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser alice: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Resources) != 1 || page.Resources[0].ResourceID != resourceID {
+		t.Fatalf("alice resources = %+v, want only alice image", page)
+	}
+	if page.Resources[0].ProjectID != "project-ct" {
+		t.Fatalf("alice project_id = %q, want project-ct", page.Resources[0].ProjectID)
+	}
+	wrongProject, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice-" + suffix, OrgID: "org-a", ProjectID: "project-other", Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser wrong project: %v", err)
+	}
+	if wrongProject.TotalCount != 0 || len(wrongProject.Resources) != 0 {
+		t.Fatalf("wrong project resources = %+v, want none", wrongProject)
+	}
+	if _, err := store.GetResourceForUser(ctx, resourceID, "bob-"+suffix, "org-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetResourceForUser bob err = %v, want ErrNotFound", err)
+	}
+	deleted, err := store.SoftDeleteResourceForUser(ctx, resourceID, "alice-"+suffix, "org-a", time.Now())
+	if err != nil {
+		t.Fatalf("SoftDeleteResourceForUser: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt.IsZero() || deleted.RetentionExpiresAt.IsZero() {
+		t.Fatalf("deleted = %+v, want deleted status with retention expiry", deleted)
+	}
+	deletedPage, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{UserID: "alice-" + suffix, OrgID: "org-a", Limit: 20})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser after delete: %v", err)
+	}
+	if deletedPage.TotalCount != 0 || len(deletedPage.Resources) != 0 {
+		t.Fatalf("deleted resources = %+v, want no active rows", deletedPage)
+	}
+	restored, err := store.RestoreResourceForUser(ctx, resourceID, "alice-"+suffix, "org-a", time.Now())
+	if err != nil {
+		t.Fatalf("RestoreResourceForUser: %v", err)
+	}
+	if restored.Status != "active" || !restored.DeletedAt.IsZero() || !restored.RetentionExpiresAt.IsZero() {
+		t.Fatalf("restored = %+v, want active with empty retention fields", restored)
+	}
+	if _, err := store.CreateResourceEvent(ctx, domain.AppendResourceEventInput{
+		ResourceID:  resourceID,
+		ActorUserID: "alice-" + suffix,
+		ActorOrgID:  "org-a",
+		EventType:   "resource.restored",
+	}); err != nil {
+		t.Fatalf("CreateResourceEvent: %v", err)
+	}
+}
+
 func TestPostgresStoreCompleteRunRepairsSucceededRunMissingResponseText(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {

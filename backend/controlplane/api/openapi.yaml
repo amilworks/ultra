@@ -799,6 +799,33 @@ paths:
                 properties:
                   deleted: { type: boolean }
                   file_id: { type: string }
+  /v2/resources/{file_id}/restore:
+    post:
+      operationId: restoreResource
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Restored resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceResponse"
+  /v2/resources/{file_id}/events:
+    get:
+      operationId: listResourceEvents
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        "200":
+          description: Tenant-scoped resource audit events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceEventsResponse"
   /v2/resources/{file_id}/thumbnail:
     get:
       operationId: getResourceThumbnail
@@ -1037,6 +1064,29 @@ paths:
               schema:
                 type: string
                 format: binary
+  /v2/artifacts/{artifact_id}/promote-resource:
+    post:
+      operationId: promoteArtifactResource
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2PromoteArtifactResourceRequest"
+      responses:
+        "201":
+          description: Artifact copied into the user resource namespace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceResponse"
+        "404":
+          description: Artifact not found for the current user
   /v2/workers/heartbeat:
     post:
       operationId: postV2WorkerHeartbeat
@@ -1072,6 +1122,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2AdminOverviewResponse"
+  /v2/admin/resources/reconcile:
+    post:
+      operationId: reconcileV2AdminResources
+      responses:
+        "200":
+          description: Read-only resource catalog and NFS drift report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceReconcileResponse"
   /v2/admin/orgs:
     get:
       operationId: listV2AdminOrganizations
@@ -1936,6 +1996,8 @@ components:
         updated_at: { type: string }
         metadata:
           $ref: "#/components/schemas/JsonObject"
+        uploads: { type: integer }
+        storage_bytes: { type: integer, format: int64 }
     V2AdminOrganizationListResponse:
       type: object
       required: [count, organizations]
@@ -2090,7 +2152,7 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2AdminOverviewResponse:
       type: object
-      required: [generated_at, runtime, queue, kpis, activity, usage_last_24h, tool_usage_7d, workers, top_users, recent_issues]
+      required: [generated_at, runtime, queue, kpis, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
       properties:
         generated_at: { type: string }
         runtime:
@@ -2119,10 +2181,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2AdminUserSummary"
+        resource_projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2AdminResourceOwnerSummary"
         recent_issues:
           type: array
           items:
             $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminResourceOwnerSummary:
+      type: object
+      required: [id, uploads, storage_bytes]
+      properties:
+        id: { type: string }
+        uploads: { type: integer }
+        storage_bytes: { type: integer, format: int64 }
     V2AdminUserListResponse:
       type: object
       required: [count, users]
@@ -2441,6 +2514,7 @@ components:
         sha256: { type: string }
         created_at: { type: string }
         source_uri: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
         preview_url: { type: string, nullable: true }
         principal:
           nullable: true
@@ -2532,6 +2606,7 @@ components:
         source_type: { type: string }
         resource_kind: { type: string }
         source_uri: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
         has_thumbnail: { type: boolean }
         thumbnail_url: { type: string, nullable: true }
         preview_url: { type: string, nullable: true }
@@ -2561,6 +2636,63 @@ components:
       properties:
         resource:
           $ref: "#/components/schemas/V2ResourceRecord"
+    V2ResourceEventRecord:
+      type: object
+      required: [event_id, resource_id, event_type, ts, metadata]
+      properties:
+        event_id: { type: string }
+        resource_id: { type: string }
+        actor_user_id: { type: string, nullable: true }
+        actor_org_id: { type: string, nullable: true }
+        event_type: { type: string }
+        ts: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceEventsResponse:
+      type: object
+      required: [resource_id, count, events]
+      properties:
+        resource_id: { type: string }
+        count: { type: integer }
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceEventRecord"
+    V2PromoteArtifactResourceRequest:
+      type: object
+      properties:
+        original_name:
+          type: string
+          description: Optional filename for the promoted Resource. Defaults to the artifact filename.
+        project_id:
+          type: string
+          description: Optional project/study id for accounting when promoting an artifact.
+    V2ResourceReconcileIssue:
+      type: object
+      required: [issue_type, severity, message]
+      properties:
+        issue_type: { type: string }
+        severity: { type: string, enum: [info, warning, error] }
+        resource_id: { type: string, nullable: true }
+        path: { type: string, nullable: true }
+        message: { type: string }
+        expected_sha: { type: string, nullable: true }
+        actual_sha: { type: string, nullable: true }
+    V2ResourceReconcileResponse:
+      type: object
+      required: [checked_at, issue_count, summary, issues]
+      properties:
+        checked_at: { type: string }
+        issue_count: { type: integer }
+        summary:
+          type: object
+          additionalProperties:
+            type: integer
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceReconcileIssue"
     V2RunRecord:
       type: object
       required: [run_id, goal, status, workflow_kind, created_at, updated_at, metadata]

@@ -734,6 +734,7 @@ export type UploadedFileRecord = {
   sync_status?: string | null;
   canonical_resource_uniq?: string | null;
   canonical_resource_uri?: string | null;
+  project_id?: string | null;
   client_view_url?: string | null;
   image_service_url?: string | null;
   sync_error?: string | null;
@@ -755,6 +756,7 @@ export type ResourceRecord = {
   source_type: "upload" | "bisque_import" | string;
   resource_kind: "image" | "video" | "table" | "file" | string;
   source_uri?: string | null;
+  project_id?: string | null;
   client_view_url?: string | null;
   image_service_url?: string | null;
   has_thumbnail: boolean;
@@ -1055,7 +1057,14 @@ export type AdminOverviewResponse = {
   tool_usage_7d: AdminToolUsageRecord[];
   workers: AdminWorkerRecord[];
   top_users: AdminUserSummary[];
+  resource_projects: AdminResourceOwnerSummary[];
   recent_issues: AdminIssueRecord[];
+};
+
+export type AdminResourceOwnerSummary = {
+  id: string;
+  uploads: number;
+  storage_bytes: number;
 };
 
 export type AdminUserListResponse = {
@@ -1070,6 +1079,8 @@ export type AdminOrganization = {
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown>;
+  uploads?: number;
+  storage_bytes?: number;
 };
 
 export type AdminOrganizationListResponse = {

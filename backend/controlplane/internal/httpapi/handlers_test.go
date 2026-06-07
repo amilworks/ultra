@@ -1230,6 +1230,114 @@ func TestV2AdminCreateUserPersistsFirstClassAccount(t *testing.T) {
 	}
 }
 
+func TestV2AdminUsersIncludeResourceCatalogAccounting(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem})
+
+	account, err := mem.CreateUser(ctx, domain.CreateUserInput{
+		UserID:      "researcher-1",
+		Email:       "researcher@example.org",
+		DisplayName: "Researcher One",
+		OrgID:       "local-org",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_active_a",
+		OriginalName: "a.png",
+		ContentType:  "image/png",
+		SizeBytes:    100,
+		SourceType:   "upload",
+		ResourceKind: "image",
+		ProjectID:    "project-alpha",
+		OwnerUserID:  account.UserID,
+		OwnerOrgID:   "local-org",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource active a: %v", err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_active_b",
+		OriginalName: "b.csv",
+		ContentType:  "text/csv",
+		SizeBytes:    23,
+		SourceType:   "artifact",
+		ResourceKind: "table",
+		ProjectID:    "project-alpha",
+		OwnerUserID:  account.UserID,
+		OwnerOrgID:   "local-org",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource active b: %v", err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_deleted",
+		OriginalName: "deleted.txt",
+		SizeBytes:    999,
+		SourceType:   "upload",
+		ResourceKind: "file",
+		OwnerUserID:  account.UserID,
+		OwnerOrgID:   "local-org",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource deleted: %v", err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_deleted", account.UserID, "local-org", time.Now()); err != nil {
+		t.Fatalf("SoftDeleteResourceForUser: %v", err)
+	}
+
+	usersReq := httptest.NewRequest(http.MethodGet, "/v2/admin/users?q=researcher@example.org", nil)
+	usersRec := httptest.NewRecorder()
+	router.ServeHTTP(usersRec, usersReq)
+	if usersRec.Code != http.StatusOK {
+		t.Fatalf("list users status = %d body=%s", usersRec.Code, usersRec.Body.String())
+	}
+	var usersPayload adminUserListResponse
+	if err := json.Unmarshal(usersRec.Body.Bytes(), &usersPayload); err != nil {
+		t.Fatalf("decode users: %v", err)
+	}
+	if usersPayload.Count != 1 || usersPayload.Users[0].Uploads != 2 || usersPayload.Users[0].StorageBytes != 123 {
+		t.Fatalf("users payload = %+v, want active catalog accounting", usersPayload)
+	}
+
+	overviewReq := httptest.NewRequest(http.MethodGet, "/v2/admin/overview", nil)
+	overviewRec := httptest.NewRecorder()
+	router.ServeHTTP(overviewRec, overviewReq)
+	if overviewRec.Code != http.StatusOK {
+		t.Fatalf("overview status = %d body=%s", overviewRec.Code, overviewRec.Body.String())
+	}
+	var overview adminOverviewResponse
+	if err := json.Unmarshal(overviewRec.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if overview.KPIs.TotalUploads != 2 || overview.KPIs.SoftDeletedUploads != 1 || overview.KPIs.TotalStorageBytes != 123 {
+		t.Fatalf("overview KPIs = %+v, want resource catalog accounting", overview.KPIs)
+	}
+	if len(overview.ResourceProjects) != 1 || overview.ResourceProjects[0].ID != "project-alpha" || overview.ResourceProjects[0].Uploads != 2 || overview.ResourceProjects[0].StorageBytes != 123 {
+		t.Fatalf("overview resource projects = %+v, want project-alpha accounting", overview.ResourceProjects)
+	}
+
+	orgsReq := httptest.NewRequest(http.MethodGet, "/v2/admin/orgs?q=local", nil)
+	orgsRec := httptest.NewRecorder()
+	router.ServeHTTP(orgsRec, orgsReq)
+	if orgsRec.Code != http.StatusOK {
+		t.Fatalf("orgs status = %d body=%s", orgsRec.Code, orgsRec.Body.String())
+	}
+	var orgsPayload adminOrganizationListResponse
+	if err := json.Unmarshal(orgsRec.Body.Bytes(), &orgsPayload); err != nil {
+		t.Fatalf("decode orgs: %v", err)
+	}
+	if orgsPayload.Count != 1 || orgsPayload.Organizations[0].Uploads != 2 || orgsPayload.Organizations[0].StorageBytes != 123 {
+		t.Fatalf("orgs payload = %+v, want org resource accounting", orgsPayload)
+	}
+}
+
 func TestV2AdminCreateUserDuplicateEmailReturnsConflict(t *testing.T) {
 	t.Parallel()
 
@@ -2280,6 +2388,388 @@ func TestV2UploadAndResourceHandlers(t *testing.T) {
 	}
 	if captionResponse.FileID != uploaded.FileID || !strings.Contains(captionResponse.Caption, "prairie.jpg") || captionResponse.Source != "fallback" {
 		t.Fatalf("caption response = %+v, want fallback caption for uploaded image", captionResponse)
+	}
+}
+
+func TestV2ResourcesListComesFromCatalogWhenNFSFileIsMissing(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "catalog-only.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 4, 3)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.Header.Set("X-Ultra-User-Id", "catalog-user")
+	uploadReq.Header.Set("X-Ultra-Org-Id", "catalog-org")
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+	uploaded := uploadResponse.Uploaded[0]
+	matches, err := filepath.Glob(filepath.Join(uploadRoot, uploaded.FileID+"__*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("uploaded files = %v err=%v, want one file", matches, err)
+	}
+	if err := os.Remove(matches[0]); err != nil {
+		t.Fatalf("remove uploaded blob to prove list is catalog-backed: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20&kind=image&source=upload", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "catalog-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "catalog-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list resources status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listResponse resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode resources response: %v", err)
+	}
+	if listResponse.Count != 1 || len(listResponse.Resources) != 1 {
+		t.Fatalf("resources = %+v, want catalog row even when blob is missing", listResponse)
+	}
+	if got := listResponse.Resources[0].FileID; got != uploaded.FileID {
+		t.Fatalf("resource file_id = %q, want %q", got, uploaded.FileID)
+	}
+	if listResponse.Resources[0].StagedLocally {
+		t.Fatalf("staged_locally = true, want false after blob was removed")
+	}
+}
+
+func TestV2ResourcesListMigratesExistingUploadsOnceThenUsesCatalog(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	migratedFileID := writeTestUploadFile(t, uploadRoot, "migrated-image.png", testPNGBytes(t, 3, 3))
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	firstReq.Header.Set("X-Ultra-User-Id", "test-user")
+	firstReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	firstRec := httptest.NewRecorder()
+	router.ServeHTTP(firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first list status = %d body=%s", firstRec.Code, firstRec.Body.String())
+	}
+	var first resourcesResponse
+	if err := json.Unmarshal(firstRec.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first resources: %v", err)
+	}
+	if first.Count != 1 || len(first.Resources) != 1 || first.Resources[0].FileID != migratedFileID {
+		t.Fatalf("first resources = %+v, want migrated upload only", first)
+	}
+
+	orphanPath := filepath.Join(uploadRoot, "file_uncataloged__orphan.png")
+	if err := os.WriteFile(orphanPath, testPNGBytes(t, 4, 4), 0o644); err != nil {
+		t.Fatalf("write uncataloged upload after migration: %v", err)
+	}
+	if err := writeUploadMetadata(uploadRoot, "file_uncataloged", requestPrincipal{UserID: "test-user", OrgID: "test-org", Role: "researcher"}); err != nil {
+		t.Fatalf("write uncataloged metadata: %v", err)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	secondReq.Header.Set("X-Ultra-User-Id", "test-user")
+	secondReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	secondRec := httptest.NewRecorder()
+	router.ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second list status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	var second resourcesResponse
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode second resources: %v", err)
+	}
+	if second.Count != 1 || len(second.Resources) != 1 || second.Resources[0].FileID != migratedFileID {
+		t.Fatalf("second resources = %+v, want unchanged catalog-backed list", second)
+	}
+}
+
+func TestV2UploadRejectsResourceQuotaAndCleansBlob(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		metadata  domain.JSONMap
+		projectID string
+		existing  domain.UpsertResourceInput
+	}{
+		{
+			name: "user quota",
+			metadata: domain.JSONMap{
+				"resource_quota_count": 1,
+			},
+			existing: domain.UpsertResourceInput{
+				ResourceID:   "file_existing_user_quota",
+				OriginalName: "existing.png",
+				SizeBytes:    32,
+				SourceType:   "upload",
+				ResourceKind: "image",
+				OwnerUserID:  "quota-user",
+				Status:       "active",
+			},
+		},
+		{
+			name: "project quota",
+			metadata: domain.JSONMap{
+				"resource_project_quotas": map[string]any{
+					"project-alpha": map[string]any{"max_resources": 1},
+				},
+			},
+			projectID: "project-alpha",
+			existing: domain.UpsertResourceInput{
+				ResourceID:   "file_existing_project_quota",
+				OriginalName: "existing-project.png",
+				SizeBytes:    32,
+				SourceType:   "upload",
+				ResourceKind: "image",
+				ProjectID:    "project-alpha",
+				OwnerUserID:  "quota-user",
+				Status:       "active",
+			},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			uploadRoot := t.TempDir()
+			mem := store.NewMemoryStore()
+			router := NewRouter(ServerDeps{
+				Version:    "test-version",
+				Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+				Store:      mem,
+				UploadRoot: uploadRoot,
+			})
+			if _, err := mem.CreateUser(context.Background(), domain.CreateUserInput{
+				UserID:   "quota-user",
+				Email:    "quota@example.org",
+				Metadata: tc.metadata,
+			}); err != nil {
+				t.Fatalf("CreateUser: %v", err)
+			}
+			if _, err := mem.UpsertResource(context.Background(), tc.existing); err != nil {
+				t.Fatalf("UpsertResource existing: %v", err)
+			}
+
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			if tc.projectID != "" {
+				if err := writer.WriteField("project_id", tc.projectID); err != nil {
+					t.Fatalf("WriteField project_id: %v", err)
+				}
+			}
+			part, err := writer.CreateFormFile("files", "blocked.png")
+			if err != nil {
+				t.Fatalf("CreateFormFile: %v", err)
+			}
+			if _, err := part.Write(testPNGBytes(t, 2, 2)); err != nil {
+				t.Fatalf("write multipart file: %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close multipart writer: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req.Header.Set("X-Ultra-User-Id", "quota-user")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("upload status = %d body=%s, want quota response", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "resource_quota_exceeded") {
+				t.Fatalf("quota body = %s, want resource_quota_exceeded", rec.Body.String())
+			}
+			page, err := mem.ListResourcesForUser(context.Background(), domain.ResourceListInput{UserID: "quota-user", Limit: 20})
+			if err != nil {
+				t.Fatalf("ListResourcesForUser: %v", err)
+			}
+			if page.TotalCount != 1 || len(page.Resources) != 1 || page.Resources[0].ResourceID != tc.existing.ResourceID {
+				t.Fatalf("catalog resources = %+v, want only pre-existing resource", page)
+			}
+			files, err := listUploadResources(uploadRoot)
+			if err != nil {
+				t.Fatalf("list upload root after quota failure: %v", err)
+			}
+			if len(files) != 0 {
+				t.Fatalf("upload root resources after quota failure = %+v, want cleaned root", files)
+			}
+		})
+	}
+}
+
+func TestUploadCatalogMigrationSmokeExistingRoot(t *testing.T) {
+	root := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_UPLOAD_ROOT_SMOKE"))
+	if root == "" {
+		t.Skip("set ULTRA_CONTROL_UPLOAD_ROOT_SMOKE to run migration smoke against an existing upload root")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("resolve smoke upload root: %v", err)
+	}
+	before, err := listUploadResources(absRoot)
+	if err != nil {
+		t.Fatalf("list existing upload root before migration: %v", err)
+	}
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: absRoot,
+	}
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), absRoot); err != nil {
+		t.Fatalf("migrate existing upload root: %v", err)
+	}
+	records, err := mem.ListResources(context.Background(), len(before)+10, 0)
+	if err != nil {
+		t.Fatalf("list migrated catalog resources: %v", err)
+	}
+	if len(records) != len(before) {
+		t.Fatalf("migrated catalog rows = %d, want %d existing upload resources from %s", len(records), len(before), absRoot)
+	}
+}
+
+func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	fileID := writeTestUploadFile(t, uploadRoot, "restore-me.png", testPNGBytes(t, 2, 2))
+
+	migrateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	migrateReq.Header.Set("X-Ultra-User-Id", "test-user")
+	migrateReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	migrateRec := httptest.NewRecorder()
+	router.ServeHTTP(migrateRec, migrateReq)
+	if migrateRec.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body=%s", migrateRec.Code, migrateRec.Body.String())
+	}
+
+	matches, err := filepath.Glob(filepath.Join(uploadRoot, fileID+"__*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("uploaded fixture files = %v err=%v, want one file", matches, err)
+	}
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resources/"+fileID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "test-user")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, err := os.Stat(matches[0]); err != nil {
+		t.Fatalf("soft delete removed the physical blob: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "test-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list after delete status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listResponse resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode list after delete: %v", err)
+	}
+	if listResponse.Count != 0 || len(listResponse.Resources) != 0 {
+		t.Fatalf("resources after delete = %+v, want hidden soft-deleted resource", listResponse)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/v2/resources/"+fileID+"/restore", nil)
+	restoreReq.Header.Set("X-Ultra-User-Id", "test-user")
+	restoreReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore status = %d body=%s", restoreRec.Code, restoreRec.Body.String())
+	}
+	listAgainRec := httptest.NewRecorder()
+	router.ServeHTTP(listAgainRec, listReq)
+	if listAgainRec.Code != http.StatusOK {
+		t.Fatalf("list after restore status = %d body=%s", listAgainRec.Code, listAgainRec.Body.String())
+	}
+	var restoredResponse resourcesResponse
+	if err := json.Unmarshal(listAgainRec.Body.Bytes(), &restoredResponse); err != nil {
+		t.Fatalf("decode list after restore: %v", err)
+	}
+	if restoredResponse.Count != 1 || restoredResponse.Resources[0].FileID != fileID {
+		t.Fatalf("resources after restore = %+v, want restored resource", restoredResponse)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "test-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var eventsResponse resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &eventsResponse); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	if eventsResponse.ResourceID != fileID || eventsResponse.Count < 3 {
+		t.Fatalf("events response = %+v, want migrated/deleted/restored audit events", eventsResponse)
+	}
+	seenEvents := map[string]bool{}
+	for _, event := range eventsResponse.Events {
+		seenEvents[event.EventType] = true
+	}
+	for _, want := range []string{"resource.migrated", "resource.deleted", "resource.restored"} {
+		if !seenEvents[want] {
+			t.Fatalf("resource events = %+v, missing %s", eventsResponse.Events, want)
+		}
+	}
+
+	foreignEventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/events", nil)
+	foreignEventsReq.Header.Set("X-Ultra-User-Id", "other-user")
+	foreignEventsReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	foreignEventsRec := httptest.NewRecorder()
+	router.ServeHTTP(foreignEventsRec, foreignEventsReq)
+	if foreignEventsRec.Code != http.StatusNotFound {
+		t.Fatalf("foreign events status = %d body=%s, want 404", foreignEventsRec.Code, foreignEventsRec.Body.String())
 	}
 }
 
@@ -5080,6 +5570,210 @@ func TestArtifactDownloadServesFilesUnderArtifactRootAndRejectsTraversal(t *test
 	router.ServeHTTP(traversalRec, traversalReq)
 	if traversalRec.Code != http.StatusBadRequest {
 		t.Fatalf("traversal status = %d body=%s, want 400", traversalRec.Code, traversalRec.Body.String())
+	}
+}
+
+func TestArtifactPromotionCopiesArtifactIntoResourceCatalog(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	artifactRoot := t.TempDir()
+	uploadRoot := t.TempDir()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:      "test-version",
+		Runs:         service,
+		Store:        mem,
+		Bus:          bus,
+		ArtifactRoot: artifactRoot,
+		UploadRoot:   uploadRoot,
+	})
+
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "artifact promote"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "artifact promote",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	artifactPath := filepath.Join(artifactRoot, run.RunID, "outputs", "detections.csv")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("x,y\n1,2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile artifact: %v", err)
+	}
+	artifact, err := mem.CreateArtifact(ctx, domain.CreateArtifactInput{
+		RunID:    run.RunID,
+		ThreadID: thread.ThreadID,
+		Kind:     "table",
+		Path:     "outputs/detections.csv",
+		MimeType: "text/csv",
+		Title:    "Detections",
+	})
+	if err != nil {
+		t.Fatalf("CreateArtifact: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/artifacts/"+artifact.ArtifactID+"/promote-resource", strings.NewReader(`{"original_name":"saved-detections.csv"}`))
+	req.Header.Set("X-Ultra-User-Id", "user-1")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("promote status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var promoted resourceResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &promoted); err != nil {
+		t.Fatalf("decode promoted resource: %v", err)
+	}
+	if promoted.Resource.FileID == "" || promoted.Resource.OriginalName != "saved-detections.csv" {
+		t.Fatalf("promoted resource = %+v, want saved filename", promoted.Resource)
+	}
+	if promoted.Resource.SourceType != "artifact" || promoted.Resource.ResourceKind != "table" {
+		t.Fatalf("promoted source/kind = %+v, want artifact table", promoted.Resource)
+	}
+	if !strings.Contains(promoted.Resource.SourceURI, artifact.ArtifactID) {
+		t.Fatalf("promoted source_uri = %q, want artifact id", promoted.Resource.SourceURI)
+	}
+	copiedPath := filepath.Join(uploadRoot, promoted.Resource.FileID+"__saved-detections.csv")
+	copied, err := os.ReadFile(copiedPath)
+	if err != nil {
+		t.Fatalf("read promoted upload copy: %v", err)
+	}
+	if string(copied) != "x,y\n1,2\n" {
+		t.Fatalf("copied artifact content = %q", string(copied))
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?source=artifact", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "user-1")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list promoted status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var list resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode resources: %v", err)
+	}
+	if list.Count != 1 || len(list.Resources) != 1 || list.Resources[0].FileID != promoted.Resource.FileID {
+		t.Fatalf("resources = %+v, want promoted resource only", list)
+	}
+
+	bobReq := httptest.NewRequest(http.MethodPost, "/v2/artifacts/"+artifact.ArtifactID+"/promote-resource", nil)
+	bobReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobRec := httptest.NewRecorder()
+	router.ServeHTTP(bobRec, bobReq)
+	if bobRec.Code != http.StatusNotFound {
+		t.Fatalf("bob promote status = %d body=%s, want 404", bobRec.Code, bobRec.Body.String())
+	}
+}
+
+func TestAdminResourceReconcilerDetectsUploadCatalogDrift(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	uploadRoot := t.TempDir()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       service,
+		Store:      mem,
+		Bus:        bus,
+		UploadRoot: uploadRoot,
+	})
+
+	orphanPath := filepath.Join(uploadRoot, "file_orphan__orphan.txt")
+	if err := os.WriteFile(orphanPath, []byte("orphan"), 0o644); err != nil {
+		t.Fatalf("WriteFile orphan: %v", err)
+	}
+
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_missing",
+		OriginalName: "missing.txt",
+		ContentType:  "text/plain",
+		StoragePath:  "file_missing__missing.txt",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		OwnerUserID:  "local-user",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource missing: %v", err)
+	}
+
+	driftPath := filepath.Join(uploadRoot, "file_drift__drift.txt")
+	if err := os.WriteFile(driftPath, []byte("new-bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile drift: %v", err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_drift",
+		OriginalName: "drift.txt",
+		ContentType:  "text/plain",
+		StoragePath:  filepath.Base(driftPath),
+		SourceType:   "upload",
+		ResourceKind: "file",
+		OwnerUserID:  "local-user",
+		Status:       "active",
+		SHA256:       strings.Repeat("0", 64),
+	}); err != nil {
+		t.Fatalf("UpsertResource drift: %v", err)
+	}
+
+	previewPath := filepath.Join(uploadRoot, "file_preview__preview.png")
+	previewBytes := []byte("not-a-png")
+	if err := os.WriteFile(previewPath, previewBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile preview: %v", err)
+	}
+	previewSHA, err := sha256File(previewPath)
+	if err != nil {
+		t.Fatalf("sha preview: %v", err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_preview",
+		OriginalName: "preview.png",
+		ContentType:  "image/png",
+		StoragePath:  filepath.Base(previewPath),
+		SourceType:   "upload",
+		ResourceKind: "image",
+		OwnerUserID:  "local-user",
+		Status:       "active",
+		SizeBytes:    int64(len(previewBytes)),
+		SHA256:       previewSHA,
+	}); err != nil {
+		t.Fatalf("UpsertResource preview: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/admin/resources/reconcile", nil)
+	req.Header.Set("X-Ultra-User-Id", "local-user")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconcile status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourceReconcileResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode reconcile response: %v", err)
+	}
+	issueTypes := map[string]bool{}
+	for _, issue := range response.Issues {
+		issueTypes[issue.IssueType] = true
+	}
+	for _, want := range []string{"missing_catalog_row", "missing_sidecar", "missing_blob", "checksum_drift", "failed_preview"} {
+		if !issueTypes[want] {
+			t.Fatalf("issue types = %#v, missing %s; response=%+v", issueTypes, want, response)
+		}
+	}
+	if response.IssueCount != len(response.Issues) || response.Summary["checksum_drift"] != 1 {
+		t.Fatalf("reconcile response = %+v, want issue count and drift summary", response)
 	}
 }
 

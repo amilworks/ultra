@@ -77,6 +77,51 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 	return i, err
 }
 
+const countResourcesForUser = `-- name: CountResourcesForUser :one
+SELECT count(*)::bigint
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND status = $3
+  AND ($4::text = '' OR resource_kind = $4)
+  AND ($5::text = '' OR source_type = $5)
+  AND ($6::text = '' OR project_id = $6)
+  AND (
+    $7::text = ''
+    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
+    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+  )
+`
+
+type CountResourcesForUserParams struct {
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+	Status      string      `json:"status"`
+	Column4     string      `json:"column_4"`
+	Column5     string      `json:"column_5"`
+	Column6     string      `json:"column_6"`
+	Column7     string      `json:"column_7"`
+}
+
+func (q *Queries) CountResourcesForUser(ctx context.Context, arg CountResourcesForUserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countResourcesForUser,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Status,
+		arg.Column4,
+		arg.Column5,
+		arg.Column6,
+		arg.Column7,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countThreads = `-- name: CountThreads :one
 SELECT COUNT(*) FROM control_threads
 WHERE ($1::text = '' OR status = $1)
@@ -178,6 +223,47 @@ func (q *Queries) CreateArtifact(ctx context.Context, arg CreateArtifactParams) 
 		&i.Category,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const createResourceEvent = `-- name: CreateResourceEvent :one
+INSERT INTO control_resource_events (
+  event_id, resource_id, actor_user_id, actor_org_id, event_type, ts, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING event_id, resource_id, actor_user_id, actor_org_id, event_type, ts, metadata
+`
+
+type CreateResourceEventParams struct {
+	EventID     string             `json:"event_id"`
+	ResourceID  string             `json:"resource_id"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	EventType   string             `json:"event_type"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+func (q *Queries) CreateResourceEvent(ctx context.Context, arg CreateResourceEventParams) (ControlResourceEvent, error) {
+	row := q.db.QueryRow(ctx, createResourceEvent,
+		arg.EventID,
+		arg.ResourceID,
+		arg.ActorUserID,
+		arg.ActorOrgID,
+		arg.EventType,
+		arg.Ts,
+		arg.Metadata,
+	)
+	var i ControlResourceEvent
+	err := row.Scan(
+		&i.EventID,
+		&i.ResourceID,
+		&i.ActorUserID,
+		&i.ActorOrgID,
+		&i.EventType,
+		&i.Ts,
 		&i.Metadata,
 	)
 	return i, err
@@ -355,6 +441,49 @@ func (q *Queries) GetArtifactForUser(ctx context.Context, arg GetArtifactForUser
 		&i.Category,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getResourceForUser = `-- name: GetResourceForUser :one
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'
+`
+
+type GetResourceForUserParams struct {
+	ResourceID  string      `json:"resource_id"`
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+}
+
+func (q *Queries) GetResourceForUser(ctx context.Context, arg GetResourceForUserParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, getResourceForUser, arg.ResourceID, arg.OwnerUserID, arg.OwnerOrgID)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
 		&i.Metadata,
 	)
 	return i, err
@@ -546,6 +675,185 @@ func (q *Queries) InsertThreadMessage(ctx context.Context, arg InsertThreadMessa
 		&i.RunID,
 	)
 	return i, err
+}
+
+const listResourceEvents = `-- name: ListResourceEvents :many
+SELECT event_id, resource_id, actor_user_id, actor_org_id, event_type, ts, metadata
+FROM control_resource_events
+WHERE resource_id = $1
+ORDER BY ts DESC, event_id ASC
+LIMIT $2
+`
+
+type ListResourceEventsParams struct {
+	ResourceID string `json:"resource_id"`
+	Limit      int32  `json:"limit"`
+}
+
+func (q *Queries) ListResourceEvents(ctx context.Context, arg ListResourceEventsParams) ([]ControlResourceEvent, error) {
+	rows, err := q.db.Query(ctx, listResourceEvents, arg.ResourceID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlResourceEvent
+	for rows.Next() {
+		var i ControlResourceEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.ResourceID,
+			&i.ActorUserID,
+			&i.ActorOrgID,
+			&i.EventType,
+			&i.Ts,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResources = `-- name: ListResources :many
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+ORDER BY created_at DESC, resource_id ASC
+LIMIT $1 OFFSET $2
+`
+
+type ListResourcesParams struct {
+	Limit  int32 `json:"limit"`
+	Offset int32 `json:"offset"`
+}
+
+func (q *Queries) ListResources(ctx context.Context, arg ListResourcesParams) ([]ControlResource, error) {
+	rows, err := q.db.Query(ctx, listResources, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlResource
+	for rows.Next() {
+		var i ControlResource
+		if err := rows.Scan(
+			&i.ResourceID,
+			&i.OwnerUserID,
+			&i.OwnerOrgID,
+			&i.OwnerRole,
+			&i.OriginalName,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.StorageUri,
+			&i.StoragePath,
+			&i.SourceType,
+			&i.ResourceKind,
+			&i.SourceUri,
+			&i.ProjectID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.RetentionExpiresAt,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResourcesForUser = `-- name: ListResourcesForUser :many
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND status = $3
+  AND ($4::text = '' OR resource_kind = $4)
+  AND ($5::text = '' OR source_type = $5)
+  AND ($6::text = '' OR project_id = $6)
+  AND (
+    $7::text = ''
+    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
+    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
+    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+  )
+ORDER BY created_at DESC, resource_id ASC
+LIMIT $8 OFFSET $9
+`
+
+type ListResourcesForUserParams struct {
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+	Status      string      `json:"status"`
+	Column4     string      `json:"column_4"`
+	Column5     string      `json:"column_5"`
+	Column6     string      `json:"column_6"`
+	Column7     string      `json:"column_7"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesForUserParams) ([]ControlResource, error) {
+	rows, err := q.db.Query(ctx, listResourcesForUser,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Status,
+		arg.Column4,
+		arg.Column5,
+		arg.Column6,
+		arg.Column7,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlResource
+	for rows.Next() {
+		var i ControlResource
+		if err := rows.Scan(
+			&i.ResourceID,
+			&i.OwnerUserID,
+			&i.OwnerOrgID,
+			&i.OwnerRole,
+			&i.OriginalName,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.StorageUri,
+			&i.StoragePath,
+			&i.SourceType,
+			&i.ResourceKind,
+			&i.SourceUri,
+			&i.ProjectID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.RetentionExpiresAt,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRunArtifacts = `-- name: ListRunArtifacts :many
@@ -1174,6 +1482,76 @@ func (q *Queries) NextRunEventSequence(ctx context.Context, runID string) (int32
 	return next_sequence, err
 }
 
+const resourceStorageStats = `-- name: ResourceStorageStats :one
+SELECT count(*)::bigint AS total_resources, COALESCE(sum(size_bytes), 0)::bigint AS total_bytes
+FROM control_resources
+WHERE status = 'active'
+`
+
+type ResourceStorageStatsRow struct {
+	TotalResources int64 `json:"total_resources"`
+	TotalBytes     int64 `json:"total_bytes"`
+}
+
+func (q *Queries) ResourceStorageStats(ctx context.Context) (ResourceStorageStatsRow, error) {
+	row := q.db.QueryRow(ctx, resourceStorageStats)
+	var i ResourceStorageStatsRow
+	err := row.Scan(&i.TotalResources, &i.TotalBytes)
+	return i, err
+}
+
+const restoreResourceForUser = `-- name: RestoreResourceForUser :one
+UPDATE control_resources
+SET status = 'active',
+    deleted_at = NULL,
+    retention_expires_at = NULL,
+    updated_at = $4
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+`
+
+type RestoreResourceForUserParams struct {
+	ResourceID  string             `json:"resource_id"`
+	OwnerUserID string             `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text        `json:"owner_org_id"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) RestoreResourceForUser(ctx context.Context, arg RestoreResourceForUserParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, restoreResourceForUser,
+		arg.ResourceID,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.UpdatedAt,
+	)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const setThreadLatestRun = `-- name: SetThreadLatestRun :exec
 UPDATE control_threads SET latest_run_id = $2, updated_at = $3 WHERE thread_id = $1
 `
@@ -1187,6 +1565,61 @@ type SetThreadLatestRunParams struct {
 func (q *Queries) SetThreadLatestRun(ctx context.Context, arg SetThreadLatestRunParams) error {
 	_, err := q.db.Exec(ctx, setThreadLatestRun, arg.ThreadID, arg.LatestRunID, arg.UpdatedAt)
 	return err
+}
+
+const softDeleteResourceForUser = `-- name: SoftDeleteResourceForUser :one
+UPDATE control_resources
+SET status = 'deleted',
+    deleted_at = $4,
+    retention_expires_at = $5,
+    updated_at = $4
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status <> 'deleted'
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+`
+
+type SoftDeleteResourceForUserParams struct {
+	ResourceID         string             `json:"resource_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
+	RetentionExpiresAt pgtype.Timestamptz `json:"retention_expires_at"`
+}
+
+func (q *Queries) SoftDeleteResourceForUser(ctx context.Context, arg SoftDeleteResourceForUserParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, softDeleteResourceForUser,
+		arg.ResourceID,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.DeletedAt,
+		arg.RetentionExpiresAt,
+	)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
+		&i.Metadata,
+	)
+	return i, err
 }
 
 const updateRunStatus = `-- name: UpdateRunStatus :one
@@ -1241,6 +1674,111 @@ func (q *Queries) UpdateRunStatus(ctx context.Context, arg UpdateRunStatusParams
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const upsertResource = `-- name: UpsertResource :one
+INSERT INTO control_resources (
+  resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type,
+  size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind,
+  source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+)
+VALUES (
+  $1, $2, $3, $4, $5, $6,
+  $7, $8, $9, $10, $11, $12,
+  $13, $14, $15, $16, $17, $18, $19, $20
+)
+ON CONFLICT (resource_id) DO UPDATE SET
+  owner_user_id = EXCLUDED.owner_user_id,
+  owner_org_id = EXCLUDED.owner_org_id,
+  owner_role = EXCLUDED.owner_role,
+  original_name = EXCLUDED.original_name,
+  content_type = EXCLUDED.content_type,
+  size_bytes = EXCLUDED.size_bytes,
+  sha256 = EXCLUDED.sha256,
+  storage_uri = EXCLUDED.storage_uri,
+  storage_path = EXCLUDED.storage_path,
+  source_type = EXCLUDED.source_type,
+  resource_kind = EXCLUDED.resource_kind,
+  source_uri = EXCLUDED.source_uri,
+  project_id = EXCLUDED.project_id,
+  status = EXCLUDED.status,
+  updated_at = EXCLUDED.updated_at,
+  deleted_at = EXCLUDED.deleted_at,
+  retention_expires_at = EXCLUDED.retention_expires_at,
+  metadata = EXCLUDED.metadata
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+`
+
+type UpsertResourceParams struct {
+	ResourceID         string             `json:"resource_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	OriginalName       string             `json:"original_name"`
+	ContentType        pgtype.Text        `json:"content_type"`
+	SizeBytes          int64              `json:"size_bytes"`
+	Sha256             pgtype.Text        `json:"sha256"`
+	StorageUri         pgtype.Text        `json:"storage_uri"`
+	StoragePath        pgtype.Text        `json:"storage_path"`
+	SourceType         string             `json:"source_type"`
+	ResourceKind       string             `json:"resource_kind"`
+	SourceUri          pgtype.Text        `json:"source_uri"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
+	RetentionExpiresAt pgtype.Timestamptz `json:"retention_expires_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+func (q *Queries) UpsertResource(ctx context.Context, arg UpsertResourceParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, upsertResource,
+		arg.ResourceID,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.OwnerRole,
+		arg.OriginalName,
+		arg.ContentType,
+		arg.SizeBytes,
+		arg.Sha256,
+		arg.StorageUri,
+		arg.StoragePath,
+		arg.SourceType,
+		arg.ResourceKind,
+		arg.SourceUri,
+		arg.ProjectID,
+		arg.Status,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.DeletedAt,
+		arg.RetentionExpiresAt,
+		arg.Metadata,
+	)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
 		&i.Metadata,
 	)
 	return i, err

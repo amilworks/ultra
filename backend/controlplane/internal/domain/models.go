@@ -120,6 +120,96 @@ type ArtifactRecord struct {
 	Metadata      JSONMap   `json:"metadata"`
 }
 
+type ResourceRecord struct {
+	ResourceID         string    `json:"resource_id"`
+	OriginalName       string    `json:"original_name"`
+	ContentType        string    `json:"content_type,omitempty"`
+	SizeBytes          int64     `json:"size_bytes"`
+	SHA256             string    `json:"sha256,omitempty"`
+	StorageURI         string    `json:"storage_uri,omitempty"`
+	StoragePath        string    `json:"storage_path,omitempty"`
+	SourceType         string    `json:"source_type"`
+	ResourceKind       string    `json:"resource_kind"`
+	SourceURI          string    `json:"source_uri,omitempty"`
+	ProjectID          string    `json:"project_id,omitempty"`
+	OwnerUserID        string    `json:"owner_user_id"`
+	OwnerOrgID         string    `json:"owner_org_id,omitempty"`
+	OwnerRole          string    `json:"owner_role,omitempty"`
+	Status             string    `json:"status"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	DeletedAt          time.Time `json:"deleted_at,omitempty"`
+	RetentionExpiresAt time.Time `json:"retention_expires_at,omitempty"`
+	Metadata           JSONMap   `json:"metadata"`
+}
+
+type ResourceListInput struct {
+	UserID    string
+	OrgID     string
+	Query     string
+	Kind      string
+	Source    string
+	ProjectID string
+	Status    string
+	Limit     int
+	Offset    int
+}
+
+type ResourceListPage struct {
+	Resources  []ResourceRecord
+	TotalCount int
+	Limit      int
+	Offset     int
+}
+
+type UpsertResourceInput struct {
+	ResourceID         string
+	OriginalName       string
+	ContentType        string
+	SizeBytes          int64
+	SHA256             string
+	StorageURI         string
+	StoragePath        string
+	SourceType         string
+	ResourceKind       string
+	SourceURI          string
+	ProjectID          string
+	OwnerUserID        string
+	OwnerOrgID         string
+	OwnerRole          string
+	Status             string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	DeletedAt          time.Time
+	RetentionExpiresAt time.Time
+	Metadata           JSONMap
+}
+
+type ResourceEventRecord struct {
+	EventID     string    `json:"event_id"`
+	ResourceID  string    `json:"resource_id"`
+	ActorUserID string    `json:"actor_user_id,omitempty"`
+	ActorOrgID  string    `json:"actor_org_id,omitempty"`
+	EventType   string    `json:"event_type"`
+	TS          time.Time `json:"ts"`
+	Metadata    JSONMap   `json:"metadata"`
+}
+
+type AppendResourceEventInput struct {
+	EventID     string
+	ResourceID  string
+	ActorUserID string
+	ActorOrgID  string
+	EventType   string
+	TS          time.Time
+	Metadata    JSONMap
+}
+
+type ResourceStorageStats struct {
+	TotalResources int
+	TotalBytes     int64
+}
+
 type UserAccount struct {
 	UserID      string    `json:"user_id"`
 	Email       string    `json:"email,omitempty"`

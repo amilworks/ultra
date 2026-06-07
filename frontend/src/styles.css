@@ -1627,6 +1627,19 @@ body {
   gap: 1rem;
 }
 
+.resource-browser-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.resource-browser-upload,
+.resource-browser-refresh {
+  border-radius: 0.72rem;
+}
+
 .resource-browser-title {
   font-size: 1.15rem;
 }
@@ -1964,12 +1977,17 @@ body {
     align-items: stretch;
   }
 
+  .resource-browser-header-actions {
+    justify-content: flex-start;
+  }
+
+  .resource-browser-upload,
   .resource-browser-refresh {
-    align-self: flex-start;
     min-height: 2.55rem;
     padding-inline: 0.8rem;
   }
 
+  .resource-browser-upload-label,
   .resource-browser-refresh-label {
     display: none;
   }
@@ -4697,6 +4715,79 @@ details {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.viewer-workspace-document {
+  background: color-mix(in oklab, var(--bg-main) 97%, #6f8f85 3%);
+}
+
+.viewer-pdf-reader {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.viewer-pdf-header {
+  padding: 0.1rem 0.05rem 0;
+}
+
+.viewer-pdf-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.viewer-pdf-title-row svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  color: color-mix(in oklab, var(--text-muted) 78%, #4f8073 22%);
+}
+
+.viewer-pdf-title {
+  flex: 0 1 auto;
+}
+
+.viewer-pdf-badge {
+  border-color: color-mix(in oklab, var(--line) 82%, #4f8073 18%);
+  background: color-mix(in oklab, var(--surface-panel) 88%, #4f8073 12%);
+  color: color-mix(in oklab, var(--text-main) 84%, #28594e 16%);
+}
+
+.viewer-pdf-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.viewer-pdf-shell {
+  min-height: clamp(520px, 68vh, 920px);
+  flex: 1;
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, #4f8073 16%);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--surface-panel) 96%, #4f8073 4%),
+      color-mix(in oklab, var(--bg-main) 98%, #536b8f 2%)
+    );
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7),
+    0 14px 34px rgba(42, 50, 58, 0.1);
+}
+
+.viewer-pdf-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: clamp(520px, 68vh, 920px);
+  border: 0;
+  background: #f8faf9;
 }
 
 .viewer-canvas-shell {

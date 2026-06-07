@@ -64,6 +64,21 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 			source: "-- name: GetArtifactForUser :one",
 			gen:    "func (q *Queries) GetArtifactForUser",
 		},
+		{
+			name:   "resource upsert query",
+			source: "-- name: UpsertResource :one",
+			gen:    "func (q *Queries) UpsertResource",
+		},
+		{
+			name:   "tenant resource list query",
+			source: "-- name: ListResourcesForUser :many",
+			gen:    "func (q *Queries) ListResourcesForUser",
+		},
+		{
+			name:   "resource soft delete query",
+			source: "-- name: SoftDeleteResourceForUser :one",
+			gen:    "func (q *Queries) SoftDeleteResourceForUser",
+		},
 	} {
 		if !strings.Contains(sourceText, expectation.source) {
 			t.Fatalf("queries.sql missing %s marker %q", expectation.name, expectation.source)
@@ -74,5 +89,11 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 	}
 	if !strings.Contains(string(schema), "control_threads_user_status_updated_idx") {
 		t.Fatalf("schema.sql missing tenant thread owner/status/update index")
+	}
+	if !strings.Contains(string(schema), "control_resources_owner_status_created_idx") {
+		t.Fatalf("schema.sql missing tenant resource owner/status/create index")
+	}
+	if !strings.Contains(string(schema), "control_resources_project_status_idx") {
+		t.Fatalf("schema.sql missing resource project/status index")
 	}
 }

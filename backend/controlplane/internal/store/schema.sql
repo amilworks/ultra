@@ -133,6 +133,41 @@ CREATE TABLE IF NOT EXISTS control_artifacts (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS control_resources (
+  resource_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  original_name text NOT NULL,
+  content_type text,
+  size_bytes bigint NOT NULL DEFAULT 0,
+  sha256 text,
+  storage_uri text,
+  storage_path text,
+  source_type text NOT NULL DEFAULT 'upload',
+  resource_kind text NOT NULL DEFAULT 'file',
+  source_uri text,
+  project_id text,
+  status text NOT NULL DEFAULT 'active',
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  deleted_at timestamptz,
+  retention_expires_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+ALTER TABLE control_resources ADD COLUMN IF NOT EXISTS project_id text;
+
+CREATE TABLE IF NOT EXISTS control_resource_events (
+  event_id text PRIMARY KEY,
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  actor_user_id text,
+  actor_org_id text,
+  event_type text NOT NULL,
+  ts timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   session_id text PRIMARY KEY,
   user_id text NOT NULL,
@@ -164,6 +199,12 @@ CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_run_created_idx ON control_artifacts(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_sha_idx ON control_artifacts(sha256);
+CREATE INDEX IF NOT EXISTS control_resources_owner_status_created_idx ON control_resources(owner_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_owner_org_status_idx ON control_resources(owner_user_id, owner_org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_project_status_idx ON control_resources(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_sha_idx ON control_resources(sha256);
+CREATE INDEX IF NOT EXISTS control_resources_source_uri_idx ON control_resources(source_uri);
+CREATE INDEX IF NOT EXISTS control_resource_events_resource_ts_idx ON control_resource_events(resource_id, ts DESC);
 CREATE INDEX IF NOT EXISTS control_organizations_status_updated_idx ON control_organizations(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_org_status_idx ON control_users(org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_email_idx ON control_users(lower(email));

@@ -504,6 +504,10 @@ func (deps ServerDeps) handleImportBisqueResources(w http.ResponseWriter, r *htt
 			writeBisqueError(w, err)
 			return
 		}
+		if err := deps.catalogUploadedFile(r.Context(), root, record, "resource.imported"); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		uploaded = append(uploaded, record)
 		imports = append(imports, imported)
 	}
@@ -531,7 +535,7 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 	principal := deps.principalFromRequest(r, "")
 	uploads := make([]BisqueUploadRecord, 0, len(req.FileIDs)+len(req.ArtifactIDs))
 	for _, fileID := range req.FileIDs {
-		record, path, err := findUploadResourceForRequest(root, principal, fileID)
+		record, path, err := deps.findUploadResourceForRequest(r.Context(), root, principal, fileID)
 		if err != nil {
 			writeStoreError(w, err)
 			return

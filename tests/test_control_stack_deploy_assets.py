@@ -47,6 +47,50 @@ def test_frontend_deploy_points_web_root_at_built_dist() -> None:
     assert 'CURRENT_LINK="$ULTRA_RELEASE_ROOT/frontend-current"' in script
 
 
+def test_release_artifact_script_builds_immutable_control_stack_bundle() -> None:
+    script = read_repo_file("scripts/build_ultra_release_artifact.sh")
+
+    assert "git archive --format=tar" in script
+    assert "frontend/dist/index.html" in script
+    assert "go build -trimpath" in script
+    assert 'GOOS_VALUE="${GOOS:-linux}"' in script
+    assert 'GOARCH_VALUE="${GOARCH:-amd64}"' in script
+    assert "bin/ultra-control" in script
+    assert "frontend/dist" in script
+    assert "release-manifest.json" in script
+    assert "ultra-release-$RELEASE_SHA.tar.gz" in script
+    assert "sha256sum" in script or "shasum -a 256" in script
+
+
+def test_pr_ci_workflow_covers_release_gates() -> None:
+    workflow = read_repo_file(".github/workflows/pr-ci.yml")
+
+    assert "name: PR CI" in workflow
+    assert "scripts/release_codescan.sh" in workflow
+    assert "pnpm --dir frontend lint" in workflow
+    assert "pnpm --dir frontend typecheck" in workflow
+    assert "pnpm --dir frontend test:unit" in workflow
+    assert "pnpm --dir frontend build" in workflow
+    assert "pnpm --dir frontend bundle:check" in workflow
+    assert "pnpm --dir frontend test:smoke" in workflow
+    assert "make control-test" in workflow
+    assert "make deepagents-test" in workflow
+    assert "make deepagents-autonomy-test" in workflow
+
+
+def test_main_release_workflow_builds_uploadable_release_artifact() -> None:
+    workflow = read_repo_file(".github/workflows/release-artifacts.yml")
+
+    assert "name: Release Artifacts" in workflow
+    assert "branches:" in workflow
+    assert "- main" in workflow
+    assert "scripts/release_codescan.sh" in workflow
+    assert "scripts/build_ultra_release_artifact.sh" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "ultra-release-${{ github.sha }}" in workflow
+    assert "release-manifest-${{ github.sha }}.json" in workflow
+
+
 def test_systemd_units_run_go_control_and_deepagents_workers() -> None:
     control = read_repo_file("deploy/systemd/ultra-control.service")
     deepagents = read_repo_file("deploy/systemd/ultra-deepagents-worker.service")

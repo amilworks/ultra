@@ -1,0 +1,81 @@
+name: Release Artifacts
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-artifact:
+    name: Build Immutable Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/controlplane/go.mod
+          cache-dependency-path: backend/controlplane/go.sum
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Scan release source
+        run: scripts/release_codescan.sh
+
+      - name: Run control-plane tests
+        run: make control-test
+
+      - name: Run Deep Agents autonomy tests
+        run: make deepagents-autonomy-test
+
+      - name: Run frontend quality checks
+        run: make frontend-quality
+
+      - name: Build frontend
+        run: pnpm --dir frontend build
+
+      - name: Enforce bundle budgets
+        run: pnpm --dir frontend bundle:check
+
+      - name: Build immutable release artifact
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_OUT_DIR: .tmp/releases
+        run: scripts/build_ultra_release_artifact.sh
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultra-release-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            .tmp/releases/ultra-release-${{ github.sha }}.tar.gz
+            .tmp/releases/ultra-release-${{ github.sha }}.tar.gz.sha256
+            .tmp/releases/release-manifest-${{ github.sha }}.json

@@ -1,0 +1,102 @@
+name: PR CI
+
+on:
+  push:
+    branches:
+      - "codex/**"
+      - "feature/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pr-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-codescan:
+    name: Release Code Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for local paths, internal hosts, and secret-shaped strings
+        run: scripts/release_codescan.sh
+
+  frontend:
+    name: Frontend Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Lint frontend
+        run: pnpm --dir frontend lint
+
+      - name: Typecheck frontend
+        run: pnpm --dir frontend typecheck
+
+      - name: Run frontend unit tests
+        run: pnpm --dir frontend test:unit
+
+      - name: Build frontend
+        run: pnpm --dir frontend build
+
+      - name: Enforce bundle budgets
+        run: pnpm --dir frontend bundle:check
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir frontend exec playwright install --with-deps chromium
+
+      - name: Run frontend smoke tests
+        run: pnpm --dir frontend test:smoke
+
+  control-plane:
+    name: Go Control Plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/controlplane/go.mod
+          cache-dependency-path: backend/controlplane/go.sum
+
+      - name: Run Go control-plane tests
+        run: make control-test
+
+  deepagents:
+    name: Deep Agents Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run Deep Agents unit tests
+        run: make deepagents-test
+
+      - name: Run Deep Agents autonomy tests
+        run: make deepagents-autonomy-test

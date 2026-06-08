@@ -3243,6 +3243,59 @@ func TestNiftiUploadViewerServesFloat32ScalarVolume(t *testing.T) {
 	}
 }
 
+func TestNiftiUploadViewerUsesCTLikeVolumeDefaults(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: uploadRoot,
+	})
+	values := []float32{-1024, -700, 40, 1200}
+	fileID := writeTestUploadFile(t, uploadRoot, "ct-head.nii", testNifti1Float32Bytes(t, 2, 2, 1, values))
+
+	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	viewerReq.Header.Set("X-Ultra-User-Id", "test-user")
+	viewerReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	viewerRec := httptest.NewRecorder()
+	router.ServeHTTP(viewerRec, viewerReq)
+	if viewerRec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", viewerRec.Code, viewerRec.Body.String())
+	}
+	var viewerResponse struct {
+		DisplayDefaults struct {
+			Enhancement            string  `json:"enhancement"`
+			FusionMethod           string  `json:"fusion_method"`
+			ScalarColormap         string  `json:"scalar_colormap"`
+			VolumeSignalFloor      float64 `json:"volume_signal_floor"`
+			VolumeDensity          float64 `json:"volume_density"`
+			VolumeLighting         bool    `json:"volume_lighting"`
+			VolumeLightingStrength float64 `json:"volume_lighting_strength"`
+			VolumeViewPreset       string  `json:"volume_view_preset"`
+			VolumeCameraMode       string  `json:"volume_camera_mode"`
+		} `json:"display_defaults"`
+	}
+	if err := json.Unmarshal(viewerRec.Body.Bytes(), &viewerResponse); err != nil {
+		t.Fatalf("decode viewer response: %v", err)
+	}
+	defaults := viewerResponse.DisplayDefaults
+	if defaults.Enhancement != "hounsfield:350.000:1800.000" {
+		t.Fatalf("enhancement = %q, want CT volume window", defaults.Enhancement)
+	}
+	if defaults.FusionMethod != "a" || defaults.ScalarColormap != "grayscale" {
+		t.Fatalf("projection/color defaults = %+v, want composite grayscale", defaults)
+	}
+	if defaults.VolumeSignalFloor != 0.12 || defaults.VolumeDensity != 1.75 {
+		t.Fatalf("transfer defaults = floor:%f density:%f, want 0.12/1.75", defaults.VolumeSignalFloor, defaults.VolumeDensity)
+	}
+	if !defaults.VolumeLighting || defaults.VolumeLightingStrength != 0.72 {
+		t.Fatalf("lighting defaults = enabled:%v strength:%f, want enabled 0.72", defaults.VolumeLighting, defaults.VolumeLightingStrength)
+	}
+	if defaults.VolumeViewPreset != "iso" || defaults.VolumeCameraMode != "orthographic" {
+		t.Fatalf("camera defaults = preset:%q mode:%q, want iso orthographic", defaults.VolumeViewPreset, defaults.VolumeCameraMode)
+	}
+}
+
 func TestNiftiUploadViewerServesSignedInt16ScalarVolume(t *testing.T) {
 	t.Parallel()
 

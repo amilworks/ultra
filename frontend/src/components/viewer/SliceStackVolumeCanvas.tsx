@@ -103,10 +103,52 @@ const MIN_INTERACTIVE_STEPS = 32;
 const SAMPLE_RAMP_FACTOR = 1.5;
 const DEFAULT_VOLUME_CLEAR = 0x07090d;
 const DEFAULT_VOLUME_AXIS_SIZES: UploadViewerInfo["axis_sizes"] = { T: 1, C: 1, Z: 1, Y: 1, X: 1 };
-const ORTHOGRAPHIC_FRUSTUM_SCALE = 2.8;
+const DEFAULT_VOLUME_CAMERA_FOV = 42;
 const MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT = 1.8;
+const VOLUME_CAMERA_FIT_MARGIN = 1.35;
+const VOLUME_INTERIOR_MIN_DISTANCE_FACTOR = 0.045;
+const VOLUME_INTERIOR_MAX_ZOOM = 8;
+const VOLUME_INTERIOR_MIN_LOOK_DISTANCE = 0.18;
+const VOLUME_INTERIOR_LOOK_DISTANCE_FACTOR = 0.72;
+const DEFAULT_VOLUME_CAMERA_SAFE_INSETS = {
+  top: 0.08,
+  right: 0.06,
+  bottom: 0.22,
+  left: 0.06,
+} as const;
 
 type VolumeCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
+
+type VolumeCameraSafeInsets = Partial<{
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}>;
+
+export type VolumeCameraFit = {
+  distance: number;
+  minDistance: number;
+  insideMinDistance: number;
+  maxDistance: number;
+  inspectMaxZoom: number;
+  orthographicFrustumHeight: number;
+  safeWidth: number;
+  safeHeight: number;
+};
+
+type VolumeVector = { x: number; y: number; z: number };
+
+type VolumeClipBounds = {
+  min: VolumeVector;
+  max: VolumeVector;
+};
+
+export type VolumeInteriorCameraFrame = {
+  position: VolumeVector;
+  target: VolumeVector;
+  lookDistance: number;
+};
 
 export type VolumeSampleBudget = {
   interactiveSteps: number;
@@ -150,6 +192,100 @@ export function advanceProgressiveVolumeSteps(
     budget.settledSteps,
     Math.max(current + 1, Math.round(current * budget.rampFactor))
   );
+}
+
+const normalizeVector = (value: VolumeVector): VolumeVector => {
+  const length = Math.sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+  if (!Number.isFinite(length) || length < 1e-6) {
+    return { x: 0, y: 0, z: 1 };
+  }
+  return {
+    x: value.x / length,
+    y: value.y / length,
+    z: value.z / length,
+  };
+};
+
+const roundSceneCoordinate = (value: number): number => Number(value.toFixed(6));
+
+export function isVolumeInteriorInspectionActive({
+  clipActive,
+  cameraMode,
+}: {
+  clipActive: boolean;
+  cameraMode: VolumeCameraMode;
+}): boolean {
+  return clipActive && !cameraMode.isOrthographic;
+}
+
+export function shouldShowVolumeSliceCursorPlanes({
+  cueVisible,
+  interiorInspectionActive,
+}: {
+  cueVisible: boolean;
+  interiorInspectionActive: boolean;
+}): boolean {
+  return cueVisible && !interiorInspectionActive;
+}
+
+export function shouldShowVolumeContextEdges({
+  cueVisible,
+  interiorInspectionActive,
+}: {
+  cueVisible: boolean;
+  interiorInspectionActive: boolean;
+}): boolean {
+  return cueVisible && !interiorInspectionActive;
+}
+
+export function computeVolumeInteriorCameraFrame({
+  clipBounds,
+  normalizedScale,
+  preset,
+  volumeRadius,
+}: {
+  clipBounds: VolumeClipBounds;
+  normalizedScale: VolumeVector;
+  preset: VolumeViewPreset;
+  volumeRadius: number;
+}): VolumeInteriorCameraFrame {
+  const centerLocal = {
+    x: (clipBounds.min.x + clipBounds.max.x) / 2 - 0.5,
+    y: (clipBounds.min.y + clipBounds.max.y) / 2 - 0.5,
+    z: (clipBounds.min.z + clipBounds.max.z) / 2 - 0.5,
+  };
+  const position = {
+    x: roundSceneCoordinate(centerLocal.x * normalizedScale.x),
+    y: roundSceneCoordinate(centerLocal.y * normalizedScale.y),
+    z: roundSceneCoordinate(centerLocal.z * normalizedScale.z),
+  };
+  const clipSize = {
+    x: Math.max(0.001, (clipBounds.max.x - clipBounds.min.x) * normalizedScale.x),
+    y: Math.max(0.001, (clipBounds.max.y - clipBounds.min.y) * normalizedScale.y),
+    z: Math.max(0.001, (clipBounds.max.z - clipBounds.min.z) * normalizedScale.z),
+  };
+  const clipRadius = Math.sqrt(
+    clipSize.x * clipSize.x +
+      clipSize.y * clipSize.y +
+      clipSize.z * clipSize.z
+  ) / 2;
+  const safeRadius = Math.max(0.25, Number.isFinite(volumeRadius) ? volumeRadius : 0.25);
+  const lookDistance = roundSceneCoordinate(
+    Math.max(
+      VOLUME_INTERIOR_MIN_LOOK_DISTANCE,
+      Math.min(safeRadius * 0.95, clipRadius * VOLUME_INTERIOR_LOOK_DISTANCE_FACTOR)
+    )
+  );
+  const direction = normalizeVector(preset.direction);
+  return {
+    position,
+    target: {
+      x: roundSceneCoordinate(position.x - direction.x * lookDistance),
+      y: roundSceneCoordinate(position.y - direction.y * lookDistance),
+      z: roundSceneCoordinate(position.z - direction.z * lookDistance),
+    },
+    lookDistance,
+  };
 }
 
 export function resolveVolumeProjectionMode({
@@ -219,6 +355,12 @@ const ATLAS_FRAGMENT_SHADER = `
     return tFar > max(tNear, 0.0);
   }
 
+  float alphaFromOpacity(float opacityValue, float stepLength) {
+    float baseAlpha = clamp(opacityValue * uDensity, 0.0, 0.95);
+    float stepScale = max(0.001, stepLength * 128.0);
+    return 1.0 - pow(1.0 - baseAlpha, stepScale);
+  }
+
   void main() {
     vec3 rayDir = uOrthographicCamera
       ? normalize(uCameraDirectionLocal)
@@ -251,7 +393,7 @@ const ATLAS_FRAGMENT_SHADER = `
         break;
       }
       vec4 sampleColor = texture(uData, clamp(location, vec3(0.0), vec3(1.0)));
-      float alpha = max(max(sampleColor.r, sampleColor.g), sampleColor.b) * uDensity;
+      float alpha = alphaFromOpacity(max(max(sampleColor.r, sampleColor.g), sampleColor.b), length(delta));
       sampleColor.a = alpha;
       accum.rgb += (1.0 - accum.a) * sampleColor.rgb * sampleColor.a;
       accum.a += (1.0 - accum.a) * sampleColor.a;
@@ -373,6 +515,12 @@ const SCALAR_FRAGMENT_SHADER = `
     return smoothstep(uSignalFloor, 1.0, clamp(value, 0.0, 1.0));
   }
 
+  float alphaFromOpacity(float opacityValue, float stepLength) {
+    float baseAlpha = clamp(opacityValue * uDensity * uDensityScale, 0.0, 0.95);
+    float stepScale = max(0.001, stepLength * 128.0);
+    return 1.0 - pow(1.0 - baseAlpha, stepScale);
+  }
+
   vec3 applyDepthLighting(vec3 location, vec3 color, float value) {
     if (!uLightingEnabled || uLightingStrength <= 0.0 || value <= uSignalFloor) {
       return color;
@@ -443,7 +591,7 @@ const SCALAR_FRAGMENT_SHADER = `
         location += delta;
         continue;
       }
-      float alpha = opacityValue * uDensity * uDensityScale;
+      float alpha = alphaFromOpacity(opacityValue, length(delta));
       vec3 sampleColor = applyDepthLighting(location, scalarColor(sampleValue), sampleValue);
       accum.rgb += (1.0 - accum.a) * sampleColor * alpha;
       accum.a += (1.0 - accum.a) * alpha;
@@ -576,8 +724,55 @@ const normalizeWindowRange = (
   return { low: lowNorm, high: highNorm };
 };
 
-const computeOrthographicFrustumHeight = (volumeRadius: number): number =>
-  Math.max(MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT, volumeRadius * ORTHOGRAPHIC_FRUSTUM_SCALE);
+export function computeVolumeCameraFit({
+  volumeRadius,
+  aspect = 1,
+  safeInsets = DEFAULT_VOLUME_CAMERA_SAFE_INSETS,
+}: {
+  volumeRadius: number;
+  aspect?: number;
+  safeInsets?: VolumeCameraSafeInsets;
+}): VolumeCameraFit {
+  const radius = Math.max(0.25, Number.isFinite(volumeRadius) ? volumeRadius : 0.25);
+  const safeTop = Math.max(0, Math.min(0.45, safeInsets.top ?? DEFAULT_VOLUME_CAMERA_SAFE_INSETS.top));
+  const safeRight = Math.max(0, Math.min(0.45, safeInsets.right ?? DEFAULT_VOLUME_CAMERA_SAFE_INSETS.right));
+  const safeBottom = Math.max(0, Math.min(0.45, safeInsets.bottom ?? DEFAULT_VOLUME_CAMERA_SAFE_INSETS.bottom));
+  const safeLeft = Math.max(0, Math.min(0.45, safeInsets.left ?? DEFAULT_VOLUME_CAMERA_SAFE_INSETS.left));
+  const safeHeight = Math.max(0.35, 1 - safeTop - safeBottom);
+  const safeWidth = Math.max(0.35, 1 - safeLeft - safeRight);
+  const safeAspect = Math.max(0.1, Number.isFinite(aspect) ? aspect : 1);
+  const verticalFov = THREE.MathUtils.degToRad(DEFAULT_VOLUME_CAMERA_FOV);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * safeAspect);
+  const safeVerticalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * safeHeight);
+  const safeHorizontalFov = 2 * Math.atan(Math.tan(horizontalFov / 2) * safeWidth);
+  const verticalDistance = radius / Math.max(0.05, Math.sin(safeVerticalFov / 2));
+  const horizontalDistance = radius / Math.max(0.05, Math.sin(safeHorizontalFov / 2));
+  const distance = Math.max(2.4, Math.max(verticalDistance, horizontalDistance) * VOLUME_CAMERA_FIT_MARGIN);
+  const minDistance = Math.max(radius * 2.72, distance / VOLUME_CAMERA_FIT_MARGIN);
+  const insideMinDistance = Math.max(0.025, radius * VOLUME_INTERIOR_MIN_DISTANCE_FACTOR);
+  const maxDistance = Math.max(distance * 4, radius * 10, 6);
+  const orthographicHeightForVerticalFit = (radius * 2 * VOLUME_CAMERA_FIT_MARGIN) / safeHeight;
+  const orthographicHeightForHorizontalFit =
+    (radius * 2 * VOLUME_CAMERA_FIT_MARGIN) / Math.max(0.35, safeWidth * safeAspect);
+  const orthographicFrustumHeight = Math.max(
+    MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT,
+    orthographicHeightForVerticalFit,
+    orthographicHeightForHorizontalFit
+  );
+  return {
+    distance,
+    minDistance,
+    insideMinDistance,
+    maxDistance,
+    inspectMaxZoom: VOLUME_INTERIOR_MAX_ZOOM,
+    orthographicFrustumHeight,
+    safeWidth,
+    safeHeight,
+  };
+}
+
+const computeOrthographicFrustumHeight = (volumeRadius: number, aspect = 1): number =>
+  computeVolumeCameraFit({ volumeRadius, aspect }).orthographicFrustumHeight;
 
 const createVolumeCamera = ({
   mode,
@@ -587,7 +782,7 @@ const createVolumeCamera = ({
   volumeRadius: number;
 }): VolumeCamera => {
   if (!mode.isOrthographic) {
-    return new THREE.PerspectiveCamera(42, 1, 0.01, 100);
+    return new THREE.PerspectiveCamera(DEFAULT_VOLUME_CAMERA_FOV, 1, 0.01, 100);
   }
   const frustumHeight = computeOrthographicFrustumHeight(volumeRadius);
   return new THREE.OrthographicCamera(
@@ -612,8 +807,9 @@ const configureVolumeCameraProjection = ({
   volumeRadius: number;
 }) => {
   const aspect = width / height;
+  const fit = computeVolumeCameraFit({ volumeRadius, aspect });
   if (camera instanceof THREE.OrthographicCamera) {
-    const frustumHeight = computeOrthographicFrustumHeight(volumeRadius);
+    const frustumHeight = fit.orthographicFrustumHeight;
     const frustumWidth = frustumHeight * aspect;
     camera.left = -frustumWidth / 2;
     camera.right = frustumWidth / 2;
@@ -630,18 +826,35 @@ const applyVolumeCameraPreset = ({
   controls,
   preset,
   volumeRadius,
+  aspect = 1,
+  interiorFrame = null,
 }: {
   camera: VolumeCamera;
   controls: TrackballControls;
   preset: VolumeViewPreset;
   volumeRadius: number;
+  aspect?: number;
+  interiorFrame?: VolumeInteriorCameraFrame | null;
 }) => {
   const direction = new THREE.Vector3(preset.direction.x, preset.direction.y, preset.direction.z).normalize();
-  const distance = Math.max(volumeRadius * 3.4, 2.4);
-  camera.position.copy(direction.multiplyScalar(distance));
+  const fit = computeVolumeCameraFit({ volumeRadius, aspect });
+  if (interiorFrame && !(camera instanceof THREE.OrthographicCamera)) {
+    camera.position.set(interiorFrame.position.x, interiorFrame.position.y, interiorFrame.position.z);
+    controls.target.set(interiorFrame.target.x, interiorFrame.target.y, interiorFrame.target.z);
+  } else {
+    camera.position.copy(direction.multiplyScalar(fit.distance));
+    controls.target.set(0, 0, 0);
+  }
   camera.up.set(preset.up.x, preset.up.y, preset.up.z);
-  controls.target.set(0, 0, 0);
-  camera.lookAt(0, 0, 0);
+  if (camera instanceof THREE.OrthographicCamera) {
+    camera.zoom = 1;
+    camera.updateProjectionMatrix();
+  }
+  controls.minDistance = fit.insideMinDistance;
+  controls.maxDistance = fit.maxDistance;
+  controls.minZoom = 0.2;
+  controls.maxZoom = fit.inspectMaxZoom;
+  camera.lookAt(controls.target);
   controls.update();
 };
 
@@ -655,14 +868,16 @@ const applyVolumeSliceCursorPlanes = ({
   planes,
   cue,
   normalizedScale,
+  showPlanes,
 }: {
   planes: SliceCursorPlanes;
   cue: VolumeSliceCursorCue;
   normalizedScale: { x: number; y: number; z: number };
+  showPlanes: boolean;
 }) => {
-  planes.x.visible = cue.visible && cue.x.count > 1;
-  planes.y.visible = cue.visible && cue.y.count > 1;
-  planes.z.visible = cue.visible && cue.z.count > 1;
+  planes.x.visible = showPlanes && cue.x.count > 1;
+  planes.y.visible = showPlanes && cue.y.count > 1;
+  planes.z.visible = showPlanes && cue.z.count > 1;
 
   planes.x.scale.set(normalizedScale.z, normalizedScale.y, 1);
   planes.x.position.set(normalizedScale.x * cue.x.local, 0, 0);
@@ -703,6 +918,7 @@ export function SliceStackVolumeCanvas({
   volumeSource,
 }: SliceStackVolumeCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const requestRenderRef = useRef<(() => void) | null>(null);
   const scalarUniformsRef = useRef<{
     uWindowLow: { value: number };
@@ -1000,6 +1216,28 @@ export function SliceStackVolumeCanvas({
     clipMax: clipBounds.max,
     unit: spatialUnit,
   });
+  const volumeInteriorInspectionActive = isVolumeInteriorInspectionActive({
+    clipActive: volumeClipCue.active,
+    cameraMode: volumeCameraMode,
+  });
+  const volumeInteriorCameraFrame = useMemo(
+    () =>
+      volumeInteriorInspectionActive
+        ? computeVolumeInteriorCameraFrame({
+            clipBounds,
+            normalizedScale,
+            preset: volumeViewPreset,
+            volumeRadius,
+          })
+        : null,
+    [
+      clipBounds,
+      normalizedScale,
+      volumeInteriorInspectionActive,
+      volumeRadius,
+      volumeViewPreset,
+    ]
+  );
   const scalarVoxelStep = useMemo(
     () => ({
       x: 1 / Math.max(1, axisSizes.X - 1),
@@ -1103,18 +1341,23 @@ export function SliceStackVolumeCanvas({
     if (!rig) {
       return;
     }
+    const width = Math.max(1, containerRef.current?.clientWidth || 1);
+    const height = Math.max(1, containerRef.current?.clientHeight || 1);
     applyVolumeCameraPreset({
       camera: rig.camera,
       controls: rig.controls,
       preset: volumeViewPreset,
       volumeRadius,
+      aspect: width / height,
+      interiorFrame: volumeInteriorCameraFrame,
     });
     requestRenderRef.current?.();
-  }, [volumeRadius, volumeViewPreset]);
+  }, [volumeInteriorCameraFrame, volumeRadius, volumeViewPreset]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !resolvedSource) {
+    const canvasHost = canvasHostRef.current;
+    if (!container || !canvasHost || !resolvedSource) {
       return;
     }
 
@@ -1175,7 +1418,7 @@ export function SliceStackVolumeCanvas({
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(clearColor, 1);
     renderer.domElement.className = "viewer-webgl-canvas";
-    container.appendChild(renderer.domElement);
+    canvasHost.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     const camera = createVolumeCamera({
@@ -1190,14 +1433,16 @@ export function SliceStackVolumeCanvas({
     controls.rotateSpeed = 5;
     controls.zoomSpeed = 1.5;
     controls.panSpeed = 0.9;
-    controls.minDistance = volumeRadius * 1.05;
-    controls.maxDistance = Math.max(volumeRadius * 10, 6);
     cameraRigRef.current = { camera, controls };
+    const initialWidth = Math.max(1, container.clientWidth || 1);
+    const initialHeight = Math.max(1, container.clientHeight || 1);
     applyVolumeCameraPreset({
       camera,
       controls,
       preset: volumeViewPreset,
       volumeRadius,
+      aspect: initialWidth / initialHeight,
+      interiorFrame: volumeInteriorCameraFrame,
     });
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -1262,6 +1507,10 @@ export function SliceStackVolumeCanvas({
     const edgeLines = new THREE.LineSegments(edgeGeometry, edgeMaterial);
     edgeLines.scale.set(normalizedScale.x, normalizedScale.y, normalizedScale.z);
     edgeLines.renderOrder = 2;
+    edgeLines.visible = shouldShowVolumeContextEdges({
+      cueVisible: true,
+      interiorInspectionActive: volumeInteriorInspectionActive,
+    });
     scene.add(edgeLines);
 
     const clipEdgeGeometry = new THREE.EdgesGeometry(geometry);
@@ -1294,7 +1543,10 @@ export function SliceStackVolumeCanvas({
       normalizedScale.z * (clipCenter.z - 0.5)
     );
     clipEdgeLines.renderOrder = 3;
-    clipEdgeLines.visible = volumeClipCue.active;
+    clipEdgeLines.visible = shouldShowVolumeContextEdges({
+      cueVisible: volumeClipCue.active,
+      interiorInspectionActive: volumeInteriorInspectionActive,
+    });
     scene.add(clipEdgeLines);
 
     const slicePlaneGeometry = new THREE.PlaneGeometry(1, 1);
@@ -1324,6 +1576,10 @@ export function SliceStackVolumeCanvas({
         planes: sliceCursorPlanes,
         cue: initialSliceCursorCue,
         normalizedScale,
+        showPlanes: shouldShowVolumeSliceCursorPlanes({
+          cueVisible: initialSliceCursorCue.visible,
+          interiorInspectionActive: volumeInteriorInspectionActive,
+        }),
       });
     }
     sliceCursorPlanesRef.current = sliceCursorPlanes;
@@ -1381,8 +1637,25 @@ export function SliceStackVolumeCanvas({
       const width = Math.max(1, container.clientWidth || 1);
       const height = Math.max(1, container.clientHeight || 1);
       renderer.setSize(width, height, false);
+      const aspect = width / height;
+      const fit = computeVolumeCameraFit({ volumeRadius, aspect });
       configureVolumeCameraProjection({ camera, width, height, volumeRadius });
-      camera.lookAt(0, 0, 0);
+      controls.minDistance = fit.insideMinDistance;
+      controls.maxDistance = fit.maxDistance;
+      controls.minZoom = 0.2;
+      controls.maxZoom = fit.inspectMaxZoom;
+      if (camera instanceof THREE.OrthographicCamera && camera.zoom > controls.maxZoom) {
+        camera.zoom = controls.maxZoom;
+        camera.updateProjectionMatrix();
+      }
+      if (
+        !volumeInteriorInspectionActive &&
+        !(camera instanceof THREE.OrthographicCamera) &&
+        camera.position.length() < fit.insideMinDistance
+      ) {
+        camera.position.normalize().multiplyScalar(fit.insideMinDistance);
+      }
+      camera.lookAt(controls.target);
       controls.handleResize();
       render();
     };
@@ -1489,7 +1762,7 @@ export function SliceStackVolumeCanvas({
       material.dispose();
       texture3D?.dispose();
       renderer.dispose();
-      renderer.domElement.remove();
+      renderer.domElement.parentNode?.removeChild(renderer.domElement);
     };
   }, [
     renderError,
@@ -1517,6 +1790,8 @@ export function SliceStackVolumeCanvas({
     volumeRadius,
     volumeCameraMode,
     volumeViewPreset,
+    volumeInteriorCameraFrame,
+    volumeInteriorInspectionActive,
     physicalGeometry.worldDepth,
     physicalGeometry.worldHeight,
     physicalGeometry.worldWidth,
@@ -1532,9 +1807,13 @@ export function SliceStackVolumeCanvas({
       planes,
       cue: sliceCursorCue,
       normalizedScale,
+      showPlanes: shouldShowVolumeSliceCursorPlanes({
+        cueVisible: sliceCursorCue.visible,
+        interiorInspectionActive: volumeInteriorInspectionActive,
+      }),
     });
     requestRenderRef.current?.();
-  }, [normalizedScale, sliceCursorCue]);
+  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (
@@ -1680,6 +1959,27 @@ export function SliceStackVolumeCanvas({
         data-viewer-camera-mode={volumeCameraMode.id}
         data-viewer-camera-label={volumeCameraMode.label}
         data-viewer-camera-orthographic={volumeCameraMode.isOrthographic ? "true" : "false"}
+        data-viewer-interior-inspection={volumeInteriorInspectionActive ? "true" : "false"}
+        data-viewer-interior-camera={volumeInteriorCameraFrame ? "center" : "overview"}
+        data-viewer-interior-camera-x={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.x.toFixed(4) : undefined}
+        data-viewer-interior-camera-y={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.y.toFixed(4) : undefined}
+        data-viewer-interior-camera-z={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.z.toFixed(4) : undefined}
+        data-viewer-slice-cursor-planes={
+          shouldShowVolumeSliceCursorPlanes({
+            cueVisible: sliceCursorCue.visible,
+            interiorInspectionActive: volumeInteriorInspectionActive,
+          })
+            ? "true"
+            : "false"
+        }
+        data-viewer-context-edges={
+          shouldShowVolumeContextEdges({
+            cueVisible: true,
+            interiorInspectionActive: volumeInteriorInspectionActive,
+          })
+            ? "true"
+            : "false"
+        }
         data-viewer-axis-summary={volumeAxisCue.summary || undefined}
         data-viewer-axis-unit={volumeAxisCue.unit}
         data-viewer-axis-x-length={volumeAxisCue.visible ? volumeAxisCue.x.length.toFixed(4) : undefined}
@@ -1763,6 +2063,27 @@ export function SliceStackVolumeCanvas({
       data-viewer-camera-mode={volumeCameraMode.id}
       data-viewer-camera-label={volumeCameraMode.label}
       data-viewer-camera-orthographic={volumeCameraMode.isOrthographic ? "true" : "false"}
+      data-viewer-interior-inspection={volumeInteriorInspectionActive ? "true" : "false"}
+      data-viewer-interior-camera={volumeInteriorCameraFrame ? "center" : "overview"}
+      data-viewer-interior-camera-x={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.x.toFixed(4) : undefined}
+      data-viewer-interior-camera-y={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.y.toFixed(4) : undefined}
+      data-viewer-interior-camera-z={volumeInteriorCameraFrame ? volumeInteriorCameraFrame.position.z.toFixed(4) : undefined}
+      data-viewer-slice-cursor-planes={
+        shouldShowVolumeSliceCursorPlanes({
+          cueVisible: sliceCursorCue.visible,
+          interiorInspectionActive: volumeInteriorInspectionActive,
+        })
+          ? "true"
+          : "false"
+      }
+      data-viewer-context-edges={
+        shouldShowVolumeContextEdges({
+          cueVisible: true,
+          interiorInspectionActive: volumeInteriorInspectionActive,
+        })
+          ? "true"
+          : "false"
+      }
       data-viewer-axis-summary={volumeAxisCue.summary || undefined}
       data-viewer-axis-unit={volumeAxisCue.unit}
       data-viewer-axis-x-length={volumeAxisCue.visible ? volumeAxisCue.x.length.toFixed(4) : undefined}
@@ -1807,6 +2128,7 @@ export function SliceStackVolumeCanvas({
       data-viewer-sample-steps-interactive={String(sampleBudget.interactiveSteps)}
       data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
     >
+      <div ref={canvasHostRef} className="viewer-webgl-canvas-host" aria-hidden="true" />
       {renderVolumeOrientationOverlay()}
       {renderVolumeAxisCue()}
       {renderVolumeSliceCursorCue()}

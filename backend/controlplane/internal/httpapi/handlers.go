@@ -2629,20 +2629,7 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 		"is_timeseries":    false,
 		"is_multichannel":  volume.ChannelCount > 1,
 		"service_urls":     serviceURLs,
-		"display_defaults": map[string]any{
-			"enhancement":     "d",
-			"negative":        false,
-			"rotate":          0,
-			"fusion_method":   "a",
-			"channel_mode":    "single",
-			"channels":        []int{0},
-			"channel_colors":  channelColors,
-			"time_index":      0,
-			"z_index":         volume.Depth / 2,
-			"volume_channel":  0,
-			"volume_clip_min": map[string]float64{"x": 0, "y": 0, "z": 0},
-			"volume_clip_max": map[string]float64{"x": 1, "y": 1, "z": 1},
-		},
+		"display_defaults": niftiScalarDisplayDefaults(volume, channelColors),
 		"metadata": map[string]any{
 			"reader":           "nifti-1",
 			"dims_order":       dimsOrder,
@@ -6585,6 +6572,38 @@ type niftiScalarVolume struct {
 	SpacingY      float64
 	SpacingZ      float64
 	Warnings      []string
+}
+
+func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string) map[string]any {
+	defaults := map[string]any{
+		"enhancement":        "d",
+		"negative":           false,
+		"rotate":             0,
+		"fusion_method":      "a",
+		"channel_mode":       "single",
+		"channels":           []int{0},
+		"channel_colors":     channelColors,
+		"scalar_colormap":    "grayscale",
+		"time_index":         0,
+		"z_index":            volume.Depth / 2,
+		"volume_channel":     0,
+		"volume_clip_min":    map[string]float64{"x": 0, "y": 0, "z": 0},
+		"volume_clip_max":    map[string]float64{"x": 1, "y": 1, "z": 1},
+		"volume_view_preset": "iso",
+	}
+	if niftiScalarRangeLooksCTLike(volume) {
+		defaults["enhancement"] = "hounsfield:350.000:1800.000"
+		defaults["volume_signal_floor"] = 0.12
+		defaults["volume_density"] = 1.75
+		defaults["volume_lighting"] = true
+		defaults["volume_lighting_strength"] = 0.72
+		defaults["volume_camera_mode"] = "orthographic"
+	}
+	return defaults
+}
+
+func niftiScalarRangeLooksCTLike(volume niftiScalarVolume) bool {
+	return volume.RawMin <= -900 && volume.RawMax >= 500
 }
 
 func loadNiftiScalarVolume(path string, requestedChannel ...int) (niftiScalarVolume, error) {

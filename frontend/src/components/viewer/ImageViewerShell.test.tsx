@@ -57,6 +57,8 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
       data-camera-mode={displayState?.volume_camera_mode ?? ""}
       data-clip-x-min={displayState?.volume_clip_min == null ? "" : String(displayState.volume_clip_min.x)}
       data-clip-x-max={displayState?.volume_clip_max == null ? "" : String(displayState.volume_clip_max.x)}
+      data-clip-y-min={displayState?.volume_clip_min == null ? "" : String(displayState.volume_clip_min.y)}
+      data-clip-y-max={displayState?.volume_clip_max == null ? "" : String(displayState.volume_clip_max.y)}
       data-clip-z-min={displayState?.volume_clip_min == null ? "" : String(displayState.volume_clip_min.z)}
       data-clip-z-max={displayState?.volume_clip_max == null ? "" : String(displayState.volume_clip_max.z)}
       data-x-index={xIndex == null ? "" : String(xIndex)}
@@ -1186,6 +1188,122 @@ describe("ImageViewerShell", () => {
     });
     expect(screen.getByText("20-100%")).toBeInTheDocument();
     expect(screen.getByText("0-75%")).toBeInTheDocument();
+  });
+
+  it("focuses a centered interior cutaway around the selected voxel for volume inspection", async () => {
+    const scalarPlane = {
+      axis: "z" as const,
+      label: "XY plane",
+      axes: ["Y", "X"],
+      pixel_size: { width: 10, height: 10 },
+      spacing: { row: 1, col: 1 },
+      world_size: { width: 10, height: 10 },
+      aspect_ratio: 1,
+    };
+    const scalarViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      original_name: "scalar-volume.nii",
+      modality: "medical",
+      dims_order: "ZYX",
+      backend_mode: "scalar",
+      axis_sizes: { T: 1, C: 1, Z: 10, Y: 10, X: 10 },
+      selected_indices: { T: 0, C: 0, Z: 6 },
+      is_volume: true,
+      display_defaults: {
+        ...(viewerInfo.display_defaults ?? {
+          enhancement: "d",
+          negative: false,
+          rotate: 0,
+          fusion_method: "a",
+          channel_mode: "single",
+          channels: [0],
+          channel_colors: ["#ffffff"],
+          time_index: 0,
+          z_index: 0,
+        }),
+        fusion_method: "a",
+        channel_mode: "single",
+        channels: [0],
+        channel_colors: ["#ffffff"],
+        volume_channel: 0,
+        volume_clip_min: { x: 0, y: 0, z: 0 },
+        volume_clip_max: { x: 1, y: 1, z: 1 },
+      },
+      service_urls: {
+        ...viewerInfo.service_urls,
+        scalar_volume: "/v2/uploads/file-123/scalar-volume",
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        dims_order: "ZYX",
+        array_shape: [10, 10, 10],
+        array_dtype: "uint16",
+        array_min: 0,
+        array_max: 100,
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        available_surfaces: ["volume", "metadata"],
+        default_surface: "volume",
+        default_axis: "z",
+        slice_axes: ["z"],
+        default_plane: scalarPlane,
+        planes: { z: scalarPlane },
+        volume_mode: "scalar",
+        render_policy: "scalar",
+        diagnostic_surface: "mpr",
+        display_capabilities: ["window_level"],
+        viewer_capabilities: ["volume", "metadata"],
+      },
+    };
+    const apiClient = {
+      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+
+    function Harness() {
+      const [displayState, setDisplayState] = useState(scalarViewerInfo.display_defaults ?? null);
+      return (
+        <ImageViewerShell
+          viewerInfo={scalarViewerInfo}
+          apiClient={apiClient}
+          selectedSurface="volume"
+          onSurfaceChange={() => {}}
+          selectedDisplayState={displayState}
+          updateSelectedDisplay={(patch) =>
+            setDisplayState((previous) => (previous ? { ...previous, ...patch } : previous))
+          }
+          clampedIndices={{ x: 4, y: 5, z: 6, t: 0 }}
+          debouncedX={4}
+          debouncedY={5}
+          debouncedZ={6}
+          debouncedT={0}
+          xAxisSize={10}
+          yAxisSize={10}
+          zAxisSize={10}
+          tAxisSize={1}
+          setSelectedIndex={() => {}}
+          selectedCaption=""
+          captionLoading={false}
+        />
+      );
+    }
+
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Interior focus" }));
+
+    await waitFor(() => {
+      const canvas = screen.getByTestId("slice-stack-volume-canvas");
+      expect(canvas.dataset.clipXMin).toBe("0.17");
+      expect(canvas.dataset.clipXMax).toBe("0.73");
+      expect(canvas.dataset.clipYMin).toBe("0.27");
+      expect(canvas.dataset.clipYMax).toBe("0.83");
+      expect(canvas.dataset.clipZMin).toBe("0.37");
+      expect(canvas.dataset.clipZMax).toBe("0.93");
+      expect(canvas.dataset.cameraMode).toBe("perspective");
+    });
+    expect(screen.getByText("Interior cutaway active")).toBeInTheDocument();
   });
 
   it("passes volume view preset changes into the volume renderer state", async () => {

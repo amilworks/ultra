@@ -4,7 +4,6 @@ import {
   memo,
   type CSSProperties,
   type ComponentType,
-  type FormEvent,
   type MutableRefObject,
   useCallback,
   useEffect,
@@ -37,13 +36,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Alert,
-  AlertAction,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -55,20 +47,6 @@ import {
   AlertDialogMedia,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -83,25 +61,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import {
-  ContextMenu,
-  ContextMenuCheckboxItem,
-  ContextMenuContent,
-  ContextMenuLabel,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import {
   Sidebar,
   SidebarContent,
@@ -151,7 +111,6 @@ import {
 } from "./features/chat/client";
 import {
   buildScientificResultGroups,
-  type ScientificResultFigure,
 } from "./features/chat/scientific-results";
 import {
   isHydratableRunArtifactVisual,
@@ -208,22 +167,30 @@ import type {
   SelectionContext,
   UploadedFileRecord,
 } from "./types";
-import { AuthScreen } from "./components/auth/AuthScreen";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
-import { InlineDataQuickPreview } from "./components/chat/InlineDataQuickPreview";
-import { ChatRunSteps } from "./components/chat/ChatRunSteps";
-import { ComposerSlashMenu } from "./components/chat/ComposerSlashMenu";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
-import { ToolResultQuickPreview } from "./components/chat/ToolResultQuickPreview";
-import {
-  coerceComposerWorkflowPresetState,
-  filterComposerWorkflows,
-  getComposerWorkflowById,
-  toComposerWorkflowPresetState,
-  type ComposerWorkflowDefinition,
-  type ComposerWorkflowId,
-  type ComposerWorkflowPresetState,
+import type {
+  ComposerWorkflowDefinition,
+  ComposerWorkflowId,
+  ComposerWorkflowPresetState,
 } from "./components/chat/composer-workflows";
+import type {
+  MegasegFileInsight,
+  PrairieImageAnalysis,
+  ResearchDigestData,
+  ResearchDigestMeasurementRow,
+  ResearchDigestStatisticRow,
+  ScientificFigureCard,
+  ToolCardImage,
+  ToolCardMetric,
+  ToolDetectionBox,
+  ToolDownloadRow,
+  ToolImageHoverDetails,
+  ToolResourceRow,
+  ToolResultCard,
+  YoloFigureCard,
+  YoloFigureClassCount,
+} from "./components/chat/ToolResultCards";
 import type {
   ResourceKindFilter,
   ResourceSourceFilter,
@@ -232,16 +199,11 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Copy,
   Database,
-  Download,
-  ExternalLink,
   FolderOpen,
   ImageIcon,
   Images,
-  Info,
   Layers3,
   Laptop,
   Link2,
@@ -260,12 +222,13 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash,
-  Unlink,
-  UserRound,
   X,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { Toaster, toast } from "sonner";
+import type * as Sonner from "sonner";
+
+type SonnerModule = typeof Sonner;
+type ToastSuccessOptions = Parameters<SonnerModule["toast"]["success"]>[1];
 
 type UiRole = "user" | "assistant";
 type ThemePreference = "system" | "light" | "dark";
@@ -278,6 +241,44 @@ type BisqueResourceCounts = {
   image: number;
   dataset: number;
   table: number;
+};
+type BisqueResourceCountsState = {
+  requestKey: string;
+  counts: BisqueResourceCounts | null;
+};
+
+const queueEffectUpdate = (callback: () => void): (() => void) => {
+  let cancelled = false;
+  window.queueMicrotask(() => {
+    if (!cancelled) {
+      callback();
+    }
+  });
+  return () => {
+    cancelled = true;
+  };
+};
+
+const readAuthErrorFromLocation = (): string | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const value = new URLSearchParams(window.location.search).get("auth_error");
+  return value && value.trim().length > 0 ? value.trim() : null;
+};
+
+const clearAuthErrorFromLocation = (): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("auth_error")) {
+    return;
+  }
+  params.delete("auth_error");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, "", nextUrl);
 };
 
 type WorkOSRedirectScreenProps = {
@@ -326,6 +327,54 @@ function WorkOSRedirectScreen({
   );
 }
 
+function AuthScreenLoadingFallback() {
+  return (
+    <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
+      <section className="grid w-full max-w-sm gap-3 rounded-2xl border bg-card p-6 text-center shadow-sm">
+        <Loader className="mx-auto size-5 animate-spin text-muted-foreground" />
+        <h1 className="text-xl font-semibold tracking-tight">Opening sign in</h1>
+        <p className="text-sm text-muted-foreground">
+          Preparing BisQue Ultra.
+        </p>
+      </section>
+    </main>
+  );
+}
+
+function DeferredToaster({ theme }: { theme: "light" | "dark" }) {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const show = () => setReady(true);
+    if (typeof window.requestIdleCallback === "function") {
+      const idleId = window.requestIdleCallback(show, { timeout: 3_000 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+
+    const timeoutId = window.setTimeout(show, 1_200);
+    return () => window.clearTimeout(timeoutId);
+  }, []);
+
+  if (!ready) {
+    return null;
+  }
+
+  return (
+    <Suspense fallback={null}>
+      <LazyToaster
+        theme={theme}
+        richColors
+        position="bottom-right"
+        toastOptions={{ duration: 4200 }}
+      />
+    </Suspense>
+  );
+}
+
 type RunImageArtifact = {
   path: string;
   url: string;
@@ -336,21 +385,6 @@ type RunImageArtifact = {
   downloadUrl?: string;
   linkedFileId?: string | null;
   resultGroupId?: string | null;
-};
-
-type ToolCardMetric = {
-  label: string;
-  value: string;
-};
-
-type ScientificFigureCard = {
-  key: string;
-  title: string;
-  subtitle?: string;
-  summary?: string;
-  previewUrl: string;
-  downloadUrl?: string;
-  previewable: boolean;
 };
 
 const formatBisqueShortcutLabel = (
@@ -378,257 +412,145 @@ const lazyNamed = <TModule extends Record<string, unknown>>(
     };
   });
 
+const loadSam3AnnotationDialogModule = () => import("./components/Sam3AnnotationDialog");
+const loadUploadViewerSheetModule = () => import("./components/UploadViewerSheet");
+const loadAdminConsoleModule = () => import("./components/AdminConsole");
+const loadAppSettingsDialogModule = () => import("./components/AppSettingsDialog");
+const loadAuthScreenModule = () => import("./components/auth/AuthScreen");
+const loadTrainingDashboardModule = () => import("./components/TrainingDashboard");
+const loadScientificViewerPageModule = () => import("./components/ScientificViewerPage");
+const loadResourceBrowserModule = () => import("./components/ResourceBrowser");
+const loadComposerSlashMenuModule = () => import("./components/chat/ComposerSlashMenu");
+const loadChatRunStepsModule = () => import("./components/chat/ChatRunSteps");
+const loadInlineDataQuickPreviewModule = () =>
+  import("./components/chat/InlineDataQuickPreview");
+const loadProModeDevTraceModule = () => import("./components/chat/ProModeDevTrace");
+const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
+const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
+
+type ComposerWorkflowsModule = Awaited<
+  ReturnType<typeof loadComposerWorkflowsModule>
+>;
+
+let composerWorkflowsModulePromise: Promise<ComposerWorkflowsModule> | null = null;
+
+const loadComposerWorkflows = (): Promise<ComposerWorkflowsModule> => {
+  composerWorkflowsModulePromise ??= loadComposerWorkflowsModule().catch(
+    (error: unknown) => {
+      composerWorkflowsModulePromise = null;
+      throw error;
+    }
+  );
+  return composerWorkflowsModulePromise;
+};
+
+let sonnerModulePromise: Promise<SonnerModule> | null = null;
+
+const loadSonnerModule = (): Promise<SonnerModule> => {
+  sonnerModulePromise ??= import("sonner").catch((error: unknown) => {
+    sonnerModulePromise = null;
+    throw error;
+  });
+  return sonnerModulePromise;
+};
+
+const showSuccessToast = (
+  message: string,
+  options?: ToastSuccessOptions
+): void => {
+  void loadSonnerModule().then(({ toast }) => {
+    toast.success(message, options);
+  });
+};
+
 const LazySam3AnnotationDialog = lazyNamed(
-  () => import("./components/Sam3AnnotationDialog"),
+  loadSam3AnnotationDialogModule,
   "Sam3AnnotationDialog"
 );
 const LazyUploadViewerSheet = lazyNamed(
-  () => import("./components/UploadViewerSheet"),
+  loadUploadViewerSheetModule,
   "UploadViewerSheet"
 );
 const LazyAdminConsole = lazyNamed(
-  () => import("./components/AdminConsole"),
+  loadAdminConsoleModule,
   "AdminConsole"
 );
+const LazyAppSettingsDialog = lazyNamed(
+  loadAppSettingsDialogModule,
+  "AppSettingsDialog"
+);
+const LazyAuthScreen = lazyNamed(loadAuthScreenModule, "AuthScreen");
+const LazyToaster = lazy(async () => {
+  const module = await loadSonnerModule();
+  return {
+    default: module.Toaster as ComponentType<any>,
+  };
+});
 const LazyTrainingDashboard = lazyNamed(
-  () => import("./components/TrainingDashboard"),
+  loadTrainingDashboardModule,
   "TrainingDashboard"
 );
 const LazyScientificViewerPage = lazyNamed(
-  () => import("./components/ScientificViewerPage"),
+  loadScientificViewerPageModule,
   "ScientificViewerPage"
 );
 const LazyResourceBrowser = lazyNamed(
-  () => import("./components/ResourceBrowser"),
+  loadResourceBrowserModule,
   "ResourceBrowser"
 );
+const LazyComposerSlashMenu = lazyNamed(
+  loadComposerSlashMenuModule,
+  "ComposerSlashMenu"
+);
+const LazyChatRunSteps = lazyNamed(loadChatRunStepsModule, "ChatRunSteps");
+const LazyInlineDataQuickPreview = lazyNamed(
+  loadInlineDataQuickPreviewModule,
+  "InlineDataQuickPreview"
+);
+const LazyProModeDevTrace = lazyNamed(loadProModeDevTraceModule, "ProModeDevTrace");
+const LazyToolResultCardSection = lazyNamed(
+  loadToolResultCardsModule,
+  "ToolResultCardSection"
+);
+const LazyResearchDigestCard = lazyNamed(
+  loadToolResultCardsModule,
+  "ResearchDigestCard"
+);
 
-type PrairieImageAnalysis = {
-  rawFile: string;
-  fileLabel?: string;
-  prairieDogCount?: number | null;
-  burrowCount?: number | null;
-  boxCount?: number | null;
-  nearestBurrowDistancePxMean?: number | null;
-  nearestBurrowDistancePxMin?: number | null;
-  nearestBurrowDistancePxMedian?: number | null;
-  nearestBurrowDistancePxMax?: number | null;
-  overlappingBurrowCount?: number | null;
-  capturedAt?: string | null;
-  latitude?: number | null;
-  longitude?: number | null;
+let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
+let adminPanelPreloadPromise: Promise<unknown> | null = null;
+
+const preloadAdminPanelModule = (): Promise<unknown> => {
+  adminPanelPreloadPromise ??= loadAdminConsoleModule().catch((error: unknown) => {
+    adminPanelPreloadPromise = null;
+    throw error;
+  });
+  return adminPanelPreloadPromise;
 };
 
-type PrairieDetectionInsights = {
-  summary?: string;
-  inferenceBackend?: string | null;
-  tileSize?: number | null;
-  tileOverlap?: number | null;
-  tileCount?: number | null;
-  conf?: number | null;
-  iou?: number | null;
-  mergeIou?: number | null;
-  prairieDogCount: number;
-  burrowCount: number;
-  avgConfidence?: number | null;
-  nearestBurrowDistancePxMean?: number | null;
-  nearestBurrowDistancePxMin?: number | null;
-  overlapCount?: number | null;
-  metadataSummary?: {
-    capturedAt?: string | null;
-    latitude?: number | null;
-    longitude?: number | null;
-  };
-  perImage: PrairieImageAnalysis[];
-};
-
-type ToolImageHoverDetails = {
-  fileLabel?: string;
-  masksGenerated?: number | null;
-  avgPointsPerWindow?: number | null;
-  minPoints?: number | null;
-  maxPoints?: number | null;
-  detectionBoxes?: ToolDetectionBox[];
-  prairieImageAnalysis?: PrairieImageAnalysis;
-};
-
-type ToolDetectionBox = {
-  className: string;
-  confidence?: number | null;
-  xMin: number;
-  yMin: number;
-  xMax: number;
-  yMax: number;
-};
-
-type ToolCardImage = RunImageArtifact & {
-  hoverDetails?: ToolImageHoverDetails;
-};
-
-type YoloFigureClassCount = {
-  name: string;
-  count: number;
-};
-
-type YoloFigureCard = {
-  key: string;
-  title: string;
-  subtitle?: string;
-  previewUrl: string;
-  downloadUrl?: string;
-  originalUrl?: string;
-  previewKind?: string;
-  sourceName?: string;
-  rawSourceName?: string;
-  sourcePath?: string;
-  rawSourcePath?: string;
-  imageWidth?: number | null;
-  imageHeight?: number | null;
-  boxCount?: number | null;
-  classCounts: YoloFigureClassCount[];
-  previewable: boolean;
-};
-
-type YoloFigureAvailability = {
-  missingAnnotatedFigure: boolean;
-};
-
-type MegasegFileInsight = {
-  file: string;
-  coveragePercent?: number | null;
-  objectCount?: number | null;
-  activeSliceCount?: number | null;
-  zSliceCount?: number | null;
-  largestComponentVoxels?: number | null;
-  technicalSummary?: string | null;
-};
-
-type MegasegInsights = {
-  resultGroupId: string;
-  heroFigure: ScientificResultFigure | null;
-  secondaryFigures: ScientificResultFigure[];
-  fileRows: MegasegFileInsight[];
-  reportPath?: string | null;
-  summaryCsvPath?: string | null;
-  reportDownloadUrl?: string | null;
-  summaryCsvDownloadUrl?: string | null;
-  technicalSummary?: string | null;
-  collectionLabel?: string;
-  device?: string | null;
-  structureChannel?: number | null;
-  nucleusChannel?: number | null;
-};
-
-type ToolResourceRow = {
-  name: string;
-  owner?: string;
-  created?: string;
-  resourceType?: string;
-  uri?: string;
-  resourceUri?: string;
-  clientViewUrl?: string;
-  imageServiceUrl?: string;
-};
-
-type ToolDownloadRow = {
-  status: string;
-  outputPath?: string;
-  resourceUri?: string;
-  clientViewUrl?: string;
-  imageServiceUrl?: string;
-  error?: string;
-};
-
-type ToolResultCard = {
-  id: string;
-  tool:
-    | "segment_image_megaseg"
-    | "segment_image_sam2"
-    | "segment_image_sam3"
-    | "yolo_detect"
-    | "estimate_depth_pro"
-    | "quantify_segmentation_masks"
-    | "plot_quantified_detections"
-    | "upload_to_bisque"
-    | "load_bisque_resource"
-    | "bisque_download_resource"
-    | "bisque_download_dataset"
-    | "bisque_create_dataset"
-    | "bisque_add_to_dataset"
-    | "bisque_add_gobjects"
-    | "add_tags_to_resource"
-    | "bisque_fetch_xml"
-    | "delete_bisque_resource"
-    | "run_bisque_module"
-    | "search_bisque_resources"
-    | "bisque_advanced_search"
-    | "bisque_find_assets";
-  title: string;
-  subtitle?: string;
-  metrics: ToolCardMetric[];
-  classes: Array<{ name: string; count: number }>;
-  images: ToolCardImage[];
-  resourceRows: ToolResourceRow[];
-  downloadRows: ToolDownloadRow[];
-  variant?: "prairie_detection";
-  narrative?: string;
-  prairieInsights?: PrairieDetectionInsights | null;
-  yoloFigures?: YoloFigureCard[];
-  yoloFigureAvailability?: YoloFigureAvailability | null;
-  placement?: "before_text" | "after_text";
-  scientificFigures?: ScientificFigureCard[];
-  megasegInsights?: MegasegInsights | null;
-};
-
-type ResearchDigestEvidenceRow = {
-  source: string;
-  summary?: string;
-  artifact?: string;
-  runId?: string | null;
-};
-
-type ResearchDigestMeasurementRow = {
-  name: string;
-  valueLabel: string;
-};
-
-type ResearchDigestStatisticRow = {
-  label: string;
-  summary: string;
-};
-
-type ResearchDigestData = {
-  result: string;
-  confidenceLevel?: "low" | "medium" | "high";
-  confidenceWhy: string[];
-  evidence: ResearchDigestEvidenceRow[];
-  measurements: ResearchDigestMeasurementRow[];
-  statisticalAnalysis: ResearchDigestStatisticRow[];
-  qcWarnings: string[];
-  limitations: string[];
-  nextSteps: string[];
-};
-
-const RESOURCE_BACKED_BISQUE_CARD_TOOLS = new Set<ToolResultCard["tool"]>([
-  "upload_to_bisque",
-  "load_bisque_resource",
-  "search_bisque_resources",
-  "bisque_advanced_search",
-  "bisque_find_assets",
-  "bisque_create_dataset",
-  "bisque_add_to_dataset",
-  "bisque_add_gobjects",
-  "add_tags_to_resource",
-  "bisque_fetch_xml",
-  "run_bisque_module",
-]);
-
-type BisqueResourceHeader = {
-  eyebrow: string;
-  title: string;
-  subtitle?: string;
-  summary?: string;
-  hideMetricBadges?: boolean;
+const preloadSecondaryPanelModules = ({
+  includeAdmin = false,
+}: { includeAdmin?: boolean } = {}): Promise<unknown[]> => {
+  secondaryPanelPreloadPromise ??= Promise.all([
+    loadResourceBrowserModule(),
+    loadScientificViewerPageModule(),
+    loadTrainingDashboardModule(),
+    loadAppSettingsDialogModule(),
+    loadUploadViewerSheetModule(),
+  ]).catch((error: unknown) => {
+    secondaryPanelPreloadPromise = null;
+    throw error;
+  });
+  if (!includeAdmin) {
+    return secondaryPanelPreloadPromise;
+  }
+  return Promise.all([
+    secondaryPanelPreloadPromise,
+    preloadAdminPanelModule(),
+  ]).then(([secondaryModules, adminModule]) => [
+    ...secondaryModules,
+    adminModule,
+  ]);
 };
 
 type UiMessage = {
@@ -1072,6 +994,131 @@ const ConversationHistoryActions = ({
   );
 };
 
+type ConversationRenameEditorProps = {
+  conversation: HistoryItem;
+  value: string;
+  disabled: boolean;
+  onTitleChange: (conversationId: string, title: string) => void;
+  onSubmit: () => Promise<void>;
+  onCancel: () => void;
+};
+
+const ConversationRenameEditor = memo(function ConversationRenameEditor({
+  conversation,
+  value,
+  disabled,
+  onTitleChange,
+  onSubmit,
+  onCancel,
+}: ConversationRenameEditorProps) {
+  return (
+    <div className="app-history-rename-shell">
+      <Input
+        value={value}
+        onChange={(event) => {
+          onTitleChange(conversation.id, event.target.value);
+        }}
+        onFocus={(event) => {
+          event.currentTarget.select();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void onSubmit();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        autoFocus
+        maxLength={120}
+        aria-label={`Rename ${conversation.title}`}
+        data-testid="conversation-rename-input"
+        className="app-history-rename-input"
+        disabled={disabled}
+      />
+      <div className="app-history-rename-actions">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="app-history-rename-button"
+          aria-label="Save chat name"
+          onClick={() => {
+            void onSubmit();
+          }}
+          disabled={disabled}
+        >
+          <Check className="size-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="app-history-rename-button"
+          aria-label="Cancel renaming chat"
+          onClick={onCancel}
+          disabled={disabled}
+        >
+          <X className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+});
+
+type ConversationHistoryRowProps = {
+  conversation: HistoryItem;
+  active: boolean;
+  deleting: boolean;
+  renaming: boolean;
+  onOpen: (conversation: HistoryItem) => void;
+  onCopyLink: (conversationId: string) => Promise<void>;
+  onCopyId: (conversationId: string) => Promise<void>;
+  onRename: (conversationId: string, conversationTitle: string) => void;
+  onDelete: (conversationId: string) => void;
+};
+
+const ConversationHistoryRow = memo(function ConversationHistoryRow({
+  conversation,
+  active,
+  deleting,
+  renaming,
+  onOpen,
+  onCopyLink,
+  onCopyId,
+  onRename,
+  onDelete,
+}: ConversationHistoryRowProps) {
+  return (
+    <SidebarMenuItem className="app-history-item">
+      <SidebarMenuButton
+        isActive={active}
+        className="app-history-button group/history h-auto py-2"
+        onClick={() => onOpen(conversation)}
+        {...mobileSidebarCloseProps}
+      >
+        <div className="flex min-w-0 w-full items-center gap-2">
+          <span className="truncate">{conversation.title}</span>
+          <div className="ml-auto flex items-center gap-1.5">
+            {conversation.running ? <RunningStatusPill size="compact" /> : null}
+          </div>
+        </div>
+      </SidebarMenuButton>
+      <ConversationHistoryActions
+        conversationId={conversation.id}
+        conversationTitle={conversation.title}
+        deleting={deleting}
+        renaming={renaming}
+        onCopyLink={onCopyLink}
+        onCopyId={onCopyId}
+        onRename={onRename}
+        onDelete={onDelete}
+      />
+    </SidebarMenuItem>
+  );
+});
+
 const scientificFileExtensions = [
   ".tif",
   ".tiff",
@@ -1212,7 +1259,74 @@ const inferPromptWorkflowIntent = (promptText: string): PromptWorkflowIntent => 
   };
 };
 
-const PRO_MODE_PRIMARY_WORKFLOW = getComposerWorkflowById("pro_mode");
+const PRO_MODE_COMPOSER_WORKFLOW_PRESET: ComposerWorkflowPresetState = {
+  id: "pro_mode",
+  label: "Pro Mode",
+  prompt: "",
+  selectedToolNames: [],
+  workflowHint: {
+    id: "pro_mode",
+    source: "slash_menu",
+  },
+  requiresAttachedFiles: false,
+  opensResourcePickerOnSelect: false,
+  clearsAfterResourcePick: false,
+  persistsAcrossTurns: true,
+};
+
+const toComposerWorkflowPresetState = (
+  workflow: ComposerWorkflowPresetState
+): ComposerWorkflowPresetState => ({
+  id: workflow.id,
+  label: workflow.label,
+  prompt: workflow.prompt,
+  selectedToolNames: [...workflow.selectedToolNames],
+  workflowHint: workflow.workflowHint ? { ...workflow.workflowHint } : null,
+  requiresAttachedFiles: workflow.requiresAttachedFiles,
+  opensResourcePickerOnSelect: workflow.opensResourcePickerOnSelect,
+  clearsAfterResourcePick: workflow.clearsAfterResourcePick,
+  persistsAcrossTurns: workflow.persistsAcrossTurns ?? false,
+});
+
+const coerceComposerWorkflowPresetState = (
+  value: unknown
+): ComposerWorkflowPresetState | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = String(record.id ?? "").trim() as ComposerWorkflowId;
+  const label = String(record.label ?? "").trim();
+  if (!id || !label) {
+    return null;
+  }
+  const selectedToolNames = Array.isArray(record.selectedToolNames)
+    ? record.selectedToolNames.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const hintRecord =
+    record.workflowHint &&
+    typeof record.workflowHint === "object" &&
+    !Array.isArray(record.workflowHint)
+      ? (record.workflowHint as Record<string, unknown>)
+      : null;
+  const hintId = String(hintRecord?.id ?? "").trim();
+  return {
+    id,
+    label,
+    prompt: String(record.prompt ?? ""),
+    selectedToolNames,
+    workflowHint: hintId
+      ? ({
+          id: hintId as ComposerWorkflowId,
+          source: "slash_menu",
+        } as NonNullable<ComposerWorkflowPresetState["workflowHint"]>)
+      : null,
+    requiresAttachedFiles: Boolean(record.requiresAttachedFiles),
+    opensResourcePickerOnSelect: Boolean(record.opensResourcePickerOnSelect),
+    clearsAfterResourcePick: Boolean(record.clearsAfterResourcePick),
+    persistsAcrossTurns: Boolean(record.persistsAcrossTurns),
+  };
+};
 
 const inferReuseToolNames = (promptText: string): string[] => {
   const intent = inferPromptWorkflowIntent(promptText);
@@ -1518,9 +1632,9 @@ const createConversationState = (): ConversationState => {
     activeSelectionContext: null,
     failedUploadPreviewIds: {},
     bisqueLinksByFileId: {},
-    composerWorkflowPreset: PRO_MODE_PRIMARY_WORKFLOW
-      ? toComposerWorkflowPresetState(PRO_MODE_PRIMARY_WORKFLOW)
-      : null,
+    composerWorkflowPreset: toComposerWorkflowPresetState(
+      PRO_MODE_COMPOSER_WORKFLOW_PRESET
+    ),
     selectionImportPending: false,
     sending: false,
     chatError: null,
@@ -2108,9 +2222,10 @@ function ChatAutoScroll({
   }, [conversationId]);
 
   useLayoutEffect(() => {
-    scrollElementRef.current = scrollRef.current;
+    const scrollElement = scrollRef.current;
+    scrollElementRef.current = scrollElement;
     return () => {
-      if (scrollElementRef.current === scrollRef.current) {
+      if (scrollElementRef.current === scrollElement) {
         scrollElementRef.current = null;
       }
     };
@@ -2165,6 +2280,7 @@ function ChatAutoScroll({
     scrollMemoryRef,
     scrollRef,
     scrollToBottom,
+    scrollWriteBlockRef,
     stopScroll,
   ]);
 
@@ -2189,7 +2305,7 @@ function ChatAutoScroll({
     return () => {
       scrollElement.removeEventListener("scroll", handleScroll);
     };
-  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef]);
+  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef, scrollWriteBlockRef]);
 
   useEffect(() => {
     if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
@@ -2356,245 +2472,6 @@ const ConversationMessageRow = memo(
       () => summaryModeLabelForMessage(message),
       [message]
     );
-    const renderToolCardSection = useCallback(
-      (cardsToRender: ToolResultCard[]) => (
-        <div className="chat-tool-cards">
-          {cardsToRender.map((card) => {
-            const usesResourceQuickPreview =
-              card.images.length > 0 &&
-              RESOURCE_BACKED_BISQUE_CARD_TOOLS.has(card.tool);
-            const bisqueResourceHeader =
-              usesResourceQuickPreview && card.tool !== "run_bisque_module"
-                ? buildBisqueResourceHeader(card)
-                : null;
-            const showResourceTable =
-              card.resourceRows.length > 0 &&
-              !(usesResourceQuickPreview && card.resourceRows.length === 1);
-            const isPrairieCard =
-              card.variant === "prairie_detection" &&
-              Boolean(card.prairieInsights);
-            const isMegasegCard =
-              card.tool === "segment_image_megaseg" &&
-              Boolean(card.megasegInsights);
-
-            return (
-              <Card
-                key={card.id}
-                className={cn(
-                  "chat-tool-card",
-                  isPrairieCard && "chat-tool-card--prairie",
-                  isMegasegCard && "chat-tool-card--scientific"
-                )}
-              >
-                <CardHeader className="chat-tool-card-header">
-                  {isPrairieCard ? (
-                    <p className="chat-tool-card-eyebrow">Wildlife Detection</p>
-                  ) : isMegasegCard ? (
-                    <p className="chat-tool-card-eyebrow">Microscopy Segmentation</p>
-                  ) : bisqueResourceHeader?.eyebrow ? (
-                    <p className="chat-tool-card-eyebrow">
-                      {bisqueResourceHeader.eyebrow}
-                    </p>
-                  ) : null}
-                  <CardTitle className="chat-tool-card-title">
-                    {bisqueResourceHeader?.title ?? card.title}
-                  </CardTitle>
-                  {(bisqueResourceHeader?.subtitle ?? card.subtitle) ? (
-                    <p className="chat-tool-card-subtitle">
-                      {bisqueResourceHeader?.subtitle ?? card.subtitle}
-                    </p>
-                  ) : null}
-                  {bisqueResourceHeader?.summary ? (
-                    <p className="chat-tool-card-summary">
-                      {bisqueResourceHeader.summary}
-                    </p>
-                  ) : null}
-                  {!isPrairieCard && !bisqueResourceHeader?.hideMetricBadges ? (
-                    <div className="chat-tool-metrics">
-                      {card.metrics.map((metric) => (
-                        <Badge key={`${card.id}-${metric.label}`} variant="secondary">
-                          {metric.label}: {metric.value}
-                        </Badge>
-                      ))}
-                    </div>
-                  ) : null}
-                </CardHeader>
-                <CardContent className="chat-tool-card-content">
-                  {isMegasegCard ? <MegasegCardBody card={card} /> : null}
-                  {isPrairieCard ? (
-                    <PrairieDetectionCardBody card={card} />
-                  ) : null}
-                  {!isMegasegCard && !isPrairieCard && card.classes.length > 0 ? (
-                    <div className="chat-tool-classes">
-                      {card.classes.map((cls) => (
-                        <Badge key={`${card.id}-${cls.name}`} variant="outline">
-                          {cls.name} ({cls.count})
-                        </Badge>
-                      ))}
-                    </div>
-                  ) : null}
-                  {!isMegasegCard && !isPrairieCard && showResourceTable ? (
-                    <div className="chat-tool-resource-table-wrap">
-                      <table className="chat-tool-resource-table">
-                        <thead>
-                          <tr>
-                            <th>Name</th>
-                            <th>Created</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {card.resourceRows.map((row, rowIndex) => (
-                            <tr key={`${card.id}-resource-${rowIndex}`}>
-                              <td className="chat-tool-resource-name-cell">
-                                <div
-                                  className="chat-tool-resource-name"
-                                  title={row.name}
-                                >
-                                  {row.name}
-                                </div>
-                              </td>
-                              <td>
-                                <span className="chat-tool-resource-date">
-                                  {row.created ?? "—"}
-                                </span>
-                              </td>
-                              <td className="chat-tool-resource-actions-cell">
-                                <div className="chat-tool-resource-actions">
-                                  {row.clientViewUrl || row.uri ? (
-                                    <a
-                                      href={row.clientViewUrl || row.uri}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="chat-tool-resource-link"
-                                    >
-                                      Open in BisQue
-                                    </a>
-                                  ) : null}
-                                  {row.resourceUri ? (
-                                    <button
-                                      type="button"
-                                      className="chat-tool-resource-link"
-                                      onClick={() => {
-                                        void actions.onImportBisqueResourcesIntoConversation(
-                                          [row.resourceUri as string],
-                                          {
-                                            materialize: false,
-                                            persistSelectionContext: true,
-                                            source: "tool_result_use_in_chat",
-                                            originatingMessageId: message.id,
-                                          }
-                                        );
-                                      }}
-                                    >
-                                      Use in chat
-                                    </button>
-                                  ) : null}
-                                  {row.resourceUri ? (
-                                    <button
-                                      type="button"
-                                      className="chat-tool-resource-link"
-                                      onClick={() => {
-                                        void actions.onCopyBisqueResourceUri(
-                                          (row.clientViewUrl || row.resourceUri) as string
-                                        );
-                                      }}
-                                    >
-                                      Copy link
-                                    </button>
-                                  ) : null}
-                                  {!row.clientViewUrl &&
-                                  !row.uri &&
-                                  !row.resourceUri
-                                    ? "—"
-                                    : null}
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : null}
-                  {!isMegasegCard && !isPrairieCard && card.downloadRows.length > 0 ? (
-                    <div className="chat-tool-resource-table-wrap">
-                      <p className="chat-tool-card-subtitle">Download activity</p>
-                      <table className="chat-tool-resource-table">
-                        <thead>
-                          <tr>
-                            <th>Status</th>
-                            <th>Saved to</th>
-                            <th>Resource</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {card.downloadRows.map((row, rowIndex) => (
-                            <tr key={`${card.id}-download-${rowIndex}`}>
-                              <td>{row.status}</td>
-                              <td>{row.outputPath ?? "—"}</td>
-                              <td>
-                                {row.clientViewUrl ? (
-                                  <a
-                                    href={row.clientViewUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="chat-tool-resource-link"
-                                  >
-                                    {row.clientViewUrl}
-                                  </a>
-                                ) : (
-                                  row.resourceUri ?? "—"
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : null}
-                  {!isMegasegCard && !isPrairieCard && card.tool === "yolo_detect" && card.yoloFigures?.length ? (
-                    <YoloFigureStack
-                      figures={card.yoloFigures}
-                      variant="default"
-                    />
-                  ) : !isMegasegCard &&
-                    !isPrairieCard &&
-                    card.tool === "yolo_detect" &&
-                    card.yoloFigureAvailability?.missingAnnotatedFigure ? (
-                    <YoloFigureUnavailable variant="default" />
-                  ) : !isMegasegCard && !isPrairieCard && card.images.length > 0 ? (
-                    usesResourceQuickPreview ? (
-                      <ToolResultQuickPreview
-                        images={card.images}
-                        resourceRows={card.resourceRows}
-                        onUseInChat={(resourceUri) => {
-                          void actions.onImportBisqueResourcesIntoConversation(
-                            [resourceUri],
-                            {
-                              materialize: false,
-                              persistSelectionContext: true,
-                              source: "tool_result_use_in_chat",
-                              originatingMessageId: message.id,
-                            }
-                          );
-                        }}
-                      />
-                    ) : (
-                      <ToolImageCarousel
-                        key={card.images.map((image) => image.path).join("|")}
-                        images={card.images}
-                      />
-                    )
-                  ) : null}
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      ),
-      [actions, message.id]
-    );
-
     if (!isAssistant) {
       return (
         <Message
@@ -2676,12 +2553,14 @@ const ConversationMessageRow = memo(
             </div>
           ) : null}
           {isStreamingAssistant ? (
-            <ChatRunSteps
-              runEvents={runEvents}
-              progressEvents={progressEvents}
-              isStreaming={isStreamingAssistant}
-              fallbackLabel={thinkingBarText}
-            />
+            <Suspense fallback={null}>
+              <LazyChatRunSteps
+                runEvents={runEvents}
+                progressEvents={progressEvents}
+                isStreaming={isStreamingAssistant}
+                fallbackLabel={thinkingBarText}
+              />
+            </Suspense>
           ) : reasonedDurationLabel || summaryModeLabel ? (
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
               {reasonedDurationLabel ? (
@@ -2694,9 +2573,18 @@ const ConversationMessageRow = memo(
               ) : null}
             </div>
           ) : null}
-          {showLeadingToolResultCards
-            ? renderToolCardSection(leadingToolResultCards)
-            : null}
+          {showLeadingToolResultCards ? (
+            <Suspense fallback={null}>
+              <LazyToolResultCardSection
+                cards={leadingToolResultCards}
+                messageId={message.id}
+                onImportBisqueResourcesIntoConversation={
+                  actions.onImportBisqueResourcesIntoConversation
+                }
+                onCopyBisqueResourceUri={actions.onCopyBisqueResourceUri}
+              />
+            </Suspense>
+          ) : null}
           {isStreamingAssistant && message.liveStream ? (
             <div
               id={message.id}
@@ -2732,16 +2620,18 @@ const ConversationMessageRow = memo(
               </MessageContent>
             )
           )}
-          {proModeDevConversation
-            ? renderProModeDevConversation(message.id, proModeDevConversation, {
-                onCopy: () =>
-                  void actions.onCopy(
-                    proModeDevConversationCopyText(proModeDevConversation),
-                    proModeDevCopyKey
-                  ),
-                isCopied: isProModeDevCopied,
-              })
-            : null}
+          {proModeDevConversation ? (
+            <Suspense fallback={null}>
+              <LazyProModeDevTrace
+                messageId={message.id}
+                conversation={proModeDevConversation}
+                isCopied={isProModeDevCopied}
+                onCopy={(copyText: string) =>
+                  void actions.onCopy(copyText, proModeDevCopyKey)
+                }
+              />
+            </Suspense>
+          ) : null}
           {bisqueAuthGate ? (
             <div
               className="mt-3 flex flex-col gap-3 rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 text-sm text-amber-950 shadow-sm backdrop-blur"
@@ -2775,22 +2665,35 @@ const ConversationMessageRow = memo(
           {message.quickPreviewFileIds &&
           message.quickPreviewFileIds.length > 0 &&
           !hasPrimaryToolCard ? (
-            <InlineDataQuickPreview
-              fileIds={message.quickPreviewFileIds}
-              uploadedFiles={uploadedFiles}
-              bisqueLinksByFileId={bisqueLinksByFileId}
-              apiClient={apiClient}
-              onOpenInViewer={actions.onOpenConversationFilesInViewer}
-            />
+            <Suspense fallback={null}>
+              <LazyInlineDataQuickPreview
+                fileIds={message.quickPreviewFileIds}
+                uploadedFiles={uploadedFiles}
+                bisqueLinksByFileId={bisqueLinksByFileId}
+                apiClient={apiClient}
+                onOpenInViewer={actions.onOpenConversationFilesInViewer}
+              />
+            </Suspense>
           ) : null}
-          {showTrailingToolResultCards
-            ? renderToolCardSection(trailingToolResultCards)
-            : null}
+          {showTrailingToolResultCards ? (
+            <Suspense fallback={null}>
+              <LazyToolResultCardSection
+                cards={trailingToolResultCards}
+                messageId={message.id}
+                onImportBisqueResourcesIntoConversation={
+                  actions.onImportBisqueResourcesIntoConversation
+                }
+                onCopyBisqueResourceUri={actions.onCopyBisqueResourceUri}
+              />
+            </Suspense>
+          ) : null}
           {showResearchDigest && researchDigest ? (
-            <ResearchDigestCard
-              digest={researchDigest}
-              followsVisuals={showLeadingToolResultCards}
-            />
+            <Suspense fallback={null}>
+              <LazyResearchDigestCard
+                digest={researchDigest}
+                followsVisuals={showLeadingToolResultCards}
+              />
+            </Suspense>
           ) : null}
           {runArtifacts.length > 0 && toolResultCards.length === 0 ? (
             <div className="chat-artifact-grid">
@@ -3921,40 +3824,6 @@ const extractBisqueAuthGate = (
     };
   }
   return null;
-};
-
-const yoloOverlayPalette = [
-  "#8b9a6d",
-  "#bb8263",
-  "#d2aa67",
-  "#6f8f9f",
-  "#b08ba0",
-  "#7f745f",
-  "#769c90",
-  "#cc9278",
-];
-
-const clampToRange = (value: number, minimum: number, maximum: number): number =>
-  Math.min(maximum, Math.max(minimum, value));
-
-const hashText = (value: string): number => {
-  let hash = 0;
-  for (let idx = 0; idx < value.length; idx += 1) {
-    hash = (hash * 31 + value.charCodeAt(idx)) >>> 0;
-  }
-  return hash;
-};
-
-const yoloClassColor = (className: string): string => {
-  const normalized = String(className || "class").trim().toLowerCase();
-  if (normalized === "prairie_dog") {
-    return "#bb8263";
-  }
-  if (normalized === "burrow") {
-    return "#8b9a6d";
-  }
-  const bucket = hashText(normalized || "class") % yoloOverlayPalette.length;
-  return yoloOverlayPalette[bucket];
 };
 
 const isPrairieDetectionClassName = (className: string): boolean => {
@@ -5239,7 +5108,7 @@ const buildToolResultCards = (
           return leftKey[0] - rightKey[0] || leftKey[1].localeCompare(rightKey[1]);
         });
 
-      const figureCardsFromHydratedArtifacts =
+      const figureCardsFromHydratedArtifacts: ScientificFigureCard[] =
         figureCards.length > 0
           ? figureCards
           : runArtifacts
@@ -5248,7 +5117,7 @@ const buildToolResultCards = (
                   `${artifact.path} ${artifact.title} ${artifact.sourceName}`
                 )
               )
-              .map((artifact, artifactIndex) => ({
+              .map((artifact, artifactIndex): ScientificFigureCard => ({
                 key: `${artifact.path}-${artifactIndex}`,
                 title: artifact.title || "Megaseg figure",
                 subtitle:
@@ -5274,14 +5143,22 @@ const buildToolResultCards = (
 
       const megasegImages: ToolCardImage[] =
         figureCardsFromHydratedArtifacts.length > 0
-          ? figureCardsFromHydratedArtifacts.map((figure) => ({
-              path: figure.key,
-              url: figure.previewUrl,
-              downloadUrl: figure.downloadUrl ?? figure.previewUrl,
-              title: figure.title,
-              sourceName: figure.subtitle ?? figure.title,
-              previewable: figure.previewable,
-            }))
+          ? figureCardsFromHydratedArtifacts.flatMap((figure) => {
+              const url = figure.previewUrl ?? figure.url;
+              if (!url) {
+                return [];
+              }
+              return [
+                {
+                  path: figure.key,
+                  url,
+                  downloadUrl: figure.downloadUrl ?? url,
+                  title: figure.title,
+                  sourceName: figure.file ?? figure.subtitle ?? figure.title,
+                  previewable: figure.previewable,
+                },
+              ];
+            })
           : fallbackMegasegImages.slice(0, 6);
 
       const hasMeaningfulMegasegResult =
@@ -7083,16 +6960,6 @@ const summaryModeLabelForMessage = (message: UiMessage): string | null => {
   return path === "pro_mode" || Boolean(proMode) ? "Pro Mode" : null;
 };
 
-const toRecordArray = (value: unknown): Record<string, unknown>[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item) => item && typeof item === "object" && !Array.isArray(item)) as Record<
-    string,
-    unknown
-  >[];
-};
-
 const proModeDevConversationForMessage = (
   message: UiMessage
 ): Record<string, unknown> | null => {
@@ -7112,97 +6979,6 @@ const proModeDevConversationForMessage = (
   return conversation;
 };
 
-const proModeDevConversationCopyText = (
-  conversation: Record<string, unknown>
-): string => {
-  const markdown = String(conversation.markdown || "").trim();
-  if (markdown) {
-    return markdown;
-  }
-  const rounds = toRecordArray(conversation.rounds);
-  const calculatorResults = toRecordArray(conversation.calculator_results);
-  const verifier = toRecord(conversation.verifier);
-  const synthesis = toRecord(conversation.synthesis);
-  const sections: string[] = [];
-
-  rounds.forEach((round, roundIndex) => {
-    const roundNumber = Number(round.round_index ?? roundIndex + 1);
-    const messages = toRecordArray(round.messages);
-    const unresolvedCruxes = Array.isArray(round.unresolved_cruxes)
-      ? round.unresolved_cruxes.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
-    const lines: string[] = [`Round ${roundNumber}`];
-    if (unresolvedCruxes.length > 0) {
-      lines.push(`Central cruxes: ${unresolvedCruxes.join("; ")}`);
-    }
-    messages.forEach((entry) => {
-      const senderRole = String(entry.sender_role || "Unknown role").trim();
-      const recipients = Array.isArray(entry.recipient_roles)
-        ? entry.recipient_roles.map((item) => String(item || "").trim()).filter(Boolean)
-        : [];
-      const vote = String(entry.vote || "").trim();
-      const content = String(entry.content || "").trim();
-      const objections = Array.isArray(entry.objections)
-        ? entry.objections.map((item) => String(item || "").trim()).filter(Boolean)
-        : [];
-      const requestedActions = Array.isArray(entry.requested_actions)
-        ? entry.requested_actions.map((item) => String(item || "").trim()).filter(Boolean)
-        : [];
-      lines.push(`- ${senderRole}${vote ? ` [${vote}]` : ""}`);
-      if (recipients.length > 0) {
-        lines.push(`  To: ${recipients.join(", ")}`);
-      }
-      if (content) {
-        lines.push(`  ${content}`);
-      }
-      if (objections.length > 0) {
-        lines.push(`  Objections: ${objections.join("; ")}`);
-      }
-      if (requestedActions.length > 0) {
-        lines.push(`  Requested actions: ${requestedActions.join("; ")}`);
-      }
-    });
-    sections.push(lines.join("\n"));
-  });
-
-  if (calculatorResults.length > 0) {
-    sections.push(
-      [
-        "Calculator evidence",
-        ...calculatorResults.map((item) => {
-          const purpose = String(item.purpose || "Calculator check").trim();
-          const status = item.success ? "Passed" : "Failed";
-          const detail = String(
-            item.formatted_result || item.error || item.expression || "No calculator result."
-          ).trim();
-          return `- ${purpose} [${status}]\n  ${detail}`;
-        }),
-      ].join("\n")
-    );
-  }
-
-  if (synthesis) {
-    sections.push(
-      ["Synthesis", String(synthesis.response_text || "").trim() || "No synthesis draft recorded."].join(
-        "\n"
-      )
-    );
-  }
-
-  if (verifier) {
-    const issues = Array.isArray(verifier.issues)
-      ? verifier.issues.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
-    sections.push(
-      ["Verifier", verifier.passed ? "Passed" : "Flagged issues", ...issues.map((item) => `- ${item}`)].join(
-        "\n"
-      )
-    );
-  }
-
-  return sections.join("\n\n").trim() || JSON.stringify(conversation, null, 2);
-};
-
 const formatReasoningDuration = (seconds: number | null | undefined): string | null => {
   const value = Number(seconds ?? 0);
   if (!Number.isFinite(value) || value <= 0) {
@@ -7218,221 +6994,6 @@ const formatReasoningDuration = (seconds: number | null | undefined): string | n
     return `${(value / 60).toFixed(1)}m`;
   }
   return `${(value / 3600).toFixed(1)}h`;
-};
-
-const renderProModeDevConversation = (
-  messageId: string,
-  conversation: Record<string, unknown>,
-  options: {
-    onCopy: () => void;
-    isCopied: boolean;
-  }
-) => {
-  const { onCopy, isCopied } = options;
-  const rounds = toRecordArray(conversation.rounds);
-  const calculatorResults = toRecordArray(conversation.calculator_results);
-  const verifier = toRecord(conversation.verifier);
-  const synthesis = toRecord(conversation.synthesis);
-  if (rounds.length === 0 && calculatorResults.length === 0 && !verifier && !synthesis) {
-    return null;
-  }
-  return (
-    <details className="pro-mode-dev-trace" data-testid="pro-mode-dev-trace">
-      <summary>
-        <span>Internal Pro Mode conversation (development only)</span>
-        <button
-          type="button"
-          className={cn("pro-mode-dev-copy-button", isCopied && "pro-mode-dev-copy-button--copied")}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onCopy();
-          }}
-          aria-label={isCopied ? "Copied internal Pro Mode conversation" : "Copy internal Pro Mode conversation"}
-        >
-          {isCopied ? (
-            <>
-              <Check className="size-3.5" />
-              <span>Copied</span>
-            </>
-          ) : (
-            <>
-              <Copy className="size-3.5" />
-              <span>Copy</span>
-            </>
-          )}
-        </button>
-      </summary>
-      <div className="pro-mode-dev-trace-content">
-        {rounds.map((round, roundIndex) => {
-          const roundNumber = Number(round.round_index ?? roundIndex + 1);
-          const messages = toRecordArray(round.messages);
-          const unresolvedCruxes = Array.isArray(round.unresolved_cruxes)
-            ? round.unresolved_cruxes.map((item) => String(item || "").trim()).filter(Boolean)
-            : [];
-          return (
-            <section key={`${messageId}-round-${roundNumber}`} className="pro-mode-dev-round">
-              <header className="pro-mode-dev-round-header">
-                <h4>{`Round ${roundNumber}`}</h4>
-                {unresolvedCruxes.length > 0 ? (
-                  <span className="pro-mode-dev-round-status">
-                    {`${unresolvedCruxes.length} central ${
-                      unresolvedCruxes.length === 1 ? "crux" : "cruxes"
-                    }`}
-                  </span>
-                ) : (
-                  <span className="pro-mode-dev-round-status">No central blockers</span>
-                )}
-              </header>
-              {messages.map((entry, entryIndex) => {
-                const senderRole = String(entry.sender_role || "Unknown role").trim();
-                const recipients = Array.isArray(entry.recipient_roles)
-                  ? entry.recipient_roles.map((item) => String(item || "").trim()).filter(Boolean)
-                  : [];
-                const objections = Array.isArray(entry.objections)
-                  ? entry.objections.map((item) => String(item || "").trim()).filter(Boolean)
-                  : [];
-                const requestedActions = Array.isArray(entry.requested_actions)
-                  ? entry.requested_actions.map((item) => String(item || "").trim()).filter(Boolean)
-                  : [];
-                const content = String(entry.content || "").trim();
-                const vote = String(entry.vote || "").trim();
-                return (
-                  <article
-                    key={`${messageId}-round-${roundNumber}-message-${entryIndex}`}
-                    className="pro-mode-dev-message"
-                  >
-                    <div className="pro-mode-dev-message-header">
-                      <strong>{senderRole}</strong>
-                      <span>{vote ? `Vote: ${vote}` : "Vote unavailable"}</span>
-                    </div>
-                    {recipients.length > 0 ? (
-                      <p className="pro-mode-dev-message-meta">
-                        {`To: ${recipients.join(", ")}`}
-                      </p>
-                    ) : null}
-                    {content ? <p className="pro-mode-dev-message-body">{content}</p> : null}
-                    {objections.length > 0 ? (
-                      <div className="pro-mode-dev-message-list">
-                        <span>Objections</span>
-                        <ul>
-                          {objections.map((item) => (
-                            <li key={`${messageId}-${roundNumber}-${senderRole}-objection-${item}`}>
-                              {item}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {requestedActions.length > 0 ? (
-                      <div className="pro-mode-dev-message-list">
-                        <span>Requested actions</span>
-                        <ul>
-                          {requestedActions.map((item) => (
-                            <li key={`${messageId}-${roundNumber}-${senderRole}-action-${item}`}>
-                              {item}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </article>
-                );
-              })}
-            </section>
-          );
-        })}
-        {calculatorResults.length > 0 ? (
-          <section className="pro-mode-dev-round">
-            <header className="pro-mode-dev-round-header">
-              <h4>Calculator evidence</h4>
-            </header>
-            {calculatorResults.map((item, index) => (
-              <article
-                key={`${messageId}-calculator-${index}`}
-                className="pro-mode-dev-message pro-mode-dev-evidence"
-              >
-                <div className="pro-mode-dev-message-header">
-                  <strong>{String(item.purpose || "Calculator check").trim()}</strong>
-                  <span>{item.success ? "Passed" : "Failed"}</span>
-                </div>
-                <p className="pro-mode-dev-message-body">
-                  {String(
-                    item.formatted_result || item.error || item.expression || "No calculator result."
-                  ).trim()}
-                </p>
-              </article>
-            ))}
-          </section>
-        ) : null}
-        {synthesis ? (
-          <section className="pro-mode-dev-round">
-            <header className="pro-mode-dev-round-header">
-              <h4>Synthesis</h4>
-            </header>
-            <article className="pro-mode-dev-message">
-              <p className="pro-mode-dev-message-body">
-                {String(synthesis.response_text || "").trim() || "No synthesis draft recorded."}
-              </p>
-            </article>
-          </section>
-        ) : null}
-        {verifier ? (
-          <section className="pro-mode-dev-round">
-            <header className="pro-mode-dev-round-header">
-              <h4>Verifier</h4>
-              <span className="pro-mode-dev-round-status">
-                {verifier.passed ? "Passed" : "Flagged issues"}
-              </span>
-            </header>
-            {Array.isArray(verifier.issues) && verifier.issues.length > 0 ? (
-              <article className="pro-mode-dev-message">
-                <div className="pro-mode-dev-message-list">
-                  <span>Issues</span>
-                  <ul>
-                    {verifier.issues.map((item, index) => (
-                      <li key={`${messageId}-verifier-issue-${index}`}>{String(item || "").trim()}</li>
-                    ))}
-                  </ul>
-                </div>
-              </article>
-            ) : null}
-          </section>
-        ) : null}
-      </div>
-    </details>
-  );
-};
-
-const detectionBoxStyle = (
-  detection: ToolDetectionBox,
-  imageSize: { width: number; height: number },
-  classColor: string
-): CSSProperties | null => {
-  const width = Number(imageSize.width);
-  const height = Number(imageSize.height);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    return null;
-  }
-  const xMin = clampToRange(detection.xMin, 0, width);
-  const yMin = clampToRange(detection.yMin, 0, height);
-  const xMax = clampToRange(detection.xMax, 0, width);
-  const yMax = clampToRange(detection.yMax, 0, height);
-  const left = (Math.min(xMin, xMax) / width) * 100;
-  const top = (Math.min(yMin, yMax) / height) * 100;
-  const boxWidth = (Math.max(xMin, xMax) - Math.min(xMin, xMax)) / width * 100;
-  const boxHeight = (Math.max(yMin, yMax) - Math.min(yMin, yMax)) / height * 100;
-  if (boxWidth <= 0 || boxHeight <= 0) {
-    return null;
-  }
-  return {
-    left: `${left}%`,
-    top: `${top}%`,
-    width: `${boxWidth}%`,
-    height: `${boxHeight}%`,
-    borderColor: classColor,
-    boxShadow: `inset 0 0 0 1px ${classColor}40`,
-  };
 };
 
 const toolCardImagesFromBisqueResourceRows = (
@@ -7533,36 +7094,6 @@ const uploadedPreviewArtifactFromPath = (
 const pluralizeCount = (count: number, singular: string, plural?: string): string =>
   `${count} ${count === 1 ? singular : plural ?? `${singular}s`}`;
 
-const parseLeadingMetricCount = (
-  metrics: Array<{ label: string; value: string }>,
-  label: string
-): number | null => {
-  const raw = metrics.find((metric) => metric.label === label)?.value ?? "";
-  const match = raw.match(/^\s*(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const value = Number.parseInt(match[1], 10);
-  return Number.isFinite(value) ? value : null;
-};
-
-const parseFractionMetric = (
-  metrics: Array<{ label: string; value: string }>,
-  label: string
-): { numerator: number; denominator: number } | null => {
-  const raw = metrics.find((metric) => metric.label === label)?.value ?? "";
-  const match = raw.match(/^\s*(\d+)\s*\/\s*(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const numerator = Number.parseInt(match[1], 10);
-  const denominator = Number.parseInt(match[2], 10);
-  if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) {
-    return null;
-  }
-  return { numerator, denominator };
-};
-
 const normalizeBisqueServiceKind = (
   value: string | null | undefined
 ): "image" | "table" | "dataset" | "resource" => {
@@ -7582,455 +7113,6 @@ const normalizeBisqueServiceKind = (
   }
   return "resource";
 };
-
-const bisqueServiceTitleForKind = (
-  kind: "image" | "table" | "dataset" | "resource"
-): string => {
-  switch (kind) {
-    case "image":
-      return "Image Service";
-    case "table":
-      return "Table Service";
-    case "dataset":
-      return "Dataset Catalog";
-    default:
-      return "Resource Catalog";
-  }
-};
-
-const inferBisqueServiceKindFromCard = (
-  card: ToolResultCard
-): "image" | "table" | "dataset" | "resource" => {
-  const preferredRowKind = card.resourceRows
-    .map((row) => normalizeBisqueServiceKind(row.resourceType))
-    .find((kind) => kind !== "resource");
-  if (preferredRowKind) {
-    return preferredRowKind;
-  }
-  if (card.images.length > 0) {
-    return "image";
-  }
-  return "resource";
-};
-
-const buildBisqueResourceHeader = (card: ToolResultCard): BisqueResourceHeader | null => {
-  const kind = inferBisqueServiceKindFromCard(card);
-  const serviceTitle = bisqueServiceTitleForKind(kind);
-
-  if (
-    card.tool === "search_bisque_resources" ||
-    card.tool === "bisque_advanced_search" ||
-    card.tool === "bisque_find_assets"
-  ) {
-    const matches = parseLeadingMetricCount(card.metrics, "Matches") ?? card.resourceRows.length;
-    const metadataCount = parseLeadingMetricCount(card.metrics, "Metadata");
-    const downloadFraction = parseFractionMetric(card.metrics, "Downloads");
-    const summaryParts = [`${pluralizeCount(matches, "result")} returned from the current query.`];
-    if (metadataCount !== null && metadataCount > 0) {
-      summaryParts.push(`${pluralizeCount(metadataCount, "record")} enriched with metadata.`);
-    }
-    if (downloadFraction && downloadFraction.denominator > 0) {
-      summaryParts.push(
-        `${downloadFraction.numerator} of ${downloadFraction.denominator} requested downloads prepared.`
-      );
-    }
-    return {
-      eyebrow: "BisQue",
-      title: serviceTitle,
-      summary: summaryParts.join(" "),
-      hideMetricBadges: true,
-    };
-  }
-
-  if (card.tool === "load_bisque_resource") {
-    const tagCount = parseLeadingMetricCount(card.metrics, "Tags");
-    const dimensions =
-      card.metrics.find((metric) => metric.label === "Dimensions")?.value ?? "n/a";
-    const summaryParts: string[] = [];
-    if (tagCount !== null) {
-      summaryParts.push(`${pluralizeCount(tagCount, "tag")} recorded.`);
-    }
-    if (dimensions && dimensions !== "n/a") {
-      summaryParts.push(`Dimensions ${dimensions}.`);
-    }
-    return {
-      eyebrow: "BisQue",
-      title: `${serviceTitle} Record`,
-      subtitle: card.subtitle,
-      summary: summaryParts.join(" "),
-      hideMetricBadges: true,
-    };
-  }
-
-  if (card.tool === "upload_to_bisque") {
-    const uploadValue = card.metrics.find((metric) => metric.label === "Uploaded")?.value ?? "";
-    const datasetAction =
-      card.metrics.find((metric) => metric.label === "Dataset")?.value ?? "none";
-    const addedCount = parseLeadingMetricCount(card.metrics, "Added");
-    const summaryParts: string[] = [];
-    if (uploadValue) {
-      summaryParts.push(`Uploaded ${uploadValue}.`);
-    }
-    if (datasetAction && datasetAction !== "none") {
-      summaryParts.push(`Dataset action: ${datasetAction}.`);
-    }
-    if (addedCount !== null && addedCount > 0) {
-      summaryParts.push(`${pluralizeCount(addedCount, "resource")} added to the dataset.`);
-    }
-    return {
-      eyebrow: "BisQue",
-      title: "Ingest Service",
-      subtitle: card.subtitle ? `Target dataset: ${card.subtitle}` : undefined,
-      summary: summaryParts.join(" "),
-      hideMetricBadges: true,
-    };
-  }
-
-  return null;
-};
-
-function ToolImageCarousel({
-  images,
-  variant = "default",
-}: {
-  images: ToolCardImage[];
-  variant?: "default" | "prairie";
-}) {
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [showDetectionOverlay, setShowDetectionOverlay] = useState(variant === "prairie");
-  const [showImageInfo, setShowImageInfo] = useState(variant === "prairie");
-  const [naturalSizeByPath, setNaturalSizeByPath] = useState<
-    Record<string, { width: number; height: number }>
-  >({});
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const longPressTimerRef = useRef<number | null>(null);
-  const prefersPersistentControls = variant === "prairie";
-
-  const clearLongPress = useCallback(() => {
-    if (longPressTimerRef.current !== null) {
-      window.clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  }, []);
-
-  const triggerContextMenuAtPoint = useCallback((clientX: number, clientY: number) => {
-    if (!stageRef.current) {
-      return;
-    }
-    stageRef.current.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        clientX,
-        clientY,
-        view: window,
-      })
-    );
-  }, []);
-
-  useEffect(() => clearLongPress, [clearLongPress]);
-
-  if (images.length === 0) {
-    return null;
-  }
-
-  const boundedIndex = Math.min(Math.max(activeIndex, 0), images.length - 1);
-  const activeImage = images[boundedIndex];
-  const activeDetections = activeImage.hoverDetails?.detectionBoxes ?? [];
-  const activePrairieAnalysis = activeImage.hoverDetails?.prairieImageAnalysis;
-  const hasDetectionData = activeImage.previewable && activeDetections.length > 0;
-  const activeNaturalSize = naturalSizeByPath[activeImage.path];
-  const hasDetectionOverlay = Boolean(hasDetectionData && activeNaturalSize);
-  const showsPointHint = images.some(
-    (image) => image.hoverDetails?.maxPoints !== null && image.hoverDetails?.maxPoints !== undefined
-  );
-  const hasMultipleImages = images.length > 1;
-  const showDetectionLayer = Boolean(
-    hasDetectionOverlay && prefersPersistentControls && showDetectionOverlay
-  );
-  const showInfoPanel = Boolean(
-    activeImage.hoverDetails && (!prefersPersistentControls || showImageInfo)
-  );
-
-  const media = activeImage.previewable ? (
-    <div
-      className={cn(
-        "chat-tool-carousel-media",
-        hasDetectionData && "chat-tool-carousel-media--detection"
-      )}
-    >
-      <img
-        src={activeImage.url}
-        alt={activeImage.title}
-        loading="lazy"
-        className={cn(
-          "chat-tool-carousel-image",
-          hasDetectionData && "chat-tool-carousel-image--detection"
-        )}
-        onLoad={(event) => {
-          const target = event.currentTarget;
-          const width = target.naturalWidth;
-          const height = target.naturalHeight;
-          if (!width || !height) {
-            return;
-          }
-          setNaturalSizeByPath((prev) => {
-            const existing = prev[activeImage.path];
-            if (existing && existing.width === width && existing.height === height) {
-              return prev;
-            }
-            return {
-              ...prev,
-              [activeImage.path]: { width, height },
-            };
-          });
-        }}
-      />
-      {hasDetectionOverlay ? (
-        <div
-          className={cn(
-            "chat-tool-carousel-detection-layer",
-            showDetectionLayer && "is-visible"
-          )}
-          data-testid={prefersPersistentControls ? "prairie-detection-overlay" : undefined}
-        >
-          {activeDetections.map((detection, detectionIndex) => {
-            const classColor = yoloClassColor(detection.className);
-            const style = detectionBoxStyle(detection, activeNaturalSize, classColor);
-            if (!style) {
-              return null;
-            }
-            return (
-              <div
-                key={`${activeImage.path}-${detection.className}-${detectionIndex}`}
-                className="chat-tool-detection-box"
-                style={style}
-              >
-                <span
-                  className="chat-tool-detection-label"
-                  style={{
-                    backgroundColor: `${classColor}CC`,
-                    borderColor: classColor,
-                  }}
-                >
-                  {detection.className}
-                  {detection.confidence !== null && detection.confidence !== undefined
-                    ? ` ${(detection.confidence * 100).toFixed(0)}%`
-                    : ""}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  ) : (
-    <div className="chat-tool-carousel-image chat-tool-image-placeholder">
-      <ImageIcon className="size-5" />
-      <span>Preview unavailable</span>
-    </div>
-  );
-
-  const stage = (
-    <div
-      ref={stageRef}
-      className={cn(
-        "chat-tool-carousel-stage",
-        prefersPersistentControls && "chat-tool-carousel-stage--prairie"
-      )}
-      data-variant={variant}
-      onTouchStart={(event) => {
-        if (!prefersPersistentControls) {
-          return;
-        }
-        const touch = event.touches[0];
-        if (!touch) {
-          return;
-        }
-        clearLongPress();
-        const { clientX, clientY } = touch;
-        longPressTimerRef.current = window.setTimeout(() => {
-          triggerContextMenuAtPoint(clientX, clientY);
-        }, 550);
-      }}
-      onTouchMove={() => {
-        clearLongPress();
-      }}
-      onTouchEnd={() => {
-        clearLongPress();
-      }}
-      onTouchCancel={() => {
-        clearLongPress();
-      }}
-      data-testid={prefersPersistentControls ? "prairie-detection-stage" : undefined}
-    >
-      {media}
-      {showInfoPanel ? (
-        <div
-          className={cn(
-            "chat-tool-carousel-hover",
-            prefersPersistentControls && "is-persistent"
-          )}
-        >
-          {activeImage.hoverDetails?.fileLabel ? <p>{activeImage.hoverDetails.fileLabel}</p> : null}
-          {activeImage.hoverDetails?.detectionBoxes &&
-          activeImage.hoverDetails.detectionBoxes.length > 0 ? (
-            <p>Detections: {activeImage.hoverDetails.detectionBoxes.length}</p>
-          ) : null}
-          {activePrairieAnalysis?.prairieDogCount !== null &&
-          activePrairieAnalysis?.prairieDogCount !== undefined ? (
-            <p>Prairie dogs: {Math.round(activePrairieAnalysis.prairieDogCount)}</p>
-          ) : null}
-          {activePrairieAnalysis?.burrowCount !== null &&
-          activePrairieAnalysis?.burrowCount !== undefined ? (
-            <p>Burrows: {Math.round(activePrairieAnalysis.burrowCount)}</p>
-          ) : null}
-          {activePrairieAnalysis?.nearestBurrowDistancePxMean !== null &&
-          activePrairieAnalysis?.nearestBurrowDistancePxMean !== undefined ? (
-            <p>
-              Mean nearest burrow: {activePrairieAnalysis.nearestBurrowDistancePxMean.toFixed(1)} px
-            </p>
-          ) : null}
-          {activePrairieAnalysis?.capturedAt ? <p>Captured: {activePrairieAnalysis.capturedAt}</p> : null}
-          {activePrairieAnalysis?.latitude !== null &&
-          activePrairieAnalysis?.latitude !== undefined &&
-          activePrairieAnalysis?.longitude !== null &&
-          activePrairieAnalysis?.longitude !== undefined ? (
-            <p>
-              GPS: {activePrairieAnalysis.latitude.toFixed(5)}, {activePrairieAnalysis.longitude.toFixed(5)}
-            </p>
-          ) : null}
-          {activeImage.hoverDetails?.masksGenerated !== null &&
-          activeImage.hoverDetails?.masksGenerated !== undefined ? (
-            <p>Masks: {Math.round(activeImage.hoverDetails.masksGenerated)}</p>
-          ) : null}
-          {activeImage.hoverDetails?.avgPointsPerWindow !== null &&
-          activeImage.hoverDetails?.avgPointsPerWindow !== undefined ? (
-            <p>Avg points/window: {activeImage.hoverDetails.avgPointsPerWindow.toFixed(1)}</p>
-          ) : null}
-          {activeImage.hoverDetails?.minPoints !== null &&
-          activeImage.hoverDetails?.maxPoints !== null &&
-          activeImage.hoverDetails?.minPoints !== undefined &&
-          activeImage.hoverDetails?.maxPoints !== undefined ? (
-            <p>
-              Point range: {Math.round(activeImage.hoverDetails.minPoints)}–
-              {Math.round(activeImage.hoverDetails.maxPoints)}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-
-  return (
-    <div className="chat-tool-carousel">
-      {prefersPersistentControls ? (
-        <ContextMenu>
-          <ContextMenuTrigger asChild>{stage}</ContextMenuTrigger>
-          <ContextMenuContent className="w-56">
-            <ContextMenuLabel>Prairie overlay controls</ContextMenuLabel>
-            <ContextMenuCheckboxItem
-              checked={showDetectionOverlay}
-              onCheckedChange={(checked) => {
-                setShowDetectionOverlay(Boolean(checked));
-              }}
-              disabled={!hasDetectionData}
-            >
-              Show bounding boxes
-            </ContextMenuCheckboxItem>
-            <ContextMenuCheckboxItem
-              checked={showImageInfo}
-              onCheckedChange={(checked) => {
-                setShowImageInfo(Boolean(checked));
-              }}
-              disabled={!activeImage.hoverDetails}
-            >
-              Show image context
-            </ContextMenuCheckboxItem>
-            <ContextMenuSeparator />
-            <ContextMenuLabel className="text-xs font-normal text-muted-foreground">
-              Right-click or press and hold on the image to change the overlay.
-            </ContextMenuLabel>
-          </ContextMenuContent>
-        </ContextMenu>
-      ) : (
-        stage
-      )}
-      {hasMultipleImages ? (
-        <>
-          <div className="chat-tool-carousel-controls">
-            <div className="chat-tool-carousel-nav">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setActiveIndex((prev) => (prev - 1 + images.length) % images.length)}
-                aria-label="Previous image"
-              >
-                <ChevronLeft />
-              </Button>
-              <span className="chat-tool-carousel-index">
-                {boundedIndex + 1} / {images.length}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setActiveIndex((prev) => (prev + 1) % images.length)}
-                aria-label="Next image"
-              >
-                <ChevronRight />
-              </Button>
-            </div>
-            <Button asChild variant="outline" size="sm">
-              <a
-                href={activeImage.downloadUrl ?? activeImage.url}
-                download
-                target="_blank"
-                rel="noreferrer"
-              >
-                <Download className="size-4" />
-                Download
-              </a>
-            </Button>
-          </div>
-          <div className="chat-tool-carousel-thumbs">
-            {images.map((image, imageIndex) => (
-              <button
-                key={image.path}
-                type="button"
-                className={cn(
-                  "chat-tool-carousel-thumb",
-                  imageIndex === boundedIndex && "is-active"
-                )}
-                onClick={() => setActiveIndex(imageIndex)}
-                aria-label={`Select ${image.title}`}
-              >
-                {image.previewable ? (
-                  <img src={image.url} alt={image.title} loading="lazy" />
-                ) : (
-                  <div className="chat-tool-image-placeholder">
-                    <ImageIcon className="size-4" />
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
-        </>
-      ) : null}
-      {prefersPersistentControls ? (
-        <p className="chat-tool-carousel-menu-hint">
-          Right-click or press and hold on the image to hide boxes or context.
-        </p>
-      ) : null}
-      {showsPointHint ? (
-        <p className="chat-tool-carousel-tip">
-          Tip: ask “rerun with 256 points” to increase prompt density.
-        </p>
-      ) : null}
-    </div>
-  );
-}
 
 const parseYoloClassCounts = (value: unknown): YoloFigureClassCount[] => {
   if (!value || typeof value !== "object") {
@@ -8275,564 +7357,6 @@ const buildYoloFigureCardsFromAnnotatedArtifacts = (
     .filter((item): item is YoloFigureCard => item !== null);
 };
 
-function YoloFigureStack({
-  figures,
-  variant = "default",
-}: {
-  figures: YoloFigureCard[];
-  variant?: "default" | "prairie";
-}) {
-  if (figures.length === 0) {
-    return null;
-  }
-
-  return (
-    <div
-      className={cn(
-        "chat-tool-figure-stack",
-        variant === "prairie" && "chat-tool-figure-stack--prairie"
-      )}
-      data-testid={variant === "prairie" ? "prairie-figure-stack" : "yolo-figure-stack"}
-    >
-      {figures.map((figure, index) => {
-        const classSummary = figure.classCounts
-          .map((item) => `${item.name} ${item.count}`)
-          .join(" · ");
-        const details = [
-          figure.boxCount !== null && figure.boxCount !== undefined
-            ? `${Math.round(figure.boxCount)} box${Math.round(figure.boxCount) === 1 ? "" : "es"}`
-            : null,
-          classSummary || null,
-        ].filter((value): value is string => value !== null);
-        return (
-          <figure
-            key={figure.key}
-            className={cn(
-              "chat-tool-figure-card",
-              variant === "prairie" && "chat-tool-figure-card--prairie"
-            )}
-            data-testid={variant === "prairie" ? "prairie-figure-card" : "yolo-figure-card"}
-          >
-            <div className="chat-tool-figure-media-wrap">
-              {figure.previewable ? (
-                <img
-                  src={figure.previewUrl}
-                  alt={figure.title}
-                  loading={index === 0 ? "eager" : "lazy"}
-                  className="chat-tool-figure-image"
-                  data-testid={variant === "prairie" ? "prairie-figure-image" : "yolo-figure-image"}
-                />
-              ) : (
-                <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
-                  <ImageIcon className="size-5" />
-                  <span>Preview unavailable</span>
-                </div>
-              )}
-            </div>
-            <figcaption className="chat-tool-figure-caption">
-              <div className="chat-tool-figure-meta">
-                <div>
-                  <p className="chat-tool-figure-title">{figure.title}</p>
-                  {figure.subtitle ? (
-                    <p className="chat-tool-figure-subtitle">{figure.subtitle}</p>
-                  ) : null}
-                </div>
-                {details.length > 0 ? (
-                  <p className="chat-tool-figure-summary">{details.join(" · ")}</p>
-                ) : null}
-              </div>
-              <div className="chat-tool-figure-actions">
-                <Button asChild variant="outline" size="sm">
-                  <a
-                    href={figure.previewUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open annotated
-                  </a>
-                </Button>
-                {figure.originalUrl ? (
-                  <Button asChild variant="ghost" size="sm">
-                    <a href={figure.originalUrl} target="_blank" rel="noreferrer">
-                      Open original
-                    </a>
-                  </Button>
-                ) : null}
-                <Button asChild variant="ghost" size="sm">
-                  <a href={figure.downloadUrl ?? figure.previewUrl} download target="_blank" rel="noreferrer">
-                    <Download className="size-4" />
-                    Download
-                  </a>
-                </Button>
-              </div>
-            </figcaption>
-          </figure>
-        );
-      })}
-    </div>
-  );
-}
-
-function YoloFigureUnavailable({
-  variant = "default",
-}: {
-  variant?: "default" | "prairie";
-}) {
-  return (
-    <p
-      className={cn(
-        "chat-tool-figure-unavailable",
-        variant === "prairie" && "chat-tool-figure-unavailable--prairie"
-      )}
-    >
-      Annotated figure unavailable for this run. If this is a restored result, the current
-      session may not have access to the stored artifacts yet.
-    </p>
-  );
-}
-
-const scientificFigureTabLabel = (figure: ScientificResultFigure): string => {
-  const kind = String(figure.kind || "").trim().toLowerCase();
-  if (kind === "overlay_mid_z") {
-    return "Mid-Z";
-  }
-  if (kind === "overlay_mip") {
-    return "MIP";
-  }
-  if (kind === "mask_preview") {
-    return "Mask";
-  }
-  if (kind === "probability_preview") {
-    return "Probability";
-  }
-  return figure.title;
-};
-
-function MegasegCardBody({
-  card,
-}: {
-  card: ToolResultCard;
-}) {
-  const insights = card.megasegInsights;
-  if (!insights) {
-    return null;
-  }
-
-  const heroFigure = insights.heroFigure;
-  const visibleSecondaryFigures = insights.secondaryFigures.filter(
-    (figure) => figure.kind !== "mask_preview"
-  );
-  const deferredFigures = insights.secondaryFigures.filter(
-    (figure) => figure.kind === "mask_preview"
-  );
-  const defaultSecondaryFigure =
-    visibleSecondaryFigures[0] ?? deferredFigures[0] ?? null;
-
-  return (
-    <div className="chat-scientific-result-shell" data-testid="megaseg-card">
-      {heroFigure ? (
-        <figure className="chat-scientific-hero">
-          <div className="chat-scientific-hero-media">
-            {heroFigure.previewable ? (
-              <img
-                src={heroFigure.url}
-                alt={heroFigure.title}
-                loading="eager"
-                className="chat-scientific-hero-image"
-              />
-            ) : (
-              <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
-                <ImageIcon className="size-5" />
-                <span>Preview unavailable</span>
-              </div>
-            )}
-          </div>
-          <figcaption className="chat-scientific-caption">
-            <div className="chat-scientific-caption-copy">
-              <p className="chat-tool-figure-title">{heroFigure.title}</p>
-              {heroFigure.file ? (
-                <p className="chat-tool-figure-subtitle">
-                  {toDisplayFileLabel(heroFigure.file)}
-                </p>
-              ) : null}
-              {heroFigure.summary ? (
-                <p className="chat-tool-figure-summary">{heroFigure.summary}</p>
-              ) : null}
-            </div>
-            <div className="chat-scientific-caption-actions">
-              <Button asChild variant="outline" size="sm">
-                <a href={heroFigure.url} target="_blank" rel="noreferrer">
-                  Open figure
-                </a>
-              </Button>
-              <Button asChild variant="ghost" size="sm">
-                <a
-                  href={heroFigure.downloadUrl ?? heroFigure.url}
-                  download
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Download
-                </a>
-              </Button>
-            </div>
-          </figcaption>
-        </figure>
-      ) : null}
-      {card.narrative ? (
-        <div className="chat-scientific-takeaway">
-          <p className="chat-scientific-section-label">Takeaway</p>
-          <p className="chat-tool-insight-body">{card.narrative}</p>
-        </div>
-      ) : null}
-      {(insights.reportDownloadUrl || insights.summaryCsvDownloadUrl) ? (
-        <div className="chat-scientific-downloads">
-          {insights.reportDownloadUrl ? (
-            <Button asChild variant="outline" size="sm">
-              <a href={insights.reportDownloadUrl} target="_blank" rel="noreferrer">
-                Open report
-              </a>
-            </Button>
-          ) : null}
-          {insights.summaryCsvDownloadUrl ? (
-            <Button asChild variant="ghost" size="sm">
-              <a href={insights.summaryCsvDownloadUrl} download target="_blank" rel="noreferrer">
-                Download CSV
-              </a>
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-      {defaultSecondaryFigure ? (
-        <Tabs
-          defaultValue={defaultSecondaryFigure.key}
-          className="chat-scientific-secondary"
-        >
-          <TabsList className="chat-scientific-tabs-list">
-            {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
-              <TabsTrigger key={figure.key} value={figure.key}>
-                {scientificFigureTabLabel(figure)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-          {[...visibleSecondaryFigures, ...deferredFigures].map((figure) => (
-            <TabsContent
-              key={figure.key}
-              value={figure.key}
-              className="chat-scientific-tab-panel"
-            >
-              <figure className="chat-scientific-secondary-figure">
-                <div className="chat-scientific-secondary-media">
-                  {figure.previewable ? (
-                    <img
-                      src={figure.url}
-                      alt={figure.title}
-                      loading="lazy"
-                      className="chat-scientific-secondary-image"
-                    />
-                  ) : (
-                    <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
-                      <ImageIcon className="size-5" />
-                      <span>Preview unavailable</span>
-                    </div>
-                  )}
-                </div>
-                <figcaption className="chat-scientific-secondary-caption">
-                  <div>
-                    <p className="chat-tool-figure-title">{figure.title}</p>
-                    {figure.file ? (
-                      <p className="chat-tool-figure-subtitle">
-                        {toDisplayFileLabel(figure.file)}
-                      </p>
-                    ) : null}
-                  </div>
-                  <Button asChild variant="ghost" size="sm">
-                    <a
-                      href={figure.downloadUrl ?? figure.url}
-                      download
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Download
-                    </a>
-                  </Button>
-                </figcaption>
-              </figure>
-            </TabsContent>
-          ))}
-        </Tabs>
-      ) : null}
-      {insights.fileRows.length > 0 ? (
-        <div className="chat-tool-resource-table-wrap">
-          <div className="chat-tool-megaseg-table-head">
-            <div>
-              <p className="chat-scientific-section-label">Quantitative summary</p>
-              {insights.collectionLabel ? (
-                <p className="chat-tool-card-summary">{insights.collectionLabel}</p>
-              ) : null}
-            </div>
-            {(insights.device ||
-              insights.structureChannel !== null ||
-              insights.structureChannel !== undefined) ? (
-              <div className="chat-tool-megaseg-meta">
-                {insights.device ? <span>Device {insights.device}</span> : null}
-                {insights.structureChannel !== null &&
-                insights.structureChannel !== undefined ? (
-                  <span>Structure ch {Math.round(insights.structureChannel)}</span>
-                ) : null}
-                {insights.nucleusChannel !== null &&
-                insights.nucleusChannel !== undefined ? (
-                  <span>Nucleus ch {Math.round(insights.nucleusChannel)}</span>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          <table className="chat-tool-resource-table">
-            <thead>
-              <tr>
-                <th>Image</th>
-                <th>Coverage</th>
-                <th>Objects</th>
-                <th>Active z-slices</th>
-                <th>Largest component</th>
-              </tr>
-            </thead>
-            <tbody>
-              {insights.fileRows.map((row, rowIndex) => (
-                <tr key={`${card.id}-megaseg-row-${rowIndex}`}>
-                  <td className="chat-tool-resource-name-cell">
-                    <div className="chat-tool-resource-name" title={row.file}>
-                      {toDisplayFileLabel(row.file)}
-                    </div>
-                  </td>
-                  <td>{formatPercentMetric(row.coveragePercent)}</td>
-                  <td>{formatIntegerMetric(row.objectCount)}</td>
-                  <td>
-                    {row.activeSliceCount !== null &&
-                    row.activeSliceCount !== undefined &&
-                    row.zSliceCount !== null &&
-                    row.zSliceCount !== undefined
-                      ? `${formatIntegerMetric(row.activeSliceCount)}/${formatIntegerMetric(row.zSliceCount)}`
-                      : "n/a"}
-                  </td>
-                  <td>{formatIntegerMetric(row.largestComponentVoxels)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      {(insights.technicalSummary ||
-        deferredFigures.length > 0 ||
-        insights.reportPath ||
-        insights.summaryCsvPath) ? (
-        <details className="chat-scientific-appendix">
-          <summary>Methods & evidence</summary>
-          <div className="chat-scientific-appendix-body">
-            {insights.technicalSummary ? (
-              <p className="chat-tool-card-summary">{insights.technicalSummary}</p>
-            ) : null}
-            {deferredFigures.length > 0 ? (
-              <ul className="chat-research-list">
-                {deferredFigures.map((figure) => (
-                  <li key={figure.key}>
-                    {figure.title}
-                    {figure.file ? ` (${toDisplayFileLabel(figure.file)})` : ""}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {(insights.reportPath || insights.summaryCsvPath) ? (
-              <ul className="chat-research-list">
-                {insights.reportPath ? (
-                  <li>
-                    <strong>Report</strong>: {toDisplayFileLabel(insights.reportPath)}
-                  </li>
-                ) : null}
-                {insights.summaryCsvPath ? (
-                  <li>
-                    <strong>CSV</strong>: {toDisplayFileLabel(insights.summaryCsvPath)}
-                  </li>
-                ) : null}
-              </ul>
-            ) : null}
-          </div>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-function ResearchDigestCard({
-  digest,
-  followsVisuals = false,
-}: {
-  digest: ResearchDigestData;
-  followsVisuals?: boolean;
-}) {
-  const summaryBits = [
-    digest.measurements.length > 0
-      ? `${digest.measurements.length} measurement${digest.measurements.length === 1 ? "" : "s"}`
-      : null,
-    digest.statisticalAnalysis.length > 0
-      ? `${digest.statisticalAnalysis.length} statistical check${digest.statisticalAnalysis.length === 1 ? "" : "s"}`
-      : null,
-    digest.evidence.length > 0
-      ? `${digest.evidence.length} supporting artifact${digest.evidence.length === 1 ? "" : "s"}`
-      : null,
-  ].filter((item): item is string => item !== null);
-  const showCautionNote =
-    String(digest.confidenceLevel || "").trim().toLowerCase() === "low" &&
-    digest.confidenceWhy.length > 0;
-  const showNextSteps =
-    digest.nextSteps.length > 0 &&
-    (showCautionNote || digest.qcWarnings.length > 0 || digest.limitations.length > 0);
-
-  return (
-    <section className="chat-research-digest" data-testid="research-digest-card">
-      <div className="chat-research-digest-header">
-        <p className="chat-research-digest-label">
-          {followsVisuals ? "Evidence from this run" : "Measured evidence"}
-        </p>
-        {summaryBits.length > 0 ? (
-          <p className="chat-research-digest-meta">{summaryBits.join(" · ")}</p>
-        ) : null}
-      </div>
-      {showCautionNote ? (
-        <p className="chat-research-digest-note">{digest.confidenceWhy.join(" ")}</p>
-      ) : null}
-      <div className="chat-research-digest-body">
-        {digest.measurements.length > 0 ? (
-          <section className="chat-research-digest-section">
-            <div className="chat-research-digest-section-header">
-              <p className="chat-tool-card-subtitle">Key measurements</p>
-            </div>
-            <div className="chat-tool-resource-table-wrap">
-              <table className="chat-tool-resource-table">
-                <thead>
-                  <tr>
-                    <th>Measurement</th>
-                    <th>Value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {digest.measurements.map((row) => (
-                    <tr key={`measurement-${row.name}`}>
-                      <td>{row.name}</td>
-                      <td>{row.valueLabel}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ) : null}
-        {digest.evidence.length > 0 ? (
-          <section className="chat-research-digest-section">
-            <div className="chat-research-digest-section-header">
-              <p className="chat-tool-card-subtitle">Evidence</p>
-            </div>
-            <ul className="chat-research-list">
-              {digest.evidence.map((item, index) => (
-                <li key={`evidence-${index}`}>
-                  <strong>{item.source}</strong>
-                  {item.summary ? `: ${item.summary}` : ""}
-                  {item.artifact ? ` (${toDisplayFileLabel(item.artifact)})` : ""}
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-        {digest.statisticalAnalysis.length > 0 ? (
-          <section className="chat-research-digest-section">
-            <div className="chat-research-digest-section-header">
-              <p className="chat-tool-card-subtitle">Statistical analysis</p>
-            </div>
-            <ul className="chat-research-list">
-              {digest.statisticalAnalysis.map((item, index) => (
-                <li key={`stat-${index}`}>
-                  <strong>{item.label}</strong>: {item.summary}
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-        {digest.qcWarnings.length > 0 || digest.limitations.length > 0 ? (
-          <div className="chat-research-digest-grid">
-            {digest.qcWarnings.length > 0 ? (
-              <section className="chat-research-digest-section">
-                <div className="chat-research-digest-section-header">
-                  <p className="chat-tool-card-subtitle">QC notes</p>
-                </div>
-                <ul className="chat-research-list">
-                  {digest.qcWarnings.map((item, index) => (
-                    <li key={`qc-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-            {digest.limitations.length > 0 ? (
-              <section className="chat-research-digest-section">
-                <div className="chat-research-digest-section-header">
-                  <p className="chat-tool-card-subtitle">Limits</p>
-                </div>
-                <ul className="chat-research-list">
-                  {digest.limitations.map((item, index) => (
-                    <li key={`limit-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-          </div>
-        ) : null}
-        {showNextSteps ? (
-          <section className="chat-research-digest-section">
-            <div className="chat-research-digest-section-header">
-              <p className="chat-tool-card-subtitle">Recommended next steps</p>
-            </div>
-            <ol className="chat-research-list chat-research-list--ordered">
-              {digest.nextSteps.map((item, index) => (
-                <li key={`step-${index}`}>{item}</li>
-              ))}
-            </ol>
-          </section>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-function PrairieDetectionCardBody({
-  card,
-}: {
-  card: ToolResultCard;
-}) {
-  if (!card.prairieInsights) {
-    return null;
-  }
-  const figures = card.yoloFigures ?? [];
-
-  return (
-    <div className="chat-tool-prairie-shell" data-testid="prairie-detection-card">
-      {card.metrics.length > 0 ? (
-        <div className="chat-tool-prairie-stats">
-          {card.metrics.map((metric) => (
-            <div key={`${card.id}-${metric.label}`} className="chat-tool-prairie-stat">
-              <span className="chat-tool-prairie-stat-label">{metric.label}</span>
-              <strong className="chat-tool-prairie-stat-value">{metric.value}</strong>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {figures.length > 0 ? (
-        <YoloFigureStack figures={figures} variant="prairie" />
-      ) : card.yoloFigureAvailability?.missingAnnotatedFigure ? (
-        <YoloFigureUnavailable variant="prairie" />
-      ) : null}
-    </div>
-  );
-}
-
 function PanelLoadingState({
   title = "Loading panel...",
   subtitle = "Preparing this workspace only when you open it keeps the chat shell lighter.",
@@ -8847,28 +7371,6 @@ function PanelLoadingState({
     </div>
   );
 }
-
-const THEME_OPTIONS: Array<{
-  value: ThemePreference;
-  label: string;
-  detail: string;
-}> = [
-  {
-    value: "system",
-    label: "System",
-    detail: "Follow the appearance selected on this device.",
-  },
-  {
-    value: "light",
-    label: "Light",
-    detail: "Use the brighter interface.",
-  },
-  {
-    value: "dark",
-    label: "Dark",
-    detail: "Use the darker interface.",
-  },
-];
 
 const getAccountDisplayName = (
   authUser: string | null,
@@ -9011,530 +7513,6 @@ function SidebarAccountSettingsButton({
   );
 }
 
-type AppSettingsDialogProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  authUser: string | null;
-  authMode: AuthMode | null;
-  authIsAdmin: boolean;
-  bisqueCredentialsLinked: boolean;
-  themePreference: ThemePreference;
-  resolvedTheme: "light" | "dark";
-  bisqueNavLinks: BisqueNavLinks | null;
-  onThemePreferenceChange: (value: ThemePreference) => void;
-  onOpenResources: () => void;
-  onOpenTraining: () => void;
-  onOpenAdmin: () => void;
-  onLogout: () => Promise<void>;
-  onUnlinkBisqueAccount: () => Promise<void>;
-  onLinkBisqueAccount: (payload: { username: string; password: string }) => Promise<{
-    imageCount: number;
-  }>;
-};
-
-function AppSettingsDialog({
-  open,
-  onOpenChange,
-  authUser,
-  authMode,
-  authIsAdmin,
-  bisqueCredentialsLinked,
-  themePreference,
-  resolvedTheme,
-  bisqueNavLinks,
-  onThemePreferenceChange,
-  onOpenResources,
-  onOpenTraining,
-  onOpenAdmin,
-  onLogout,
-  onUnlinkBisqueAccount,
-  onLinkBisqueAccount,
-}: AppSettingsDialogProps) {
-  const accountName = getAccountDisplayName(authUser, authMode);
-  const accountSubtitle = getAccountSubtitle(authMode, authIsAdmin);
-  const initials = getAccountInitials(accountName);
-  const resolvedThemeLabel = resolvedTheme === "dark" ? "Dark" : "Light";
-  const [bisqueUsername, setBisqueUsername] = useState(() =>
-    authMode === "bisque" ? authUser ?? "" : ""
-  );
-  const [bisquePassword, setBisquePassword] = useState("");
-  const [bisqueLinking, setBisqueLinking] = useState(false);
-  const [bisqueUnlinking, setBisqueUnlinking] = useState(false);
-  const [bisqueLinkError, setBisqueLinkError] = useState<string | null>(null);
-  const [bisqueImageCount, setBisqueImageCount] = useState<number | null>(null);
-  const bisqueLinked = Boolean(bisqueCredentialsLinked && authUser);
-  const bisqueRootHref = bisqueNavLinks?.home ?? DEFAULT_BISQUE_BROWSER_URL;
-
-  useEffect(() => {
-    if (authMode === "bisque" && authUser) {
-      setBisqueUsername(authUser);
-    }
-  }, [authMode, authUser]);
-
-  const runAndClose = (action: () => void): void => {
-    onOpenChange(false);
-    action();
-  };
-
-  const logoutAndClose = (): void => {
-    onOpenChange(false);
-    void onLogout();
-  };
-
-  const submitBisqueLink = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    const username = bisqueUsername.trim();
-    if (!username || !bisquePassword) {
-      setBisqueLinkError("Enter your BisQue username and password.");
-      return;
-    }
-    setBisqueLinking(true);
-    setBisqueLinkError(null);
-    try {
-      const result = await onLinkBisqueAccount({
-        username,
-        password: bisquePassword,
-      });
-      setBisquePassword("");
-      setBisqueImageCount(result.imageCount);
-    } catch (error) {
-      const message = normalizeApiError(error);
-      setBisqueLinkError(message);
-      toast.error("Could not link BisQue account", {
-        description: message,
-      });
-      setBisquePassword("");
-    } finally {
-      setBisqueLinking(false);
-    }
-  };
-
-  const unlinkBisqueAccount = async (): Promise<void> => {
-    setBisqueUnlinking(true);
-    setBisqueLinkError(null);
-    setBisquePassword("");
-    setBisqueImageCount(null);
-    try {
-      await onUnlinkBisqueAccount();
-    } catch (error) {
-      const message = normalizeApiError(error);
-      setBisqueLinkError(message);
-      toast.error("Could not unlink BisQue account", {
-        description: message,
-      });
-    } finally {
-      setBisqueUnlinking(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="app-settings-dialog" showCloseButton={false}>
-        <Tabs defaultValue="general" className="app-settings-shell">
-          <aside className="app-settings-sidebar-pane">
-            <DialogClose asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="app-settings-close-button"
-                aria-label="Close settings"
-              >
-                <X data-icon="inline-start" aria-hidden="true" />
-              </Button>
-            </DialogClose>
-            <DialogHeader className="app-settings-header">
-              <DialogTitle>Settings</DialogTitle>
-              <DialogDescription>
-                Tune the interface and account shortcuts for this workspace.
-              </DialogDescription>
-            </DialogHeader>
-            <TabsList className="app-settings-nav-list" aria-label="Settings sections">
-              <TabsTrigger value="general" className="app-settings-nav-item">
-                <Settings data-icon="inline-start" aria-hidden="true" />
-                General
-              </TabsTrigger>
-              <TabsTrigger value="account" className="app-settings-nav-item">
-                <UserRound data-icon="inline-start" aria-hidden="true" />
-                Account
-              </TabsTrigger>
-              <TabsTrigger value="bisque" className="app-settings-nav-item">
-                <Database data-icon="inline-start" aria-hidden="true" />
-                BisQue
-              </TabsTrigger>
-              <TabsTrigger value="about" className="app-settings-nav-item">
-                <Info data-icon="inline-start" aria-hidden="true" />
-                About
-              </TabsTrigger>
-            </TabsList>
-          </aside>
-
-          <section className="app-settings-content-pane">
-            <TabsContent value="general" className="app-settings-tab-content">
-              <div className="app-settings-panel-heading">
-                <h2>General</h2>
-                <p>Keep the day-to-day interface fast, readable, and predictable.</p>
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Appearance</div>
-                  <p>Match your system preference or pin BisQue Ultra to one mode.</p>
-                </div>
-                <Select
-                  value={themePreference}
-                  onValueChange={(value) =>
-                    onThemePreferenceChange(value as ThemePreference)
-                  }
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className="app-settings-select-trigger"
-                    aria-label="Appearance"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {THEME_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Resolved theme</div>
-                  <p>
-                    System mode currently resolves to the active browser color scheme.
-                  </p>
-                </div>
-                <Badge variant="secondary">{resolvedThemeLabel}</Badge>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="account" className="app-settings-tab-content">
-              <div className="app-settings-panel-heading">
-                <h2>Account</h2>
-                <p>Review the active session and sign out when you are finished.</p>
-              </div>
-              <Separator />
-              <div className="app-settings-account-summary">
-                <Avatar size="lg" className="app-settings-account-avatar">
-                  <AvatarFallback>{initials}</AvatarFallback>
-                </Avatar>
-                <div className="app-settings-account-copy">
-                  <div className="app-settings-account-name">{accountName}</div>
-                  <div className="app-settings-account-subtitle">{accountSubtitle}</div>
-                </div>
-                <Badge variant={authMode === "guest" ? "secondary" : "default"}>
-                  {authMode === "guest" ? "Guest" : "Signed in"}
-                </Badge>
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Admin console</div>
-                  <p>
-                    {authIsAdmin
-                      ? "Open the operational view for users, runs, and issues."
-                      : "This account does not have admin console access."}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={!authIsAdmin}
-                  onClick={() => runAndClose(onOpenAdmin)}
-                >
-                  <Shield data-icon="inline-start" aria-hidden="true" />
-                  Open
-                </Button>
-              </div>
-              <Separator />
-              <div className="app-settings-action-row">
-                <Button type="button" variant="outline" onClick={logoutAndClose}>
-                  <LogOut data-icon="inline-start" aria-hidden="true" />
-                  Sign out
-                </Button>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="bisque" className="app-settings-tab-content">
-              <div className="app-settings-panel-heading">
-                <h2>BisQue</h2>
-                <p>Link your BisQue account or jump into production resources.</p>
-              </div>
-              <Separator />
-              <form className="app-settings-bisque-link-form" onSubmit={submitBisqueLink}>
-                <div className="app-settings-row">
-                  <div className="app-settings-row-copy">
-                    <div className="app-settings-row-title">Linked account</div>
-                    <p>
-                      Store a local session so Ultra can query, download, and upload
-                      BisQue data during autonomous runs.
-                    </p>
-                  </div>
-                </div>
-                {bisqueLinked && authUser ? (
-                  <Alert className="app-settings-bisque-linked-alert">
-                    <Check data-icon="inline-start" aria-hidden="true" />
-                    <AlertTitle>BisQue account linked</AlertTitle>
-                    <AlertDescription>
-                      <span>
-                        Signed in as <strong>{authUser}</strong>
-                        {bisqueImageCount != null
-                          ? `. Found ${bisqueImageCount.toLocaleString()} image${
-                              bisqueImageCount === 1 ? "" : "s"
-                            }.`
-                          : "."}
-                      </span>
-                      <AlertAction>
-                        <Button asChild variant="outline" size="sm">
-                          <a href={bisqueRootHref} target="_blank" rel="noreferrer">
-                            Open BisQue
-                            <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                          </a>
-                        </Button>
-                      </AlertAction>
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <div className="app-settings-bisque-credential-grid">
-                    <div className="app-settings-field">
-                      <Label htmlFor="settings-bisque-username">Username</Label>
-                      <Input
-                        id="settings-bisque-username"
-                        value={bisqueUsername}
-                        onChange={(event) => setBisqueUsername(event.target.value)}
-                        autoComplete="username"
-                        disabled={bisqueLinking}
-                      />
-                    </div>
-                    <div className="app-settings-field">
-                      <Label htmlFor="settings-bisque-password">Password</Label>
-                      <Input
-                        id="settings-bisque-password"
-                        type="password"
-                        value={bisquePassword}
-                        onChange={(event) => setBisquePassword(event.target.value)}
-                        autoComplete="current-password"
-                        disabled={bisqueLinking}
-                      />
-                    </div>
-                  </div>
-                )}
-                {bisqueLinkError ? (
-                  <SystemMessage variant="error" fill>
-                    {bisqueLinkError}
-                  </SystemMessage>
-                ) : null}
-                {bisqueImageCount != null && !bisqueLinkError && !bisqueLinked ? (
-                  <div className="app-settings-bisque-link-status">
-                    <Check data-icon="inline-start" aria-hidden="true" />
-                    BisQue account linked. Found {bisqueImageCount.toLocaleString()} image
-                    {bisqueImageCount === 1 ? "" : "s"}.
-                  </div>
-                ) : null}
-                <div className="app-settings-action-row">
-                  {bisqueLinked ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={bisqueUnlinking}
-                      onClick={() => {
-                        void unlinkBisqueAccount();
-                      }}
-                    >
-                      <Unlink data-icon="inline-start" aria-hidden="true" />
-                      {bisqueUnlinking ? "Unlinking..." : "Unlink account"}
-                    </Button>
-                  ) : (
-                    <Button
-                      type="submit"
-                      variant="outline"
-                      disabled={bisqueLinking || !bisqueUsername.trim() || !bisquePassword}
-                    >
-                      <Link2 data-icon="inline-start" aria-hidden="true" />
-                      {bisqueLinking ? "Testing account..." : "Link account"}
-                    </Button>
-                  )}
-                </div>
-              </form>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">BisQue production</div>
-                  <p>Open the configured BisQue instance in a new browser tab.</p>
-                </div>
-                {bisqueNavLinks ? (
-                  <Button asChild variant="outline" size="sm">
-                    <a href={bisqueNavLinks.home} target="_blank" rel="noreferrer">
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      Open
-                    </a>
-                  </Button>
-                ) : (
-                  <Button type="button" variant="outline" size="sm" disabled>
-                    Open
-                  </Button>
-                )}
-              </div>
-              <Separator />
-              <div className="app-settings-link-grid">
-                {bisqueNavLinks ? (
-                  <>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.images} target="_blank" rel="noreferrer">
-                        <Images data-icon="inline-start" aria-hidden="true" />
-                        Images
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.datasets} target="_blank" rel="noreferrer">
-                        <Database data-icon="inline-start" aria-hidden="true" />
-                        Datasets
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.tables} target="_blank" rel="noreferrer">
-                        <Table2 data-icon="inline-start" aria-hidden="true" />
-                        Tables
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                  </>
-                ) : (
-                  <div className="app-settings-unavailable">
-                    BisQue shortcuts are unavailable until the production root is configured.
-                  </div>
-                )}
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Ultra panels</div>
-                  <p>Open resources or model training inside this app.</p>
-                </div>
-                <div className="app-settings-inline-actions">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => runAndClose(onOpenResources)}
-                  >
-                    <FolderOpen data-icon="inline-start" aria-hidden="true" />
-                    Resources
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => runAndClose(onOpenTraining)}
-                  >
-                    <Database data-icon="inline-start" aria-hidden="true" />
-                    Training
-                  </Button>
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="about" className="app-settings-tab-content">
-              <div className="app-settings-panel-heading">
-                <h2>About</h2>
-                <p>Project background, links, and workspace context.</p>
-              </div>
-              <Alert className="app-settings-about-alert">
-                <Info data-icon="inline-start" aria-hidden="true" />
-                <AlertTitle>Created within the UCSB Vision Research Lab</AlertTitle>
-                <AlertDescription>
-                  BisQue Ultra was created by Amil Khan, a PhD student in the
-                  UCSB Vision Research Lab. The lab is led by Professor B.S.
-                  Manjunath in the Department of Electrical and Computer
-                  Engineering, with research spanning computer vision, image
-                  processing, and machine learning applications.
-                </AlertDescription>
-              </Alert>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Project links</div>
-                  <p>Open the source repository or public project website.</p>
-                </div>
-                <div className="app-settings-inline-actions">
-                  <Button asChild variant="outline" size="sm">
-                    <a
-                      href="https://github.com/amilworks/ultra"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      GitHub
-                    </a>
-                  </Button>
-                  <Button asChild variant="outline" size="sm">
-                    <a
-                      href="https://amilworks.github.io/ultra_website/"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      Website
-                    </a>
-                  </Button>
-                </div>
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Platform</div>
-                  <p>
-                    A scientific imaging workbench for reproducible, tool-guided
-                    analysis with BisQue-backed data management, a Go control plane,
-                    Deep Agents execution, and long-running workflow visibility.
-                  </p>
-                </div>
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Contact us</div>
-                  <p>Reach out to the creator through public project channels.</p>
-                </div>
-                <div className="app-settings-inline-actions">
-                  <Button asChild variant="outline" size="sm">
-                    <a href="https://github.com/amilworks" target="_blank" rel="noreferrer">
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      Creator
-                    </a>
-                  </Button>
-                  <Button asChild variant="outline" size="sm">
-                    <a
-                      href="https://github.com/amilworks/ultra/issues"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      Issues
-                    </a>
-                  </Button>
-                </div>
-              </div>
-            </TabsContent>
-          </section>
-        </Tabs>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export function App() {
   const apiBaseUrl = DEFAULT_API_BASE_URL;
   const [themePreference, setThemePreference] = useLocalStorageState<ThemePreference>(
@@ -9546,15 +7524,15 @@ export function App() {
     const fallbackRoot = inferBisqueRootFromUrl(DEFAULT_BISQUE_BROWSER_URL);
     return fallbackRoot ? buildBisqueNavLinks(fallbackRoot) : null;
   });
-  const [bisqueResourceCounts, setBisqueResourceCounts] =
-    useState<BisqueResourceCounts | null>(null);
+  const [bisqueResourceCountsState, setBisqueResourceCountsState] =
+    useState<BisqueResourceCountsState>({ requestKey: "", counts: null });
   const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
   const [authUser, setAuthUser] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [authProvider, setAuthProvider] = useState<AuthProvider>("local");
   const [authIsAdmin, setAuthIsAdmin] = useState(false);
   const [bisqueCredentialsLinked, setBisqueCredentialsLinked] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(() => readAuthErrorFromLocation());
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
@@ -9629,11 +7607,6 @@ export function App() {
     Record<string, boolean>
   >({});
 
-  useEffect(() => {
-    if (!isPhoneView) {
-      setMobileConversationQuery("");
-    }
-  }, [isPhoneView]);
   const [adminRunCancellingById, setAdminRunCancellingById] = useState<Record<string, boolean>>(
     {}
   );
@@ -9658,6 +7631,11 @@ export function App() {
   >(() => readComposerDraftsFromStorage());
 
   const sidebarInsetRef = useRef<HTMLElement>(null);
+  const [sidebarInsetElement, setSidebarInsetElement] = useState<HTMLElement | null>(null);
+  const setSidebarInsetNode = useCallback((node: HTMLElement | null): void => {
+    sidebarInsetRef.current = node;
+    setSidebarInsetElement(node);
+  }, []);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeChatScrollElementRef = useRef<HTMLElement | null>(null);
   const conversationScrollMemoryRef = useRef<Record<string, ConversationScrollMemory>>({});
@@ -9674,6 +7652,8 @@ export function App() {
   const [activeSlashWorkflowId, setActiveSlashWorkflowId] = useState<ComposerWorkflowId | null>(
     null
   );
+  const [composerWorkflows, setComposerWorkflows] =
+    useState<ComposerWorkflowsModule | null>(null);
   const [dismissedSlashPrompt, setDismissedSlashPrompt] = useState<string | null>(null);
   const [chatScrollRequestKey, setChatScrollRequestKey] = useState(0);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -9682,20 +7662,39 @@ export function App() {
     () => new ApiClient({ baseUrl: apiBaseUrl, apiKey: DEFAULT_API_KEY }),
     [apiBaseUrl]
   );
-
-  useEffect(() => {
+  const bisqueResourceCountsRequestKey = useMemo(() => {
     if (
       authStatus !== "authenticated" ||
       (authMode !== "bisque" && authMode !== "workos") ||
       !bisqueCredentialsLinked ||
       !bisqueNavLinks
     ) {
-      setBisqueResourceCounts(null);
+      return "";
+    }
+    return [
+      authStatus,
+      authMode,
+      bisqueCredentialsLinked ? "linked" : "unlinked",
+      bisqueNavLinks.home,
+      bisqueNavLinks.images,
+      bisqueNavLinks.datasets,
+      bisqueNavLinks.tables,
+    ].join("\u0000");
+  }, [authMode, authStatus, bisqueCredentialsLinked, bisqueNavLinks]);
+  const bisqueResourceCounts =
+    bisqueResourceCountsState.requestKey === bisqueResourceCountsRequestKey
+      ? bisqueResourceCountsState.counts
+      : null;
+
+  useEffect(() => {
+    if (!bisqueResourceCountsRequestKey) {
+      return;
+    }
+    if (bisqueResourceCountsState.requestKey === bisqueResourceCountsRequestKey) {
       return;
     }
 
     let isCancelled = false;
-    setBisqueResourceCounts(null);
 
     void Promise.all([
       apiClient.searchBisqueResources({
@@ -9719,23 +7718,29 @@ export function App() {
     ])
       .then(([imageSearch, datasetSearch, tableSearch]) => {
         if (!isCancelled) {
-          setBisqueResourceCounts({
-            image: Math.max(0, Math.floor(Number(imageSearch.count) || 0)),
-            dataset: Math.max(0, Math.floor(Number(datasetSearch.count) || 0)),
-            table: Math.max(0, Math.floor(Number(tableSearch.count) || 0)),
+          setBisqueResourceCountsState({
+            requestKey: bisqueResourceCountsRequestKey,
+            counts: {
+              image: Math.max(0, Math.floor(Number(imageSearch.count) || 0)),
+              dataset: Math.max(0, Math.floor(Number(datasetSearch.count) || 0)),
+              table: Math.max(0, Math.floor(Number(tableSearch.count) || 0)),
+            },
           });
         }
       })
       .catch(() => {
         if (!isCancelled) {
-          setBisqueResourceCounts(null);
+          setBisqueResourceCountsState({
+            requestKey: bisqueResourceCountsRequestKey,
+            counts: null,
+          });
         }
       });
 
     return () => {
       isCancelled = true;
     };
-  }, [apiClient, authMode, authStatus, bisqueCredentialsLinked, bisqueNavLinks]);
+  }, [apiClient, bisqueResourceCountsRequestKey, bisqueResourceCountsState.requestKey]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -9834,12 +7839,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const activeChatAbortControllers = activeChatAbortControllersRef.current;
+    const runStreamRecoveryControllers = runStreamRecoveryControllersRef.current;
+    const stopRequestedConversationIds = stopRequestedConversationIdsRef.current;
     return () => {
-      activeChatAbortControllersRef.current.forEach((controller) => controller.abort());
-      activeChatAbortControllersRef.current.clear();
-      runStreamRecoveryControllersRef.current.forEach((controller) => controller.abort());
-      runStreamRecoveryControllersRef.current.clear();
-      stopRequestedConversationIdsRef.current.clear();
+      activeChatAbortControllers.forEach((controller) => controller.abort());
+      activeChatAbortControllers.clear();
+      runStreamRecoveryControllers.forEach((controller) => controller.abort());
+      runStreamRecoveryControllers.clear();
+      stopRequestedConversationIds.clear();
       if (copyFeedbackTimeoutRef.current) {
         window.clearTimeout(copyFeedbackTimeoutRef.current);
       }
@@ -9863,9 +7871,6 @@ export function App() {
 
   useEffect(() => {
     let isCancelled = false;
-    setAuthStatus("checking");
-    setAuthError(null);
-    setAuthNotice(null);
     void apiClient
       .getBisqueSession()
       .then((session) => {
@@ -9925,35 +7930,57 @@ export function App() {
   }, [apiClient]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (authStatus !== "authenticated") {
       return;
     }
-    const params = new URLSearchParams(window.location.search);
-    const authErrorParam = params.get("auth_error");
-    if (!authErrorParam) {
-      return;
+
+    let cancelled = false;
+    const preload = () => {
+      if (cancelled) {
+        return;
+      }
+      void preloadSecondaryPanelModules({ includeAdmin: authIsAdmin }).catch(
+        () => undefined
+      );
+    };
+
+    if (typeof window.requestIdleCallback === "function") {
+      const idleId = window.requestIdleCallback(preload, { timeout: 2_500 });
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback(idleId);
+      };
     }
-    setAuthError(authErrorParam);
-    setAuthNotice(null);
-    params.delete("auth_error");
-    const nextQuery = params.toString();
-    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
-    window.history.replaceState({}, "", nextUrl);
+
+    const timeoutId = window.setTimeout(preload, 650);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [authIsAdmin, authStatus]);
+
+  useEffect(() => {
+    clearAuthErrorFromLocation();
   }, []);
 
   useEffect(() => {
     if (authStatus !== "authenticated") {
-      setConversationsHydrated(false);
-      setConversationListOffset(0);
-      setConversationListHasMore(false);
-      setConversationListLoadingMore(false);
       persistedConversationHashesRef.current = {};
       optimisticConversationIdsRef.current = new Set();
       hydratingConversationIdsRef.current = new Set();
-      return;
+      return queueEffectUpdate(() => {
+        setConversationsHydrated(false);
+        setConversationListOffset(0);
+        setConversationListHasMore(false);
+        setConversationListLoadingMore(false);
+      });
     }
     let isCancelled = false;
-    setConversationsHydrated(false);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (!isCancelled) {
+        setConversationsHydrated(false);
+      }
+    });
     void (async () => {
       const targetConversationId = readConversationIdFromLocation();
       try {
@@ -10052,6 +8079,7 @@ export function App() {
     })();
     return () => {
       isCancelled = true;
+      cancelQueuedReset();
     };
   }, [apiClient, authStatus, hashHydratedConversations]);
 
@@ -10061,15 +8089,18 @@ export function App() {
     }
     if (conversations.length === 0) {
       const seed = createConversationState();
-      setConversations([seed]);
-      setActiveConversationId(seed.id);
-      return;
+      return queueEffectUpdate(() => {
+        setConversations([seed]);
+        setActiveConversationId(seed.id);
+      });
     }
     if (
       !activeConversationId ||
       !conversations.some((conversation) => conversation.id === activeConversationId)
     ) {
-      setActiveConversationId(conversations[0].id);
+      return queueEffectUpdate(() => {
+        setActiveConversationId(conversations[0].id);
+      });
     }
   }, [activeConversationId, conversations, conversationsHydrated]);
 
@@ -10162,12 +8193,13 @@ export function App() {
   useEffect(() => {
     if (authStatus !== "authenticated") {
       resourceListKeyRef.current = "";
-      setResources([]);
-      setResourceTotalCount(0);
-      setResourcesError(null);
-      setResourcesLoading(false);
-      setResourcesLoadingMore(false);
-      return;
+      return queueEffectUpdate(() => {
+        setResources([]);
+        setResourceTotalCount(0);
+        setResourcesError(null);
+        setResourcesLoading(false);
+        setResourcesLoadingMore(false);
+      });
     }
     let cancelled = false;
     const activeQuery = debouncedResourceQuery.trim();
@@ -10178,10 +8210,15 @@ export function App() {
       String(resourceRefreshToken),
     ].join("\u0000");
     resourceListKeyRef.current = activeResourceListKey;
-    setResourcesLoading(true);
-    setResourcesLoadingMore(false);
-    setResourcesError(null);
-    setResources([]);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
+        return;
+      }
+      setResourcesLoading(true);
+      setResourcesLoadingMore(false);
+      setResourcesError(null);
+      setResources([]);
+    });
     void loadLibraryResources(apiClient, {
       limit: RESOURCE_PAGE_SIZE,
       offset: 0,
@@ -10212,6 +8249,7 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [
     apiClient,
@@ -10224,14 +8262,20 @@ export function App() {
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !composerResourcePickerOpen) {
-      setComposerResources([]);
-      setComposerResourcesError(null);
-      setComposerResourcesLoading(false);
-      return;
+      return queueEffectUpdate(() => {
+        setComposerResources([]);
+        setComposerResourcesError(null);
+        setComposerResourcesLoading(false);
+      });
     }
     let cancelled = false;
-    setComposerResourcesLoading(true);
-    setComposerResourcesError(null);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setComposerResourcesLoading(true);
+      setComposerResourcesError(null);
+    });
     void loadComposerResources(apiClient, {
       limit: 200,
       query: composerResourceQuery.trim() || undefined,
@@ -10257,32 +8301,43 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [apiClient, authStatus, composerResourcePickerOpen, composerResourceQuery]);
 
   useEffect(() => {
-    setDismissedSlashPrompt(null);
-    setActiveComposerResourceId(null);
-    setComposerResourcePickerSelection({});
-    setComposerResourceQuery("");
-    setComposerResourcePickerOpen(false);
+    return queueEffectUpdate(() => {
+      setDismissedSlashPrompt(null);
+      setActiveComposerResourceId(null);
+      setComposerResourcePickerSelection({});
+      setComposerResourceQuery("");
+      setComposerResourcePickerOpen(false);
+    });
   }, [activeConversationId]);
 
   useEffect(() => {
     if (activePanel === "admin" && !authIsAdmin) {
-      setActivePanel("chat");
+      return queueEffectUpdate(() => {
+        setActivePanel("chat");
+      });
     }
   }, [activePanel, authIsAdmin]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
-      setAdminOverview(null);
-      setAdminLoadingOverview(false);
-      return;
+      return queueEffectUpdate(() => {
+        setAdminOverview(null);
+        setAdminLoadingOverview(false);
+      });
     }
     let cancelled = false;
-    setAdminLoadingOverview(true);
-    setAdminError(null);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingOverview(true);
+      setAdminError(null);
+    });
     void loadAdminOverview(apiClient, { topUsers: 8, issueLimit: 12 })
       .then((payload) => {
         if (cancelled) {
@@ -10304,17 +8359,24 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
-      setAdminOrganizations([]);
-      setAdminLoadingOrganizations(false);
-      return;
+      return queueEffectUpdate(() => {
+        setAdminOrganizations([]);
+        setAdminLoadingOrganizations(false);
+      });
     }
     let cancelled = false;
-    setAdminLoadingOrganizations(true);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingOrganizations(true);
+    });
     void loadAdminOrganizations(apiClient, { limit: 250 })
       .then((payload) => {
         if (cancelled) {
@@ -10336,17 +8398,24 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
-      setAdminUsers([]);
-      setAdminLoadingUsers(false);
-      return;
+      return queueEffectUpdate(() => {
+        setAdminUsers([]);
+        setAdminLoadingUsers(false);
+      });
     }
     let cancelled = false;
-    setAdminLoadingUsers(true);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingUsers(true);
+    });
     void loadAdminUsers(apiClient, {
       limit: 250,
       query: adminUserQuery.trim() || undefined,
@@ -10371,17 +8440,24 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, adminUserQuery, apiClient, authIsAdmin, authStatus]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
-      setAdminRuns([]);
-      setAdminLoadingRuns(false);
-      return;
+      return queueEffectUpdate(() => {
+        setAdminRuns([]);
+        setAdminLoadingRuns(false);
+      });
     }
     let cancelled = false;
-    setAdminLoadingRuns(true);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingRuns(true);
+    });
     void loadAdminRuns(apiClient, {
       limit: 250,
       status: adminRunStatusFilter || undefined,
@@ -10410,6 +8486,7 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [
     activePanel,
@@ -10423,12 +8500,18 @@ export function App() {
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
-      setAdminIssues([]);
-      setAdminLoadingIssues(false);
-      return;
+      return queueEffectUpdate(() => {
+        setAdminIssues([]);
+        setAdminLoadingIssues(false);
+      });
     }
     let cancelled = false;
-    setAdminLoadingIssues(true);
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingIssues(true);
+    });
     void loadAdminIssues(apiClient, 25)
       .then((payload) => {
         if (cancelled) {
@@ -10450,6 +8533,7 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
 
@@ -10473,7 +8557,9 @@ export function App() {
     if (!activeConversation || activeConversation.hydrated) {
       return;
     }
-    void ensureConversationHydrated(activeConversation.id);
+    return queueEffectUpdate(() => {
+      void ensureConversationHydrated(activeConversation.id);
+    });
   }, [
     activeConversation,
     authStatus,
@@ -10531,6 +8617,7 @@ export function App() {
       cancelled = true;
     };
   }, [
+    activeConversation,
     activeConversation?.id,
     activeConversation?.hydrated,
     activeConversation?.messages.length,
@@ -10930,6 +9017,15 @@ export function App() {
     setPendingConversationRename(null);
   }, []);
 
+  const updatePendingConversationRenameTitle = useCallback(
+    (conversationId: string, nextTitle: string): void => {
+      setPendingConversationRename((current) =>
+        current?.id === conversationId ? { ...current, title: nextTitle } : current
+      );
+    },
+    []
+  );
+
   const submitConversationRename = useCallback(async (): Promise<void> => {
     if (!pendingConversationRename) {
       return;
@@ -11097,7 +9193,7 @@ export function App() {
         countAll: true,
       });
       const imageCount = Math.max(0, Number(search.count) || 0);
-      toast.success("Successfully linked BisQue account", {
+      showSuccessToast("Successfully linked BisQue account", {
         description: `Found ${imageCount.toLocaleString()} image${
           imageCount === 1 ? "" : "s"
         } on BisQue.`,
@@ -11148,7 +9244,7 @@ export function App() {
     }
   };
 
-  const clearAuthViewState = (): void => {
+  const clearAuthViewState = useCallback((): void => {
     setAuthStatus("unauthenticated");
     setAuthUser(null);
     setAuthMode(null);
@@ -11156,7 +9252,7 @@ export function App() {
     setBisqueCredentialsLinked(false);
     setAuthError(null);
     setAuthNotice(null);
-    setBisqueResourceCounts(null);
+    setBisqueResourceCountsState({ requestKey: "", counts: null });
     setComposerDraftsByConversationId({});
     setConversations([]);
     setActiveConversationId(null);
@@ -11179,9 +9275,9 @@ export function App() {
     setAdminRunCancellingById({});
     setAdminRunRequeueingById({});
     setAdminDeletingConversationKey(null);
-  };
+  }, []);
 
-  const logoutBisque = async (): Promise<void> => {
+  const logoutBisque = useCallback(async (): Promise<void> => {
     let logoutUrl = "";
     try {
       const session = await apiClient.logoutBisque();
@@ -11193,14 +9289,14 @@ export function App() {
     if (logoutUrl && typeof window !== "undefined") {
       window.location.assign(logoutUrl);
     }
-  };
+  }, [apiClient, clearAuthViewState]);
 
-  const unlinkBisqueAccount = async (): Promise<void> => {
+  const unlinkBisqueAccount = useCallback(async (): Promise<void> => {
     await apiClient.unlinkBisqueAccount();
     clearAuthViewState();
-  };
+  }, [apiClient, clearAuthViewState]);
 
-  const promptBisqueAuthentication = async (message: string): Promise<void> => {
+  const promptBisqueAuthentication = useCallback(async (message: string): Promise<void> => {
     const nextMessage = message.trim() || "BisQue authentication is required.";
     try {
       await apiClient.logoutBisque();
@@ -11209,9 +9305,9 @@ export function App() {
     }
     clearAuthViewState();
     setAuthError(nextMessage);
-  };
+  }, [apiClient, clearAuthViewState]);
 
-  const copyTextWithUiFeedback = async (
+  const copyTextWithUiFeedback = useCallback(async (
     value: string,
     label: string
   ): Promise<void> => {
@@ -11229,28 +9325,28 @@ export function App() {
     } catch (error) {
       setUiErrorBanner(`Failed to copy ${label}: ${normalizeApiError(error)}`);
     }
-  };
+  }, []);
 
-  const copyBisqueResourceUri = async (resourceUrl: string): Promise<void> => {
+  const copyBisqueResourceUri = useCallback(async (resourceUrl: string): Promise<void> => {
     await copyTextWithUiFeedback(resourceUrl, "BisQue link");
-  };
+  }, [copyTextWithUiFeedback]);
 
-  const copyConversationLink = async (conversationId: string): Promise<void> => {
+  const copyConversationLink = useCallback(async (conversationId: string): Promise<void> => {
     await copyTextWithUiFeedback(buildConversationUrl(conversationId), "chat link");
-  };
+  }, [copyTextWithUiFeedback]);
 
-  const copyConversationId = async (conversationId: string): Promise<void> => {
+  const copyConversationId = useCallback(async (conversationId: string): Promise<void> => {
     await copyTextWithUiFeedback(conversationId, "chat ID");
-  };
+  }, [copyTextWithUiFeedback]);
 
-  const isSuccessfulBisqueImportStatus = (
+  const isSuccessfulBisqueImportStatus = useCallback((
     status: "imported" | "reused" | "error" | string | null | undefined
   ): boolean => {
     const normalized = String(status ?? "").trim().toLowerCase();
     return normalized === "imported" || normalized === "reused";
-  };
+  }, []);
 
-  const importBisqueResourcesIntoConversation = async (
+  const importBisqueResourcesIntoConversation = useCallback(async (
     resourcesToImport: string[],
     options?: {
       materialize?: boolean;
@@ -11497,7 +9593,13 @@ export function App() {
       setUiErrorBanner(`BisQue import failed: ${normalizeApiError(error)}`);
       return { uploadedFiles: [], bisqueLinksByFileId: {} };
     }
-  };
+  }, [
+    activeConversation,
+    apiClient,
+    isSuccessfulBisqueImportStatus,
+    promptBisqueAuthentication,
+    updateConversation,
+  ]);
 
   const resolveBisqueReferenceSelectionForPrompt = async (
     promptText: string,
@@ -11655,12 +9757,13 @@ export function App() {
   const requestChatScrollToBottom = useCallback((): void => {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
+  const activeConversationStopId = activeConversation?.id ?? null;
   const stopActiveConversation = useCallback((): void => {
-    if (!activeConversation?.id) {
+    if (!activeConversationStopId) {
       return;
     }
-    requestStopConversation(activeConversation.id);
-  }, [activeConversation?.id, requestStopConversation]);
+    requestStopConversation(activeConversationStopId);
+  }, [activeConversationStopId, requestStopConversation]);
 
   useEffect(() => {
     const conversationId = activeConversation?.id ?? null;
@@ -11707,12 +9810,13 @@ export function App() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [
-    activeConversation?.id,
-    activeStreamingMessageId,
-    activeStreamingRunId,
-    apiClient,
-  ]);
+	  }, [
+	    activeConversation?.id,
+	    activeStreamingMessageId,
+	    activeStreamingRunId,
+	    apiClient,
+	    updateConversation,
+	  ]);
 
   const welcomeHeadline = "Ready when you are.";
   const welcomeSubtitleBase =
@@ -11735,30 +9839,6 @@ export function App() {
     resourceViewerContext?.uploadedFiles ?? activeAvailableUploadedFiles;
   const viewerBisqueLinksByFileId =
     resourceViewerContext?.bisqueLinksByFileId ?? activeBisqueLinksByFileId;
-
-  const openConversationFilesInViewer = (fileIds: string[]): void => {
-    const selectedFileIds = uniqueFileIds(fileIds);
-    if (selectedFileIds.length === 0) {
-      return;
-    }
-    const selectedUploads = selectedFileIds
-      .map((fileId) =>
-        activeAvailableUploadedFiles.find((file) => file.file_id === fileId) ?? null
-      )
-      .filter((file): file is UploadedFileRecord => file !== null);
-    if (selectedUploads.length === 0) {
-      return;
-    }
-    const selectedLinks = Object.fromEntries(
-      selectedUploads
-        .map((file) => {
-          const link = activeBisqueLinksByFileId[file.file_id];
-          return link ? ([file.file_id, link] as const) : null;
-        })
-        .filter((entry): entry is readonly [string, BisqueViewerLink] => entry !== null)
-    );
-    openUploadedFilesInViewer(selectedUploads, selectedLinks);
-  };
 
   const pendingPreviewFiles = useMemo(
     () =>
@@ -11814,8 +9894,8 @@ export function App() {
   );
   const slashWorkflowQuery = normalizeSlashWorkflowQuery(activePrompt);
   const filteredSlashWorkflows = useMemo(
-    () => filterComposerWorkflows(slashWorkflowQuery),
-    [slashWorkflowQuery]
+    () => composerWorkflows?.filterComposerWorkflows(slashWorkflowQuery) ?? [],
+    [composerWorkflows, slashWorkflowQuery]
   );
   const slashMenuOpen =
     !composerResourcePickerOpen &&
@@ -11825,34 +9905,41 @@ export function App() {
     activePrompt !== dismissedSlashPrompt;
 
   useEffect(() => {
-    if (!slashMenuOpen) {
-      setActiveSlashWorkflowId(null);
+    if (!slashMenuOpen || composerWorkflows) {
       return;
     }
-    if (filteredSlashWorkflows.length === 0) {
-      setActiveSlashWorkflowId(null);
-      return;
-    }
-    setActiveSlashWorkflowId((current) => {
-      if (current && filteredSlashWorkflows.some((workflow) => workflow.id === current)) {
-        return current;
-      }
-      return filteredSlashWorkflows[0]?.id ?? null;
-    });
-  }, [filteredSlashWorkflows, slashMenuOpen]);
+    let cancelled = false;
+    void loadComposerWorkflows()
+      .then((module) => {
+        if (!cancelled) {
+          setComposerWorkflows(module);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [composerWorkflows, slashMenuOpen]);
 
-  useEffect(() => {
-    if (!composerResourcePickerOpen || composerResources.length === 0) {
-      setActiveComposerResourceId(null);
-      return;
+  const resolvedActiveSlashWorkflowId = useMemo(() => {
+    if (!slashMenuOpen || filteredSlashWorkflows.length === 0) {
+      return null;
     }
-    setActiveComposerResourceId((current) => {
-      if (current && composerResources.some((resource) => resource.file_id === current)) {
-        return current;
-      }
-      return composerResources[0]?.file_id ?? null;
-    });
-  }, [composerResourcePickerOpen, composerResources]);
+    if (activeSlashWorkflowId && filteredSlashWorkflows.some((workflow) => workflow.id === activeSlashWorkflowId)) {
+      return activeSlashWorkflowId;
+    }
+    return filteredSlashWorkflows[0]?.id ?? null;
+  }, [activeSlashWorkflowId, filteredSlashWorkflows, slashMenuOpen]);
+
+  const resolvedActiveComposerResourceId = useMemo(() => {
+    if (!composerResourcePickerOpen || composerResources.length === 0) {
+      return null;
+    }
+    if (activeComposerResourceId && composerResources.some((resource) => resource.file_id === activeComposerResourceId)) {
+      return activeComposerResourceId;
+    }
+    return composerResources[0]?.file_id ?? null;
+  }, [activeComposerResourceId, composerResourcePickerOpen, composerResources]);
 
   const refreshResources = useCallback((): void => {
     setResourceRefreshToken((value) => value + 1);
@@ -12144,7 +10231,7 @@ export function App() {
     };
   };
 
-  const openUploadedFilesInViewer = (
+  const openUploadedFilesInViewer = useCallback((
     selectedFiles: UploadedFileRecord[],
     selectedLinksByFileId: Record<string, BisqueViewerLink>
   ): void => {
@@ -12159,7 +10246,31 @@ export function App() {
     setActivePanel("scientific-viewer");
     setViewerOpen(false);
     setResourceRefreshToken((value) => value + 1);
-  };
+  }, [rememberActiveConversationScrollPosition]);
+
+  const openConversationFilesInViewer = useCallback((fileIds: string[]): void => {
+    const selectedFileIds = uniqueFileIds(fileIds);
+    if (selectedFileIds.length === 0) {
+      return;
+    }
+    const selectedUploads = selectedFileIds
+      .map((fileId) =>
+        activeAvailableUploadedFiles.find((file) => file.file_id === fileId) ?? null
+      )
+      .filter((file): file is UploadedFileRecord => file !== null);
+    if (selectedUploads.length === 0) {
+      return;
+    }
+    const selectedLinks = Object.fromEntries(
+      selectedUploads
+        .map((file) => {
+          const link = activeBisqueLinksByFileId[file.file_id];
+          return link ? ([file.file_id, link] as const) : null;
+        })
+        .filter((entry): entry is readonly [string, BisqueViewerLink] => entry !== null)
+    );
+    openUploadedFilesInViewer(selectedUploads, selectedLinks);
+  }, [activeAvailableUploadedFiles, activeBisqueLinksByFileId, openUploadedFilesInViewer]);
 
   const openResourceInViewer = (resource: ResourceRecord): void => {
     const uploaded = resourceToUploadedFile(resource);
@@ -12353,10 +10464,10 @@ export function App() {
       focusComposerTextarea();
       return;
     }
-    if (!PRO_MODE_PRIMARY_WORKFLOW || !activeConversation) {
+    if (!activeConversation) {
       return;
     }
-    const preset = toComposerWorkflowPresetState(PRO_MODE_PRIMARY_WORKFLOW);
+    const preset = toComposerWorkflowPresetState(PRO_MODE_COMPOSER_WORKFLOW_PRESET);
     updateConversation(activeConversation.id, (conversation) => ({
       ...conversation,
       updatedAt: Date.now(),
@@ -12401,7 +10512,7 @@ export function App() {
       event.stopPropagation();
       const direction = event.key === "ArrowDown" ? 1 : -1;
       const currentIndex = composerResources.findIndex(
-        (resource) => resource.file_id === activeComposerResourceId
+        (resource) => resource.file_id === resolvedActiveComposerResourceId
       );
       const nextIndex =
         currentIndex < 0
@@ -12414,7 +10525,7 @@ export function App() {
       event.preventDefault();
       event.stopPropagation();
       const activeResource =
-        composerResources.find((resource) => resource.file_id === activeComposerResourceId) ??
+        composerResources.find((resource) => resource.file_id === resolvedActiveComposerResourceId) ??
         composerResources[0];
       if (activeResource) {
         toggleComposerResourceSelection(activeResource);
@@ -12609,7 +10720,7 @@ export function App() {
     };
   };
 
-  const handleCopy = async (value: string, feedbackKey?: string): Promise<void> => {
+  const handleCopy = useCallback(async (value: string, feedbackKey?: string): Promise<void> => {
     if (!navigator.clipboard) {
       return;
     }
@@ -12628,7 +10739,7 @@ export function App() {
     } catch {
       // no-op in non-secure contexts
     }
-  };
+  }, []);
 
   const handlePreviewError = (fileId: string): void => {
     updateActiveConversation((conversation) =>
@@ -12879,7 +10990,7 @@ export function App() {
     }
   };
 
-  const hydrateRunArtifacts = async (
+  const hydrateRunArtifacts = useCallback(async (
     conversationId: string,
     assistantMessageId: string,
     runId: string
@@ -12980,9 +11091,9 @@ export function App() {
       console.warn("Artifact hydration failed", { runId, error });
       // non-blocking: keep chat response usable without artifact previews
     }
-  };
+  }, [apiClient, updateConversation]);
 
-  const hydrateRunEvents = async (
+  const hydrateRunEvents = useCallback(async (
     conversationId: string,
     assistantMessageId: string,
     runId: string
@@ -13019,16 +11130,16 @@ export function App() {
     } catch {
       // non-blocking: keep chat response usable without step traces
     }
-  };
+  }, [apiClient, updateConversation]);
 
-  const hydrateRunDetails = (
+  const hydrateRunDetails = useCallback((
     conversationId: string,
     assistantMessageId: string,
     runId: string
   ): void => {
     void hydrateRunArtifacts(conversationId, assistantMessageId, runId);
     void hydrateRunEvents(conversationId, assistantMessageId, runId);
-  };
+  }, [hydrateRunArtifacts, hydrateRunEvents]);
 
   useEffect(() => {
     if (!conversationsHydrated) {
@@ -13090,7 +11201,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [apiClient, conversations, conversationsHydrated]);
+  }, [apiClient, conversations, conversationsHydrated, hydrateRunArtifacts]);
 
   const runRecoveryTargets = useMemo(() => {
     if (authStatus !== "authenticated" || !conversationsHydrated) {
@@ -13309,9 +11420,15 @@ export function App() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [apiClient, applyGeneratedConversationTitle, runRecoveryTargets]);
+  }, [
+    apiClient,
+    applyGeneratedConversationTitle,
+    hydrateRunDetails,
+    runRecoveryTargets,
+    updateConversation,
+  ]);
 
-  const setActivePromptValue = (
+  const setActivePromptValue = useCallback((
     nextValue: string | ((previous: string) => string)
   ): void => {
     if (!activeConversation) {
@@ -13339,7 +11456,7 @@ export function App() {
     if (dismissedSlashPrompt !== null && resolvedValue !== dismissedSlashPrompt) {
       setDismissedSlashPrompt(null);
     }
-  };
+  }, [activeConversation, dismissedSlashPrompt]);
 
   const handleDeleteUserMessage = useCallback(
     (messageId: string): void => {
@@ -14251,7 +12368,9 @@ export function App() {
     },
     [ensureConversationHydrated, rememberActiveConversationScrollPosition]
   );
-  const normalizedMobileConversationQuery = mobileConversationQuery.trim().toLowerCase();
+  const normalizedMobileConversationQuery = isPhoneView
+    ? mobileConversationQuery.trim().toLowerCase()
+    : "";
   const filteredHistoryItems = useMemo(() => {
     if (!normalizedMobileConversationQuery) {
       return historyItems;
@@ -14313,18 +12432,20 @@ export function App() {
     }
 
     return (
-      <AuthScreen
-        authProvider={authProvider}
-        bisqueRoot={bisqueRootForAuth}
-        bisqueHomeUrl={bisqueNavLinks?.home ?? undefined}
-        allowGuest={authGuestEnabled}
-        loading={authSubmitting}
-        errorMessage={authError}
-        statusMessage={authNotice}
-        onAuthenticate={authenticateBisque}
-        onStartHostedAuth={startHostedAuth}
-        onRequestAccount={requestAccount}
-      />
+      <Suspense fallback={<AuthScreenLoadingFallback />}>
+        <LazyAuthScreen
+          authProvider={authProvider}
+          bisqueRoot={bisqueRootForAuth}
+          bisqueHomeUrl={bisqueNavLinks?.home ?? undefined}
+          allowGuest={authGuestEnabled}
+          loading={authSubmitting}
+          errorMessage={authError}
+          statusMessage={authNotice}
+          onAuthenticate={authenticateBisque}
+          onStartHostedAuth={startHostedAuth}
+          onRequestAccount={requestAccount}
+        />
+      </Suspense>
     );
   }
 
@@ -14593,100 +12714,36 @@ export function App() {
                     {group.period === "Today" ? "Recents" : group.period}
                   </SidebarGroupLabel>
                   <SidebarMenu>
-	                    {group.conversations.map((conversation) => (
-	                      <SidebarMenuItem key={conversation.id} className="app-history-item">
-	                        {pendingConversationRename?.id === conversation.id ? (
-	                          <div className="app-history-rename-shell">
-	                            <Input
-	                              value={pendingConversationRename.title}
-	                              onChange={(event) => {
-	                                const nextTitle = event.target.value;
-	                                setPendingConversationRename((current) =>
-	                                  current?.id === conversation.id
-	                                    ? { ...current, title: nextTitle }
-	                                    : current
-	                                );
-	                              }}
-	                              onFocus={(event) => {
-	                                event.currentTarget.select();
-	                              }}
-	                              onKeyDown={(event) => {
-	                                if (event.key === "Enter") {
-	                                  event.preventDefault();
-	                                  void submitConversationRename();
-	                                } else if (event.key === "Escape") {
-	                                  event.preventDefault();
-	                                  cancelConversationRename();
-	                                }
-	                              }}
-	                              autoFocus
-	                              maxLength={120}
-	                              aria-label={`Rename ${conversation.title}`}
-	                              data-testid="conversation-rename-input"
-	                              className="app-history-rename-input"
-	                              disabled={Boolean(conversationRenamingById[conversation.id])}
-	                            />
-	                            <div className="app-history-rename-actions">
-	                              <Button
-	                                type="button"
-	                                variant="ghost"
-	                                size="icon"
-	                                className="app-history-rename-button"
-	                                aria-label="Save chat name"
-	                                onClick={() => {
-	                                  void submitConversationRename();
-	                                }}
-	                                disabled={Boolean(conversationRenamingById[conversation.id])}
-	                              >
-	                                <Check className="size-4" />
-	                              </Button>
-	                              <Button
-	                                type="button"
-	                                variant="ghost"
-	                                size="icon"
-	                                className="app-history-rename-button"
-	                                aria-label="Cancel renaming chat"
-	                                onClick={cancelConversationRename}
-	                                disabled={Boolean(conversationRenamingById[conversation.id])}
-	                              >
-	                                <X className="size-4" />
-	                              </Button>
-	                            </div>
-	                          </div>
-	                        ) : (
-	                          <>
-	                            <SidebarMenuButton
-	                              isActive={
-	                                activePanel === "chat" &&
-	                                conversation.id === activeConversation?.id
-	                              }
-	                              className="app-history-button group/history h-auto py-2"
-	                              onClick={() => openHistoryItem(conversation)}
-	                              {...mobileSidebarCloseProps}
-	                            >
-	                              <div className="flex min-w-0 w-full items-center gap-2">
-	                                <span className="truncate">{conversation.title}</span>
-	                                <div className="ml-auto flex items-center gap-1.5">
-	                                  {conversation.running ? (
-	                                    <RunningStatusPill size="compact" />
-	                                  ) : null}
-	                                </div>
-	                              </div>
-	                            </SidebarMenuButton>
-	                            <ConversationHistoryActions
-	                              conversationId={conversation.id}
-	                              conversationTitle={conversation.title}
-	                              deleting={Boolean(conversationDeletingById[conversation.id])}
-	                              renaming={Boolean(conversationRenamingById[conversation.id])}
-	                              onCopyLink={copyConversationLink}
-	                              onCopyId={copyConversationId}
-	                              onRename={startConversationRename}
-	                              onDelete={requestConversationDelete}
-	                            />
-	                          </>
-	                        )}
-	                      </SidebarMenuItem>
-	                    ))}
+                    {group.conversations.map((conversation) =>
+                      pendingConversationRename?.id === conversation.id ? (
+                        <SidebarMenuItem key={conversation.id} className="app-history-item">
+                          <ConversationRenameEditor
+                            conversation={conversation}
+                            value={pendingConversationRename.title}
+                            disabled={Boolean(conversationRenamingById[conversation.id])}
+                            onTitleChange={updatePendingConversationRenameTitle}
+                            onSubmit={submitConversationRename}
+                            onCancel={cancelConversationRename}
+                          />
+                        </SidebarMenuItem>
+                      ) : (
+                        <ConversationHistoryRow
+                          key={conversation.id}
+                          conversation={conversation}
+                          active={
+                            activePanel === "chat" &&
+                            conversation.id === activeConversation?.id
+                          }
+                          deleting={Boolean(conversationDeletingById[conversation.id])}
+                          renaming={Boolean(conversationRenamingById[conversation.id])}
+                          onOpen={openHistoryItem}
+                          onCopyLink={copyConversationLink}
+                          onCopyId={copyConversationId}
+                          onRename={startConversationRename}
+                          onDelete={requestConversationDelete}
+                        />
+                      )
+                    )}
                   </SidebarMenu>
                 </SidebarGroup>
               ))
@@ -14713,31 +12770,39 @@ export function App() {
             authIsAdmin={authIsAdmin}
             themePreference={themePreference}
             onThemePreferenceChange={setThemePreference}
-            onOpenSettings={() => setSettingsDialogOpen(true)}
+            onOpenSettings={() => {
+              void loadAppSettingsDialogModule();
+              setSettingsDialogOpen(true);
+            }}
             onLogout={logoutBisque}
           />
         </SidebarContent>
       </Sidebar>
-      <AppSettingsDialog
-        open={settingsDialogOpen}
-        onOpenChange={setSettingsDialogOpen}
-        authUser={authUser}
-        authMode={authMode}
-        authIsAdmin={authIsAdmin}
-        bisqueCredentialsLinked={bisqueCredentialsLinked}
-        themePreference={themePreference}
-        resolvedTheme={resolvedTheme}
-        bisqueNavLinks={bisqueNavLinks}
-        onThemePreferenceChange={setThemePreference}
-        onOpenResources={openResourcesPanel}
-        onOpenTraining={openTrainingPanel}
-        onOpenAdmin={openAdminPanel}
-        onLogout={logoutBisque}
-        onUnlinkBisqueAccount={unlinkBisqueAccount}
-        onLinkBisqueAccount={linkBisqueAccountFromSettings}
-      />
+      {settingsDialogOpen ? (
+        <Suspense fallback={null}>
+          <LazyAppSettingsDialog
+            open={settingsDialogOpen}
+            onOpenChange={setSettingsDialogOpen}
+            authUser={authUser}
+            authMode={authMode}
+            authIsAdmin={authIsAdmin}
+            bisqueCredentialsLinked={bisqueCredentialsLinked}
+            themePreference={themePreference}
+            resolvedTheme={resolvedTheme}
+            bisqueNavLinks={bisqueNavLinks}
+            onThemePreferenceChange={setThemePreference}
+            onOpenResources={openResourcesPanel}
+            onOpenTraining={openTrainingPanel}
+            onOpenAdmin={openAdminPanel}
+            onLogout={logoutBisque}
+            onUnlinkBisqueAccount={unlinkBisqueAccount}
+            onLinkBisqueAccount={linkBisqueAccountFromSettings}
+            formatError={normalizeApiError}
+          />
+        </Suspense>
+      ) : null}
 
-      <SidebarInset ref={sidebarInsetRef}>
+      <SidebarInset ref={setSidebarInsetNode}>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="app-mobile-shell-bar md:hidden">
             <SidebarTrigger
@@ -14957,29 +13022,33 @@ export function App() {
                   className="app-composer-card relative z-10 w-full"
                 >
                   {slashMenuOpen ? (
-                    <ComposerSlashMenu
-                      mode="workflow"
-                      workflowQuery={slashWorkflowQuery}
-                      activeWorkflowId={activeSlashWorkflowId}
-                      onSelectWorkflow={handleSelectComposerWorkflow}
-                    />
+                    <Suspense fallback={null}>
+                      <LazyComposerSlashMenu
+                        mode="workflow"
+                        workflowQuery={slashWorkflowQuery}
+                        activeWorkflowId={resolvedActiveSlashWorkflowId}
+                        onSelectWorkflow={handleSelectComposerWorkflow}
+                      />
+                    </Suspense>
                   ) : null}
                   {composerResourcePickerOpen ? (
-                    <ComposerSlashMenu
-                      mode="resource_picker"
-                      preset={activeComposerWorkflowPreset}
-                      resourceQuery={composerResourceQuery}
-                      onResourceQueryChange={setComposerResourceQuery}
-                      resources={composerResources}
-                      resourcesLoading={composerResourcesLoading}
-                      resourcesError={composerResourcesError}
-                      activeResourceId={activeComposerResourceId}
-                      selectedResourceIds={selectedComposerResourceIds}
-                      onResourceInputKeyDown={handleComposerResourceInputKeyDown}
-                      onToggleResource={toggleComposerResourceSelection}
-                      onConfirmResources={confirmComposerResourceSelection}
-                      onCancelResourcePicker={cancelComposerResourcePicker}
-                    />
+                    <Suspense fallback={null}>
+                      <LazyComposerSlashMenu
+                        mode="resource_picker"
+                        preset={activeComposerWorkflowPreset}
+                        resourceQuery={composerResourceQuery}
+                        onResourceQueryChange={setComposerResourceQuery}
+                        resources={composerResources}
+                        resourcesLoading={composerResourcesLoading}
+                        resourcesError={composerResourcesError}
+                        activeResourceId={resolvedActiveComposerResourceId}
+                        selectedResourceIds={selectedComposerResourceIds}
+                        onResourceInputKeyDown={handleComposerResourceInputKeyDown}
+                        onToggleResource={toggleComposerResourceSelection}
+                        onConfirmResources={confirmComposerResourceSelection}
+                        onCancelResourcePicker={cancelComposerResourcePicker}
+                      />
+                    </Suspense>
                   ) : null}
                   <div className="app-composer-card-body">
                     {activeSending ? (
@@ -15009,9 +13078,9 @@ export function App() {
                           ) {
                             event.preventDefault();
                             const direction = event.key === "ArrowDown" ? 1 : -1;
-                            const currentIndex = filteredSlashWorkflows.findIndex(
-                              (workflow) => workflow.id === activeSlashWorkflowId
-                            );
+	                            const currentIndex = filteredSlashWorkflows.findIndex(
+	                              (workflow) => workflow.id === resolvedActiveSlashWorkflowId
+	                            );
                             const nextIndex =
                               currentIndex < 0
                                 ? 0
@@ -15024,11 +13093,11 @@ export function App() {
                             );
                             return;
                           }
-                          if (event.key === "Enter") {
-                            const selectedWorkflow =
-                              filteredSlashWorkflows.find(
-                                (workflow) => workflow.id === activeSlashWorkflowId
-                              ) ?? filteredSlashWorkflows[0];
+	                          if (event.key === "Enter") {
+	                            const selectedWorkflow =
+	                              filteredSlashWorkflows.find(
+	                                (workflow) => workflow.id === resolvedActiveSlashWorkflowId
+	                              ) ?? filteredSlashWorkflows[0];
                             if (selectedWorkflow) {
                               event.preventDefault();
                               handleSelectComposerWorkflow(selectedWorkflow);
@@ -15383,7 +13452,7 @@ export function App() {
               files={sam3AnnotationSession?.uploadedFiles ?? []}
               apiClient={apiClient}
               busy={sam3AnnotationBusy}
-              portalContainer={sidebarInsetRef.current}
+              portalContainer={sidebarInsetElement}
               conversationId={sam3AnnotationSession?.conversationId ?? null}
               initialPromptText={sam3AnnotationSession?.promptText ?? ""}
               onSubmit={runSam3InteractiveSegmentation}
@@ -15400,7 +13469,7 @@ export function App() {
         >
           <AlertDialogContent
             size="default"
-            portalContainer={sidebarInsetRef.current}
+            portalContainer={sidebarInsetElement}
             overlayClassName="absolute inset-0"
             className="!absolute !left-1/2 !top-1/2 z-50 max-h-[calc(100%-1rem)] w-[min(calc(var(--user-chat-width)+2rem),calc(100%-1.5rem))] max-w-[calc(100%-1.5rem)] min-w-0 !-translate-x-1/2 !-translate-y-1/2 gap-5 overflow-y-auto overflow-x-hidden"
           >
@@ -15549,12 +13618,7 @@ export function App() {
           </AlertDialogContent>
         </AlertDialog>
       </SidebarInset>
-      <Toaster
-        theme={resolvedTheme}
-        richColors
-        position="bottom-right"
-        toastOptions={{ duration: 4200 }}
-      />
+      <DeferredToaster theme={resolvedTheme} />
     </SidebarProvider>
   );
 }

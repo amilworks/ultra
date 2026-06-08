@@ -9,29 +9,36 @@ const readSource = (relativePath: string): string =>
 describe("sidebar settings menu", () => {
   it("composes a shadcn settings entry below chat history with a relevant settings dialog", () => {
     const app = readSource("src/App.tsx");
+    const settingsDialog = readSource("src/components/AppSettingsDialog.tsx");
     const styles = readSource("src/styles.css");
 
     expect(app).toMatch(/function SidebarAccountSettingsButton/);
-    expect(app).toMatch(/function AppSettingsDialog/);
-    expect(app).toMatch(/<Avatar/);
-    expect(app).toMatch(/<AvatarFallback>/);
-    expect(app).toMatch(/<Dialog open={open} onOpenChange={onOpenChange}>/);
-    expect(app).toMatch(/<DialogTitle>Settings<\/DialogTitle>/);
-    expect(app).toMatch(/<TabsList/);
-    expect(app).toMatch(/<SelectGroup>/);
-    expect(app).toMatch(/<Separator/);
-    expect(app).toMatch(/import \{ Toaster, toast \} from "sonner";/);
-    expect(app).toMatch(/Alert,\s*AlertAction,\s*AlertDescription,\s*AlertTitle/);
-    expect(app).toMatch(/onLinkBisqueAccount/);
-    expect(app).toMatch(/onUnlinkBisqueAccount/);
-    expect(app).toMatch(/settings-bisque-username/);
-    expect(app).toMatch(/settings-bisque-password/);
+    expect(app).toMatch(/const LazyAppSettingsDialog = lazyNamed/);
+    expect(settingsDialog).toMatch(/export function AppSettingsDialog/);
+    expect(settingsDialog).toMatch(/<Avatar/);
+    expect(settingsDialog).toMatch(/<AvatarFallback>/);
+    expect(settingsDialog).toMatch(/<Dialog open={open} onOpenChange={onOpenChange}>/);
+    expect(settingsDialog).toMatch(/<DialogTitle>Settings<\/DialogTitle>/);
+    expect(settingsDialog).toMatch(/<TabsList/);
+    expect(settingsDialog).toMatch(/<SelectGroup>/);
+    expect(settingsDialog).toMatch(/<Separator/);
+    expect(app).toMatch(/const LazyToaster = lazy/);
+    expect(app).toMatch(/import type \* as Sonner from "sonner";/);
+    expect(app).not.toMatch(
+      /import\s+\{[^}]*\b(?:Toaster|toast)\b[^}]*\}\s+from "sonner";/
+    );
+    expect(settingsDialog).toMatch(/import \{ toast \} from "sonner";/);
+    expect(settingsDialog).toMatch(/Alert,\s*AlertAction,\s*AlertDescription,\s*AlertTitle/);
+    expect(settingsDialog).toMatch(/onLinkBisqueAccount/);
+    expect(settingsDialog).toMatch(/onUnlinkBisqueAccount/);
+    expect(settingsDialog).toMatch(/settings-bisque-username/);
+    expect(settingsDialog).toMatch(/settings-bisque-password/);
     expect(app).toMatch(/const \[bisqueCredentialsLinked,\s*setBisqueCredentialsLinked\]/);
     expect(app).toMatch(/setBisqueCredentialsLinked\(Boolean\(session\.bisque_linked\)\)/);
     expect(app).toMatch(
       /authStatus !== "authenticated" \|\|\s*\(authMode !== "bisque" && authMode !== "workos"\) \|\|\s*!bisqueCredentialsLinked \|\|\s*!bisqueNavLinks/
     );
-    expect(app).toMatch(/const bisqueLinked = Boolean\(bisqueCredentialsLinked && authUser\)/);
+    expect(settingsDialog).toMatch(/const bisqueLinked = Boolean\(bisqueCredentialsLinked && authUser\)/);
     expect(app).toMatch(
       /apiClient\.searchBisqueResources\(\{\s*resourceType: "image",\s*scope: "owner",\s*limit: 1,\s*countAll: true,/s
     );
@@ -52,11 +59,11 @@ describe("sidebar settings menu", () => {
     expect(app).not.toMatch(/<span>View Images<\/span>/);
     expect(app).not.toMatch(/<span>View Datasets<\/span>/);
     expect(app).not.toMatch(/<span>View Tables<\/span>/);
-    expect(app).toMatch(/BisQue account linked/);
-    expect(app).toMatch(/Open BisQue/);
-    expect(app).toMatch(/Unlink account/);
-    expect(app).toMatch(/toast\.success\("Successfully linked BisQue account"/);
-    expect(app).toMatch(/<Toaster/);
+    expect(settingsDialog).toMatch(/BisQue account linked/);
+    expect(settingsDialog).toMatch(/Open BisQue/);
+    expect(settingsDialog).toMatch(/Unlink account/);
+    expect(app).toMatch(/showSuccessToast\("Successfully linked BisQue account"/);
+    expect(app).toMatch(/<LazyToaster/);
     expect(app).toMatch(/app-sidebar-user-menu/);
     expect(app).toMatch(/<Avatar className="app-sidebar-account-avatar">/);
     expect(app).toMatch(/className="app-sidebar-account-menu"/);

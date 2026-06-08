@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Download, ExternalLink, FileImage } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -148,13 +148,17 @@ function ToolResultPreviewTile({
       ),
     [image.url, row?.imageServiceUrl]
   );
-  const [previewIndex, setPreviewIndex] = useState(
-    previewCandidates.length > 0 ? 0 : -1
-  );
-
-  useEffect(() => {
-    setPreviewIndex(previewCandidates.length > 0 ? 0 : -1);
-  }, [previewCandidates]);
+  const previewCandidatesKey = previewCandidates.join("\u0000");
+  const [previewCursor, setPreviewCursor] = useState(() => ({
+    key: previewCandidatesKey,
+    index: previewCandidates.length > 0 ? 0 : -1,
+  }));
+  const previewIndex =
+    previewCursor.key === previewCandidatesKey
+      ? previewCursor.index
+      : previewCandidates.length > 0
+        ? 0
+        : -1;
 
   const previewUrl =
     previewIndex >= 0 && previewIndex < previewCandidates.length
@@ -180,16 +184,20 @@ function ToolResultPreviewTile({
             src={previewUrl}
             alt={title}
             loading="lazy"
-            className="h-full w-full object-cover"
-            onError={() => {
-              setPreviewIndex((current) => {
-                if (current < 0) {
-                  return current;
-                }
-                const next = current + 1;
-                return next < previewCandidates.length ? next : -1;
-              });
-            }}
+	            className="h-full w-full object-cover"
+	            onError={() => {
+	              setPreviewCursor((current) => {
+	                const currentIndex = current.key === previewCandidatesKey ? current.index : previewIndex;
+	                if (currentIndex < 0) {
+	                  return { key: previewCandidatesKey, index: currentIndex };
+	                }
+	                const next = currentIndex + 1;
+	                return {
+	                  key: previewCandidatesKey,
+	                  index: next < previewCandidates.length ? next : -1,
+	                };
+	              });
+	            }}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-muted-foreground">

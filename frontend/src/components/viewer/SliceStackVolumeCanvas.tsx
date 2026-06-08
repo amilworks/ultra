@@ -102,6 +102,7 @@ export const MAX_STEPS = 512;
 const MIN_INTERACTIVE_STEPS = 32;
 const SAMPLE_RAMP_FACTOR = 1.5;
 const DEFAULT_VOLUME_CLEAR = 0x07090d;
+const DEFAULT_VOLUME_AXIS_SIZES: UploadViewerInfo["axis_sizes"] = { T: 1, C: 1, Z: 1, Y: 1, X: 1 };
 const ORTHOGRAPHIC_FRUSTUM_SCALE = 2.8;
 const MIN_ORTHOGRAPHIC_FRUSTUM_HEIGHT = 1.8;
 
@@ -717,6 +718,16 @@ export function SliceStackVolumeCanvas({
     uClipMin: { value: THREE.Vector3 };
     uClipMax: { value: THREE.Vector3 };
   } | null>(null);
+  const scalarRenderConfigRef = useRef({
+    enhancement: undefined as string | undefined,
+    negative: false,
+    colorMapShaderValue: 0,
+    signalFloor: 0,
+    densityScale: 1,
+    lightingEnabled: false,
+    lightingStrength: 0.65,
+  });
+  const sliceCursorCueRef = useRef<VolumeSliceCursorCue | null>(null);
   const cameraRigRef = useRef<{
     camera: VolumeCamera;
     controls: TrackballControls;
@@ -734,7 +745,10 @@ export function SliceStackVolumeCanvas({
       ),
     [viewerInfo, volumeSource]
   );
-  const axisSizes = volumeSource?.axisSizes ?? viewerInfo?.axis_sizes ?? { T: 1, C: 1, Z: 1, Y: 1, X: 1 };
+  const axisSizes = useMemo(
+    () => volumeSource?.axisSizes ?? viewerInfo?.axis_sizes ?? DEFAULT_VOLUME_AXIS_SIZES,
+    [viewerInfo?.axis_sizes, volumeSource?.axisSizes]
+  );
   const spacing = volumeSource?.physicalSpacing ?? viewerInfo?.metadata.physical_spacing ?? null;
   const volumeDepth = Math.max(1, axisSizes.Z);
   const physicalGeometry = useMemo(
@@ -874,7 +888,7 @@ export function SliceStackVolumeCanvas({
     displayState?.negative,
     fileId,
     tIndex,
-    volumeSource?.fallbackImageUrl,
+    volumeSource,
     zIndex,
   ]);
 
@@ -917,10 +931,30 @@ export function SliceStackVolumeCanvas({
     modality,
     fusionMethod: displayState?.fusion_method,
   });
-  const scalarColorMap = resolveScalarVolumeColorMap(displayState?.scalar_colormap);
-  const scalarTransfer = resolveScalarVolumeTransferFunction(displayState);
-  const scalarLighting = resolveScalarVolumeLighting(displayState);
-  const volumeCameraMode = resolveVolumeCameraMode(displayState?.volume_camera_mode);
+  const scalarColorMap = useMemo(
+    () => resolveScalarVolumeColorMap(displayState?.scalar_colormap),
+    [displayState?.scalar_colormap]
+  );
+  const scalarTransfer = useMemo(
+    () =>
+      resolveScalarVolumeTransferFunction({
+        volume_density: displayState?.volume_density,
+        volume_signal_floor: displayState?.volume_signal_floor,
+      }),
+    [displayState?.volume_density, displayState?.volume_signal_floor]
+  );
+  const scalarLighting = useMemo(
+    () =>
+      resolveScalarVolumeLighting({
+        volume_lighting: displayState?.volume_lighting,
+        volume_lighting_strength: displayState?.volume_lighting_strength,
+      }),
+    [displayState?.volume_lighting, displayState?.volume_lighting_strength]
+  );
+  const volumeCameraMode = useMemo(
+    () => resolveVolumeCameraMode(displayState?.volume_camera_mode),
+    [displayState?.volume_camera_mode]
+  );
   const volumeViewPreset = resolveVolumeViewPreset(displayState?.volume_view_preset);
   const spatialUnit = resolveSpatialUnit(viewerInfo);
   const sliceCursorCue = useMemo(
@@ -938,9 +972,7 @@ export function SliceStackVolumeCanvas({
         unit: spatialUnit,
       }),
     [
-      axisSizes.X,
-      axisSizes.Y,
-      axisSizes.Z,
+      axisSizes,
       physicalGeometry.worldDepth,
       physicalGeometry.worldHeight,
       physicalGeometry.worldWidth,
@@ -1005,6 +1037,34 @@ export function SliceStackVolumeCanvas({
       }),
     [projectionMode, resolvedSource?.kind, volumeDepth]
   );
+  const scalarRenderConfig = useMemo(
+    () => ({
+      enhancement: displayState?.enhancement,
+      negative: Boolean(displayState?.negative),
+      colorMapShaderValue: scalarColorMap.shaderValue,
+      signalFloor: scalarTransfer.signalFloor,
+      densityScale: scalarTransfer.densityScale,
+      lightingEnabled: scalarLighting.enabled,
+      lightingStrength: scalarLighting.strength,
+    }),
+    [
+      displayState?.enhancement,
+      displayState?.negative,
+      scalarColorMap.shaderValue,
+      scalarLighting.enabled,
+      scalarLighting.strength,
+      scalarTransfer.densityScale,
+      scalarTransfer.signalFloor,
+    ]
+  );
+
+  useEffect(() => {
+    scalarRenderConfigRef.current = scalarRenderConfig;
+  }, [scalarRenderConfig]);
+
+  useEffect(() => {
+    sliceCursorCueRef.current = sliceCursorCue;
+  }, [sliceCursorCue]);
 
   useEffect(() => {
     const scalarRange = scalarRangeRef.current;
@@ -1013,28 +1073,20 @@ export function SliceStackVolumeCanvas({
       return;
     }
     const normalizedWindow = normalizeWindowRange(
-      displayState?.enhancement,
+      scalarRenderConfig.enhancement,
       scalarRange.rawMin,
       scalarRange.rawMax
     );
     scalarUniforms.uWindowLow.value = normalizedWindow.low;
     scalarUniforms.uWindowHigh.value = normalizedWindow.high;
-    scalarUniforms.uInvert.value = Boolean(displayState?.negative);
-    scalarUniforms.uColorMap.value = scalarColorMap.shaderValue;
-    scalarUniforms.uSignalFloor.value = scalarTransfer.signalFloor;
-    scalarUniforms.uDensityScale.value = scalarTransfer.densityScale;
-    scalarUniforms.uLightingEnabled.value = scalarLighting.enabled;
-    scalarUniforms.uLightingStrength.value = scalarLighting.strength;
+    scalarUniforms.uInvert.value = scalarRenderConfig.negative;
+    scalarUniforms.uColorMap.value = scalarRenderConfig.colorMapShaderValue;
+    scalarUniforms.uSignalFloor.value = scalarRenderConfig.signalFloor;
+    scalarUniforms.uDensityScale.value = scalarRenderConfig.densityScale;
+    scalarUniforms.uLightingEnabled.value = scalarRenderConfig.lightingEnabled;
+    scalarUniforms.uLightingStrength.value = scalarRenderConfig.lightingStrength;
     requestRenderRef.current?.();
-  }, [
-    displayState?.enhancement,
-    displayState?.negative,
-    scalarColorMap.shaderValue,
-    scalarLighting.enabled,
-    scalarLighting.strength,
-    scalarTransfer.densityScale,
-    scalarTransfer.signalFloor,
-  ]);
+  }, [scalarRenderConfig]);
 
   useEffect(() => {
     const clipUniforms = clipUniformsRef.current;
@@ -1068,6 +1120,13 @@ export function SliceStackVolumeCanvas({
 
     let disposed = false;
     let renderer: THREE.WebGLRenderer;
+    const commitRenderError = (message: string | null) => {
+      window.setTimeout(() => {
+        if (!disposed) {
+          setRenderError(message);
+        }
+      }, 0);
+    };
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: true,
@@ -1075,16 +1134,20 @@ export function SliceStackVolumeCanvas({
         powerPreference: "high-performance",
       });
       if (renderError) {
-        setRenderError(null);
+        commitRenderError(null);
       }
     } catch (error) {
-      setRenderError(error instanceof Error ? error.message : "WebGL unavailable");
-      return;
+      commitRenderError(error instanceof Error ? error.message : "WebGL unavailable");
+      return () => {
+        disposed = true;
+      };
     }
     if (!renderer.capabilities.isWebGL2) {
       renderer.dispose();
-      setRenderError("WebGL2 unavailable");
-      return;
+      commitRenderError("WebGL2 unavailable");
+      return () => {
+        disposed = true;
+      };
     }
 
     const gl = renderer.getContext();
@@ -1100,10 +1163,12 @@ export function SliceStackVolumeCanvas({
     );
     if (Number.isFinite(max3DTextureSize) && max3DTextureSize > 0 && largestDimension > max3DTextureSize) {
       renderer.dispose();
-      setRenderError(
+      commitRenderError(
         `Volume exceeds this browser's 3D texture limit (${largestDimension} > ${max3DTextureSize}).`
       );
-      return;
+      return () => {
+        disposed = true;
+      };
     }
 
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -1145,12 +1210,12 @@ export function SliceStackVolumeCanvas({
               uDensity: { value: density },
               uWindowLow: { value: 0.0 },
               uWindowHigh: { value: 1.0 },
-              uInvert: { value: Boolean(displayState?.negative) },
-              uColorMap: { value: scalarColorMap.shaderValue },
-              uSignalFloor: { value: scalarTransfer.signalFloor },
-              uDensityScale: { value: scalarTransfer.densityScale },
-              uLightingEnabled: { value: scalarLighting.enabled },
-              uLightingStrength: { value: scalarLighting.strength },
+              uInvert: { value: scalarRenderConfigRef.current.negative },
+              uColorMap: { value: scalarRenderConfigRef.current.colorMapShaderValue },
+              uSignalFloor: { value: scalarRenderConfigRef.current.signalFloor },
+              uDensityScale: { value: scalarRenderConfigRef.current.densityScale },
+              uLightingEnabled: { value: scalarRenderConfigRef.current.lightingEnabled },
+              uLightingStrength: { value: scalarRenderConfigRef.current.lightingStrength },
               uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
               uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
@@ -1251,13 +1316,16 @@ export function SliceStackVolumeCanvas({
       y: createSlicePlane(0x66c78d, 0.14),
       z: createSlicePlane(0x74a7ff, 0.15),
     };
+    const initialSliceCursorCue = sliceCursorCueRef.current;
     sliceCursorPlanes.x.rotation.y = Math.PI / 2;
     sliceCursorPlanes.y.rotation.x = -Math.PI / 2;
-    applyVolumeSliceCursorPlanes({
-      planes: sliceCursorPlanes,
-      cue: sliceCursorCue,
-      normalizedScale,
-    });
+    if (initialSliceCursorCue) {
+      applyVolumeSliceCursorPlanes({
+        planes: sliceCursorPlanes,
+        cue: initialSliceCursorCue,
+        normalizedScale,
+      });
+    }
     sliceCursorPlanesRef.current = sliceCursorPlanes;
     scene.add(sliceCursorPlanes.x, sliceCursorPlanes.y, sliceCursorPlanes.z);
 
@@ -1341,8 +1409,9 @@ export function SliceStackVolumeCanvas({
         ? resolvedSource.loadScalarVolume().then(async (payload) => {
             const texture = await scalarToVolumeTexture(payload, texturePolicy);
             scalarRangeRef.current = { rawMin: payload.rawMin, rawMax: payload.rawMax };
+            const latestScalarRenderConfig = scalarRenderConfigRef.current;
             const normalizedWindow = normalizeWindowRange(
-              displayState?.enhancement,
+              latestScalarRenderConfig.enhancement,
               payload.rawMin,
               payload.rawMax
             );
@@ -1358,12 +1427,12 @@ export function SliceStackVolumeCanvas({
             };
             scalarUniformsRef.current.uWindowLow.value = normalizedWindow.low;
             scalarUniformsRef.current.uWindowHigh.value = normalizedWindow.high;
-            scalarUniformsRef.current.uInvert.value = Boolean(displayState?.negative);
-            scalarUniformsRef.current.uColorMap.value = scalarColorMap.shaderValue;
-            scalarUniformsRef.current.uSignalFloor.value = scalarTransfer.signalFloor;
-            scalarUniformsRef.current.uDensityScale.value = scalarTransfer.densityScale;
-            scalarUniformsRef.current.uLightingEnabled.value = scalarLighting.enabled;
-            scalarUniformsRef.current.uLightingStrength.value = scalarLighting.strength;
+            scalarUniformsRef.current.uInvert.value = latestScalarRenderConfig.negative;
+            scalarUniformsRef.current.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
+            scalarUniformsRef.current.uSignalFloor.value = latestScalarRenderConfig.signalFloor;
+            scalarUniformsRef.current.uDensityScale.value = latestScalarRenderConfig.densityScale;
+            scalarUniformsRef.current.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
+            scalarUniformsRef.current.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
             return texture;
           })
         : atlasToVolumeTexture(resolvedSource.atlasUrl, resolvedSource.atlasScheme, texturePolicy);
@@ -1429,9 +1498,8 @@ export function SliceStackVolumeCanvas({
     clearColor,
     density,
     projectionMode,
-    sampleBudget.interactiveSteps,
-    sampleBudget.rampFactor,
-    sampleBudget.settledSteps,
+    renderPolicy,
+    sampleBudget,
     scalarVoxelStep.x,
     scalarVoxelStep.y,
     scalarVoxelStep.z,
@@ -1444,10 +1512,10 @@ export function SliceStackVolumeCanvas({
     normalizedScale.x,
     normalizedScale.y,
     normalizedScale.z,
+    normalizedScale,
     volumeDepth,
     volumeRadius,
-    volumeCameraMode.id,
-    volumeCameraMode.isOrthographic,
+    volumeCameraMode,
     volumeViewPreset,
     physicalGeometry.worldDepth,
     physicalGeometry.worldHeight,
@@ -1466,18 +1534,7 @@ export function SliceStackVolumeCanvas({
       normalizedScale,
     });
     requestRenderRef.current?.();
-  }, [
-    normalizedScale.x,
-    normalizedScale.y,
-    normalizedScale.z,
-    sliceCursorCue.visible,
-    sliceCursorCue.x.count,
-    sliceCursorCue.x.local,
-    sliceCursorCue.y.count,
-    sliceCursorCue.y.local,
-    sliceCursorCue.z.count,
-    sliceCursorCue.z.local,
-  ]);
+  }, [normalizedScale, sliceCursorCue]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (

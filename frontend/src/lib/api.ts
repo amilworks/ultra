@@ -97,7 +97,7 @@ import type {
   UploadViewerInfo,
   UploadFilesResponse,
 } from "../types";
-import { normalizeUploadViewerInfo } from "./viewerManifest";
+import type * as ViewerManifest from "./viewerManifest";
 
 export type ApiClientOptions = {
   baseUrl: string;
@@ -145,6 +145,16 @@ export type ScalarVolumePayload = {
   rawMin: number;
   rawMax: number;
   channel: number | null;
+};
+
+let viewerManifestModulePromise: Promise<typeof ViewerManifest> | null = null;
+
+const loadViewerManifestModule = () => {
+  viewerManifestModulePromise ??= import("./viewerManifest").catch((error: unknown) => {
+    viewerManifestModulePromise = null;
+    throw error;
+  });
+  return viewerManifestModulePromise;
 };
 
 const buildUrl = (baseUrl: string, path: string, params?: Record<string, string>): string => {
@@ -3017,6 +3027,7 @@ export class ApiClient {
     if (!response.ok) {
       return parseError(response);
     }
+    const { normalizeUploadViewerInfo } = await loadViewerManifestModule();
     return normalizeUploadViewerInfo(await response.json());
   }
 

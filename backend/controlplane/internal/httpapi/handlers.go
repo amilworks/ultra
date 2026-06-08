@@ -260,16 +260,63 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func publicBisqueNavLinks(rootURL string) (string, map[string]string) {
+	rootURL = strings.TrimSpace(rootURL)
+	if rootURL == "" {
+		return "", nil
+	}
+
+	base := ""
+	if parsed, err := url.Parse(rootURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		path := strings.TrimRight(parsed.Path, "/")
+		clientServiceIndex := strings.Index(strings.ToLower(path), "/client_service")
+		switch {
+		case clientServiceIndex >= 0:
+			parsed.Path = path[:clientServiceIndex+len("/client_service")]
+		case path == "" || path == "/":
+			parsed.Path = "/client_service"
+		default:
+			parsed.Path = path + "/client_service"
+		}
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		base = strings.TrimRight(parsed.String(), "/")
+	} else {
+		withoutQuery := strings.TrimRight(strings.Split(rootURL, "?")[0], "/")
+		clientServiceIndex := strings.Index(strings.ToLower(withoutQuery), "/client_service")
+		if clientServiceIndex >= 0 {
+			base = withoutQuery[:clientServiceIndex+len("/client_service")]
+		} else {
+			base = withoutQuery + "/client_service"
+		}
+	}
+	if base == "" {
+		return "", nil
+	}
+	return strings.TrimRight(rootURL, "/"), map[string]string{
+		"home":     base + "/",
+		"datasets": base + "/browser?resource=/data_service/dataset",
+		"images":   base + "/browser?resource=/data_service/image",
+		"tables":   base + "/browser?resource=/data_service/table",
+	}
+}
+
 func handlePublicConfig(deps ServerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
+		payload := map[string]any{
 			"app_name":      "BisQue Ultra",
 			"app_version":   deps.Version,
 			"admin_enabled": deps.DevAdminEnabled,
 			"features": map[string]bool{
 				"v2_runs": true,
 			},
-		})
+		}
+		if rootURL, links := publicBisqueNavLinks(deps.bisqueRootURL()); rootURL != "" && links != nil {
+			payload["bisque_root"] = rootURL
+			payload["bisque_browser_url"] = links["home"]
+			payload["bisque_urls"] = links
+		}
+		writeJSON(w, http.StatusOK, payload)
 	}
 }
 

@@ -39,6 +39,18 @@ import { VOLUME_VIEW_PRESETS } from "./volumeViewPreset";
 
 type ViewerDisplayState = NonNullable<UploadViewerInfo["display_defaults"]>;
 
+type UploadHistogramState = {
+  key: string;
+  histogram: UploadViewerHistogramResponse | null;
+  error: string | null;
+};
+
+type ScalarProbeState = {
+  key: string;
+  volume: ScalarVolumePayload | null;
+  error: string | null;
+};
+
 type ImageViewerShellProps = {
   viewerInfo: UploadViewerInfo;
   apiClient: ApiClient;
@@ -376,10 +388,16 @@ export function ImageViewerShell({
   const [activeMeasurementAxis, setActiveMeasurementAxis] = useState<PlaneAxis>("z");
   const [advancedControlsOpen, setAdvancedControlsOpen] = useState(false);
   const [metadataDetailsOpen, setMetadataDetailsOpen] = useState(false);
-  const [uploadHistogram, setUploadHistogram] = useState<UploadViewerHistogramResponse | null>(null);
-  const [uploadHistogramError, setUploadHistogramError] = useState<string | null>(null);
-  const [scalarProbeVolume, setScalarProbeVolume] = useState<ScalarVolumePayload | null>(null);
-  const [scalarProbeError, setScalarProbeError] = useState<string | null>(null);
+  const [uploadHistogramState, setUploadHistogramState] = useState<UploadHistogramState>({
+    key: "",
+    histogram: null,
+    error: null,
+  });
+  const [scalarProbeState, setScalarProbeState] = useState<ScalarProbeState>({
+    key: "",
+    volume: null,
+    error: null,
+  });
 
   const metadataSummaryCards: MetadataCard[] = (() => {
     const cards: MetadataCard[] = [];
@@ -536,14 +554,20 @@ export function ImageViewerShell({
     Boolean(viewerInfo.service_urls?.histogram) &&
     (displayCapabilities.has("histogram") || displayCapabilities.has("intensity_window")) &&
     (!viewerInfo.is_volume || canLoadScalarVolumeHistogram);
+  const uploadHistogramRequestKey = canLoadUploadHistogram
+    ? [viewerInfo.file_id, canControlChannels ? selectedChannelKey : "all"].join("\u0000")
+    : "";
+  const currentUploadHistogramState =
+    uploadHistogramState.key === uploadHistogramRequestKey
+      ? uploadHistogramState
+      : { key: uploadHistogramRequestKey, histogram: null, error: null };
+  const uploadHistogram = currentUploadHistogramState.histogram;
+  const uploadHistogramError = currentUploadHistogramState.error;
   useEffect(() => {
-    if (!canLoadUploadHistogram) {
-      setUploadHistogram(null);
-      setUploadHistogramError(null);
+    if (!uploadHistogramRequestKey || uploadHistogramState.key === uploadHistogramRequestKey) {
       return;
     }
     let active = true;
-    setUploadHistogramError(null);
     const histogramChannels = selectedChannelKey
       ? selectedChannelKey.split(",").map((value) => Number(value)).filter((value) => Number.isFinite(value))
       : [];
@@ -557,19 +581,29 @@ export function ImageViewerShell({
         if (!active) {
           return;
         }
-        setUploadHistogram(response);
+        setUploadHistogramState({ key: uploadHistogramRequestKey, histogram: response, error: null });
       })
       .catch((error: unknown) => {
         if (!active) {
           return;
         }
-        setUploadHistogram(null);
-        setUploadHistogramError(error instanceof Error ? error.message : "Histogram unavailable.");
+        setUploadHistogramState({
+          key: uploadHistogramRequestKey,
+          histogram: null,
+          error: error instanceof Error ? error.message : "Histogram unavailable.",
+        });
       });
     return () => {
       active = false;
     };
-  }, [apiClient, canControlChannels, canLoadUploadHistogram, selectedChannelKey, viewerInfo.file_id]);
+  }, [
+    apiClient,
+    canControlChannels,
+    selectedChannelKey,
+    uploadHistogramRequestKey,
+    uploadHistogramState.key,
+    viewerInfo.file_id,
+  ]);
   const isScalarMpr =
     viewerInfo.viewer.render_policy === "scalar" && viewerInfo.viewer.diagnostic_surface === "mpr";
   const canControlScalarVolumeColorMap =
@@ -702,15 +736,20 @@ export function ImageViewerShell({
     selectedSurface === "mpr" && selectedChannelIndices.length === 1
       ? Math.max(0, Math.min(selectedChannelIndices[0] ?? 0, Math.max(0, channelNames.length - 1)))
       : volumeChannelIndex;
+  const scalarProbeRequestKey = canLoadScalarProbe
+    ? [viewerInfo.file_id, debouncedT, scalarProbeChannelIndex].join("\u0000")
+    : "";
+  const currentScalarProbeState =
+    scalarProbeState.key === scalarProbeRequestKey
+      ? scalarProbeState
+      : { key: scalarProbeRequestKey, volume: null, error: null };
+  const scalarProbeVolume = currentScalarProbeState.volume;
+  const scalarProbeError = currentScalarProbeState.error;
   useEffect(() => {
-    if (!canLoadScalarProbe) {
-      setScalarProbeVolume(null);
-      setScalarProbeError(null);
+    if (!scalarProbeRequestKey || scalarProbeState.key === scalarProbeRequestKey) {
       return;
     }
     let active = true;
-    setScalarProbeVolume(null);
-    setScalarProbeError(null);
     apiClient
       .getUploadScalarVolume(viewerInfo.file_id, {
         t: debouncedT,
@@ -720,19 +759,29 @@ export function ImageViewerShell({
         if (!active) {
           return;
         }
-        setScalarProbeVolume(payload);
+        setScalarProbeState({ key: scalarProbeRequestKey, volume: payload, error: null });
       })
       .catch((error: unknown) => {
         if (!active) {
           return;
         }
-        setScalarProbeVolume(null);
-        setScalarProbeError(error instanceof Error ? error.message : "Scalar probe unavailable.");
+        setScalarProbeState({
+          key: scalarProbeRequestKey,
+          volume: null,
+          error: error instanceof Error ? error.message : "Scalar probe unavailable.",
+        });
       });
     return () => {
       active = false;
     };
-  }, [apiClient, canLoadScalarProbe, debouncedT, scalarProbeChannelIndex, viewerInfo.file_id]);
+  }, [
+    apiClient,
+    debouncedT,
+    scalarProbeChannelIndex,
+    scalarProbeRequestKey,
+    scalarProbeState.key,
+    viewerInfo.file_id,
+  ]);
   const displayTransformKey = [
     selectedDisplayState?.enhancement ?? "d",
     selectedDisplayState?.negative ? "negative" : "positive",

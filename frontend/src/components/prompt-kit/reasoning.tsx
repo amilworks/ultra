@@ -1,6 +1,6 @@
 import React from "react";
 import { cn } from "../../lib/cn";
-import { Markdown } from "./markdown";
+import { LazyMarkdown } from "./lazy-markdown";
 
 type ReasoningContextValue = {
   open: boolean;
@@ -34,23 +34,19 @@ export function Reasoning({
 }: ReasoningProps) {
   const [internalOpen, setInternalOpen] = React.useState(Boolean(open));
   const isControlled = typeof open === "boolean";
-  const actualOpen = isControlled ? open : internalOpen;
+  const streamingEnded = isStreaming === false;
+  const actualOpen = streamingEnded ? false : isControlled ? open : internalOpen;
 
   const setOpen = React.useCallback(
     (nextOpen: boolean) => {
+      const nextActualOpen = streamingEnded ? false : nextOpen;
       if (!isControlled) {
-        setInternalOpen(nextOpen);
+        setInternalOpen(nextActualOpen);
       }
-      onOpenChange?.(nextOpen);
+      onOpenChange?.(nextActualOpen);
     },
-    [isControlled, onOpenChange]
+    [isControlled, onOpenChange, streamingEnded]
   );
-
-  React.useEffect(() => {
-    if (isStreaming === false && actualOpen) {
-      setOpen(false);
-    }
-  }, [isStreaming, actualOpen, setOpen]);
 
   return (
     <ReasoningContext.Provider value={{ open: actualOpen, setOpen }}>
@@ -106,7 +102,15 @@ export function ReasoningContent({
   return (
     <div {...props} className={cn("pk-reasoning-content", className)}>
       <div className={cn("pk-reasoning-content-inner", contentClassName)}>
-        {canRenderMarkdown ? <Markdown>{children}</Markdown> : children}
+        {canRenderMarkdown ? (
+          <React.Suspense
+            fallback={<div style={{ whiteSpace: "pre-wrap" }}>{children}</div>}
+          >
+            <LazyMarkdown>{children}</LazyMarkdown>
+          </React.Suspense>
+        ) : (
+          children
+        )}
       </div>
     </div>
   );

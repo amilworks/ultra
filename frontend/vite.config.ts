@@ -9,6 +9,21 @@ const apiProxyTarget =
     ? process.env.VITE_PROXY_API_TARGET.trim()
     : "http://localhost:8000";
 
+const apiProxy = {
+  "/v1": {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+  "/v2": {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+  "/v3": {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+};
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
@@ -18,10 +33,7 @@ export default defineConfig({
         if (hostType !== "html") {
           return deps;
         }
-        return deps.filter(
-          (dep) =>
-            !dep.includes("vendor-charts") && !dep.includes("vendor-three")
-        );
+        return deps.filter((dep) => !dep.includes("vendor-three"));
       },
     },
     rolldownOptions: {
@@ -31,15 +43,6 @@ export default defineConfig({
             return undefined;
           }
           const normalizedId = id.replace(/\\/g, "/");
-          if (
-            normalizedId.includes("react-markdown") ||
-            normalizedId.includes("marked") ||
-            normalizedId.includes("remark-") ||
-            normalizedId.includes("rehype-") ||
-            normalizedId.includes("/katex/")
-          ) {
-            return "vendor-markdown";
-          }
           if (
             normalizedId.includes("lucide-react") ||
             normalizedId.includes("use-stick-to-bottom") ||
@@ -54,9 +57,6 @@ export default defineConfig({
           if (normalizedId.includes("@react-three") || normalizedId.includes("/three/")) {
             return "vendor-three";
           }
-          if (normalizedId.includes("recharts")) {
-            return "vendor-charts";
-          }
           return undefined;
         },
       },
@@ -70,19 +70,9 @@ export default defineConfig({
   server: {
     host: "localhost",
     port: 5173,
-    proxy: {
-      "/v1": {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-      "/v2": {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-      "/v3": {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-    },
+    proxy: apiProxy,
+  },
+  preview: {
+    proxy: apiProxy,
   },
 });

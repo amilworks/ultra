@@ -2,7 +2,7 @@ import http from "node:http";
 
 const port = Number(process.env.MOCK_API_PORT || "8000");
 const guestCookieName = "bisque_ultra_session";
-const bisqueRoot = "https://bisque.example.org";
+const bisqueRoot = "https://bisque2.ece.ucsb.edu";
 
 const navLinks = {
   home: `${bisqueRoot}/client_service/`,
@@ -10,6 +10,7 @@ const navLinks = {
   images: `${bisqueRoot}/client_service/browser?resource=/data_service/image`,
   tables: `${bisqueRoot}/client_service/browser?resource=/data_service/table`,
 };
+const nowIso = new Date("2026-06-07T12:00:00Z").toISOString();
 
 const sendJson = (response, statusCode, payload, headers = {}) => {
   response.writeHead(statusCode, {
@@ -139,6 +140,140 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/v2/resources") {
     sendJson(response, 200, { count: 0, resources: [] });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/bisque/search") {
+    let body = "";
+    for await (const chunk of request) {
+      body += chunk;
+    }
+    const payload = body ? JSON.parse(body) : {};
+    const resourceType = String(payload.resource_type || "image").toLowerCase();
+    const counts = { image: 142, dataset: 12, table: 8 };
+    sendJson(response, 200, {
+      count: counts[resourceType] ?? 0,
+      results: [],
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/training/models") {
+    sendJson(response, 200, {
+      count: 1,
+      models: [
+        {
+          key: "prairie_yolo",
+          name: "Prairie YOLO",
+          framework: "yolov5",
+          task_type: "object_detection",
+          description: "Mock prairie detection model for frontend performance tests.",
+          supports_training: true,
+          supports_finetune: true,
+          supports_inference: true,
+          dimensions: ["image"],
+          default_config: {},
+        },
+      ],
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/training/prairie/status") {
+    sendJson(response, 200, {
+      dataset_name: "Prairie_Dog_Active_Learning",
+      dataset_id: "dataset_prairie",
+      last_sync_at: nowIso,
+      next_sync_at: nowIso,
+      active_model_version: "version_active",
+      model_health: "healthy",
+      reviewed_images: 24,
+      unreviewed_images: 3,
+      class_counts: { prairie_dog: 48, burrow: 19 },
+      unsupported_class_counts: {},
+      detection_counts: {},
+      latest_metrics: { map50: 0.91 },
+      benchmark_baseline: {},
+      benchmark_latest_candidate: {},
+      last_benchmark_at: nowIso,
+      benchmark_ready: true,
+      canonical_benchmark_ready: true,
+      promotion_benchmark_ready: true,
+      retrain_gate: true,
+      retrain_gate_reasons: [],
+      retrain_gate_counts: {},
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/training/prairie/retrain-requests") {
+    sendJson(response, 200, { count: 0, requests: [] });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/training/domains") {
+    sendJson(response, 200, {
+      count: 1,
+      domains: [
+        {
+          domain_id: "domain_prairie",
+          name: "Prairie",
+          description: "Mock training domain",
+          owner_scope: "shared",
+          owner_user_id: "user_mobile_smoke",
+          metadata: {},
+          created_at: nowIso,
+          updated_at: nowIso,
+        },
+      ],
+    });
+    return;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v2/training/domains/domain_prairie/lineages"
+  ) {
+    sendJson(response, 200, {
+      count: 1,
+      lineages: [
+        {
+          lineage_id: "lineage_prairie",
+          domain_id: "domain_prairie",
+          scope: "shared",
+          owner_user_id: "user_mobile_smoke",
+          model_key: "prairie_yolo",
+          parent_lineage_id: null,
+          active_version_id: "version_active",
+          metadata: {},
+          created_at: nowIso,
+          updated_at: nowIso,
+        },
+      ],
+    });
+    return;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v2/training/lineages/lineage_prairie/versions"
+  ) {
+    sendJson(response, 200, {
+      count: 1,
+      versions: [
+        {
+          version_id: "version_active",
+          lineage_id: "lineage_prairie",
+          source_job_id: null,
+          artifact_run_id: null,
+          status: "active",
+          metrics: { benchmark_ready: true, promotion_benchmark_ready: true },
+          metadata: { guardrails: { passed: true, reasons: [] } },
+          created_at: nowIso,
+          updated_at: nowIso,
+        },
+      ],
+    });
     return;
   }
 

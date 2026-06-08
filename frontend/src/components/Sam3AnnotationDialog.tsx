@@ -75,11 +75,13 @@ type SelectedAnnotation =
   | {
       kind: "point" | "box";
       id: string;
+      fileId: string;
     }
   | null;
 
 type PointerDraft = {
   pointerId: number;
+  fileId: string;
   x1: number;
   y1: number;
   x2: number;
@@ -267,45 +269,23 @@ export function Sam3AnnotationDialog({
       return;
     }
     annotationCounterRef.current = 0;
-    setSegmentationModel(inferInteractiveModelFromPrompt(initialPromptText));
-    setTrackerPromptMode("per_positive_point_instance");
-    setPromptLabel(1);
-    setInteractionMode("point");
-    setAdvancedOpen(false);
-    setSelectedAnnotation(null);
-    setDraftBox(null);
-  }, [initialPromptText, open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    setAnnotationsByFileId((previous) => {
-      const next: Record<string, ImageAnnotations> = {};
-      files.forEach((file) => {
-        next[file.file_id] = previous[file.file_id] ?? { points: [], boxes: [] };
-      });
-      return next;
-    });
-    setViewerStateByFileId((previous) => {
-      const next: Record<string, ImageViewerState> = {};
-      files.forEach((file) => {
-        next[file.file_id] = previous[file.file_id] ?? {
-          sourceSize: DEFAULT_IMAGE_SIZE,
-          imageUrl: apiClient.uploadPreviewUrl(file.file_id),
-          loading: true,
-          error: null,
-        };
-      });
-      return next;
-    });
-    setActiveIndex((current) => {
-      if (files.length === 0) {
-        return 0;
+    let cancelled = false;
+    window.queueMicrotask(() => {
+      if (cancelled) {
+        return;
       }
-      return Math.min(Math.max(current, 0), files.length - 1);
+      setSegmentationModel(inferInteractiveModelFromPrompt(initialPromptText));
+      setTrackerPromptMode("per_positive_point_instance");
+      setPromptLabel(1);
+      setInteractionMode("point");
+      setAdvancedOpen(false);
+      setSelectedAnnotation(null);
+      setDraftBox(null);
     });
-  }, [apiClient, files, open]);
+    return () => {
+      cancelled = true;
+    };
+  }, [initialPromptText, open]);
 
   useEffect(() => {
     if (!open) {
@@ -360,13 +340,16 @@ export function Sam3AnnotationDialog({
     };
   }, [apiClient, files, open]);
 
-  useEffect(() => {
-    setSelectedAnnotation(null);
-    setDraftBox(null);
-  }, [activeIndex]);
-
-  const activeFile = files[activeIndex] ?? null;
+  const activeFileIndex =
+    files.length === 0 ? 0 : Math.min(Math.max(activeIndex, 0), files.length - 1);
+  const activeFile = files[activeFileIndex] ?? null;
   const activeFileId = activeFile?.file_id ?? null;
+  const activeSelectedAnnotation =
+    activeFileId && selectedAnnotation?.fileId === activeFileId
+      ? selectedAnnotation
+      : null;
+  const activeDraftBox =
+    activeFileId && draftBox?.fileId === activeFileId ? draftBox : null;
   const activeViewerState: ImageViewerState = useMemo(() => {
     if (!activeFileId) {
       return {
@@ -415,12 +398,12 @@ export function Sam3AnnotationDialog({
 
   const selectedModelCopy = modelUiCopy[segmentationModel];
   const selectedDetails = useMemo(() => {
-    if (!selectedAnnotation) {
+    if (!activeSelectedAnnotation) {
       return null;
     }
-    if (selectedAnnotation.kind === "point") {
+    if (activeSelectedAnnotation.kind === "point") {
       const point = activeAnnotations.points.find(
-        (item) => item.id === selectedAnnotation.id
+        (item) => item.id === activeSelectedAnnotation.id
       );
       if (!point) {
         return null;
@@ -430,7 +413,7 @@ export function Sam3AnnotationDialog({
         detail: `${point.x}, ${point.y}`,
       };
     }
-    const box = activeAnnotations.boxes.find((item) => item.id === selectedAnnotation.id);
+    const box = activeAnnotations.boxes.find((item) => item.id === activeSelectedAnnotation.id);
     if (!box) {
       return null;
     }
@@ -438,7 +421,7 @@ export function Sam3AnnotationDialog({
       label: box.label === 1 ? "Include box" : "Exclude box",
       detail: `${box.x1}, ${box.y1} → ${box.x2}, ${box.y2}`,
     };
-  }, [activeAnnotations.boxes, activeAnnotations.points, selectedAnnotation]);
+  }, [activeAnnotations.boxes, activeAnnotations.points, activeSelectedAnnotation]);
 
   const canPlacePrompts =
     Boolean(activeFileId) &&
@@ -456,17 +439,17 @@ export function Sam3AnnotationDialog({
       return;
     }
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if ((event.key === "Delete" || event.key === "Backspace") && selectedAnnotation) {
+      if ((event.key === "Delete" || event.key === "Backspace") && activeSelectedAnnotation) {
         event.preventDefault();
         setAnnotationsByFileId((previous) => {
           const current = previous[activeFileId] ?? { points: [], boxes: [] };
-          if (selectedAnnotation.kind === "point") {
+          if (activeSelectedAnnotation.kind === "point") {
             return {
               ...previous,
               [activeFileId]: {
                 ...current,
                 points: current.points.filter(
-                  (point) => point.id !== selectedAnnotation.id
+                  (point) => point.id !== activeSelectedAnnotation.id
                 ),
               },
             };
@@ -475,7 +458,7 @@ export function Sam3AnnotationDialog({
             ...previous,
             [activeFileId]: {
               ...current,
-              boxes: current.boxes.filter((box) => box.id !== selectedAnnotation.id),
+              boxes: current.boxes.filter((box) => box.id !== activeSelectedAnnotation.id),
             },
           };
         });
@@ -484,7 +467,7 @@ export function Sam3AnnotationDialog({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeFileId, open, selectedAnnotation]);
+  }, [activeFileId, activeSelectedAnnotation, open]);
 
   const nextAnnotationOrder = (): number => {
     annotationCounterRef.current += 1;
@@ -515,7 +498,7 @@ export function Sam3AnnotationDialog({
         },
       };
     });
-    setSelectedAnnotation({ kind: "point", id: nextPoint.id });
+    setSelectedAnnotation({ kind: "point", id: nextPoint.id, fileId: activeFileId });
   };
 
   const handleStageClick = (
@@ -557,6 +540,7 @@ export function Sam3AnnotationDialog({
     }
     setDraftBox({
       pointerId: event.pointerId,
+      fileId: activeFileId,
       x1: coords.x,
       y1: coords.y,
       x2: coords.x,
@@ -569,7 +553,7 @@ export function Sam3AnnotationDialog({
   const handleStagePointerMove = (
     event: ReactPointerEvent<HTMLDivElement>
   ): void => {
-    if (interactionMode !== "box" || !draftBox || draftBox.pointerId !== event.pointerId) {
+    if (interactionMode !== "box" || !activeDraftBox || activeDraftBox.pointerId !== event.pointerId) {
       return;
     }
     const coords = getSourceCoordinatesFromEvent(
@@ -594,15 +578,15 @@ export function Sam3AnnotationDialog({
   const handleStagePointerUp = (
     event: ReactPointerEvent<HTMLDivElement>
   ): void => {
-    if (!draftBox || !activeFileId || draftBox.pointerId !== event.pointerId) {
+    if (!activeDraftBox || !activeFileId || activeDraftBox.pointerId !== event.pointerId) {
       return;
     }
     const normalized = normalizeBox({
       id: makeAnnotationId(),
-      x1: draftBox.x1,
-      y1: draftBox.y1,
-      x2: draftBox.x2,
-      y2: draftBox.y2,
+      x1: activeDraftBox.x1,
+      y1: activeDraftBox.y1,
+      x2: activeDraftBox.x2,
+      y2: activeDraftBox.y2,
       label: promptLabel,
       order: nextAnnotationOrder(),
     });
@@ -621,7 +605,7 @@ export function Sam3AnnotationDialog({
         },
       };
     });
-    setSelectedAnnotation({ kind: "box", id: normalized.id });
+    setSelectedAnnotation({ kind: "box", id: normalized.id, fileId: activeFileId });
   };
 
   const clearActiveFileAnnotations = (): void => {
@@ -640,18 +624,18 @@ export function Sam3AnnotationDialog({
   };
 
   const deleteSelectedAnnotation = (): void => {
-    if (!activeFileId || !selectedAnnotation || busy) {
+    if (!activeFileId || !activeSelectedAnnotation || busy) {
       return;
     }
     setAnnotationsByFileId((previous) => {
       const current = previous[activeFileId] ?? { points: [], boxes: [] };
-      if (selectedAnnotation.kind === "point") {
+      if (activeSelectedAnnotation.kind === "point") {
         return {
           ...previous,
           [activeFileId]: {
             ...current,
             points: current.points.filter(
-              (point) => point.id !== selectedAnnotation.id
+              (point) => point.id !== activeSelectedAnnotation.id
             ),
           },
         };
@@ -660,7 +644,7 @@ export function Sam3AnnotationDialog({
         ...previous,
         [activeFileId]: {
           ...current,
-          boxes: current.boxes.filter((box) => box.id !== selectedAnnotation.id),
+          boxes: current.boxes.filter((box) => box.id !== activeSelectedAnnotation.id),
         },
       };
     });
@@ -929,7 +913,7 @@ export function Sam3AnnotationDialog({
                         {activeFile.original_name}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        Image {activeIndex + 1} of {files.length}
+                        Image {activeFileIndex + 1} of {files.length}
                         {activeViewerState.loading
                           ? " · loading source size…"
                           : ` · ${activeViewerState.sourceSize.width}×${activeViewerState.sourceSize.height} source px`}
@@ -955,7 +939,7 @@ export function Sam3AnnotationDialog({
                         size="sm"
                         variant="outline"
                         onClick={deleteSelectedAnnotation}
-                        disabled={busy || !selectedAnnotation}
+                        disabled={busy || !activeSelectedAnnotation}
                       >
                         <X className="mr-1 size-4" />
                         Delete selected
@@ -1027,8 +1011,8 @@ export function Sam3AnnotationDialog({
                         onPointerUp={handleStagePointerUp}
                         onPointerCancel={(event) => {
                           if (
-                            draftBox &&
-                            draftBox.pointerId === event.pointerId &&
+                            activeDraftBox &&
+                            activeDraftBox.pointerId === event.pointerId &&
                             event.currentTarget.hasPointerCapture(event.pointerId)
                           ) {
                             event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1044,8 +1028,8 @@ export function Sam3AnnotationDialog({
                           const boxWidth = ((box.x2 - box.x1) / sourceWidth) * 100;
                           const boxHeight = ((box.y2 - box.y1) / sourceHeight) * 100;
                           const selected =
-                            selectedAnnotation?.kind === "box" &&
-                            selectedAnnotation.id === box.id;
+                            activeSelectedAnnotation?.kind === "box" &&
+                            activeSelectedAnnotation.id === box.id;
                           return (
                             <button
                               key={box.id}
@@ -1066,7 +1050,11 @@ export function Sam3AnnotationDialog({
                               onClick={(event) => {
                                 event.preventDefault();
                                 event.stopPropagation();
-                                setSelectedAnnotation({ kind: "box", id: box.id });
+                                setSelectedAnnotation({
+                                  kind: "box",
+                                  id: box.id,
+                                  fileId: activeFileId,
+                                });
                               }}
                               aria-label="Select box prompt"
                             />
@@ -1079,8 +1067,8 @@ export function Sam3AnnotationDialog({
                           const left = (point.x / sourceWidth) * 100;
                           const top = (point.y / sourceHeight) * 100;
                           const selected =
-                            selectedAnnotation?.kind === "point" &&
-                            selectedAnnotation.id === point.id;
+                            activeSelectedAnnotation?.kind === "point" &&
+                            activeSelectedAnnotation.id === point.id;
                           const pointIndex =
                             point.label === 1
                               ? activeAnnotations.points
@@ -1107,7 +1095,11 @@ export function Sam3AnnotationDialog({
                               onClick={(event) => {
                                 event.preventDefault();
                                 event.stopPropagation();
-                                setSelectedAnnotation({ kind: "point", id: point.id });
+                                setSelectedAnnotation({
+                                  kind: "point",
+                                  id: point.id,
+                                  fileId: activeFileId,
+                                });
                               }}
                               aria-label="Select point prompt"
                             >
@@ -1116,14 +1108,14 @@ export function Sam3AnnotationDialog({
                           );
                         })}
 
-                        {draftBox ? (
+                        {activeDraftBox ? (
                           <div
                             className="pointer-events-none absolute rounded-sm border-2 border-primary/90 border-dashed"
                             style={{
-                              left: `${(Math.min(draftBox.x1, draftBox.x2) / activeViewerState.sourceSize.width) * 100}%`,
-                              top: `${(Math.min(draftBox.y1, draftBox.y2) / activeViewerState.sourceSize.height) * 100}%`,
-                              width: `${(Math.abs(draftBox.x2 - draftBox.x1) / activeViewerState.sourceSize.width) * 100}%`,
-                              height: `${(Math.abs(draftBox.y2 - draftBox.y1) / activeViewerState.sourceSize.height) * 100}%`,
+                              left: `${(Math.min(activeDraftBox.x1, activeDraftBox.x2) / activeViewerState.sourceSize.width) * 100}%`,
+                              top: `${(Math.min(activeDraftBox.y1, activeDraftBox.y2) / activeViewerState.sourceSize.height) * 100}%`,
+                              width: `${(Math.abs(activeDraftBox.x2 - activeDraftBox.x1) / activeViewerState.sourceSize.width) * 100}%`,
+                              height: `${(Math.abs(activeDraftBox.y2 - activeDraftBox.y1) / activeViewerState.sourceSize.height) * 100}%`,
                             }}
                           />
                         ) : null}
@@ -1164,7 +1156,7 @@ export function Sam3AnnotationDialog({
                       boxes: [],
                     };
                     const breakdown = countPromptBreakdown(entry);
-                    const active = index === activeIndex;
+                    const active = index === activeFileIndex;
                     return (
                       <button
                         key={file.file_id}
@@ -1200,8 +1192,8 @@ export function Sam3AnnotationDialog({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setActiveIndex((index) => Math.max(0, index - 1))}
-                disabled={busy || activeIndex <= 0}
+                onClick={() => setActiveIndex(Math.max(0, activeFileIndex - 1))}
+                disabled={busy || activeFileIndex <= 0}
               >
                 <ChevronLeft className="mr-1 size-4" />
                 Previous
@@ -1210,10 +1202,8 @@ export function Sam3AnnotationDialog({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() =>
-                  setActiveIndex((index) => Math.min(files.length - 1, index + 1))
-                }
-                disabled={busy || activeIndex >= files.length - 1}
+                onClick={() => setActiveIndex(Math.min(files.length - 1, activeFileIndex + 1))}
+                disabled={busy || activeFileIndex >= files.length - 1}
               >
                 Next
                 <ChevronRight className="ml-1 size-4" />

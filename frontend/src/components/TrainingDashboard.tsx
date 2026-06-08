@@ -39,6 +39,8 @@ type TrainingDashboardProps = {
 };
 
 const PRAIRIE_MODEL_KEY = "yolov5_rarespot";
+const EMPTY_RETRAIN_GATE_COUNTS: Record<string, number> = {};
+const EMPTY_RETRAIN_GATE_REASONS: string[] = [];
 
 const normalizeError = (error: unknown): string => {
   if (error instanceof ApiError) {
@@ -201,20 +203,13 @@ export function TrainingDashboard({
     return reasons.map((row) => String(row)).filter((row) => row.trim().length > 0);
   }, [candidateVersion]);
   const retrainGateReady = Boolean(status?.retrain_gate);
-  const retrainGateReasons = useMemo(
-    () =>
-      Array.isArray(status?.retrain_gate_reasons)
-        ? status.retrain_gate_reasons.map((row) => String(row)).filter((row) => row.trim().length > 0)
-        : [],
-    [status?.retrain_gate_reasons]
-  );
-  const retrainGateCounts = useMemo(
-    () =>
-      status?.retrain_gate_counts && typeof status.retrain_gate_counts === "object"
-        ? status.retrain_gate_counts
-        : {},
-    [status?.retrain_gate_counts]
-  );
+  const retrainGateReasons = Array.isArray(status?.retrain_gate_reasons)
+    ? status.retrain_gate_reasons.map((row) => String(row)).filter((row) => row.trim().length > 0)
+    : EMPTY_RETRAIN_GATE_REASONS;
+  const retrainGateCounts =
+    status?.retrain_gate_counts && typeof status.retrain_gate_counts === "object"
+      ? status.retrain_gate_counts
+      : EMPTY_RETRAIN_GATE_COUNTS;
   const canonicalBenchmarkReady = Boolean(status?.canonical_benchmark_ready);
   const promotionBenchmarkReady = Boolean(status?.promotion_benchmark_ready ?? status?.benchmark_ready);
   const syncSummary = useMemo(() => {

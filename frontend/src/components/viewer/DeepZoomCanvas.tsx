@@ -81,6 +81,13 @@ export function DeepZoomCanvas({
     }
     let disposed = false;
     let renderer: THREE.WebGLRenderer;
+    const commitRenderError = (message: string | null) => {
+      window.setTimeout(() => {
+        if (!disposed) {
+          setRenderError(message);
+        }
+      }, 0);
+    };
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: true,
@@ -88,11 +95,13 @@ export function DeepZoomCanvas({
         powerPreference: "high-performance",
       });
       if (renderError) {
-        setRenderError(null);
+        commitRenderError(null);
       }
     } catch (error) {
-      setRenderError(error instanceof Error ? error.message : "WebGL unavailable");
-      return;
+      commitRenderError(error instanceof Error ? error.message : "WebGL unavailable");
+      return () => {
+        disposed = true;
+      };
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));

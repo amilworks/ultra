@@ -47,6 +47,14 @@ type PreviewItem = {
   bisqueLink?: PreviewBisqueLink;
 };
 
+type Hdf5PreviewTileState = {
+  fileId: string;
+  viewerInfo: UploadViewerInfo | null;
+  datasetSummary: Hdf5DatasetSummary | null;
+  tablePreview: Hdf5DatasetTablePreviewResponse | null;
+  error: string | null;
+};
+
 const HDF5_EXTENSIONS = [".h5", ".hdf5", ".hdf"];
 const IMAGE_EXTENSIONS = [
   ".png",
@@ -90,6 +98,14 @@ const formatShape = (shape: number[] | null | undefined): string => {
   return shape.map((value) => `${Math.max(0, Number(value) || 0)}`).join(" × ");
 };
 
+const createHdf5PreviewTileState = (fileId: string): Hdf5PreviewTileState => ({
+  fileId,
+  viewerInfo: null,
+  datasetSummary: null,
+  tablePreview: null,
+  error: null,
+});
+
 function Hdf5PreviewTile({
   file,
   bisqueLink,
@@ -101,17 +117,17 @@ function Hdf5PreviewTile({
   apiClient: ApiClient;
   onOpenInViewer: (fileIds: string[]) => void;
 }) {
-  const [viewerInfo, setViewerInfo] = useState<UploadViewerInfo | null>(null);
-  const [datasetSummary, setDatasetSummary] = useState<Hdf5DatasetSummary | null>(null);
-  const [tablePreview, setTablePreview] = useState<Hdf5DatasetTablePreviewResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [previewState, setPreviewState] = useState(() =>
+    createHdf5PreviewTileState(file.file_id)
+  );
+  const currentPreviewState =
+    previewState.fileId === file.file_id
+      ? previewState
+      : createHdf5PreviewTileState(file.file_id);
+  const { viewerInfo, datasetSummary, tablePreview, error } = currentPreviewState;
 
   useEffect(() => {
     let cancelled = false;
-    setViewerInfo(null);
-    setDatasetSummary(null);
-    setTablePreview(null);
-    setError(null);
 
     void apiClient
       .getUploadViewer(file.file_id)
@@ -119,7 +135,13 @@ function Hdf5PreviewTile({
         if (cancelled) {
           return;
         }
-        setViewerInfo(response);
+        setPreviewState((current) => ({
+          fileId: file.file_id,
+          viewerInfo: response,
+          datasetSummary: current.fileId === file.file_id ? current.datasetSummary : null,
+          tablePreview: current.fileId === file.file_id ? current.tablePreview : null,
+          error: null,
+        }));
         const defaultDatasetPath =
           response.kind === "hdf5" ? response.hdf5?.default_dataset_path ?? null : null;
         if (!defaultDatasetPath) {
@@ -131,7 +153,13 @@ function Hdf5PreviewTile({
             if (cancelled) {
               return;
             }
-            setDatasetSummary(summary);
+            setPreviewState((current) => ({
+              fileId: file.file_id,
+              viewerInfo: current.fileId === file.file_id ? current.viewerInfo : response,
+              datasetSummary: summary,
+              tablePreview: current.fileId === file.file_id ? current.tablePreview : null,
+              error: null,
+            }));
             if (summary.preview_kind === "table" || summary.preview_kind === "series") {
               void apiClient
                 .getHdf5DatasetTablePreview(file.file_id, defaultDatasetPath, {
@@ -142,7 +170,13 @@ function Hdf5PreviewTile({
                   if (cancelled) {
                     return;
                   }
-                  setTablePreview(preview);
+                  setPreviewState((current) => ({
+                    fileId: file.file_id,
+                    viewerInfo: current.fileId === file.file_id ? current.viewerInfo : response,
+                    datasetSummary: current.fileId === file.file_id ? current.datasetSummary : summary,
+                    tablePreview: preview,
+                    error: null,
+                  }));
                 })
                 .catch((previewError) => {
                   if (cancelled) {
@@ -150,7 +184,13 @@ function Hdf5PreviewTile({
                   }
                   const message =
                     previewError instanceof Error ? previewError.message : String(previewError);
-                  setError(message);
+                  setPreviewState((current) => ({
+                    fileId: file.file_id,
+                    viewerInfo: current.fileId === file.file_id ? current.viewerInfo : response,
+                    datasetSummary: current.fileId === file.file_id ? current.datasetSummary : summary,
+                    tablePreview: current.fileId === file.file_id ? current.tablePreview : null,
+                    error: message,
+                  }));
                 });
             }
           })
@@ -160,7 +200,13 @@ function Hdf5PreviewTile({
             }
             const message =
               summaryError instanceof Error ? summaryError.message : String(summaryError);
-            setError(message);
+            setPreviewState((current) => ({
+              fileId: file.file_id,
+              viewerInfo: current.fileId === file.file_id ? current.viewerInfo : response,
+              datasetSummary: current.fileId === file.file_id ? current.datasetSummary : null,
+              tablePreview: current.fileId === file.file_id ? current.tablePreview : null,
+              error: message,
+            }));
           });
       })
       .catch((viewerError) => {
@@ -168,7 +214,13 @@ function Hdf5PreviewTile({
           return;
         }
         const message = viewerError instanceof Error ? viewerError.message : String(viewerError);
-        setError(message);
+        setPreviewState({
+          fileId: file.file_id,
+          viewerInfo: null,
+          datasetSummary: null,
+          tablePreview: null,
+          error: message,
+        });
       });
 
     return () => {
@@ -294,11 +346,17 @@ function PreviewTile({
       ),
     [bisqueLink?.imageServiceUrl, bisquePreviewUrl, localPreviewUrl]
   );
-  const [previewIndex, setPreviewIndex] = useState(() => (previewCandidates.length > 0 ? 0 : -1));
-
-  useEffect(() => {
-    setPreviewIndex(previewCandidates.length > 0 ? 0 : -1);
-  }, [previewCandidates]);
+  const previewCandidatesKey = previewCandidates.join("\u0000");
+  const [previewCursor, setPreviewCursor] = useState(() => ({
+    key: previewCandidatesKey,
+    index: previewCandidates.length > 0 ? 0 : -1,
+  }));
+  const previewIndex =
+    previewCursor.key === previewCandidatesKey
+      ? previewCursor.index
+      : previewCandidates.length > 0
+        ? 0
+        : -1;
 
   const previewUrl =
     previewIndex >= 0 && previewIndex < previewCandidates.length
@@ -324,16 +382,20 @@ function PreviewTile({
             src={previewUrl}
             alt={file.original_name}
             loading="lazy"
-            className="h-full w-full object-cover"
-            onError={() => {
-              setPreviewIndex((current) => {
-                if (current < 0) {
-                  return current;
-                }
-                const next = current + 1;
-                return next < previewCandidates.length ? next : -1;
-              });
-            }}
+	            className="h-full w-full object-cover"
+	            onError={() => {
+	              setPreviewCursor((current) => {
+	                const currentIndex = current.key === previewCandidatesKey ? current.index : previewIndex;
+	                if (currentIndex < 0) {
+	                  return { key: previewCandidatesKey, index: currentIndex };
+	                }
+	                const next = currentIndex + 1;
+	                return {
+	                  key: previewCandidatesKey,
+	                  index: next < previewCandidates.length ? next : -1,
+	                };
+	              });
+	            }}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -396,11 +458,15 @@ export function InlineDataQuickPreview({
       });
   }, [bisqueLinksByFileId, fileIds, uploadedFiles]);
 
-  const [open, setOpen] = useState(true);
-
-  useEffect(() => {
-    setOpen(true);
-  }, [fileIds.join("|")]);
+  const fileIdsSignature = fileIds.join("|");
+  const [openState, setOpenState] = useState(() => ({
+    signature: fileIdsSignature,
+    open: true,
+  }));
+  const open = openState.signature === fileIdsSignature ? openState.open : true;
+  const setOpen = (nextOpen: boolean) => {
+    setOpenState({ signature: fileIdsSignature, open: nextOpen });
+  };
 
   if (items.length === 0) {
     return null;

@@ -25,6 +25,17 @@ type Hdf5ViewerShellProps = {
 
 type MaterialsSection = "maps" | "grains" | "orientation" | "synthetic" | "explorer";
 
+type DatasetLoadState = {
+  key: string;
+  error: string | null;
+};
+
+type MaterialsDashboardState = {
+  key: string;
+  dashboard: Hdf5MaterialsDashboardResponse | null;
+  error: string | null;
+};
+
 const findFirstDatasetPath = (nodes: NonNullable<UploadViewerInfo["hdf5"]>["tree"]): string | null => {
   for (const node of nodes) {
     if (node.node_type === "dataset") {
@@ -93,11 +104,15 @@ export function Hdf5ViewerShell({
     return hdf5.default_dataset_path ?? findFirstDatasetPath(hdf5.tree);
   }, [hdf5]);
   const activeDatasetPath = selectedDatasetPath ?? preferredDatasetPath;
-  const [loadingPath, setLoadingPath] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [materialsDashboard, setMaterialsDashboard] = useState<Hdf5MaterialsDashboardResponse | null>(null);
-  const [materialsDashboardError, setMaterialsDashboardError] = useState<string | null>(null);
-  const [materialsDashboardLoading, setMaterialsDashboardLoading] = useState(false);
+  const [datasetLoadState, setDatasetLoadState] = useState<DatasetLoadState>({
+    key: "",
+    error: null,
+  });
+  const [materialsDashboardState, setMaterialsDashboardState] = useState<MaterialsDashboardState>({
+    key: "",
+    dashboard: null,
+    error: null,
+  });
 
   const materials = hdf5?.materials;
   const hasMaterialsDashboard = Boolean(materials?.detected);
@@ -106,92 +121,92 @@ export function Hdf5ViewerShell({
   );
 
   useEffect(() => {
-    setActiveSection(hasMaterialsDashboard && materials?.recommended_view === "materials" ? "maps" : "explorer");
-  }, [hasMaterialsDashboard, materials?.recommended_view, viewerInfo.file_id]);
-
-  useEffect(() => {
     if (!selectedDatasetPath && preferredDatasetPath) {
       onSelectedDatasetPathChange(preferredDatasetPath);
     }
   }, [onSelectedDatasetPathChange, preferredDatasetPath, selectedDatasetPath]);
 
+  const datasetLoadKey =
+    hdf5?.enabled && hdf5.supported && activeDatasetPath && !selectedDatasetSummary
+      ? [viewerInfo.file_id, activeDatasetPath].join("\u0000")
+      : "";
+  const loadingPath =
+    datasetLoadKey && datasetLoadState.key !== datasetLoadKey ? activeDatasetPath : null;
+  const loadError = datasetLoadState.key === datasetLoadKey ? datasetLoadState.error : null;
+
+  const materialsDashboardKey = hasMaterialsDashboard ? viewerInfo.file_id : "";
+  const currentMaterialsDashboardState =
+    materialsDashboardState.key === materialsDashboardKey
+      ? materialsDashboardState
+      : { key: materialsDashboardKey, dashboard: null, error: null };
+  const materialsDashboard = currentMaterialsDashboardState.dashboard;
+  const materialsDashboardError = currentMaterialsDashboardState.error;
+  const materialsDashboardLoading = Boolean(
+    materialsDashboardKey && materialsDashboardState.key !== materialsDashboardKey
+  );
+
   useEffect(() => {
-    if (!hdf5?.enabled || !hdf5.supported || !activeDatasetPath || selectedDatasetSummary) {
+    if (!datasetLoadKey || datasetLoadState.key === datasetLoadKey) {
       return;
     }
     let cancelled = false;
-    setLoadingPath(activeDatasetPath);
-    setLoadError(null);
+    const [, requestedDatasetPath] = datasetLoadKey.split("\u0000");
     apiClient
-      .getHdf5DatasetSummary(viewerInfo.file_id, activeDatasetPath)
+      .getHdf5DatasetSummary(viewerInfo.file_id, requestedDatasetPath ?? "")
       .then((summary) => {
         if (cancelled) {
           return;
         }
         cacheDatasetSummary(summary);
-        setLoadingPath((current) => (current === activeDatasetPath ? null : current));
+        setDatasetLoadState({ key: datasetLoadKey, error: null });
       })
       .catch((error: unknown) => {
         if (cancelled) {
           return;
         }
-        setLoadingPath((current) => (current === activeDatasetPath ? null : current));
-        setLoadError(error instanceof Error ? error.message : "Failed to load HDF5 dataset summary.");
+        setDatasetLoadState({
+          key: datasetLoadKey,
+          error: error instanceof Error ? error.message : "Failed to load HDF5 dataset summary.",
+        });
       });
     return () => {
       cancelled = true;
     };
   }, [
-    activeDatasetPath,
     apiClient,
     cacheDatasetSummary,
-    hdf5?.enabled,
-    hdf5?.supported,
-    selectedDatasetSummary,
+    datasetLoadKey,
+    datasetLoadState.key,
     viewerInfo.file_id,
   ]);
 
   useEffect(() => {
-    if (!hasMaterialsDashboard || materialsDashboard || materialsDashboardLoading) {
+    if (!materialsDashboardKey || materialsDashboardState.key === materialsDashboardKey) {
       return;
     }
     let cancelled = false;
-    setMaterialsDashboardLoading(true);
-    setMaterialsDashboardError(null);
     apiClient
       .getHdf5MaterialsDashboard(viewerInfo.file_id)
       .then((payload) => {
         if (cancelled) {
           return;
         }
-        setMaterialsDashboard(payload);
+        setMaterialsDashboardState({ key: materialsDashboardKey, dashboard: payload, error: null });
       })
       .catch((error: unknown) => {
         if (cancelled) {
           return;
         }
-        setMaterialsDashboardError(
-          error instanceof Error ? error.message : "Failed to load the materials dashboard."
-        );
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setMaterialsDashboardLoading(false);
+        setMaterialsDashboardState({
+          key: materialsDashboardKey,
+          dashboard: null,
+          error: error instanceof Error ? error.message : "Failed to load the materials dashboard.",
+        });
       });
     return () => {
       cancelled = true;
     };
-  }, [apiClient, hasMaterialsDashboard, materialsDashboard, materialsDashboardLoading, viewerInfo.file_id]);
-
-  useEffect(() => {
-    setLoadingPath(null);
-    setLoadError(null);
-    setMaterialsDashboard(null);
-    setMaterialsDashboardError(null);
-    setMaterialsDashboardLoading(false);
-  }, [viewerInfo.file_id]);
+  }, [apiClient, materialsDashboardKey, materialsDashboardState.key, viewerInfo.file_id]);
 
   if (!hdf5) {
     return <div className="viewer-empty">HDF5 metadata unavailable.</div>;

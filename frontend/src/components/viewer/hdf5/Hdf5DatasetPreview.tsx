@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Scatter, ScatterChart, XAxis, YAxis } from "recharts";
 
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,20 @@ type Hdf5DatasetPreviewProps = {
   apiClient: ApiClient;
   summary: Hdf5DatasetSummary;
   compactLayout?: boolean;
+};
+
+type Hdf5VolumeSource = NonNullable<Parameters<typeof SliceStackVolumeCanvas>[0]["volumeSource"]>;
+
+type HistogramPreviewState = {
+  key: string;
+  histogram: Hdf5DatasetHistogramResponse | null;
+  error: string | null;
+};
+
+type TablePreviewState = {
+  key: string;
+  preview: Hdf5DatasetTablePreviewResponse | null;
+  error: string | null;
 };
 
 const HISTOGRAM_CHART_CONFIG = {
@@ -88,39 +102,38 @@ const buildPreviewNotice = (summary: Hdf5DatasetSummary, componentLabel: string 
   return null;
 };
 
-function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5DatasetPreviewProps) {
-  const availableAxes = summary.slice_axes.length > 0 ? summary.slice_axes : (["z"] as Array<"z" | "y" | "x">);
-  const [selectedAxis, setSelectedAxis] = useState<"z" | "y" | "x">(availableAxes[0] ?? "z");
-  const [selectedComponent, setSelectedComponent] = useState(0);
-  const canRenderVolume = Boolean(
+const canRenderNativeVolume = (summary: Hdf5DatasetSummary): boolean =>
+  Boolean(
     summary.volume_eligible &&
       summary.capabilities.includes("volume") &&
       summary.axis_sizes &&
       summary.preview_planes.z &&
       (summary.render_policy === "scalar" || summary.atlas_scheme)
   );
+
+function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5DatasetPreviewProps) {
+  const availableAxes = useMemo(
+    () => (summary.slice_axes.length > 0 ? summary.slice_axes : (["z"] as Array<"z" | "y" | "x">)),
+    [summary.slice_axes]
+  );
+  const [selectedAxis, setSelectedAxis] = useState<"z" | "y" | "x">(availableAxes[0] ?? "z");
+  const [selectedComponent, setSelectedComponent] = useState(0);
+  const canRenderVolume = canRenderNativeVolume(summary);
   const [selectedTab, setSelectedTab] = useState<"volume" | "visual" | "distribution">(
     canRenderVolume ? "volume" : "visual"
   );
-  const [histogram, setHistogram] = useState<Hdf5DatasetHistogramResponse | null>(null);
-  const [histogramError, setHistogramError] = useState<string | null>(null);
-  const [histogramLoading, setHistogramLoading] = useState(false);
-
-  useEffect(() => {
-    setSelectedAxis(availableAxes[0] ?? "z");
-    setSelectedComponent(0);
-  }, [summary.dataset_path, availableAxes]);
-
-  useEffect(() => {
-    setSelectedTab(canRenderVolume ? "volume" : "visual");
-  }, [canRenderVolume, summary.dataset_path]);
+  const [histogramState, setHistogramState] = useState<HistogramPreviewState>({
+    key: "",
+    histogram: null,
+    error: null,
+  });
 
   const maxIndex = axisSize(summary, selectedAxis);
   const [selectedIndex, setSelectedIndex] = useState(Math.max(0, Math.floor(maxIndex / 2)));
-
-  useEffect(() => {
-    setSelectedIndex(Math.max(0, Math.floor(axisSize(summary, selectedAxis) / 2)));
-  }, [selectedAxis, summary]);
+  const handleSelectedAxisChange = (axis: "z" | "y" | "x") => {
+    setSelectedAxis(axis);
+    setSelectedIndex(Math.max(0, Math.floor(axisSize(summary, axis) / 2)));
+  };
 
   const componentCount = Math.max(1, Number(summary.component_count || 1));
   const componentLabels =
@@ -128,6 +141,20 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
       ? summary.component_labels
       : Array.from({ length: componentCount }, (_, index) => `component_${index + 1}`);
   const activeComponent = Math.max(0, Math.min(selectedComponent, componentCount - 1));
+  const histogramRequestKey = summary.capabilities.includes("histogram")
+    ? [
+        summary.file_id,
+        summary.dataset_path,
+        summary.preview_kind === "vector_volume" ? activeComponent : "scalar",
+      ].join("\u0000")
+    : "";
+  const currentHistogramState =
+    histogramState.key === histogramRequestKey
+      ? histogramState
+      : { key: histogramRequestKey, histogram: null, error: null };
+  const histogram = currentHistogramState.histogram;
+  const histogramError = currentHistogramState.error;
+  const histogramLoading = Boolean(histogramRequestKey && histogramState.key !== histogramRequestKey);
   const activePlane = summary.preview_planes[selectedAxis];
   const previewUrl = apiClient.hdf5SlicePreviewUrl(summary.file_id, {
     datasetPath: summary.dataset_path,
@@ -140,6 +167,54 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
     axis: "z",
     index: Math.max(0, Math.floor(axisSize(summary, "z") / 2)),
   });
+  const hdf5VolumeSource = useMemo<Hdf5VolumeSource | null>(() => {
+    if (!canRenderVolume || !summary.axis_sizes || !summary.preview_planes.z) {
+      return null;
+    }
+    if (summary.render_policy === "scalar") {
+      return {
+        kind: "scalar",
+        loadScalarVolume: () =>
+          apiClient.getHdf5ScalarVolume(summary.file_id, {
+            datasetPath: summary.dataset_path,
+          }),
+        fallbackImageUrl: volumeFallbackUrl,
+        axisSizes: summary.axis_sizes,
+        plane: summary.preview_planes.z,
+        physicalSpacing: summary.physical_spacing ?? null,
+        renderPolicy: summary.render_policy,
+        texturePolicy: summary.texture_policy,
+      };
+    }
+    if (!summary.atlas_scheme) {
+      return null;
+    }
+    return {
+      kind: "atlas",
+      atlasUrl: apiClient.hdf5AtlasPreviewUrl(summary.file_id, {
+        datasetPath: summary.dataset_path,
+      }),
+      fallbackImageUrl: volumeFallbackUrl,
+      atlasScheme: summary.atlas_scheme,
+      axisSizes: summary.axis_sizes,
+      plane: summary.preview_planes.z,
+      physicalSpacing: summary.physical_spacing ?? null,
+      renderPolicy: summary.render_policy,
+      texturePolicy: summary.texture_policy,
+    };
+  }, [
+    apiClient,
+    canRenderVolume,
+    summary.atlas_scheme,
+    summary.axis_sizes,
+    summary.dataset_path,
+    summary.file_id,
+    summary.physical_spacing,
+    summary.preview_planes.z,
+    summary.render_policy,
+    summary.texture_policy,
+    volumeFallbackUrl,
+  ]);
   const previewTabCount = (canRenderVolume ? 1 : 0) + 1 + (summary.capabilities.includes("histogram") ? 1 : 0);
 
   const renderPreviewTabsList = () =>
@@ -179,14 +254,10 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
     ) : null;
 
   useEffect(() => {
-    if (!summary.capabilities.includes("histogram")) {
-      setHistogram(null);
-      setHistogramError(null);
+    if (!histogramRequestKey) {
       return;
     }
     let cancelled = false;
-    setHistogramLoading(true);
-    setHistogramError(null);
     apiClient
       .getHdf5DatasetHistogram(summary.file_id, summary.dataset_path, {
         component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
@@ -196,24 +267,29 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
         if (cancelled) {
           return;
         }
-        setHistogram(response);
+        setHistogramState({ key: histogramRequestKey, histogram: response, error: null });
       })
       .catch((error: unknown) => {
         if (cancelled) {
           return;
         }
-        setHistogramError(error instanceof Error ? error.message : "Failed to load histogram preview.");
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setHistogramLoading(false);
+        setHistogramState({
+          key: histogramRequestKey,
+          histogram: null,
+          error: error instanceof Error ? error.message : "Failed to load histogram preview.",
+        });
       });
     return () => {
       cancelled = true;
     };
-  }, [activeComponent, apiClient, summary]);
+  }, [
+    activeComponent,
+    apiClient,
+    histogramRequestKey,
+    summary.dataset_path,
+    summary.file_id,
+    summary.preview_kind,
+  ]);
 
   return (
     <div className="viewer-hdf-preview-body" data-hdf5-preview-kind={summary.preview_kind ?? "unknown"}>
@@ -236,7 +312,7 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
           </div>
         ) : null}
 
-        {canRenderVolume ? (
+        {canRenderVolume && hdf5VolumeSource ? (
           <TabsContent value="volume" className="viewer-hdf-preview-tab">
             {renderCompactToolbar()}
             <div className="viewer-hdf-preview-note">
@@ -251,35 +327,7 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
             </div>
             <div className="viewer-hdf-slice-shell" data-hdf5-volume-preview="true">
               <SliceStackVolumeCanvas
-                volumeSource={
-                  summary.render_policy === "scalar"
-                    ? {
-                        kind: "scalar",
-                        loadScalarVolume: () =>
-                          apiClient.getHdf5ScalarVolume(summary.file_id, {
-                            datasetPath: summary.dataset_path,
-                          }),
-                        fallbackImageUrl: volumeFallbackUrl,
-                        axisSizes: summary.axis_sizes!,
-                        plane: summary.preview_planes.z,
-                        physicalSpacing: summary.physical_spacing ?? null,
-                        renderPolicy: summary.render_policy,
-                        texturePolicy: summary.texture_policy,
-                      }
-                    : {
-                        kind: "atlas",
-                        atlasUrl: apiClient.hdf5AtlasPreviewUrl(summary.file_id, {
-                          datasetPath: summary.dataset_path,
-                        }),
-                        fallbackImageUrl: volumeFallbackUrl,
-                        atlasScheme: summary.atlas_scheme!,
-                        axisSizes: summary.axis_sizes!,
-                        plane: summary.preview_planes.z,
-                        physicalSpacing: summary.physical_spacing ?? null,
-                        renderPolicy: summary.render_policy,
-                        texturePolicy: summary.texture_policy,
-                      }
-                }
+                volumeSource={hdf5VolumeSource}
                 className="viewer-canvas-root viewer-hdf-slice-canvas"
               />
             </div>
@@ -293,13 +341,13 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
               <div className="viewer-hdf-preview-controls">
                 <div className="viewer-hdf-axis-toggle" role="tablist" aria-label="Slice orientation">
                   {availableAxes.map((axis) => (
-                    <Button
-                      key={axis}
-                      type="button"
-                      size="sm"
-                      variant={selectedAxis === axis ? "secondary" : "outline"}
-                      onClick={() => setSelectedAxis(axis)}
-                    >
+	                    <Button
+	                      key={axis}
+	                      type="button"
+	                      size="sm"
+	                      variant={selectedAxis === axis ? "secondary" : "outline"}
+	                      onClick={() => handleSelectedAxisChange(axis)}
+	                    >
                       {axisLabel(axis)}
                     </Button>
                   ))}
@@ -410,42 +458,44 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
 
 function Hdf5TablePreview({ apiClient, summary }: Hdf5DatasetPreviewProps) {
   const [offset, setOffset] = useState(0);
-  const [tablePreview, setTablePreview] = useState<Hdf5DatasetTablePreviewResponse | null>(null);
-  const [tableError, setTableError] = useState<string | null>(null);
-  const [tableLoading, setTableLoading] = useState(false);
-
-  useEffect(() => {
-    setOffset(0);
-  }, [summary.dataset_path]);
+  const [tableState, setTableState] = useState<TablePreviewState>({
+    key: "",
+    preview: null,
+    error: null,
+  });
+  const tableRequestKey = [summary.file_id, summary.dataset_path, offset].join("\u0000");
+  const currentTableState =
+    tableState.key === tableRequestKey
+      ? tableState
+      : { key: tableRequestKey, preview: null, error: null };
+  const tablePreview = currentTableState.preview;
+  const tableError = currentTableState.error;
+  const tableLoading = tableState.key !== tableRequestKey;
 
   useEffect(() => {
     let cancelled = false;
-    setTableLoading(true);
-    setTableError(null);
     apiClient
       .getHdf5DatasetTablePreview(summary.file_id, summary.dataset_path, { offset, limit: 12 })
       .then((response) => {
         if (cancelled) {
           return;
         }
-        setTablePreview(response);
+        setTableState({ key: tableRequestKey, preview: response, error: null });
       })
       .catch((error: unknown) => {
         if (cancelled) {
           return;
         }
-        setTableError(error instanceof Error ? error.message : "Failed to load table preview.");
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setTableLoading(false);
+        setTableState({
+          key: tableRequestKey,
+          preview: null,
+          error: error instanceof Error ? error.message : "Failed to load table preview.",
+        });
       });
     return () => {
       cancelled = true;
     };
-  }, [apiClient, offset, summary]);
+  }, [apiClient, offset, summary.dataset_path, summary.file_id, tableRequestKey]);
 
   const canGoBack = offset > 0;
   const canGoForward = tablePreview ? offset + tablePreview.rows.length < tablePreview.total_rows : false;
@@ -578,13 +628,21 @@ function Hdf5TablePreview({ apiClient, summary }: Hdf5DatasetPreviewProps) {
 
 export function Hdf5DatasetPreview({ apiClient, summary, compactLayout = false }: Hdf5DatasetPreviewProps) {
   const previewKind = summary.preview_kind ?? "unknown";
+  const previewKey = [
+    summary.file_id,
+    summary.dataset_path,
+    previewKind,
+    summary.slice_axes.join(","),
+    canRenderNativeVolume(summary) ? "volume" : "slice",
+    compactLayout ? "compact" : "full",
+  ].join(":");
 
   if (VOLUME_PREVIEW_KINDS.has(previewKind)) {
-    return <Hdf5VolumePreview apiClient={apiClient} summary={summary} compactLayout={compactLayout} />;
+    return <Hdf5VolumePreview key={previewKey} apiClient={apiClient} summary={summary} compactLayout={compactLayout} />;
   }
 
   if (previewKind === "table" || previewKind === "series") {
-    return <Hdf5TablePreview apiClient={apiClient} summary={summary} compactLayout={compactLayout} />;
+    return <Hdf5TablePreview key={previewKey} apiClient={apiClient} summary={summary} compactLayout={compactLayout} />;
   }
 
   return (

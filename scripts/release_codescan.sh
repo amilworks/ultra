@@ -60,6 +60,11 @@ for i in "${!CHECK_LABELS[@]}"; do
   label="${CHECK_LABELS[$i]}"
   pattern="${CHECK_PATTERNS[$i]}"
   if matches="$(rg "${RG_COMMON[@]}" -e "${pattern}" . || true)" && [[ -n "${matches}" ]]; then
+    if [[ "${label}" == "Campus-specific domains" ]]; then
+      # The production BisQue service is intentionally public runtime configuration.
+      matches="$(printf '%s\n' "${matches}" | rg -v 'bisque2\.ece\.ucsb\.edu' || true)"
+      [[ -z "${matches}" ]] && continue
+    fi
     printf '\n[%s]\n%s\n' "${label}" "${matches}"
     status=1
   fi

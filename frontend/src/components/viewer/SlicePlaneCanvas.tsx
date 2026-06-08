@@ -174,7 +174,15 @@ export function SlicePlaneCanvas({
     if (!container) {
       return;
     }
+    let disposed = false;
     let renderer: THREE.WebGLRenderer;
+    const commitRenderError = (message: string) => {
+      window.setTimeout(() => {
+        if (!disposed) {
+          setRenderError(message);
+        }
+      }, 0);
+    };
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: true,
@@ -182,8 +190,10 @@ export function SlicePlaneCanvas({
         powerPreference: "high-performance",
       });
     } catch (error) {
-      setRenderError(error instanceof Error ? error.message : "WebGL unavailable");
-      return;
+      commitRenderError(error instanceof Error ? error.message : "WebGL unavailable");
+      return () => {
+        disposed = true;
+      };
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -314,6 +324,7 @@ export function SlicePlaneCanvas({
     resize();
 
     return () => {
+      disposed = true;
       controls.removeEventListener("change", render);
       renderer.domElement.removeEventListener("click", handleClick);
       observer.disconnect();

@@ -91,13 +91,6 @@ export function AuthScreen({
   const visibleHeroText = prefersReducedMotion ? activeHeroPhrase : streamedHeroText || "\u00a0";
 
   useEffect(() => {
-    if (!allowGuest && mode === "guest") {
-      setMode("login");
-      setLocalError(null);
-    }
-  }, [allowGuest, mode]);
-
-  useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
       return undefined;
     }
@@ -124,7 +117,8 @@ export function AuthScreen({
     : effectiveMode === "login"
       ? "Sign in"
       : requestAccountLabel;
-  const mergedError = localError || errorMessage || null;
+  const visibleLocalError = effectiveMode === mode ? localError : null;
+  const mergedError = visibleLocalError || errorMessage || null;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();

@@ -233,7 +233,7 @@ export function UploadViewerWorkspace({
   active = true,
   className,
 }: UploadViewerWorkspaceProps) {
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [requestedSelectedFileId, setRequestedSelectedFileId] = useState<string | null>(null);
   const [viewerInfoById, setViewerInfoById] = useState<Record<string, UploadViewerInfo>>({});
   const [viewerErrorById, setViewerErrorById] = useState<Record<string, string>>({});
   const [viewerIndicesById, setViewerIndicesById] = useState<Record<string, ViewerIndices>>({});
@@ -248,50 +248,18 @@ export function UploadViewerWorkspace({
   >({});
   const [loadingFileId, setLoadingFileId] = useState<string | null>(null);
   const loadingFileIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const validIds = new Set(uploadedFiles.map((file) => file.file_id));
-
+  const selectedFileId = useMemo(() => {
     if (uploadedFiles.length === 0) {
-      setSelectedFileId(null);
-      return;
+      return null;
     }
-    if (!selectedFileId || !validIds.has(selectedFileId)) {
-      setSelectedFileId(uploadedFiles[0].file_id);
+    if (
+      requestedSelectedFileId &&
+      uploadedFiles.some((file) => file.file_id === requestedSelectedFileId)
+    ) {
+      return requestedSelectedFileId;
     }
-
-    const retainKeys = <T extends Record<string, unknown>>(record: T): T => {
-      return Object.fromEntries(Object.entries(record).filter(([fileId]) => validIds.has(fileId))) as T;
-    };
-    const retainDatasetSummaries = (record: Record<string, Hdf5DatasetSummary>) =>
-      Object.fromEntries(
-        Object.entries(record).filter(([cacheKey]) => validIds.has(cacheKey.split(":", 1)[0] ?? ""))
-      );
-    if (loadingFileIdRef.current && !validIds.has(loadingFileIdRef.current)) {
-      loadingFileIdRef.current = null;
-    }
-
-    setViewerInfoById((previous) => retainKeys(previous));
-    setViewerErrorById((previous) => retainKeys(previous));
-    setViewerIndicesById((previous) => retainKeys(previous));
-    setViewerSurfaceById((previous) => retainKeys(previous));
-    setViewerDisplayById((previous) => retainKeys(previous));
-    setViewerSurfaceModeById((previous) => retainKeys(previous));
-    setViewerHdf5SelectedDatasetById((previous) => retainKeys(previous));
-    setViewerHdf5DatasetSummaryByKey((previous) => retainDatasetSummaries(previous));
-  }, [selectedFileId, uploadedFiles]);
-
-  useEffect(() => {
-    if (!selectedFileId) {
-      return;
-    }
-    setViewerSurfaceModeById((previous) => {
-      if (previous[selectedFileId]) {
-        return previous;
-      }
-      return { ...previous, [selectedFileId]: "native" };
-    });
-  }, [selectedFileId]);
+    return uploadedFiles[0].file_id;
+  }, [requestedSelectedFileId, uploadedFiles]);
 
   const selectedSurfaceMode: ViewerSurfaceMode = selectedFileId
     ? viewerSurfaceModeById[selectedFileId] ?? "native"
@@ -508,7 +476,7 @@ export function UploadViewerWorkspace({
                     variant={isActive ? "secondary" : "outline"}
                     size="sm"
                     className={cn("viewer-file-chip", isActive && "viewer-file-chip-active")}
-                    onClick={() => setSelectedFileId(file.file_id)}
+                    onClick={() => setRequestedSelectedFileId(file.file_id)}
                   >
                     {file.original_name}
                   </Button>
@@ -637,8 +605,9 @@ export function UploadViewerWorkspace({
 
               <Suspense fallback={<ViewerPanelFallback />}>
                 {isHdf5Viewer ? (
-                  <LazyHdf5ViewerShell
-                    viewerInfo={selectedViewerInfo}
+	                  <LazyHdf5ViewerShell
+	                    key={selectedViewerInfo.file_id}
+	                    viewerInfo={selectedViewerInfo}
                     apiClient={apiClient}
                     selectedDatasetPath={selectedDatasetPath}
                     onSelectedDatasetPathChange={(path) =>

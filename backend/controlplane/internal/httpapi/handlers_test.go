@@ -82,6 +82,55 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	}
 }
 
+func TestPublicConfigIncludesBisqueProductionLinks(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL: "https://bisque2.ece.ucsb.edu",
+		}),
+	})
+
+	for _, path := range []string{"/v1/config/public", "/v2/config/public"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("config status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+			}
+			var config map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &config); err != nil {
+				t.Fatalf("decode config: %v", err)
+			}
+			if config["bisque_root"] != "https://bisque2.ece.ucsb.edu" {
+				t.Fatalf("bisque_root = %#v", config["bisque_root"])
+			}
+			if config["bisque_browser_url"] != "https://bisque2.ece.ucsb.edu/client_service/" {
+				t.Fatalf("bisque_browser_url = %#v", config["bisque_browser_url"])
+			}
+			links, ok := config["bisque_urls"].(map[string]any)
+			if !ok {
+				t.Fatalf("bisque_urls = %#v, want object", config["bisque_urls"])
+			}
+			if links["home"] != "https://bisque2.ece.ucsb.edu/client_service/" {
+				t.Fatalf("home link = %#v", links["home"])
+			}
+			if links["images"] != "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/image" {
+				t.Fatalf("images link = %#v", links["images"])
+			}
+			if links["datasets"] != "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/dataset" {
+				t.Fatalf("datasets link = %#v", links["datasets"])
+			}
+			if links["tables"] != "https://bisque2.ece.ucsb.edu/client_service/browser?resource=/data_service/table" {
+				t.Fatalf("tables link = %#v", links["tables"])
+			}
+		})
+	}
+}
+
 func TestDevAuthGuestSessionLifecycle(t *testing.T) {
 	t.Parallel()
 

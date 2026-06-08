@@ -151,14 +151,12 @@ const flattenDatasets = (
 export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5NavigatorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activePath, setActivePath] = useState<string | null>(null);
-  const activePathRef = useRef<string | null>(null);
   const itemRefs = useRef(new Map<string, HTMLDivElement | null>());
   const datasetEntries = useMemo(() => flattenDatasets(tree), [tree]);
   const datasetCount = useMemo(() => countDatasets(tree), [tree]);
   const trimmedQuery = searchQuery.trim();
 
   const setActivePathValue = (path: string | null) => {
-    activePathRef.current = path;
     setActivePath(path);
   };
 
@@ -180,35 +178,33 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
     return Array.from(grouped.entries());
   }, [displayedEntries]);
 
-  useEffect(() => {
-    if (displayedEntries.length === 0) {
-      setActivePathValue(null);
-      return;
-    }
-    setActivePathValue(resolveActivePath(displayedEntries, activePathRef.current, selectedPath));
-  }, [displayedEntries, selectedPath]);
+  const resolvedActivePath = useMemo(
+    () => resolveActivePath(displayedEntries, activePath, selectedPath),
+    [activePath, displayedEntries, selectedPath]
+  );
 
   useEffect(() => {
-    if (!activePath) {
+    if (!resolvedActivePath) {
       return;
     }
-    const activeElement = itemRefs.current.get(activePath);
+    const activeElement = itemRefs.current.get(resolvedActivePath);
     activeElement?.scrollIntoView({ block: "nearest" });
-  }, [activePath]);
+  }, [resolvedActivePath]);
 
   const moveActivePath = (direction: 1 | -1, queryValue: string) => {
     const entries = filterDatasetEntries(datasetEntries, queryValue, selectedPath);
     if (entries.length === 0) {
       return;
     }
-    const currentIndex = entries.findIndex((entry) => entry.path === activePathRef.current);
+    const currentPath = resolveActivePath(entries, activePath, selectedPath);
+    const currentIndex = entries.findIndex((entry) => entry.path === currentPath);
     const nextIndex =
       currentIndex === -1
         ? direction === -1
           ? entries.length - 1
           : 0
         : (currentIndex + direction + entries.length) % entries.length;
-    setActivePathValue(entries[nextIndex]?.path ?? activePathRef.current);
+    setActivePathValue(entries[nextIndex]?.path ?? currentPath);
   };
 
   return (
@@ -236,7 +232,7 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
               onValueChange={(nextValue) => {
                 setSearchQuery(nextValue);
                 const nextEntries = filterDatasetEntries(datasetEntries, nextValue, selectedPath);
-                setActivePathValue(resolveActivePath(nextEntries, activePathRef.current, selectedPath));
+                setActivePathValue(resolveActivePath(nextEntries, activePath, selectedPath));
               }}
               placeholder="Find datasets by name, path, or type"
               aria-label="Find datasets"
@@ -259,7 +255,7 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
                   );
                   const targetPath = resolveActivePath(
                     currentEntries,
-                    activePathRef.current,
+                    activePath,
                     selectedPath
                   );
                   if (!targetPath) {
@@ -278,7 +274,7 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
                 size="sm"
                 onClick={() => {
                   setSearchQuery("");
-                  setActivePathValue(resolveActivePath(datasetEntries, activePathRef.current, selectedPath));
+                  setActivePathValue(resolveActivePath(datasetEntries, activePath, selectedPath));
                 }}
               >
                 <X className="size-4" />
@@ -311,7 +307,7 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
                     className={cn(
                       "viewer-hdf-command-item",
                       selectedPath === entry.path && "is-selected",
-                      activePath === entry.path && "is-active"
+                      resolvedActivePath === entry.path && "is-active"
                     )}
                   >
                     <div className="viewer-hdf-command-item-copy">

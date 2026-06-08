@@ -7,7 +7,8 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import React from "react";
-import { Markdown } from "./markdown";
+import { LazyMarkdown } from "./lazy-markdown";
+import type { MarkdownProps } from "./markdown";
 
 export type MessageProps = {
   children: React.ReactNode;
@@ -53,13 +54,15 @@ export type MessageContentProps = {
   children: React.ReactNode;
   markdown?: boolean;
   className?: string;
-} & React.ComponentProps<typeof Markdown> &
-  React.HTMLProps<HTMLDivElement>;
+} & Omit<MarkdownProps, "children" | "className"> &
+  React.HTMLAttributes<HTMLDivElement>;
 
 export function MessageContent({
   children,
   markdown = false,
   className,
+  components,
+  id,
   ...props
 }: MessageContentProps) {
   const classNames = cn(
@@ -68,15 +71,26 @@ export function MessageContent({
   );
 
   if (markdown) {
+    const markdownText = typeof children === "string" ? children : String(children ?? "");
     return (
-      <Markdown className={classNames} {...props}>
-        {children as string}
-      </Markdown>
+      <React.Suspense
+        fallback={
+          <div id={id} className={classNames} {...props}>
+            <div className="pk-message-content-plain whitespace-pre-wrap">
+              {markdownText}
+            </div>
+          </div>
+        }
+      >
+        <LazyMarkdown id={id} components={components} className={classNames}>
+          {markdownText}
+        </LazyMarkdown>
+      </React.Suspense>
     );
   }
 
   return (
-    <div className={classNames} {...props}>
+    <div id={id} className={classNames} {...props}>
       <div className="pk-message-content-plain">{children}</div>
     </div>
   );

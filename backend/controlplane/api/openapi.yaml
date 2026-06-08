@@ -1812,6 +1812,19 @@ components:
         app_name: { type: string }
         app_version: { type: string }
         admin_enabled: { type: boolean }
+        bisque_root: { type: string, nullable: true }
+        bisque_browser_url: { type: string, nullable: true }
+        bisque_auth_enabled: { type: boolean, nullable: true }
+        bisque_guest_enabled: { type: boolean, nullable: true }
+        bisque_urls:
+          type: object
+          nullable: true
+          additionalProperties: false
+          properties:
+            home: { type: string, nullable: true }
+            images: { type: string, nullable: true }
+            datasets: { type: string, nullable: true }
+            tables: { type: string, nullable: true }
         features:
           type: object
           additionalProperties: { type: boolean }

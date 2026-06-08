@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Markdown } from "./markdown";
+import { Suspense, useMemo } from "react";
+import { LazyMarkdown } from "./lazy-markdown";
 import { type ResponseStreamProps, useTextStream } from "./response-stream";
 
 const FENCE_PATTERN = /^(\s*)(`{3,}|~{3,})(.*)$/;
@@ -75,7 +75,17 @@ export function MarkdownResponseStream({
     [displayedText]
   );
 
-  return <Markdown className={className}>{normalizedPreview}</Markdown>;
+  return (
+    <Suspense
+      fallback={
+        <div className={className} style={{ whiteSpace: "pre-wrap" }}>
+          {normalizedPreview}
+        </div>
+      }
+    >
+      <LazyMarkdown className={className}>{normalizedPreview}</LazyMarkdown>
+    </Suspense>
+  );
 }
 
 export { normalizeStreamingMarkdown };

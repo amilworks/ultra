@@ -65,6 +65,7 @@ function useTextStream({
   const streamRef = useRef<AbortController | null>(null)
   const completedRef = useRef(false)
   const onCompleteRef = useRef(onComplete)
+  const onErrorRef = useRef(onError)
   const displayedTextRef = useRef("")
 
   useEffect(() => {
@@ -77,7 +78,8 @@ function useTextStream({
 
   useEffect(() => {
     onCompleteRef.current = onComplete
-  }, [onComplete])
+    onErrorRef.current = onError
+  }, [onComplete, onError])
 
   const getChunkSize = useCallback(() => {
     if (typeof characterChunkSizeRef.current === "number") {
@@ -148,7 +150,7 @@ function useTextStream({
             index,
           }))
         setSegments(newSegments)
-        onError?.(error)
+        onErrorRef.current?.(error)
       }
     }
   }, [])
@@ -355,9 +357,12 @@ function useTextStream({
   }, [textStream, isComplete, processStringTypewriter])
 
   useEffect(() => {
-    startStreaming()
+    const startFrame = requestAnimationFrame(() => {
+      startStreaming()
+    })
 
     return () => {
+      cancelAnimationFrame(startFrame)
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current)
       }

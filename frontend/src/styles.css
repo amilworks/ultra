@@ -4840,6 +4840,13 @@ details {
   position: relative;
 }
 
+.viewer-webgl-canvas-host {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
 .viewer-webgl-canvas {
   display: block;
   width: 100%;
@@ -5416,6 +5423,45 @@ details {
   padding: 0.48rem 0.58rem;
   background: color-mix(in oklab, var(--viewer-control-bg) 64%, transparent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.viewer-volume-inspection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  min-width: 0;
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--viewer-control-bg) 70%, transparent);
+  padding: 0.42rem 0.5rem;
+}
+
+.viewer-volume-inspection-status {
+  min-width: 0;
+  color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
+  font-size: 0.72rem;
+  font-weight: 520;
+  line-height: 1.2;
+}
+
+.viewer-volume-inspection-toolbar[data-viewer-interior-active="true"] .viewer-volume-inspection-status {
+  color: color-mix(in oklab, #f7c948 72%, var(--text-main) 28%);
+}
+
+.viewer-volume-inspection-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.viewer-volume-inspection-actions [data-slot="button"] {
+  height: 1.85rem;
+  border-radius: 7px;
+  font-size: 0.74rem;
+  font-weight: 520;
 }
 
 .viewer-surface-readout-list {
@@ -6291,6 +6337,19 @@ details {
 
   .viewer-surface-readout-item {
     gap: 0.18rem;
+  }
+
+  .viewer-volume-inspection-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .viewer-volume-inspection-actions {
+    justify-content: stretch;
+  }
+
+  .viewer-volume-inspection-actions [data-slot="button"] {
+    flex: 1 1 0;
   }
 
   .viewer-volume-axis-cue {

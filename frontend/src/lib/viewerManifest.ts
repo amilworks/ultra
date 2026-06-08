@@ -13,6 +13,25 @@ const DEFAULT_AXIS_SIZES: UploadViewerInfo["axis_sizes"] = {
 
 const DEFAULT_CHANNEL_COLORS = ["#ffffff", "#ff0000", "#00ff00", "#0000ff"];
 
+const CT_VOLUME_DISPLAY_DEFAULTS = {
+  enhancement: "hounsfield:350.000:1800.000",
+  fusionMethod: "a",
+  volumeSignalFloor: 0.12,
+  volumeDensity: 1.75,
+  volumeLighting: true,
+  volumeLightingStrength: 0.72,
+  volumeViewPreset: "iso",
+  volumeCameraMode: "orthographic",
+} as const;
+
+type DisplayDefaultsContext = {
+  backendMode?: string;
+  isVolume?: boolean;
+  metadataSource?: UnknownRecord;
+  modality?: string;
+  source?: UnknownRecord;
+};
+
 const toRecord = (value: unknown): UnknownRecord =>
   value && typeof value === "object" ? (value as UnknownRecord) : {};
 
@@ -36,6 +55,9 @@ const toBoolean = (value: unknown, fallback: boolean): boolean => {
   }
   return fallback;
 };
+
+const normalizedString = (value: unknown): string =>
+  String(value ?? "").trim().toLowerCase();
 
 const toPositiveInt = (value: unknown, fallback: number): number => {
   const numeric = Math.max(1, Math.round(toFiniteNumber(value, fallback)));
@@ -284,6 +306,44 @@ const inferModality = (source: UnknownRecord, originalName: string): UploadViewe
   return "image";
 };
 
+const scalarRangeLooksCTLike = (source: UnknownRecord, metadataSource: UnknownRecord): boolean => {
+  const stats = toRecord(metadataSource.intensity_stats ?? source.intensity_stats);
+  const rawMin = toFiniteNumber(metadataSource.array_min ?? source.array_min ?? stats.min, NaN);
+  const rawMax = toFiniteNumber(metadataSource.array_max ?? source.array_max ?? stats.max, NaN);
+  return Number.isFinite(rawMin) && Number.isFinite(rawMax) && rawMin <= -900 && rawMax >= 500;
+};
+
+const isScalarVolumeSource = (
+  source: UnknownRecord,
+  viewerSource: UnknownRecord,
+  context?: DisplayDefaultsContext
+): boolean => {
+  const backendMode = normalizedString(
+    context?.backendMode ?? source.backend_mode ?? viewerSource.backend_mode
+  );
+  return (
+    backendMode === "scalar" ||
+    normalizedString(viewerSource.backend_mode) === "scalar" ||
+    normalizedString(viewerSource.volume_mode) === "scalar" ||
+    normalizedString(viewerSource.render_policy) === "scalar" ||
+    normalizedString(viewerSource.delivery_mode) === "scalar"
+  );
+};
+
+const shouldUseCTVolumeDisplayDefaults = (
+  source: UnknownRecord,
+  viewerSource: UnknownRecord,
+  context?: DisplayDefaultsContext
+): boolean => {
+  const metadataSource = context?.metadataSource ?? toRecord(source.metadata);
+  return (
+    normalizedString(context?.modality ?? source.modality) === "medical" &&
+    Boolean(context?.isVolume ?? source.is_volume) &&
+    isScalarVolumeSource(source, viewerSource, context) &&
+    scalarRangeLooksCTLike(context?.source ?? source, metadataSource)
+  );
+};
+
 const normalizeServiceUrls = (source: UnknownRecord, fileId: string) => {
   const fileSegment = encodeURIComponent(fileId);
   return {
@@ -406,16 +466,22 @@ const normalizeDisplayDefaults = (
   source: UnknownRecord,
   viewerSource: UnknownRecord,
   phys: NonNullable<UploadViewerInfo["phys"]>,
-  selectedIndices: UploadViewerInfo["selected_indices"]
+  selectedIndices: UploadViewerInfo["selected_indices"],
+  context?: DisplayDefaultsContext
 ): NonNullable<UploadViewerInfo["display_defaults"]> => {
   const defaultsSource = toRecord(source.display_defaults);
   const viewerDefaults = toRecord(viewerSource.display_defaults);
   const merged = { ...viewerDefaults, ...defaultsSource };
+  const useCTVolumeDefaults = shouldUseCTVolumeDisplayDefaults(source, viewerSource, context);
   return {
-    enhancement: String(merged.enhancement ?? "d"),
+    enhancement: String(
+      merged.enhancement ?? (useCTVolumeDefaults ? CT_VOLUME_DISPLAY_DEFAULTS.enhancement : "d")
+    ),
     negative: Boolean(merged.negative ?? false),
     rotate: Math.round(toFiniteNumber(merged.rotate, 0)),
-    fusion_method: String(merged.fusion_method ?? "m"),
+    fusion_method: String(
+      merged.fusion_method ?? (useCTVolumeDefaults ? CT_VOLUME_DISPLAY_DEFAULTS.fusionMethod : "m")
+    ),
     channel_mode: String(merged.channel_mode ?? "composite"),
     channels: Array.isArray(merged.channels)
       ? merged.channels.map((value) => clampNonNegativeInt(value, 0))
@@ -427,16 +493,37 @@ const normalizeDisplayDefaults = (
     z_index: clampNonNegativeInt(merged.z_index, selectedIndices.Z),
     scalar_colormap: String(merged.scalar_colormap ?? "grayscale"),
     volume_signal_floor:
-      merged.volume_signal_floor == null ? 0 : Math.max(0, Math.min(0.95, toFiniteNumber(merged.volume_signal_floor, 0))),
+      merged.volume_signal_floor == null
+        ? useCTVolumeDefaults
+          ? CT_VOLUME_DISPLAY_DEFAULTS.volumeSignalFloor
+          : 0
+        : Math.max(0, Math.min(0.95, toFiniteNumber(merged.volume_signal_floor, 0))),
     volume_density:
-      merged.volume_density == null ? 1 : Math.max(0.1, Math.min(3, toFiniteNumber(merged.volume_density, 1))),
-    volume_lighting: toBoolean(merged.volume_lighting, false),
+      merged.volume_density == null
+        ? useCTVolumeDefaults
+          ? CT_VOLUME_DISPLAY_DEFAULTS.volumeDensity
+          : 1
+        : Math.max(0.1, Math.min(3, toFiniteNumber(merged.volume_density, 1))),
+    volume_lighting: toBoolean(
+      merged.volume_lighting,
+      useCTVolumeDefaults ? CT_VOLUME_DISPLAY_DEFAULTS.volumeLighting : false
+    ),
     volume_lighting_strength:
       merged.volume_lighting_strength == null
-        ? 0.65
+        ? useCTVolumeDefaults
+          ? CT_VOLUME_DISPLAY_DEFAULTS.volumeLightingStrength
+          : 0.65
         : Math.max(0, Math.min(1, toFiniteNumber(merged.volume_lighting_strength, 0.65))),
     volume_channel:
       merged.volume_channel == null ? clampNonNegativeInt(selectedIndices.C, 0) : clampNonNegativeInt(merged.volume_channel, selectedIndices.C),
+    volume_view_preset:
+      merged.volume_view_preset == null && !useCTVolumeDefaults
+        ? undefined
+        : String(merged.volume_view_preset ?? CT_VOLUME_DISPLAY_DEFAULTS.volumeViewPreset),
+    volume_camera_mode:
+      merged.volume_camera_mode == null && !useCTVolumeDefaults
+        ? undefined
+        : String(merged.volume_camera_mode ?? CT_VOLUME_DISPLAY_DEFAULTS.volumeCameraMode),
   };
 };
 
@@ -1004,7 +1091,13 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
   const originalName = String(source.original_name ?? "resource");
   const modality = String(inferModality(source, originalName));
   const phys = normalizePhys(source, metadataSource, axisSizes, String(source.file_id ?? ""), originalName, modality);
-  const displayDefaults = normalizeDisplayDefaults(source, viewerSource, phys, selectedIndices);
+  const displayDefaults = normalizeDisplayDefaults(source, viewerSource, phys, selectedIndices, {
+    backendMode,
+    isVolume,
+    metadataSource,
+    modality,
+    source,
+  });
   const orientationFrame = String(toRecord(viewerSource.orientation).frame ?? (isVolume ? "voxel" : "pixel"));
   const rowAxis = String(toRecord(viewerSource.orientation).row_axis ?? defaultPlane.axes[0] ?? "Y");
   const colAxis = String(toRecord(viewerSource.orientation).col_axis ?? defaultPlane.axes[1] ?? "X");

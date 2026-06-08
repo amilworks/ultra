@@ -5,8 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   advanceProgressiveVolumeSteps,
+  computeVolumeInteriorCameraFrame,
   computePhysicalVolumeGeometry,
+  computeVolumeCameraFit,
   computeVolumeSampleBudget,
+  isVolumeInteriorInspectionActive,
+  shouldShowVolumeContextEdges,
+  shouldShowVolumeSliceCursorPlanes,
   resolveScalarVolumeColorMap,
   resolveScalarVolumeLighting,
   resolveScalarVolumeTransferFunction,
@@ -111,6 +116,102 @@ describe("volume camera mode", () => {
   });
 });
 
+describe("volume canvas lifecycle", () => {
+  it("mounts WebGL into a dedicated host so React overlays cannot race canvas cleanup", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+
+    expect(source).toContain("canvasHostRef");
+    expect(source).toContain("canvasHost.appendChild(renderer.domElement)");
+    expect(source).toContain("renderer.domElement.parentNode?.removeChild(renderer.domElement)");
+  });
+});
+
+describe("volume camera fit", () => {
+  it("reserves HUD-safe margins while keeping the full volume in frame", () => {
+    const relaxed = computeVolumeCameraFit({
+      volumeRadius: 1,
+      aspect: 16 / 9,
+      safeInsets: { top: 0.04, right: 0.04, bottom: 0.08, left: 0.04 },
+    });
+    const hudSafe = computeVolumeCameraFit({
+      volumeRadius: 1,
+      aspect: 16 / 9,
+      safeInsets: { top: 0.08, right: 0.06, bottom: 0.22, left: 0.06 },
+    });
+
+    expect(hudSafe.distance).toBeGreaterThan(relaxed.distance);
+    expect(hudSafe.minDistance).toBeGreaterThan(2.7);
+    expect(hudSafe.orthographicFrustumHeight).toBeGreaterThan(3.5);
+    expect(hudSafe.maxDistance).toBeGreaterThan(hudSafe.distance);
+  });
+
+  it("exposes close camera limits for interior volume inspection", () => {
+    const fit = computeVolumeCameraFit({
+      volumeRadius: 1,
+      aspect: 1,
+    });
+
+    expect(fit.minDistance).toBeGreaterThan(2);
+    expect(fit.insideMinDistance).toBeGreaterThan(0.02);
+    expect(fit.insideMinDistance).toBeLessThan(0.2);
+    expect(fit.inspectMaxZoom).toBeGreaterThan(6);
+  });
+});
+
+describe("volume interior inspection camera", () => {
+  it("places perspective cutaway inspection at the physical center of the active clip", () => {
+    const frame = computeVolumeInteriorCameraFrame({
+      clipBounds: {
+        min: { x: 0.2, y: 0.3, z: 0.4 },
+        max: { x: 0.8, y: 0.9, z: 1 },
+      },
+      normalizedScale: { x: 1, y: 0.5, z: 0.25 },
+      preset: resolveVolumeViewPreset("xy"),
+      volumeRadius: 1,
+    });
+
+    expect(frame.position).toEqual({ x: 0, y: 0.05, z: 0.05 });
+    expect(frame.target.x).toBeCloseTo(0, 5);
+    expect(frame.target.y).toBeCloseTo(0.05, 5);
+    expect(frame.target.z).toBeLessThan(frame.position.z);
+    expect(frame.lookDistance).toBeGreaterThan(0.1);
+  });
+
+  it("activates interior inspection only for clipped perspective volumes", () => {
+    expect(
+      isVolumeInteriorInspectionActive({
+        clipActive: true,
+        cameraMode: resolveVolumeCameraMode("perspective"),
+      })
+    ).toBe(true);
+    expect(
+      isVolumeInteriorInspectionActive({
+        clipActive: true,
+        cameraMode: resolveVolumeCameraMode("orthographic"),
+      })
+    ).toBe(false);
+    expect(
+      isVolumeInteriorInspectionActive({
+        clipActive: false,
+        cameraMode: resolveVolumeCameraMode("perspective"),
+      })
+    ).toBe(false);
+  });
+
+  it("removes in-canvas slice planes while the camera is inside the volume", () => {
+    expect(shouldShowVolumeSliceCursorPlanes({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
+    expect(shouldShowVolumeSliceCursorPlanes({ cueVisible: true, interiorInspectionActive: true })).toBe(false);
+  });
+
+  it("keeps wireframe context out of the center-inside inspection view", () => {
+    expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
+    expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: true })).toBe(false);
+  });
+});
+
 describe("scalar volume color maps", () => {
   it("normalizes scalar volume color maps for shader uniforms and UI labels", () => {
     expect(resolveScalarVolumeColorMap("viridis")).toEqual({
@@ -189,6 +290,17 @@ describe("scalar volume depth lighting", () => {
     expect(source).toContain("vec3 viewDir = uOrthographicCamera");
     expect(source).toContain("? -normalize(uCameraDirectionLocal)");
     expect(source).toContain(": normalize(uCameraPositionLocal - (location - vec3(0.5)))");
+  });
+
+  it("uses step-length corrected opacity so interior raymarching does not become a flat wall", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+
+    expect(source).toContain("float alphaFromOpacity(float opacityValue, float stepLength)");
+    expect(source).toContain("length(delta)");
+    expect(source).toContain("1.0 - pow(1.0 - baseAlpha");
   });
 });
 

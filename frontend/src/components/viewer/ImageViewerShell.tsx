@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, Focus, RotateCcw, SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -102,6 +102,7 @@ type MeasurementDraft =
   | null;
 
 const MIN_CLIP_SPAN = 0.02;
+const INTERIOR_FOCUS_CLIP_SPAN = 0.56;
 const SCALAR_VOLUME_TRANSFER_PRESETS = [
   { id: "custom", label: "Custom", signalFloor: null, densityScale: null },
   { id: "full", label: "Full range", signalFloor: 0, densityScale: 1 },
@@ -137,6 +138,72 @@ const formatIntensityValue = (value: number): string => {
   }
   return value.toFixed(2);
 };
+
+const roundClipFraction = (value: number): number => Number(value.toFixed(4));
+
+const centeredClipAxisBounds = ({
+  count,
+  index,
+  span = INTERIOR_FOCUS_CLIP_SPAN,
+}: {
+  count: number;
+  index: number;
+  span?: number;
+}): { min: number; max: number } => {
+  const safeCount = Math.max(1, Math.floor(Number(count) || 1));
+  const safeSpan = Math.max(MIN_CLIP_SPAN, Math.min(1, Number(span) || INTERIOR_FOCUS_CLIP_SPAN));
+  const clampedIndex = Math.max(0, Math.min(safeCount - 1, Math.floor(Number(index) || 0)));
+  const center = (clampedIndex + 0.5) / safeCount;
+  let min = center - safeSpan / 2;
+  let max = center + safeSpan / 2;
+  if (min < 0) {
+    max = Math.min(1, max - min);
+    min = 0;
+  }
+  if (max > 1) {
+    min = Math.max(0, min - (max - 1));
+    max = 1;
+  }
+  return {
+    min: roundClipFraction(min),
+    max: roundClipFraction(max),
+  };
+};
+
+export function buildInteriorVolumeClipBounds({
+  axisSizes,
+  indices,
+  span = INTERIOR_FOCUS_CLIP_SPAN,
+}: {
+  axisSizes: UploadViewerInfo["axis_sizes"];
+  indices: ViewerIndices;
+  span?: number;
+}): {
+  min: { x: number; y: number; z: number };
+  max: { x: number; y: number; z: number };
+} {
+  const x = centeredClipAxisBounds({ count: axisSizes.X, index: indices.x, span });
+  const y = centeredClipAxisBounds({ count: axisSizes.Y, index: indices.y, span });
+  const z = centeredClipAxisBounds({ count: axisSizes.Z, index: indices.z, span });
+  return {
+    min: { x: x.min, y: y.min, z: z.min },
+    max: { x: x.max, y: y.max, z: z.max },
+  };
+}
+
+const isVolumeClipActive = ({
+  min,
+  max,
+}: {
+  min: { x: number; y: number; z: number };
+  max: { x: number; y: number; z: number };
+}): boolean =>
+  Math.abs(min.x) > 0.0001 ||
+  Math.abs(min.y) > 0.0001 ||
+  Math.abs(min.z) > 0.0001 ||
+  Math.abs(1 - max.x) > 0.0001 ||
+  Math.abs(1 - max.y) > 0.0001 ||
+  Math.abs(1 - max.z) > 0.0001;
 
 const getScalarVolumeTransferPresetId = (
   transfer: ScalarVolumeTransferFunction
@@ -904,6 +971,20 @@ export function ImageViewerShell({
     });
   };
 
+  const focusInteriorVolume = () => {
+    const nextClip = buildInteriorVolumeClipBounds({
+      axisSizes: viewerInfo.axis_sizes,
+      indices: clampedIndices,
+    });
+    updateSelectedDisplay({
+      volume_clip_min: nextClip.min,
+      volume_clip_max: nextClip.max,
+      volume_camera_mode: "perspective",
+    });
+  };
+
+  const volumeClipActive = isVolumeClipActive(clipBounds);
+
   const activeMeasurement = measurementsByAxis[activeMeasurementAxis] ?? null;
   const activeMeasurementDescriptor =
     activeMeasurement != null ? viewerInfo.viewer.planes[activeMeasurementAxis] : null;
@@ -1180,6 +1261,35 @@ export function ImageViewerShell({
         <TabsContent value="volume" className="viewer-surface-panel">
           <div className="viewer-volume-layout">
             {renderCompactSurfaceReadout(volumeSummaryRows, "Volume summary")}
+            {selectedDisplayState ? (
+              <div
+                className="viewer-volume-inspection-toolbar"
+                data-viewer-volume-inspection-toolbar="true"
+                data-viewer-interior-active={volumeClipActive ? "true" : "false"}
+              >
+                <div className="viewer-volume-inspection-status">
+                  {volumeClipActive ? "Interior cutaway active" : "Full volume"}
+                </div>
+                <div className="viewer-volume-inspection-actions">
+                  <Button
+                    type="button"
+                    variant={volumeClipActive ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={focusInteriorVolume}
+                    aria-pressed={volumeClipActive}
+                  >
+                    <Focus data-icon="inline-start" />
+                    Interior focus
+                  </Button>
+                  {volumeClipActive ? (
+                    <Button type="button" variant="ghost" size="sm" onClick={resetVolumeClip}>
+                      <RotateCcw data-icon="inline-start" />
+                      Full volume
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div className="viewer-canvas-shell viewer-canvas-shell-volume">
               <SliceStackVolumeCanvas
                 apiClient={apiClient}

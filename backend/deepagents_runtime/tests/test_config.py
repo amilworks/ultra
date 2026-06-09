@@ -159,6 +159,26 @@ def test_runtime_settings_load_rarespot_worker_identity(monkeypatch):
     assert settings.rarespot_worker_kind == "rarespot-gpu"
 
 
+def test_runtime_settings_load_data_agent_worker_and_queue_defaults(monkeypatch):
+    monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", raising=False)
+    monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", raising=False)
+    monkeypatch.setenv("ULTRA_DATA_AGENT_WORKER_ID", "data-agent-prod-1")
+    monkeypatch.setenv("ULTRA_DATA_AGENT_WORKER_KIND", "data-agent-gpu")
+    monkeypatch.setenv("ULTRA_DATA_AGENT_CONTROL_LEASE_TTL_SECONDS", "900")
+    monkeypatch.setenv("ULTRA_DATA_AGENT_REQUIRE_CONTROL_LEASE", "true")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.data_agent_nats_jobs_subject == "ultra.data_agent.jobs"
+    assert settings.data_agent_nats_worker_durable == "ultra-data-agent-worker"
+    assert settings.data_agent_nats_ack_wait_seconds == 300.0
+    assert settings.data_agent_nats_ack_progress_interval_seconds == 60.0
+    assert settings.data_agent_worker_id == "data-agent-prod-1"
+    assert settings.data_agent_worker_kind == "data-agent-gpu"
+    assert settings.data_agent_control_lease_ttl_seconds == 900.0
+    assert settings.data_agent_control_lease_required is True
+
+
 def test_runtime_settings_load_rarespot_defaults(monkeypatch):
     monkeypatch.delenv("YOLOV5_RARESPOT_WEIGHTS", raising=False)
     monkeypatch.delenv("PRAIRIE_FIXED_CONF_THRESHOLD", raising=False)

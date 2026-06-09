@@ -28,6 +28,19 @@ type Job struct {
 	Metadata            domain.JSONMap         `json:"metadata,omitempty"`
 }
 
+type DataAgentJob struct {
+	JobID         string         `json:"job_id"`
+	DispatchID    string         `json:"dispatch_id,omitempty"`
+	OwnerUserID   string         `json:"owner_user_id"`
+	OwnerOrgID    string         `json:"owner_org_id,omitempty"`
+	ProjectID     string         `json:"project_id,omitempty"`
+	JobType       string         `json:"job_type"`
+	ResourceIDs   []string       `json:"resource_ids,omitempty"`
+	ResourceCount int            `json:"resource_count"`
+	InputSelector domain.JSONMap `json:"input_selector,omitempty"`
+	Metadata      domain.JSONMap `json:"metadata,omitempty"`
+}
+
 type CancelSignal struct {
 	RunID    string         `json:"run_id"`
 	ThreadID string         `json:"thread_id,omitempty"`
@@ -74,6 +87,10 @@ type QueueConsumerDiagnostics struct {
 
 type QueueDiagnosticsProvider interface {
 	QueueDiagnostics(ctx context.Context) (QueueDiagnostics, error)
+}
+
+type DataAgentJobPublisher interface {
+	PublishDataAgentJob(ctx context.Context, job DataAgentJob) error
 }
 
 type Bus interface {

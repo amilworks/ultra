@@ -3,8 +3,10 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +32,7 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type fakeQueueDiagnosticsProvider struct {
@@ -36,6 +42,20 @@ type fakeQueueDiagnosticsProvider struct {
 
 func (p fakeQueueDiagnosticsProvider) QueueDiagnostics(context.Context) (eventbus.QueueDiagnostics, error) {
 	return p.diagnostics, p.err
+}
+
+type recordingDataAgentJobPublisher struct {
+	jobs []eventbus.DataAgentJob
+	err  error
+}
+
+func (p *recordingDataAgentJobPublisher) PublishDataAgentJob(ctx context.Context, job eventbus.DataAgentJob) error {
+	_ = ctx
+	if p.err != nil {
+		return p.err
+	}
+	p.jobs = append(p.jobs, job)
+	return nil
 }
 
 func TestHealthAndPublicConfig(t *testing.T) {
@@ -1702,6 +1722,106 @@ func TestV2AdminOverviewIncludesRuntimeTransportSummary(t *testing.T) {
 	}
 }
 
+func TestV2AdminOverviewIncludesUploadSessionMetrics(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(mem, bus),
+		Store:   mem,
+		Bus:     bus,
+	})
+
+	for _, input := range []domain.CreateUploadSessionInput{
+		{
+			SessionID:      "upload_session_active",
+			OwnerUserID:    "lab-user",
+			OwnerOrgID:     "org-lab",
+			Status:         "active",
+			TotalBytes:     1000,
+			BytesReceived:  512,
+			BytesVerified:  256,
+			BytesCommitted: 0,
+		},
+		{
+			SessionID:      "upload_session_paused",
+			OwnerUserID:    "lab-user",
+			OwnerOrgID:     "org-lab",
+			Status:         "paused",
+			TotalBytes:     2000,
+			BytesReceived:  1000,
+			BytesVerified:  1000,
+			BytesCommitted: 0,
+		},
+		{
+			SessionID:     "upload_session_canceled",
+			OwnerUserID:   "lab-user",
+			OwnerOrgID:    "org-lab",
+			Status:        "canceled",
+			TotalBytes:    300,
+			BytesReceived: 100,
+		},
+		{
+			SessionID:      "upload_session_completed",
+			OwnerUserID:    "lab-user",
+			OwnerOrgID:     "org-lab",
+			Status:         "completed",
+			TotalBytes:     700,
+			BytesReceived:  700,
+			BytesVerified:  700,
+			BytesCommitted: 700,
+		},
+		{
+			SessionID:     "upload_session_failed",
+			OwnerUserID:   "lab-user",
+			OwnerOrgID:    "org-lab",
+			Status:        "failed",
+			TotalBytes:    400,
+			BytesReceived: 128,
+		},
+	} {
+		if _, err := mem.CreateUploadSession(ctx, input); err != nil {
+			t.Fatalf("CreateUploadSession(%s): %v", input.SessionID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/admin/overview", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin overview status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		UploadSessions struct {
+			Total          int   `json:"total"`
+			Active         int   `json:"active"`
+			Paused         int   `json:"paused"`
+			Completed      int   `json:"completed"`
+			Failed         int   `json:"failed"`
+			Canceled       int   `json:"canceled"`
+			Other          int   `json:"other"`
+			BytesTotal     int64 `json:"bytes_total"`
+			BytesReceived  int64 `json:"bytes_received"`
+			BytesVerified  int64 `json:"bytes_verified"`
+			BytesCommitted int64 `json:"bytes_committed"`
+		} `json:"upload_sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode admin overview: %v", err)
+	}
+	metrics := payload.UploadSessions
+	if metrics.Total != 5 || metrics.Active != 1 || metrics.Paused != 1 || metrics.Completed != 1 || metrics.Failed != 1 || metrics.Canceled != 1 || metrics.Other != 0 {
+		t.Fatalf("upload session counts = %+v, want one session in each lifecycle state", metrics)
+	}
+	if metrics.BytesTotal != 4400 || metrics.BytesReceived != 2440 || metrics.BytesVerified != 1956 || metrics.BytesCommitted != 700 {
+		t.Fatalf("upload session bytes = %+v, want summed total/received/verified/committed bytes", metrics)
+	}
+}
+
 func TestV2AdminOverviewIncludesPeriodizedActivityMetrics(t *testing.T) {
 	t.Parallel()
 
@@ -2440,6 +2560,1870 @@ func TestV2UploadAndResourceHandlers(t *testing.T) {
 	}
 }
 
+func TestV2ResourceDownloadServesOriginalBlobWithResourceScope(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	uploadedBytes := []byte("scientific field note bytes\n")
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "field-note.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write(uploadedBytes); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.Header.Set("X-Ultra-User-Id", "alice")
+	uploadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+	fileID := uploadResponse.Uploaded[0].FileID
+
+	aliceDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/download", nil)
+	aliceDownloadReq.Header.Set("X-Ultra-User-Id", "alice")
+	aliceDownloadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	aliceDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(aliceDownloadRec, aliceDownloadReq)
+	if aliceDownloadRec.Code != http.StatusOK {
+		t.Fatalf("alice download status = %d body=%s", aliceDownloadRec.Code, aliceDownloadRec.Body.String())
+	}
+	if !bytes.Equal(aliceDownloadRec.Body.Bytes(), uploadedBytes) {
+		t.Fatalf("alice download body = %q, want original bytes", aliceDownloadRec.Body.String())
+	}
+	disposition := aliceDownloadRec.Header().Get("Content-Disposition")
+	if !strings.Contains(disposition, "attachment") || !strings.Contains(disposition, "field-note.txt") {
+		t.Fatalf("content disposition = %q, want attachment filename", disposition)
+	}
+
+	otherDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/download", nil)
+	otherDownloadReq.Header.Set("X-Ultra-User-Id", "charlie")
+	otherDownloadReq.Header.Set("X-Ultra-Org-Id", "org-c")
+	otherDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(otherDownloadRec, otherDownloadReq)
+	if otherDownloadRec.Code != http.StatusNotFound {
+		t.Fatalf("other download status = %d body=%s, want 404", otherDownloadRec.Code, otherDownloadRec.Body.String())
+	}
+
+	shareBody := strings.NewReader(`{"grantee_user_id":"bob","grantee_org_id":"org-b","role":"read"}`)
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resources/"+fileID+"/shares", shareBody)
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	bobDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/download", nil)
+	bobDownloadReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDownloadReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDownloadRec, bobDownloadReq)
+	if bobDownloadRec.Code != http.StatusOK {
+		t.Fatalf("bob download status = %d body=%s", bobDownloadRec.Code, bobDownloadRec.Body.String())
+	}
+	if !bytes.Equal(bobDownloadRec.Body.Bytes(), uploadedBytes) {
+		t.Fatalf("bob download body = %q, want original bytes", bobDownloadRec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resources/"+fileID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	deletedDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/download", nil)
+	deletedDownloadReq.Header.Set("X-Ultra-User-Id", "alice")
+	deletedDownloadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deletedDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedDownloadRec, deletedDownloadReq)
+	if deletedDownloadRec.Code != http.StatusNotFound {
+		t.Fatalf("deleted download status = %d body=%s, want 404", deletedDownloadRec.Code, deletedDownloadRec.Body.String())
+	}
+}
+
+func TestV2ResourceDownloadRejectsCatalogPathOutsideUploadRoot(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	outsideRoot := t.TempDir()
+	outsidePath := filepath.Join(outsideRoot, "private-note.txt")
+	outsideBytes := []byte("must not escape upload root")
+	if err := os.WriteFile(outsidePath, outsideBytes, 0o644); err != nil {
+		t.Fatalf("write outside fixture: %v", err)
+	}
+	sum := sha256.Sum256(outsideBytes)
+	mem := store.NewMemoryStore()
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "file_outside_root",
+		OriginalName: "private-note.txt",
+		ContentType:  "text/plain",
+		SizeBytes:    int64(len(outsideBytes)),
+		SHA256:       hex.EncodeToString(sum[:]),
+		StorageURI:   fileStorageURI(outsidePath),
+		StoragePath:  outsidePath,
+		SourceType:   "upload",
+		ResourceKind: "table",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		OwnerRole:    "researcher",
+		Status:       "active",
+		CreatedAt:    domain.Now(),
+		UpdatedAt:    domain.Now(),
+	}); err != nil {
+		t.Fatalf("catalog outside resource: %v", err)
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	downloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_outside_root/download", nil)
+	downloadReq.Header.Set("X-Ultra-User-Id", "alice")
+	downloadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	downloadRec := httptest.NewRecorder()
+	router.ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusNotFound {
+		t.Fatalf("outside-root download status = %d body=%s, want 404", downloadRec.Code, downloadRec.Body.String())
+	}
+}
+
+func TestResourceRecordFromCatalogExposesDataAgentMetadata(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 6, 8, 14, 30, 0, 0, time.UTC)
+	record := (ServerDeps{}).resourceRecordFromCatalog(t.TempDir(), domain.ResourceRecord{
+		ResourceID:   "file_agent_captioned",
+		OriginalName: "prairie-cell-image.png",
+		ContentType:  "image/png",
+		SizeBytes:    42,
+		SHA256:       "abc123",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		OwnerUserID:  "field-scientist",
+		OwnerOrgID:   "lab-alpha",
+		CreatedAt:    createdAt,
+		Metadata: domain.JSONMap{
+			"label": "NPH",
+			"data_agent": domain.JSONMap{
+				"caption_resources": domain.JSONMap{
+					"status":         "succeeded",
+					"job_id":         "data_agent_job_caption",
+					"summary_kind":   "caption_generation",
+					"caption":        "Prairie microscopy image with deterministic metadata caption.",
+					"caption_source": "deterministic_metadata",
+					"completed_at":   createdAt.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	})
+
+	payload, err := json.Marshal(resourcesResponse{Count: 1, Resources: []resourceRecord{record}})
+	if err != nil {
+		t.Fatalf("marshal resources response: %v", err)
+	}
+	var decoded resourcesResponse
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode resources response: %v", err)
+	}
+	if decoded.Count != 1 || len(decoded.Resources) != 1 {
+		t.Fatalf("decoded resources = %+v, want one resource", decoded)
+	}
+	metadata := decoded.Resources[0].Metadata
+	if metadata["label"] != "NPH" {
+		t.Fatalf("metadata label = %#v, want preserved NPH label", metadata["label"])
+	}
+	agent, ok := metadata["data_agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata data_agent = %#v, want object", metadata["data_agent"])
+	}
+	caption, ok := agent["caption_resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("caption_resources = %#v, want object", agent["caption_resources"])
+	}
+	if caption["status"] != "succeeded" || caption["caption"] == "" || caption["job_id"] != "data_agent_job_caption" {
+		t.Fatalf("caption_resources metadata = %#v, want persisted caption job state", caption)
+	}
+}
+
+func TestV2ResourcesSearchMatchesDataAgentMetadata(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 8, 15, 30, 0, 0, time.UTC)
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "file_metadata_search",
+		OwnerUserID:  "metadata-user",
+		OwnerOrgID:   "metadata-org",
+		OriginalName: "image-001.png",
+		ContentType:  "image/png",
+		SizeBytes:    128,
+		SHA256:       "sha-metadata-search",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		Status:       "active",
+		CreatedAt:    createdAt,
+		UpdatedAt:    createdAt,
+		Metadata: domain.JSONMap{
+			"label": "NPH",
+			"data_agent": domain.JSONMap{
+				"caption_resources": domain.JSONMap{
+					"status":  "succeeded",
+					"caption": "Prairie microscopy image with deterministic metadata caption.",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertResource metadata search: %v", err)
+	}
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "file_metadata_other",
+		OwnerUserID:  "metadata-user",
+		OwnerOrgID:   "metadata-org",
+		OriginalName: "control-image.png",
+		ContentType:  "image/png",
+		SizeBytes:    64,
+		SHA256:       "sha-metadata-other",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		Status:       "active",
+		CreatedAt:    createdAt.Add(time.Second),
+		UpdatedAt:    createdAt.Add(time.Second),
+		Metadata:     domain.JSONMap{"label": "Control"},
+	}); err != nil {
+		t.Fatalf("UpsertResource other: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?q=deterministic%20metadata%20caption&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "metadata-user")
+	req.Header.Set("X-Ultra-Org-Id", "metadata-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metadata search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode metadata search response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_metadata_search" {
+		t.Fatalf("metadata search response = %+v, want captioned resource only", response)
+	}
+	if response.Resources[0].Metadata["label"] != "NPH" {
+		t.Fatalf("metadata search result metadata = %#v, want exposed NPH metadata", response.Resources[0].Metadata)
+	}
+}
+
+func TestV2ResourcesFilterScientificMetadata(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 9, 14, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_filter_nph_under_70",
+			OwnerUserID:  "metadata-filter-user",
+			OwnerOrgID:   "metadata-filter-org",
+			OriginalName: "nph-under-70.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-filter-nph-under",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+			Metadata: domain.JSONMap{
+				"label":       "NPH",
+				"format":      "nifti",
+				"subject_age": float64(68),
+			},
+		},
+		{
+			ResourceID:   "file_filter_nph_over_70",
+			OwnerUserID:  "metadata-filter-user",
+			OwnerOrgID:   "metadata-filter-org",
+			OriginalName: "nph-over-70.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-filter-nph-over",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(time.Second),
+			UpdatedAt:    createdAt.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"label":       "NPH",
+				"format":      "nifti",
+				"subject_age": float64(73),
+			},
+		},
+		{
+			ResourceID:   "file_filter_control_under_70",
+			OwnerUserID:  "metadata-filter-user",
+			OwnerOrgID:   "metadata-filter-org",
+			OriginalName: "control-under-70.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-filter-control",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(2 * time.Second),
+			UpdatedAt:    createdAt.Add(2 * time.Second),
+			Metadata: domain.JSONMap{
+				"label":       "control",
+				"format":      "nifti",
+				"subject_age": float64(64),
+			},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?metadata_filter=label:eq:NPH&metadata_filter=format:eq:nifti&metadata_filter=subject_age:lt:70&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "metadata-filter-user")
+	req.Header.Set("X-Ultra-Org-Id", "metadata-filter-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metadata filter status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode metadata filter response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_filter_nph_under_70" {
+		t.Fatalf("metadata filter response = %+v, want only NPH under-70 NIfTI", response)
+	}
+}
+
+func TestV2ResourcesFilterScientificDescriptors(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 9, 14, 15, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_descriptor_nph",
+			OwnerUserID:  "descriptor-filter-user",
+			OwnerOrgID:   "descriptor-filter-org",
+			OriginalName: "nph-ventriculomegaly.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-descriptor-nph",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+			Metadata: domain.JSONMap{
+				"label":                  "NPH",
+				"scientific_descriptors": []any{"ventriculomegaly", "MRI cohort"},
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{
+						"status":      "succeeded",
+						"descriptors": []any{"Evans index high"},
+					},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_descriptor_control",
+			OwnerUserID:  "descriptor-filter-user",
+			OwnerOrgID:   "descriptor-filter-org",
+			OriginalName: "control-normal.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-descriptor-control",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(time.Second),
+			UpdatedAt:    createdAt.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"label":                  "control",
+				"scientific_descriptors": []any{"normal ventricles", "MRI cohort"},
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{
+						"status":      "succeeded",
+						"descriptors": []any{"Evans index normal"},
+					},
+				},
+			},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?descriptor=ventriculomegaly&descriptors=Evans%20index%20high&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "descriptor-filter-user")
+	req.Header.Set("X-Ultra-Org-Id", "descriptor-filter-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("descriptor filter status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode descriptor filter response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_descriptor_nph" {
+		t.Fatalf("descriptor filter response = %+v, want only NPH descriptor resource", response)
+	}
+}
+
+func TestV2ResourcesFilterProcessingStatus(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 9, 14, 30, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_http_caption_ready",
+			OwnerUserID:  "processing-filter-user",
+			OwnerOrgID:   "processing-filter-org",
+			OriginalName: "caption-ready.nii.gz",
+			SizeBytes:    256,
+			SHA256:       "sha-processing-caption",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+			Metadata: domain.JSONMap{
+				"data_agent": domain.JSONMap{
+					"caption_resources": domain.JSONMap{"status": "succeeded"},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_http_metadata_ready",
+			OwnerUserID:  "processing-filter-user",
+			OwnerOrgID:   "processing-filter-org",
+			OriginalName: "metadata-ready.nii.gz",
+			SizeBytes:    256,
+			SHA256:       "sha-processing-metadata",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(time.Second),
+			UpdatedAt:    createdAt.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{"status": "succeeded"},
+				},
+			},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?processing_status=caption_ready&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "processing-filter-user")
+	req.Header.Set("X-Ultra-Org-Id", "processing-filter-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("processing filter status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode processing filter response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_http_caption_ready" {
+		t.Fatalf("processing filter response = %+v, want only caption-ready resource", response)
+	}
+}
+
+func TestV2ResourcesFilterCreatedDate(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_before_date_window",
+			OwnerUserID:  "date-filter-user",
+			OwnerOrgID:   "date-filter-org",
+			OriginalName: "before-window.nii.gz",
+			SizeBytes:    256,
+			SHA256:       "sha-date-before",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+		},
+		{
+			ResourceID:   "file_inside_date_window",
+			OwnerUserID:  "date-filter-user",
+			OwnerOrgID:   "date-filter-org",
+			OriginalName: "inside-window.nii.gz",
+			SizeBytes:    256,
+			SHA256:       "sha-date-inside",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(48 * time.Hour),
+			UpdatedAt:    createdAt.Add(48 * time.Hour),
+		},
+		{
+			ResourceID:   "file_after_date_window",
+			OwnerUserID:  "date-filter-user",
+			OwnerOrgID:   "date-filter-org",
+			OriginalName: "after-window.nii.gz",
+			SizeBytes:    256,
+			SHA256:       "sha-date-after",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(96 * time.Hour),
+			UpdatedAt:    createdAt.Add(96 * time.Hour),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?created_after=2026-06-02T00:00:00Z&created_before=2026-06-04T23:59:59Z&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "date-filter-user")
+	req.Header.Set("X-Ultra-Org-Id", "date-filter-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("date filter status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode date filter response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_inside_date_window" {
+		t.Fatalf("date filter response = %+v, want only inside-window resource", response)
+	}
+}
+
+func TestV2ResourceShareGrantAllowsReadAccessForCollaborator(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "shared-nph-study.png")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	uploadedBytes := testPNGBytes(t, 3, 2)
+	if _, err := part.Write(uploadedBytes); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.Header.Set("X-Ultra-User-Id", "alice")
+	uploadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	uploadReq.Header.Set("X-Ultra-Role", "researcher")
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+	fileID := uploadResponse.Uploaded[0].FileID
+
+	bobBeforeReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	bobBeforeReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobBeforeReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobBeforeRec := httptest.NewRecorder()
+	router.ServeHTTP(bobBeforeRec, bobBeforeReq)
+	if bobBeforeRec.Code != http.StatusOK {
+		t.Fatalf("bob before list status = %d body=%s", bobBeforeRec.Code, bobBeforeRec.Body.String())
+	}
+	var bobBefore resourcesResponse
+	if err := json.Unmarshal(bobBeforeRec.Body.Bytes(), &bobBefore); err != nil {
+		t.Fatalf("decode bob before resources: %v", err)
+	}
+	if bobBefore.Count != 0 || len(bobBefore.Resources) != 0 {
+		t.Fatalf("bob resources before share = %+v, want none", bobBefore)
+	}
+
+	shareBody := strings.NewReader(`{"grantee_user_id":"bob","grantee_org_id":"org-b","role":"read","metadata":{"reason":"collaborative review"}}`)
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resources/"+fileID+"/shares", shareBody)
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shareResponse struct {
+		Grant domain.ResourceShareGrantRecord `json:"grant"`
+	}
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shareResponse); err != nil {
+		t.Fatalf("decode share response: %v", err)
+	}
+	if shareResponse.Grant.ResourceID != fileID || shareResponse.Grant.GranteeUserID != "bob" || shareResponse.Grant.Role != "read" || shareResponse.Grant.Status != "active" {
+		t.Fatalf("share response = %+v, want active read grant for Bob", shareResponse.Grant)
+	}
+
+	bobListReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=shared-nph&limit=20", nil)
+	bobListReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobListReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobListRec := httptest.NewRecorder()
+	router.ServeHTTP(bobListRec, bobListReq)
+	if bobListRec.Code != http.StatusOK {
+		t.Fatalf("bob list status = %d body=%s", bobListRec.Code, bobListRec.Body.String())
+	}
+	var bobList resourcesResponse
+	if err := json.Unmarshal(bobListRec.Body.Bytes(), &bobList); err != nil {
+		t.Fatalf("decode bob resources: %v", err)
+	}
+	if bobList.Count != 1 || len(bobList.Resources) != 1 || bobList.Resources[0].FileID != fileID {
+		t.Fatalf("bob resources after share = %+v, want shared resource", bobList)
+	}
+	if bobList.Resources[0].Principal.UserID != "alice" {
+		t.Fatalf("shared resource principal = %+v, want Alice owner preserved", bobList.Resources[0].Principal)
+	}
+
+	bobGetReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID, nil)
+	bobGetReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobGetReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobGetRec := httptest.NewRecorder()
+	router.ServeHTTP(bobGetRec, bobGetReq)
+	if bobGetRec.Code != http.StatusOK {
+		t.Fatalf("bob get status = %d body=%s", bobGetRec.Code, bobGetRec.Body.String())
+	}
+
+	bobDisplayReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/display", nil)
+	bobDisplayReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDisplayReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobDisplayRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDisplayRec, bobDisplayReq)
+	if bobDisplayRec.Code != http.StatusOK {
+		t.Fatalf("bob display status = %d body=%s", bobDisplayRec.Code, bobDisplayRec.Body.String())
+	}
+	if !bytes.Equal(bobDisplayRec.Body.Bytes(), uploadedBytes) {
+		t.Fatalf("bob display body = %q, want uploaded bytes", bobDisplayRec.Body.String())
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if !resourceEventsContain(events.Events, "resource.shared") {
+		t.Fatalf("events = %+v, want resource.shared audit event", events.Events)
+	}
+}
+
+func TestV2ResourceShareGrantCanBeListedAndRevokedByOwner(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "revoked-nph-study.png")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	uploadedBytes := testPNGBytes(t, 3, 2)
+	if _, err := part.Write(uploadedBytes); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.Header.Set("X-Ultra-User-Id", "alice")
+	uploadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+	fileID := uploadResponse.Uploaded[0].FileID
+
+	shareBody := strings.NewReader(`{"grantee_user_id":"bob","grantee_org_id":"org-b","role":"read","metadata":{"reason":"temporary review"}}`)
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resources/"+fileID+"/shares", shareBody)
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shareResponse struct {
+		Grant domain.ResourceShareGrantRecord `json:"grant"`
+	}
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shareResponse); err != nil {
+		t.Fatalf("decode share response: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/shares", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "alice")
+	listReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list shares status = %d body=%s, want 200", listRec.Code, listRec.Body.String())
+	}
+	var listResponse struct {
+		ResourceID string                            `json:"resource_id"`
+		Count      int                               `json:"count"`
+		Grants     []domain.ResourceShareGrantRecord `json:"grants"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode list shares response: %v", err)
+	}
+	if listResponse.ResourceID != fileID || listResponse.Count != 1 || len(listResponse.Grants) != 1 || listResponse.Grants[0].Status != "active" {
+		t.Fatalf("list shares response = %+v, want one active grant", listResponse)
+	}
+
+	bobDisplayReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/display", nil)
+	bobDisplayReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDisplayReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobDisplayRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDisplayRec, bobDisplayReq)
+	if bobDisplayRec.Code != http.StatusOK {
+		t.Fatalf("bob display before revoke status = %d body=%s", bobDisplayRec.Code, bobDisplayRec.Body.String())
+	}
+	if !bytes.Equal(bobDisplayRec.Body.Bytes(), uploadedBytes) {
+		t.Fatalf("bob display body before revoke = %q, want uploaded bytes", bobDisplayRec.Body.String())
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/v2/resources/"+fileID+"/shares/"+shareResponse.Grant.GrantID, nil)
+	revokeReq.Header.Set("X-Ultra-User-Id", "alice")
+	revokeReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	revokeRec := httptest.NewRecorder()
+	router.ServeHTTP(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke share status = %d body=%s, want 200", revokeRec.Code, revokeRec.Body.String())
+	}
+	var revokeResponse struct {
+		Grant domain.ResourceShareGrantRecord `json:"grant"`
+	}
+	if err := json.Unmarshal(revokeRec.Body.Bytes(), &revokeResponse); err != nil {
+		t.Fatalf("decode revoke response: %v", err)
+	}
+	if revokeResponse.Grant.GrantID != shareResponse.Grant.GrantID || revokeResponse.Grant.Status != "revoked" || revokeResponse.Grant.RevokedAt.IsZero() {
+		t.Fatalf("revoke response = %+v, want revoked grant with timestamp", revokeResponse.Grant)
+	}
+
+	bobGetReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID, nil)
+	bobGetReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobGetReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobGetRec := httptest.NewRecorder()
+	router.ServeHTTP(bobGetRec, bobGetReq)
+	if bobGetRec.Code != http.StatusNotFound {
+		t.Fatalf("bob get after revoke status = %d body=%s, want 404", bobGetRec.Code, bobGetRec.Body.String())
+	}
+
+	afterListReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/shares", nil)
+	afterListReq.Header.Set("X-Ultra-User-Id", "alice")
+	afterListReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	afterListRec := httptest.NewRecorder()
+	router.ServeHTTP(afterListRec, afterListReq)
+	if afterListRec.Code != http.StatusOK {
+		t.Fatalf("list shares after revoke status = %d body=%s", afterListRec.Code, afterListRec.Body.String())
+	}
+	var afterListResponse struct {
+		Grants []domain.ResourceShareGrantRecord `json:"grants"`
+	}
+	if err := json.Unmarshal(afterListRec.Body.Bytes(), &afterListResponse); err != nil {
+		t.Fatalf("decode shares after revoke: %v", err)
+	}
+	if len(afterListResponse.Grants) != 1 || afterListResponse.Grants[0].Status != "revoked" {
+		t.Fatalf("shares after revoke = %+v, want revoked grant retained", afterListResponse.Grants)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if !resourceEventsContain(events.Events, "resource.shared") || !resourceEventsContain(events.Events, "resource.share_revoked") {
+		t.Fatalf("events = %+v, want share create and revoke audit events", events.Events)
+	}
+}
+
+func TestV2ResourceEventsListIsScopedAndFilterable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	base := time.Date(2026, 6, 8, 13, 0, 0, 0, time.UTC)
+	inputs := []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_audit_active",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "audit-active.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    base,
+		},
+		{
+			ResourceID:   "file_audit_deleted",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "audit-deleted.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "deleted",
+			CreatedAt:    base.Add(time.Minute),
+			DeletedAt:    base.Add(4 * time.Minute),
+		},
+		{
+			ResourceID:   "file_audit_bob_private",
+			OwnerUserID:  "bob",
+			OwnerOrgID:   "org-b",
+			OriginalName: "bob-private.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    base.Add(2 * time.Minute),
+		},
+	}
+	for _, input := range inputs {
+		if _, err := mem.UpsertResource(ctx, input); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", input.ResourceID, err)
+		}
+	}
+	if _, err := mem.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		ResourceID:      "file_audit_active",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "alice",
+		CreatedAt:       base.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	for _, event := range []domain.AppendResourceEventInput{
+		{ResourceID: "file_audit_active", ActorUserID: "alice", ActorOrgID: "org-a", EventType: "resource.tagged", TS: base.Add(4 * time.Minute), Metadata: domain.JSONMap{"tag": "NPH"}},
+		{ResourceID: "file_audit_deleted", ActorUserID: "alice", ActorOrgID: "org-a", EventType: "resource.deleted", TS: base.Add(5 * time.Minute)},
+		{ResourceID: "file_audit_bob_private", ActorUserID: "bob", ActorOrgID: "org-b", EventType: "resource.tagged", TS: base.Add(6 * time.Minute), Metadata: domain.JSONMap{"tag": "private"}},
+	} {
+		if _, err := mem.CreateResourceEvent(ctx, event); err != nil {
+			t.Fatalf("CreateResourceEvent(%s): %v", event.ResourceID, err)
+		}
+	}
+
+	aliceReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?limit=10", nil)
+	aliceReq.Header.Set("X-Ultra-User-Id", "alice")
+	aliceReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	aliceRec := httptest.NewRecorder()
+	router.ServeHTTP(aliceRec, aliceReq)
+	if aliceRec.Code != http.StatusOK {
+		t.Fatalf("alice events status = %d body=%s", aliceRec.Code, aliceRec.Body.String())
+	}
+	var aliceEvents struct {
+		Count      int                          `json:"count"`
+		TotalCount int                          `json:"total_count"`
+		Limit      int                          `json:"limit"`
+		Offset     int                          `json:"offset"`
+		Events     []domain.ResourceEventRecord `json:"events"`
+	}
+	if err := json.Unmarshal(aliceRec.Body.Bytes(), &aliceEvents); err != nil {
+		t.Fatalf("decode alice events: %v", err)
+	}
+	if aliceEvents.Count != 2 || aliceEvents.TotalCount != 2 || len(aliceEvents.Events) != 2 {
+		t.Fatalf("alice events = %+v, want two owned events", aliceEvents)
+	}
+	if aliceEvents.Events[0].ResourceID != "file_audit_deleted" || aliceEvents.Events[1].ResourceID != "file_audit_active" {
+		t.Fatalf("alice event resource order = %+v, want deleted then active", aliceEvents.Events)
+	}
+
+	deletedReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?event_type=resource.deleted&limit=10", nil)
+	deletedReq.Header.Set("X-Ultra-User-Id", "alice")
+	deletedReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deletedRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedRec, deletedReq)
+	if deletedRec.Code != http.StatusOK {
+		t.Fatalf("deleted events status = %d body=%s", deletedRec.Code, deletedRec.Body.String())
+	}
+	var deletedEvents struct {
+		Events []domain.ResourceEventRecord `json:"events"`
+	}
+	if err := json.Unmarshal(deletedRec.Body.Bytes(), &deletedEvents); err != nil {
+		t.Fatalf("decode deleted events: %v", err)
+	}
+	if len(deletedEvents.Events) != 1 || deletedEvents.Events[0].ResourceID != "file_audit_deleted" {
+		t.Fatalf("deleted events = %+v, want only deleted resource event", deletedEvents.Events)
+	}
+
+	bobReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?resource_id=file_audit_active&limit=10", nil)
+	bobReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobRec := httptest.NewRecorder()
+	router.ServeHTTP(bobRec, bobReq)
+	if bobRec.Code != http.StatusOK {
+		t.Fatalf("bob events status = %d body=%s", bobRec.Code, bobRec.Body.String())
+	}
+	var bobEvents struct {
+		Events []domain.ResourceEventRecord `json:"events"`
+	}
+	if err := json.Unmarshal(bobRec.Body.Bytes(), &bobEvents); err != nil {
+		t.Fatalf("decode bob events: %v", err)
+	}
+	if len(bobEvents.Events) != 1 || bobEvents.Events[0].ResourceID != "file_audit_active" {
+		t.Fatalf("bob events = %+v, want only shared resource event", bobEvents.Events)
+	}
+
+	foreignReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?limit=10", nil)
+	foreignReq.Header.Set("X-Ultra-User-Id", "charlie")
+	foreignReq.Header.Set("X-Ultra-Org-Id", "org-c")
+	foreignRec := httptest.NewRecorder()
+	router.ServeHTTP(foreignRec, foreignReq)
+	if foreignRec.Code != http.StatusOK {
+		t.Fatalf("foreign events status = %d body=%s", foreignRec.Code, foreignRec.Body.String())
+	}
+	var foreignEvents struct {
+		Count  int                          `json:"count"`
+		Events []domain.ResourceEventRecord `json:"events"`
+	}
+	if err := json.Unmarshal(foreignRec.Body.Bytes(), &foreignEvents); err != nil {
+		t.Fatalf("decode foreign events: %v", err)
+	}
+	if foreignEvents.Count != 0 || len(foreignEvents.Events) != 0 {
+		t.Fatalf("foreign events = %+v, want no leaked events", foreignEvents)
+	}
+}
+
+func TestV2ResourceMetadataPatchMergesAndAuditsOwnerEdit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_metadata_patch",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		OriginalName: "metadata-patch.nii.gz",
+		ContentType:  "application/gzip",
+		SourceType:   "upload",
+		ResourceKind: "image",
+		Status:       "active",
+		CreatedAt:    time.Date(2026, 6, 8, 14, 0, 0, 0, time.UTC),
+		Metadata: domain.JSONMap{
+			"source_label": "raw",
+			"review": domain.JSONMap{
+				"reader": "lab-a",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	if _, err := mem.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		ResourceID:      "file_metadata_patch",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "alice",
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "/v2/resources/file_metadata_patch", strings.NewReader(`{
+		"metadata": {
+			"cohort": "NPH",
+			"review": {"status": "checked"}
+		}
+	}`))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchReq.Header.Set("X-Ultra-User-Id", "alice")
+	patchReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	patchRec := httptest.NewRecorder()
+	router.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("metadata patch status = %d body=%s", patchRec.Code, patchRec.Body.String())
+	}
+	var patched resourceResponse
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("decode patched resource: %v", err)
+	}
+	if patched.Resource.Metadata["cohort"] != "NPH" || patched.Resource.Metadata["source_label"] != "raw" {
+		t.Fatalf("patched metadata = %+v, want merged source_label and cohort", patched.Resource.Metadata)
+	}
+	review, ok := patched.Resource.Metadata["review"].(map[string]any)
+	if !ok {
+		if typed, typedOK := patched.Resource.Metadata["review"].(domain.JSONMap); typedOK {
+			review = map[string]any(typed)
+			ok = true
+		}
+	}
+	if !ok || review["reader"] != "lab-a" || review["status"] != "checked" {
+		t.Fatalf("patched review metadata = %#v, want merged reader/status", patched.Resource.Metadata["review"])
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_metadata_patch/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	metadataEvent, ok := resourceEventByType(events.Events, "resource.metadata_updated")
+	if !ok {
+		t.Fatalf("events = %+v, want resource.metadata_updated", events.Events)
+	}
+	if metadataEvent.ActorUserID != "alice" || metadataEvent.ActorOrgID != "org-a" {
+		t.Fatalf("metadata event actor = %+v, want alice/org-a", metadataEvent)
+	}
+	keys, _ := metadataEvent.Metadata["metadata_keys"].([]any)
+	if !stringSliceContainsAny(keys, "cohort") || !stringSliceContainsAny(keys, "review") {
+		t.Fatalf("metadata event keys = %#v, want cohort and review; metadata=%+v", keys, metadataEvent.Metadata)
+	}
+
+	eventLogReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?event_type=resource.metadata_updated&limit=10", nil)
+	eventLogReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventLogReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventLogRec := httptest.NewRecorder()
+	router.ServeHTTP(eventLogRec, eventLogReq)
+	if eventLogRec.Code != http.StatusOK {
+		t.Fatalf("event log status = %d body=%s", eventLogRec.Code, eventLogRec.Body.String())
+	}
+	var eventLog resourceEventListResponse
+	if err := json.Unmarshal(eventLogRec.Body.Bytes(), &eventLog); err != nil {
+		t.Fatalf("decode event log: %v", err)
+	}
+	if eventLog.Count != 1 || eventLog.TotalCount != 1 || eventLog.Events[0].ResourceID != "file_metadata_patch" {
+		t.Fatalf("event log = %+v, want one metadata update event", eventLog)
+	}
+
+	bobPatchReq := httptest.NewRequest(http.MethodPatch, "/v2/resources/file_metadata_patch", strings.NewReader(`{"metadata":{"cohort":"tampered"}}`))
+	bobPatchReq.Header.Set("Content-Type", "application/json")
+	bobPatchReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobPatchReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobPatchRec := httptest.NewRecorder()
+	router.ServeHTTP(bobPatchRec, bobPatchReq)
+	if bobPatchRec.Code != http.StatusNotFound {
+		t.Fatalf("bob metadata patch status = %d body=%s, want 404", bobPatchRec.Code, bobPatchRec.Body.String())
+	}
+}
+
+func TestV2ResourceBulkShareGrantCreatesReadGrantsForOwnedResources(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_bulk_share_a",
+			OriginalName: "bulk-share-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-bulk-share-a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "bulk-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_bulk_share_b",
+			OriginalName: "bulk-share-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-bulk-share-b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "bulk-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resources/shares/bulk", strings.NewReader(`{
+		"resource_ids":[" file_bulk_share_a ","file_bulk_share_b","file_bulk_share_a"],
+		"grantee_user_id":"bob",
+		"grantee_org_id":"org-b",
+		"role":"read",
+		"metadata":{"reason":"bulk review"}
+	}`))
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("bulk share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shareResponse struct {
+		Count  int                               `json:"count"`
+		Grants []domain.ResourceShareGrantRecord `json:"grants"`
+	}
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shareResponse); err != nil {
+		t.Fatalf("decode bulk share response: %v", err)
+	}
+	if shareResponse.Count != 2 || len(shareResponse.Grants) != 2 {
+		t.Fatalf("bulk share response = %+v, want two grants", shareResponse)
+	}
+	for index, wantResourceID := range []string{"file_bulk_share_a", "file_bulk_share_b"} {
+		grant := shareResponse.Grants[index]
+		if grant.ResourceID != wantResourceID || grant.GranteeUserID != "bob" || grant.GranteeOrgID != "org-b" || grant.Role != "read" || grant.Status != "active" {
+			t.Fatalf("grant[%d] = %+v, want active read grant for Bob on %s", index, grant, wantResourceID)
+		}
+	}
+
+	bobListReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=bulk-share&limit=20", nil)
+	bobListReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobListReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobListRec := httptest.NewRecorder()
+	router.ServeHTTP(bobListRec, bobListReq)
+	if bobListRec.Code != http.StatusOK {
+		t.Fatalf("bob list status = %d body=%s", bobListRec.Code, bobListRec.Body.String())
+	}
+	var bobList resourcesResponse
+	if err := json.Unmarshal(bobListRec.Body.Bytes(), &bobList); err != nil {
+		t.Fatalf("decode bob resources: %v", err)
+	}
+	if bobList.Count != 2 || len(bobList.Resources) != 2 {
+		t.Fatalf("bob resources after bulk share = %+v, want two shared resources", bobList)
+	}
+
+	for _, resourceID := range []string{"file_bulk_share_a", "file_bulk_share_b"} {
+		eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+resourceID+"/events?limit=10", nil)
+		eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+		eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+		eventsRec := httptest.NewRecorder()
+		router.ServeHTTP(eventsRec, eventsReq)
+		if eventsRec.Code != http.StatusOK {
+			t.Fatalf("events status for %s = %d body=%s", resourceID, eventsRec.Code, eventsRec.Body.String())
+		}
+		var events resourceEventsResponse
+		if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+			t.Fatalf("decode events for %s: %v", resourceID, err)
+		}
+		if !resourceEventsContain(events.Events, "resource.shared") {
+			t.Fatalf("events for %s = %+v, want resource.shared audit event", resourceID, events.Events)
+		}
+	}
+}
+
+func TestV2ResourceBulkTagAddsTagsFiltersAndAuditsResources(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_tag_http_a",
+			OwnerUserID:  "tag-user",
+			OwnerOrgID:   "tag-org",
+			OriginalName: "tag-http-a.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			Tags:         []string{"raw"},
+		},
+		{
+			ResourceID:   "file_tag_http_b",
+			OwnerUserID:  "tag-user",
+			OwnerOrgID:   "tag-org",
+			OriginalName: "tag-http-b.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	tagReq := httptest.NewRequest(http.MethodPost, "/v2/resources/tags/bulk", strings.NewReader(`{
+		"resource_ids":["file_tag_http_a","file_tag_http_b"],
+		"tags":["NPH","Under 70","nph"],
+		"metadata":{"source":"resources_bulk_tag_panel"}
+	}`))
+	tagReq.Header.Set("Content-Type", "application/json")
+	tagReq.Header.Set("X-Ultra-User-Id", "tag-user")
+	tagReq.Header.Set("X-Ultra-Org-Id", "tag-org")
+	tagRec := httptest.NewRecorder()
+	router.ServeHTTP(tagRec, tagReq)
+	if tagRec.Code != http.StatusOK {
+		t.Fatalf("bulk tag status = %d body=%s, want 200", tagRec.Code, tagRec.Body.String())
+	}
+	var tagResponse struct {
+		Count     int                          `json:"count"`
+		Resources []resourceRecord             `json:"resources"`
+		Events    []domain.ResourceEventRecord `json:"events"`
+	}
+	if err := json.Unmarshal(tagRec.Body.Bytes(), &tagResponse); err != nil {
+		t.Fatalf("decode bulk tag response: %v", err)
+	}
+	if tagResponse.Count != 2 || len(tagResponse.Resources) != 2 || len(tagResponse.Events) != 2 {
+		t.Fatalf("bulk tag response = %+v, want two resources and two events", tagResponse)
+	}
+	if !reflect.DeepEqual(tagResponse.Resources[0].Tags, []string{"raw", "NPH", "Under 70"}) {
+		t.Fatalf("first tagged resource tags = %#v, want raw plus NPH tags", tagResponse.Resources[0].Tags)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?tag=nph&tag=under+70&limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "tag-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "tag-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("tag-filtered resources status = %d body=%s, want 200", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode tag-filtered resources: %v", err)
+	}
+	if listed.Count != 2 || len(listed.Resources) != 2 {
+		t.Fatalf("tag-filtered resources = %+v, want both tagged resources", listed)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_tag_http_a/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "tag-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "tag-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	if !resourceEventsContain(events.Events, "resource.tagged") {
+		t.Fatalf("resource events = %+v, want resource.tagged audit event", events.Events)
+	}
+}
+
+func TestV2ResourceCollectionShareCreatesReadGrantsForFolderMembers(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	ctx := context.Background()
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_folder_share_a",
+			OriginalName: "folder-share-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-folder-share-a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "folder-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_folder_share_b",
+			OriginalName: "folder-share-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-folder-share-b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "folder-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "file_folder_share_outside",
+			OriginalName: "folder-share-outside.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    512,
+			SHA256:       "sha-folder-share-outside",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "folder-study",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	collection, err := mem.CreateResourceCollection(ctx, domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_folder_share",
+		OwnerUserID:    "alice",
+		OwnerOrgID:     "org-a",
+		Name:           "NPH review folder",
+		CollectionType: "folder",
+		Status:         "active",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := mem.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_folder_share_a", "file_folder_share_b"},
+		AddedByUserID: "alice",
+		AddedAt:       now,
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections/collection_folder_share/shares", strings.NewReader(`{
+		"grantee_user_id":"bob",
+		"grantee_org_id":"org-b",
+		"role":"read",
+		"metadata":{"reason":"folder review"}
+	}`))
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("folder share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shareResponse struct {
+		Count      int                               `json:"count"`
+		Collection domain.ResourceCollectionRecord   `json:"collection"`
+		Grants     []domain.ResourceShareGrantRecord `json:"grants"`
+	}
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shareResponse); err != nil {
+		t.Fatalf("decode folder share response: %v", err)
+	}
+	if shareResponse.Collection.CollectionID != "collection_folder_share" {
+		t.Fatalf("collection = %+v, want folder collection", shareResponse.Collection)
+	}
+	if shareResponse.Count != 2 || len(shareResponse.Grants) != 2 {
+		t.Fatalf("folder share response = %+v, want two grants", shareResponse)
+	}
+	for index, wantResourceID := range []string{"file_folder_share_a", "file_folder_share_b"} {
+		grant := shareResponse.Grants[index]
+		if grant.ResourceID != wantResourceID || grant.GranteeUserID != "bob" || grant.GranteeOrgID != "org-b" || grant.Role != "read" || grant.Status != "active" {
+			t.Fatalf("grant[%d] = %+v, want active read grant for Bob on %s", index, grant, wantResourceID)
+		}
+	}
+
+	bobListReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=folder-share&limit=20", nil)
+	bobListReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobListReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobListRec := httptest.NewRecorder()
+	router.ServeHTTP(bobListRec, bobListReq)
+	if bobListRec.Code != http.StatusOK {
+		t.Fatalf("bob list status = %d body=%s", bobListRec.Code, bobListRec.Body.String())
+	}
+	var bobList resourcesResponse
+	if err := json.Unmarshal(bobListRec.Body.Bytes(), &bobList); err != nil {
+		t.Fatalf("decode bob resources: %v", err)
+	}
+	if bobList.Count != 2 || len(bobList.Resources) != 2 {
+		t.Fatalf("bob resources after folder share = %+v, want two shared folder resources only", bobList)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_folder_share_a/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode folder share events: %v", err)
+	}
+	sharedEvent, ok := resourceEventByType(events.Events, "resource.shared")
+	if !ok {
+		t.Fatalf("events = %+v, want resource.shared", events.Events)
+	}
+	if sharedEvent.Metadata["collection_id"] != "collection_folder_share" || sharedEvent.Metadata["source"] != "resource_collection_share" {
+		t.Fatalf("resource.shared metadata = %+v, want collection share context", sharedEvent.Metadata)
+	}
+
+	addFutureReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections/collection_folder_share/resources", strings.NewReader(`{
+		"resource_ids":["file_folder_share_outside"],
+		"metadata":{"source":"late_folder_add"}
+	}`))
+	addFutureReq.Header.Set("Content-Type", "application/json")
+	addFutureReq.Header.Set("X-Ultra-User-Id", "alice")
+	addFutureReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	addFutureRec := httptest.NewRecorder()
+	router.ServeHTTP(addFutureRec, addFutureReq)
+	if addFutureRec.Code != http.StatusOK {
+		t.Fatalf("future folder add status = %d body=%s, want 200", addFutureRec.Code, addFutureRec.Body.String())
+	}
+
+	bobFutureReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=folder-share&limit=20", nil)
+	bobFutureReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobFutureReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobFutureRec := httptest.NewRecorder()
+	router.ServeHTTP(bobFutureRec, bobFutureReq)
+	if bobFutureRec.Code != http.StatusOK {
+		t.Fatalf("bob future list status = %d body=%s", bobFutureRec.Code, bobFutureRec.Body.String())
+	}
+	var bobFutureList resourcesResponse
+	if err := json.Unmarshal(bobFutureRec.Body.Bytes(), &bobFutureList); err != nil {
+		t.Fatalf("decode bob future resources: %v", err)
+	}
+	if bobFutureList.Count != 3 || len(bobFutureList.Resources) != 3 {
+		t.Fatalf("bob resources after future folder add = %+v, want three inherited shared resources", bobFutureList)
+	}
+
+	futureEventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_folder_share_outside/events?limit=10", nil)
+	futureEventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	futureEventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	futureEventsRec := httptest.NewRecorder()
+	router.ServeHTTP(futureEventsRec, futureEventsReq)
+	if futureEventsRec.Code != http.StatusOK {
+		t.Fatalf("future events status = %d body=%s", futureEventsRec.Code, futureEventsRec.Body.String())
+	}
+	var futureEvents resourceEventsResponse
+	if err := json.Unmarshal(futureEventsRec.Body.Bytes(), &futureEvents); err != nil {
+		t.Fatalf("decode future folder share events: %v", err)
+	}
+	futureSharedEvent, ok := resourceEventByType(futureEvents.Events, "resource.shared")
+	if !ok {
+		t.Fatalf("future events = %+v, want inherited resource.shared event", futureEvents.Events)
+	}
+	if futureSharedEvent.Metadata["collection_id"] != "collection_folder_share" || futureSharedEvent.Metadata["source"] != "resource_collection_share_inherited" {
+		t.Fatalf("future resource.shared metadata = %+v, want inherited collection share context", futureSharedEvent.Metadata)
+	}
+}
+
+func TestV2ResourcesListExposesAndFiltersShareSummary(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_private_alice",
+			OriginalName: "private-alice.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    64,
+			SHA256:       "sha-private-alice",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_shared_by_alice",
+			OriginalName: "shared-by-alice.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    96,
+			SHA256:       "sha-shared-by-alice",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "file_shared_with_bob",
+			OriginalName: "shared-with-bob.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-shared-with-bob",
+			OwnerUserID:  "carol",
+			OwnerOrgID:   "org-c",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+		},
+		{
+			ResourceID:   "file_public_alice",
+			OriginalName: "public-alice.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    160,
+			SHA256:       "sha-public-alice",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(3 * time.Second),
+			UpdatedAt:    now.Add(3 * time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	if _, err := mem.CreateResourceShareGrant(context.Background(), domain.CreateResourceShareGrantInput{
+		ResourceID:      "file_shared_by_alice",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "alice",
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant alice->bob: %v", err)
+	}
+	if _, err := mem.CreateResourceShareGrant(context.Background(), domain.CreateResourceShareGrantInput{
+		ResourceID:      "file_shared_with_bob",
+		OwnerUserID:     "carol",
+		OwnerOrgID:      "org-c",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "carol",
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant carol->bob: %v", err)
+	}
+	publicReq := httptest.NewRequest(http.MethodPost, "/v2/resources/file_public_alice/shares", strings.NewReader(`{
+		"public":true,
+		"role":"read",
+		"metadata":{"reason":"publication supplement"}
+	}`))
+	publicReq.Header.Set("Content-Type", "application/json")
+	publicReq.Header.Set("X-Ultra-User-Id", "alice")
+	publicReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	publicRec := httptest.NewRecorder()
+	router.ServeHTTP(publicRec, publicReq)
+	if publicRec.Code != http.StatusCreated {
+		t.Fatalf("public share status = %d body=%s, want 201", publicRec.Code, publicRec.Body.String())
+	}
+
+	type listedResource struct {
+		FileID       string         `json:"file_id"`
+		ShareSummary map[string]any `json:"share_summary"`
+	}
+	decodeResources := func(rec *httptest.ResponseRecorder) []listedResource {
+		t.Helper()
+		var response struct {
+			Resources []listedResource `json:"resources"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode resources response: %v", err)
+		}
+		return response.Resources
+	}
+
+	aliceReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=shared_by_me&limit=20", nil)
+	aliceReq.Header.Set("X-Ultra-User-Id", "alice")
+	aliceReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	aliceRec := httptest.NewRecorder()
+	router.ServeHTTP(aliceRec, aliceReq)
+	if aliceRec.Code != http.StatusOK {
+		t.Fatalf("alice shared_by_me status = %d body=%s", aliceRec.Code, aliceRec.Body.String())
+	}
+	aliceResources := decodeResources(aliceRec)
+	if len(aliceResources) != 1 || aliceResources[0].FileID != "file_shared_by_alice" {
+		t.Fatalf("alice shared_by_me resources = %+v, want shared owned resource only", aliceResources)
+	}
+	if aliceResources[0].ShareSummary["share_status"] != "shared_by_me" || int(aliceResources[0].ShareSummary["active_grant_count"].(float64)) != 1 {
+		t.Fatalf("alice share summary = %+v, want shared_by_me with one active grant", aliceResources[0].ShareSummary)
+	}
+
+	privateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=private&limit=20", nil)
+	privateReq.Header.Set("X-Ultra-User-Id", "alice")
+	privateReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	privateRec := httptest.NewRecorder()
+	router.ServeHTTP(privateRec, privateReq)
+	if privateRec.Code != http.StatusOK {
+		t.Fatalf("alice private status = %d body=%s", privateRec.Code, privateRec.Body.String())
+	}
+	privateResources := decodeResources(privateRec)
+	if len(privateResources) != 1 || privateResources[0].FileID != "file_private_alice" || privateResources[0].ShareSummary["share_status"] != "private" {
+		t.Fatalf("alice private resources = %+v, want private resource with private summary", privateResources)
+	}
+
+	alicePublicReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=public&limit=20", nil)
+	alicePublicReq.Header.Set("X-Ultra-User-Id", "alice")
+	alicePublicReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	alicePublicRec := httptest.NewRecorder()
+	router.ServeHTTP(alicePublicRec, alicePublicReq)
+	if alicePublicRec.Code != http.StatusOK {
+		t.Fatalf("alice public status = %d body=%s", alicePublicRec.Code, alicePublicRec.Body.String())
+	}
+	alicePublicResources := decodeResources(alicePublicRec)
+	if len(alicePublicResources) != 1 || alicePublicResources[0].FileID != "file_public_alice" || alicePublicResources[0].ShareSummary["share_status"] != "public" {
+		t.Fatalf("alice public resources = %+v, want public resource with public summary", alicePublicResources)
+	}
+
+	bobReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=shared_with_me&limit=20", nil)
+	bobReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobRec := httptest.NewRecorder()
+	router.ServeHTTP(bobRec, bobReq)
+	if bobRec.Code != http.StatusOK {
+		t.Fatalf("bob shared_with_me status = %d body=%s", bobRec.Code, bobRec.Body.String())
+	}
+	bobResources := decodeResources(bobRec)
+	if len(bobResources) != 2 {
+		t.Fatalf("bob shared_with_me resources = %+v, want two shared resources", bobResources)
+	}
+	for _, resource := range bobResources {
+		if resource.ShareSummary["share_status"] != "shared_with_me" {
+			t.Fatalf("bob resource %s share summary = %+v, want shared_with_me", resource.FileID, resource.ShareSummary)
+		}
+	}
+
+	bobPublicReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=public&limit=20", nil)
+	bobPublicReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobPublicReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobPublicRec := httptest.NewRecorder()
+	router.ServeHTTP(bobPublicRec, bobPublicReq)
+	if bobPublicRec.Code != http.StatusOK {
+		t.Fatalf("bob public status = %d body=%s", bobPublicRec.Code, bobPublicRec.Body.String())
+	}
+	bobPublicResources := decodeResources(bobPublicRec)
+	if len(bobPublicResources) != 1 || bobPublicResources[0].FileID != "file_public_alice" || bobPublicResources[0].ShareSummary["share_status"] != "public" {
+		t.Fatalf("bob public resources = %+v, want public resource with public summary", bobPublicResources)
+	}
+	bobPrivateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?sharing=private&limit=20", nil)
+	bobPrivateReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobPrivateReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobPrivateRec := httptest.NewRecorder()
+	router.ServeHTTP(bobPrivateRec, bobPrivateReq)
+	if bobPrivateRec.Code != http.StatusOK {
+		t.Fatalf("bob private status = %d body=%s", bobPrivateRec.Code, bobPrivateRec.Body.String())
+	}
+	if resources := decodeResources(bobPrivateRec); len(resources) != 0 {
+		t.Fatalf("bob private resources = %+v, want no private resources leaked", resources)
+	}
+}
+
+func resourceEventsContain(events []domain.ResourceEventRecord, eventType string) bool {
+	for _, event := range events {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func resourceEventByType(events []domain.ResourceEventRecord, eventType string) (domain.ResourceEventRecord, bool) {
+	for _, event := range events {
+		if event.EventType == eventType {
+			return event, true
+		}
+	}
+	return domain.ResourceEventRecord{}, false
+}
+
+func stringSliceContainsAny(values []any, want string) bool {
+	for _, value := range values {
+		if got, ok := value.(string); ok && got == want {
+			return true
+		}
+	}
+	return false
+}
+
+type uploadSessionEventPayload struct {
+	EventType   string         `json:"event_type"`
+	ActorUserID string         `json:"actor_user_id"`
+	ActorOrgID  string         `json:"actor_org_id"`
+	Metadata    map[string]any `json:"metadata"`
+}
+
+func uploadSessionEventsContain(events []uploadSessionEventPayload, eventType string) bool {
+	for _, event := range events {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 func TestV2ResourcesListComesFromCatalogWhenNFSFileIsMissing(t *testing.T) {
 	t.Parallel()
 
@@ -2680,6 +4664,1863 @@ func TestV2UploadRejectsResourceQuotaAndCleansBlob(t *testing.T) {
 	}
 }
 
+func TestV2UploadSessionResumesChunkAndCommitsResource(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("field science pdf bytes")
+	payloadSHA := sha256.Sum256(payload)
+	firstChunk := payload[:6]
+	secondChunk := payload[6:]
+	firstSHA := sha256.Sum256(firstChunk)
+	secondSHA := sha256.Sum256(secondChunk)
+
+	createBody := fmt.Sprintf(`{
+		"idempotency_key":"field-session-1",
+		"project_id":"field-project",
+		"total_bytes":%d,
+		"files":[{
+			"file_token":"paper-1",
+			"original_name":"field-paper.pdf",
+			"relative_path":"papers/field-paper.pdf",
+			"content_type":"application/pdf",
+			"size_bytes":%d,
+			"declared_sha256":"%s"
+		}]
+	}`, len(payload), len(payload), hex.EncodeToString(payloadSHA[:]))
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "field-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create upload session status = %d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		Session domain.UploadSessionRecord       `json:"session"`
+		Files   []domain.UploadSessionFileRecord `json:"files"`
+		Chunks  []domain.UploadChunkRecord       `json:"chunks"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created upload session: %v", err)
+	}
+	if created.Session.SessionID == "" || created.Session.Status != "active" {
+		t.Fatalf("created session = %+v, want active session with id", created.Session)
+	}
+	if len(created.Files) != 1 || created.Files[0].Status != "pending" {
+		t.Fatalf("created files = %+v, want one pending file", created.Files)
+	}
+
+	chunkURL := "/v2/upload-sessions/" + created.Session.SessionID + "/files/paper-1/chunks/"
+	secondReq := httptest.NewRequest(http.MethodPut, chunkURL+"1", bytes.NewReader(secondChunk))
+	secondReq.Header.Set("X-Ultra-User-Id", "field-user")
+	secondReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	secondReq.Header.Set("X-Upload-Offset", strconv.Itoa(len(firstChunk)))
+	secondReq.Header.Set("X-Upload-Chunk-Sha256", hex.EncodeToString(secondSHA[:]))
+	secondRec := httptest.NewRecorder()
+	router.ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second chunk status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "field-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after partial upload = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var partial struct {
+		Session domain.UploadSessionRecord `json:"session"`
+		Chunks  []domain.UploadChunkRecord `json:"chunks"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &partial); err != nil {
+		t.Fatalf("decode partial upload session: %v", err)
+	}
+	if partial.Session.BytesVerified != int64(len(secondChunk)) || len(partial.Chunks) != 1 {
+		t.Fatalf("partial session = %+v chunks=%+v, want one verified resumed chunk", partial.Session, partial.Chunks)
+	}
+
+	resumeReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(createBody))
+	resumeReq.Header.Set("Content-Type", "application/json")
+	resumeReq.Header.Set("X-Ultra-User-Id", "field-user")
+	resumeReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	resumeRec := httptest.NewRecorder()
+	router.ServeHTTP(resumeRec, resumeReq)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("resume create status = %d body=%s, want existing session", resumeRec.Code, resumeRec.Body.String())
+	}
+	var resumed struct {
+		Session domain.UploadSessionRecord `json:"session"`
+		Chunks  []domain.UploadChunkRecord `json:"chunks"`
+	}
+	if err := json.Unmarshal(resumeRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resumed upload session: %v", err)
+	}
+	if resumed.Session.SessionID != created.Session.SessionID || resumed.Session.BytesVerified != int64(len(secondChunk)) || len(resumed.Chunks) != 1 {
+		t.Fatalf("resumed session = %+v chunks=%+v, want same partial session and chunk", resumed.Session, resumed.Chunks)
+	}
+
+	firstReq := httptest.NewRequest(http.MethodPut, chunkURL+"0", bytes.NewReader(firstChunk))
+	firstReq.Header.Set("X-Ultra-User-Id", "field-user")
+	firstReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	firstReq.Header.Set("X-Upload-Offset", "0")
+	firstReq.Header.Set("X-Upload-Chunk-Sha256", hex.EncodeToString(firstSHA[:]))
+	firstRec := httptest.NewRecorder()
+	router.ServeHTTP(firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first chunk status = %d body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	completeReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/files/paper-1/complete", nil)
+	completeReq.Header.Set("X-Ultra-User-Id", "field-user")
+	completeReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	completeRec := httptest.NewRecorder()
+	router.ServeHTTP(completeRec, completeReq)
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("complete session file status = %d body=%s", completeRec.Code, completeRec.Body.String())
+	}
+	var completed struct {
+		Session  domain.UploadSessionRecord     `json:"session"`
+		File     domain.UploadSessionFileRecord `json:"file"`
+		Resource uploadedFileRecord             `json:"resource"`
+	}
+	if err := json.Unmarshal(completeRec.Body.Bytes(), &completed); err != nil {
+		t.Fatalf("decode completed upload session file: %v", err)
+	}
+	if completed.Session.Status != "completed" || completed.Session.BytesCommitted != int64(len(payload)) {
+		t.Fatalf("completed session = %+v, want committed bytes and completed status", completed.Session)
+	}
+	if completed.File.ComputedSHA256 != hex.EncodeToString(payloadSHA[:]) || completed.File.Status != "completed" {
+		t.Fatalf("completed file = %+v, want computed sha and completed status", completed.File)
+	}
+	if completed.Resource.FileID == "" || completed.Resource.SHA256 != hex.EncodeToString(payloadSHA[:]) {
+		t.Fatalf("completed resource = %+v, want cataloged upload resource", completed.Resource)
+	}
+	committedPath := filepath.Join(uploadRoot, completed.Resource.FileID+"__field-paper.pdf")
+	committedBytes, err := os.ReadFile(committedPath)
+	if err != nil {
+		t.Fatalf("read committed upload: %v", err)
+	}
+	if !bytes.Equal(committedBytes, payload) {
+		t.Fatalf("committed payload = %q, want %q", committedBytes, payload)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=field-paper.pdf&limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "field-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list resources status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode listed resources: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Resources) != 1 || listed.Resources[0].FileID != completed.Resource.FileID {
+		t.Fatalf("listed resources = %+v, want committed session resource", listed)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "field-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "field-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("status with upload session events = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var audited struct {
+		Events []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &audited); err != nil {
+		t.Fatalf("decode upload session events: %v", err)
+	}
+	for _, want := range []string{"upload_session.created", "upload_session.file_completed", "upload_session.completed"} {
+		if !uploadSessionEventsContain(audited.Events, want) {
+			t.Fatalf("upload session events = %+v, want %s", audited.Events, want)
+		}
+	}
+	foundFileCompleted := false
+	for _, event := range audited.Events {
+		if event.EventType == "upload_session.file_completed" &&
+			event.ActorUserID == "field-user" &&
+			event.ActorOrgID == "field-org" &&
+			event.Metadata["file_token"] == "paper-1" &&
+			event.Metadata["resource_id"] == completed.Resource.FileID {
+			foundFileCompleted = true
+			break
+		}
+	}
+	if !foundFileCompleted {
+		t.Fatalf("upload session events = %+v, want file_completed metadata with file token/resource/actor", audited.Events)
+	}
+}
+
+func TestV2UploadSessionCommittedResourceSupportsCoreFileManagerActions(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("nifti volume bytes for nph cohort")
+	payloadSHA := sha256.Sum256(payload)
+	chunkSHA := sha256.Sum256(payload)
+	declaredSHA := hex.EncodeToString(payloadSHA[:])
+
+	createBody := fmt.Sprintf(`{
+		"idempotency_key":"core-file-manager-session",
+		"project_id":"nph-study",
+		"total_bytes":%d,
+		"files":[{
+			"file_token":"nph-volume-a",
+			"original_name":"subject-a-nph.nii.gz",
+			"relative_path":"nph/subject-a-nph.nii.gz",
+			"content_type":"application/gzip",
+			"size_bytes":%d,
+			"declared_sha256":"%s"
+		}]
+	}`, len(payload), len(payload), declaredSHA)
+	created := createUploadSessionForTest(t, router, createBody, "alice", "org-a", http.StatusCreated)
+	uploadChunkForTest(t, router, created.Session.SessionID, "nph-volume-a", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "alice", "org-a")
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "nph-volume-a", "alice", "org-a", http.StatusOK)
+	resourceID := completed.Resource.FileID
+	if resourceID == "" || completed.Resource.SHA256 != declaredSHA || completed.Resource.ProjectID != "nph-study" {
+		t.Fatalf("completed resource = %+v, want cataloged nph-study upload with checksum", completed.Resource)
+	}
+
+	ownerDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+resourceID+"/download", nil)
+	ownerDownloadReq.Header.Set("X-Ultra-User-Id", "alice")
+	ownerDownloadReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	ownerDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(ownerDownloadRec, ownerDownloadReq)
+	if ownerDownloadRec.Code != http.StatusOK {
+		t.Fatalf("owner download status = %d body=%s, want 200", ownerDownloadRec.Code, ownerDownloadRec.Body.String())
+	}
+	if !bytes.Equal(ownerDownloadRec.Body.Bytes(), payload) {
+		t.Fatalf("owner download body = %q, want committed payload", ownerDownloadRec.Body.String())
+	}
+
+	createFolderReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections", strings.NewReader(`{
+		"name":"NPH review folder",
+		"description":"Shared cohort files for review",
+		"collection_type":"folder",
+		"project_id":"nph-study",
+		"metadata":{"label":"NPH"}
+	}`))
+	createFolderReq.Header.Set("Content-Type", "application/json")
+	createFolderReq.Header.Set("X-Ultra-User-Id", "alice")
+	createFolderReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	createFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(createFolderRec, createFolderReq)
+	if createFolderRec.Code != http.StatusCreated {
+		t.Fatalf("create folder status = %d body=%s, want 201", createFolderRec.Code, createFolderRec.Body.String())
+	}
+	var createdFolder resourceCollectionResponse
+	if err := json.Unmarshal(createFolderRec.Body.Bytes(), &createdFolder); err != nil {
+		t.Fatalf("decode created folder: %v", err)
+	}
+	if createdFolder.Collection.CollectionID == "" || createdFolder.Collection.Name != "NPH review folder" {
+		t.Fatalf("created folder = %+v, want named folder", createdFolder.Collection)
+	}
+
+	addReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resource-collections/"+createdFolder.Collection.CollectionID+"/resources",
+		strings.NewReader(fmt.Sprintf(`{"resource_ids":[%q]}`, resourceID)),
+	)
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("X-Ultra-User-Id", "alice")
+	addReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	addRec := httptest.NewRecorder()
+	router.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add resource to folder status = %d body=%s, want 200", addRec.Code, addRec.Body.String())
+	}
+
+	ownerFolderReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+createdFolder.Collection.CollectionID+"/resources?q=subject-a&limit=10", nil)
+	ownerFolderReq.Header.Set("X-Ultra-User-Id", "alice")
+	ownerFolderReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	ownerFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(ownerFolderRec, ownerFolderReq)
+	if ownerFolderRec.Code != http.StatusOK {
+		t.Fatalf("owner folder resources status = %d body=%s, want 200", ownerFolderRec.Code, ownerFolderRec.Body.String())
+	}
+	var ownerFolder resourcesResponse
+	if err := json.Unmarshal(ownerFolderRec.Body.Bytes(), &ownerFolder); err != nil {
+		t.Fatalf("decode owner folder resources: %v", err)
+	}
+	if ownerFolder.Count != 1 || len(ownerFolder.Resources) != 1 || ownerFolder.Resources[0].FileID != resourceID {
+		t.Fatalf("owner folder resources = %+v, want committed upload resource", ownerFolder)
+	}
+	if ownerFolder.Resources[0].Principal.UserID != "alice" || ownerFolder.Resources[0].SHA256 != declaredSHA || ownerFolder.Resources[0].Status != "active" {
+		t.Fatalf("owner folder resource = %+v, want provenance, checksum, active state", ownerFolder.Resources[0])
+	}
+
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections/"+createdFolder.Collection.CollectionID+"/shares", strings.NewReader(`{
+		"grantee_user_id":"bob",
+		"grantee_org_id":"org-b",
+		"role":"read",
+		"metadata":{"reason":"collaborative NPH review"}
+	}`))
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("share folder status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shareResponse resourceCollectionShareGrantsCreateResponse
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shareResponse); err != nil {
+		t.Fatalf("decode folder share response: %v", err)
+	}
+	if shareResponse.Count != 1 || len(shareResponse.Grants) != 1 || shareResponse.Grants[0].ResourceID != resourceID {
+		t.Fatalf("folder share response = %+v, want one inherited resource grant", shareResponse)
+	}
+
+	bobCollectionsReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections?collection_type=folder&q=NPH%20review&limit=10", nil)
+	bobCollectionsReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobCollectionsReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobCollectionsRec := httptest.NewRecorder()
+	router.ServeHTTP(bobCollectionsRec, bobCollectionsReq)
+	if bobCollectionsRec.Code != http.StatusOK {
+		t.Fatalf("bob folder list status = %d body=%s, want 200", bobCollectionsRec.Code, bobCollectionsRec.Body.String())
+	}
+	var bobCollections resourceCollectionsResponse
+	if err := json.Unmarshal(bobCollectionsRec.Body.Bytes(), &bobCollections); err != nil {
+		t.Fatalf("decode bob folder list: %v", err)
+	}
+	if bobCollections.Count != 1 || len(bobCollections.Collections) != 1 || bobCollections.Collections[0].CollectionID != createdFolder.Collection.CollectionID {
+		t.Fatalf("bob folder list = %+v, want shared NPH folder", bobCollections)
+	}
+
+	bobFolderReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+createdFolder.Collection.CollectionID+"/resources?q=subject-a&limit=10", nil)
+	bobFolderReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobFolderReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(bobFolderRec, bobFolderReq)
+	if bobFolderRec.Code != http.StatusOK {
+		t.Fatalf("bob folder resources status = %d body=%s, want 200", bobFolderRec.Code, bobFolderRec.Body.String())
+	}
+	var bobFolder resourcesResponse
+	if err := json.Unmarshal(bobFolderRec.Body.Bytes(), &bobFolder); err != nil {
+		t.Fatalf("decode bob folder resources: %v", err)
+	}
+	if bobFolder.Count != 1 || len(bobFolder.Resources) != 1 || bobFolder.Resources[0].FileID != resourceID {
+		t.Fatalf("bob folder resources = %+v, want shared committed upload resource", bobFolder)
+	}
+	if !bobFolder.Resources[0].ShareSummary.SharedWithMe {
+		t.Fatalf("bob shared resource summary = %+v, want shared_with_me", bobFolder.Resources[0].ShareSummary)
+	}
+
+	bobDownloadReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+resourceID+"/download", nil)
+	bobDownloadReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDownloadReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDownloadRec, bobDownloadReq)
+	if bobDownloadRec.Code != http.StatusOK {
+		t.Fatalf("bob download status = %d body=%s, want 200", bobDownloadRec.Code, bobDownloadRec.Body.String())
+	}
+	if !bytes.Equal(bobDownloadRec.Body.Bytes(), payload) {
+		t.Fatalf("bob download body = %q, want original payload", bobDownloadRec.Body.String())
+	}
+
+	bobRenameReq := httptest.NewRequest(http.MethodPatch, "/v2/resource-collections/"+createdFolder.Collection.CollectionID, strings.NewReader(`{"name":"Bob rename attempt"}`))
+	bobRenameReq.Header.Set("Content-Type", "application/json")
+	bobRenameReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobRenameReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobRenameRec := httptest.NewRecorder()
+	router.ServeHTTP(bobRenameRec, bobRenameReq)
+	if bobRenameRec.Code != http.StatusNotFound {
+		t.Fatalf("bob rename shared folder status = %d body=%s, want owner-only 404", bobRenameRec.Code, bobRenameRec.Body.String())
+	}
+
+	charlieFolderReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+createdFolder.Collection.CollectionID+"/resources?limit=10", nil)
+	charlieFolderReq.Header.Set("X-Ultra-User-Id", "charlie")
+	charlieFolderReq.Header.Set("X-Ultra-Org-Id", "org-c")
+	charlieFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(charlieFolderRec, charlieFolderReq)
+	if charlieFolderRec.Code != http.StatusNotFound {
+		t.Fatalf("charlie folder resources status = %d body=%s, want 404", charlieFolderRec.Code, charlieFolderRec.Body.String())
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+resourceID+"/events?limit=20", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	for _, want := range []string{"resource.uploaded", "resource.collection_added", "resource.shared"} {
+		if !resourceEventsContain(events.Events, want) {
+			t.Fatalf("resource events = %+v, want %s audit event", events.Events, want)
+		}
+	}
+}
+
+func TestV2UploadSessionPauseResumeBlocksWrites(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("pause resume field upload")
+	payloadSHA := sha256.Sum256(payload)
+	chunkSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("pause-session-1", "pause-file", "pause-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+
+	created := createUploadSessionForTest(t, router, createBody, "pause-user", "pause-org", http.StatusCreated)
+	pauseReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/pause", nil)
+	pauseReq.Header.Set("X-Ultra-User-Id", "pause-user")
+	pauseReq.Header.Set("X-Ultra-Org-Id", "pause-org")
+	pauseRec := httptest.NewRecorder()
+	router.ServeHTTP(pauseRec, pauseReq)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("pause upload session status = %d body=%s, want 200", pauseRec.Code, pauseRec.Body.String())
+	}
+	var paused uploadSessionResponse
+	if err := json.Unmarshal(pauseRec.Body.Bytes(), &paused); err != nil {
+		t.Fatalf("decode paused upload session: %v", err)
+	}
+	if paused.Session.SessionID != created.Session.SessionID || paused.Session.Status != "paused" {
+		t.Fatalf("paused session = %+v, want same paused session", paused.Session)
+	}
+
+	chunkReq := httptest.NewRequest(http.MethodPut, "/v2/upload-sessions/"+created.Session.SessionID+"/files/pause-file/chunks/0", bytes.NewReader(payload))
+	chunkReq.Header.Set("X-Ultra-User-Id", "pause-user")
+	chunkReq.Header.Set("X-Ultra-Org-Id", "pause-org")
+	chunkReq.Header.Set("X-Upload-Offset", "0")
+	chunkReq.Header.Set("X-Upload-Chunk-Sha256", hex.EncodeToString(chunkSHA[:]))
+	chunkRec := httptest.NewRecorder()
+	router.ServeHTTP(chunkRec, chunkReq)
+	if chunkRec.Code != http.StatusConflict {
+		t.Fatalf("chunk while paused status = %d body=%s, want 409", chunkRec.Code, chunkRec.Body.String())
+	}
+	if !strings.Contains(chunkRec.Body.String(), "paused") {
+		t.Fatalf("chunk while paused body = %s, want paused conflict", chunkRec.Body.String())
+	}
+
+	completeRec := completeUploadSessionFileRaw(t, router, created.Session.SessionID, "pause-file", "pause-user", "pause-org")
+	if completeRec.Code != http.StatusConflict {
+		t.Fatalf("complete while paused status = %d body=%s, want 409", completeRec.Code, completeRec.Body.String())
+	}
+	if !strings.Contains(completeRec.Body.String(), "paused") {
+		t.Fatalf("complete while paused body = %s, want paused conflict", completeRec.Body.String())
+	}
+
+	resumeReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/resume", nil)
+	resumeReq.Header.Set("X-Ultra-User-Id", "pause-user")
+	resumeReq.Header.Set("X-Ultra-Org-Id", "pause-org")
+	resumeRec := httptest.NewRecorder()
+	router.ServeHTTP(resumeRec, resumeReq)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("resume upload session status = %d body=%s, want 200", resumeRec.Code, resumeRec.Body.String())
+	}
+	var resumed uploadSessionResponse
+	if err := json.Unmarshal(resumeRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resumed upload session: %v", err)
+	}
+	if resumed.Session.SessionID != created.Session.SessionID || resumed.Session.Status != "active" {
+		t.Fatalf("resumed session = %+v, want same active session", resumed.Session)
+	}
+
+	uploadChunkForTest(t, router, created.Session.SessionID, "pause-file", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "pause-user", "pause-org")
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "pause-file", "pause-user", "pause-org", http.StatusOK)
+	if completed.Session.Status != "completed" || completed.Resource.SHA256 != hex.EncodeToString(payloadSHA[:]) {
+		t.Fatalf("completed after resume = %+v resource=%+v, want committed resource", completed.Session, completed.Resource)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "pause-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "pause-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after pause/resume/complete = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var audited struct {
+		Events []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &audited); err != nil {
+		t.Fatalf("decode upload session event stream: %v", err)
+	}
+	for _, want := range []string{"upload_session.paused", "upload_session.resumed", "upload_session.completed"} {
+		if !uploadSessionEventsContain(audited.Events, want) {
+			t.Fatalf("upload session events = %+v, want %s", audited.Events, want)
+		}
+	}
+}
+
+func TestV2UploadSessionCancelIsAudited(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("cancel session audit")
+	payloadSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("cancel-audit-session", "cancel-file", "cancel-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+	created := createUploadSessionForTest(t, router, createBody, "cancel-user", "cancel-org", http.StatusCreated)
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/cancel", nil)
+	cancelReq.Header.Set("X-Ultra-User-Id", "cancel-user")
+	cancelReq.Header.Set("X-Ultra-Org-Id", "cancel-org")
+	cancelRec := httptest.NewRecorder()
+	router.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel upload session status = %d body=%s, want 200", cancelRec.Code, cancelRec.Body.String())
+	}
+	var canceled struct {
+		Session domain.UploadSessionRecord  `json:"session"`
+		Events  []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &canceled); err != nil {
+		t.Fatalf("decode canceled upload session: %v", err)
+	}
+	if canceled.Session.Status != "canceled" {
+		t.Fatalf("canceled session = %+v, want canceled status", canceled.Session)
+	}
+	if !uploadSessionEventsContain(canceled.Events, "upload_session.created") || !uploadSessionEventsContain(canceled.Events, "upload_session.canceled") {
+		t.Fatalf("upload session events = %+v, want created and canceled audit events", canceled.Events)
+	}
+	foundCancel := false
+	for _, event := range canceled.Events {
+		if event.EventType == "upload_session.canceled" &&
+			event.ActorUserID == "cancel-user" &&
+			event.ActorOrgID == "cancel-org" &&
+			event.Metadata["status"] == "canceled" {
+			foundCancel = true
+			break
+		}
+	}
+	if !foundCancel {
+		t.Fatalf("upload session events = %+v, want canceled metadata with actor and status", canceled.Events)
+	}
+}
+
+func TestV2UploadSessionCancelRejectsCompletedSession(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("completed upload sessions are terminal")
+	payloadSHA := sha256.Sum256(payload)
+	chunkSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("terminal-cancel-session", "terminal-cancel-file", "terminal-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+	created := createUploadSessionForTest(t, router, createBody, "terminal-user", "terminal-org", http.StatusCreated)
+
+	uploadChunkForTest(t, router, created.Session.SessionID, "terminal-cancel-file", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "terminal-user", "terminal-org")
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "terminal-cancel-file", "terminal-user", "terminal-org", http.StatusOK)
+	if completed.Session.Status != "completed" {
+		t.Fatalf("completed session = %+v, want completed before cancel", completed.Session)
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/cancel", nil)
+	cancelReq.Header.Set("X-Ultra-User-Id", "terminal-user")
+	cancelReq.Header.Set("X-Ultra-Org-Id", "terminal-org")
+	cancelRec := httptest.NewRecorder()
+	router.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusConflict {
+		t.Fatalf("cancel completed upload session status = %d body=%s, want 409", cancelRec.Code, cancelRec.Body.String())
+	}
+	if !strings.Contains(cancelRec.Body.String(), "completed") {
+		t.Fatalf("cancel completed upload session body = %s, want completed conflict", cancelRec.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "terminal-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "terminal-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after rejected terminal cancel = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var current struct {
+		Session domain.UploadSessionRecord  `json:"session"`
+		Events  []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode terminal upload session status: %v", err)
+	}
+	if current.Session.Status != "completed" || current.Session.BytesCommitted != int64(len(payload)) {
+		t.Fatalf("session after rejected terminal cancel = %+v, want completed with committed bytes", current.Session)
+	}
+	if uploadSessionEventsContain(current.Events, "upload_session.canceled") {
+		t.Fatalf("upload session events = %+v, want no canceled event after rejected terminal cancel", current.Events)
+	}
+	if !uploadSessionEventsContain(current.Events, "upload_session.completed") {
+		t.Fatalf("upload session events = %+v, want completed event preserved", current.Events)
+	}
+}
+
+func TestV2UploadSessionCancelRejectsCanceledSession(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("already canceled upload sessions stay terminal")
+	payloadSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("repeated-cancel-session", "repeated-cancel-file", "repeated-cancel.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+	created := createUploadSessionForTest(t, router, createBody, "repeated-cancel-user", "repeated-cancel-org", http.StatusCreated)
+
+	firstCancelReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/cancel", nil)
+	firstCancelReq.Header.Set("X-Ultra-User-Id", "repeated-cancel-user")
+	firstCancelReq.Header.Set("X-Ultra-Org-Id", "repeated-cancel-org")
+	firstCancelRec := httptest.NewRecorder()
+	router.ServeHTTP(firstCancelRec, firstCancelReq)
+	if firstCancelRec.Code != http.StatusOK {
+		t.Fatalf("initial cancel upload session status = %d body=%s, want 200", firstCancelRec.Code, firstCancelRec.Body.String())
+	}
+
+	secondCancelReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions/"+created.Session.SessionID+"/cancel", nil)
+	secondCancelReq.Header.Set("X-Ultra-User-Id", "repeated-cancel-user")
+	secondCancelReq.Header.Set("X-Ultra-Org-Id", "repeated-cancel-org")
+	secondCancelRec := httptest.NewRecorder()
+	router.ServeHTTP(secondCancelRec, secondCancelReq)
+	if secondCancelRec.Code != http.StatusConflict {
+		t.Fatalf("repeated cancel upload session status = %d body=%s, want 409", secondCancelRec.Code, secondCancelRec.Body.String())
+	}
+	if !strings.Contains(secondCancelRec.Body.String(), "canceled") {
+		t.Fatalf("repeated cancel upload session body = %s, want canceled conflict", secondCancelRec.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "repeated-cancel-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "repeated-cancel-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after repeated cancel = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var current struct {
+		Session domain.UploadSessionRecord  `json:"session"`
+		Events  []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode repeated-cancel upload session status: %v", err)
+	}
+	if current.Session.Status != "canceled" {
+		t.Fatalf("session after repeated cancel = %+v, want canceled terminal state", current.Session)
+	}
+	cancelEvents := 0
+	for _, event := range current.Events {
+		if event.EventType == "upload_session.canceled" {
+			cancelEvents++
+		}
+	}
+	if cancelEvents != 1 {
+		t.Fatalf("upload session events = %+v, want exactly one canceled event", current.Events)
+	}
+}
+
+func TestV2UploadSessionRejectsChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("valid chunk bytes")
+	payloadSHA := sha256.Sum256(payload)
+	createBody := fmt.Sprintf(`{
+		"total_bytes":%d,
+		"files":[{
+			"file_token":"nii-1",
+			"original_name":"brain.nii",
+			"content_type":"application/x-nifti",
+			"size_bytes":%d,
+			"declared_sha256":"%s"
+		}]
+	}`, len(payload), len(payload), hex.EncodeToString(payloadSHA[:]))
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "field-user")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create upload session status = %d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		Session domain.UploadSessionRecord `json:"session"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created upload session: %v", err)
+	}
+
+	chunkReq := httptest.NewRequest(http.MethodPut, "/v2/upload-sessions/"+created.Session.SessionID+"/files/nii-1/chunks/0", bytes.NewReader(payload))
+	chunkReq.Header.Set("X-Ultra-User-Id", "field-user")
+	chunkReq.Header.Set("X-Upload-Offset", "0")
+	chunkReq.Header.Set("X-Upload-Chunk-Sha256", strings.Repeat("0", 64))
+	chunkRec := httptest.NewRecorder()
+	router.ServeHTTP(chunkRec, chunkReq)
+	if chunkRec.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched chunk status = %d body=%s, want 400", chunkRec.Code, chunkRec.Body.String())
+	}
+	if !strings.Contains(chunkRec.Body.String(), "chunk checksum mismatch") {
+		t.Fatalf("mismatch body = %s, want checksum mismatch", chunkRec.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "field-user")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after mismatch = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var status struct {
+		Session domain.UploadSessionRecord `json:"session"`
+		Chunks  []domain.UploadChunkRecord `json:"chunks"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status after mismatch: %v", err)
+	}
+	if status.Session.BytesReceived != 0 || status.Session.BytesVerified != 0 {
+		t.Fatalf("status after mismatch = %+v, want no durable received or verified bytes", status.Session)
+	}
+	if len(status.Chunks) != 1 {
+		t.Fatalf("chunks after mismatch = %+v, want one durable failed chunk attempt", status.Chunks)
+	}
+	failedChunk := status.Chunks[0]
+	if failedChunk.Status != "failed" || failedChunk.Error != "chunk checksum mismatch" || failedChunk.SizeBytes != int64(len(payload)) {
+		t.Fatalf("failed chunk after mismatch = %+v, want failed checksum record with attempted size", failedChunk)
+	}
+}
+
+func TestV2UploadSessionRetriesFailedChecksumChunkAndCommits(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("retry after failed checksum chunk")
+	payloadSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("retry-failed-chunk-session", "retry-failed-chunk-file", "retry-failed.nii.gz", "application/x-nifti", payload, hex.EncodeToString(payloadSHA[:]))
+	created := createUploadSessionForTest(t, router, createBody, "retry-chunk-user", "retry-chunk-org", http.StatusCreated)
+
+	badReq := httptest.NewRequest(http.MethodPut, "/v2/upload-sessions/"+created.Session.SessionID+"/files/retry-failed-chunk-file/chunks/0", bytes.NewReader(payload))
+	badReq.Header.Set("X-Ultra-User-Id", "retry-chunk-user")
+	badReq.Header.Set("X-Ultra-Org-Id", "retry-chunk-org")
+	badReq.Header.Set("X-Upload-Offset", "0")
+	badReq.Header.Set("X-Upload-Chunk-Sha256", strings.Repeat("0", 64))
+	badRec := httptest.NewRecorder()
+	router.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("failed chunk attempt status = %d body=%s, want 400", badRec.Code, badRec.Body.String())
+	}
+
+	statusAfterFailureReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusAfterFailureReq.Header.Set("X-Ultra-User-Id", "retry-chunk-user")
+	statusAfterFailureReq.Header.Set("X-Ultra-Org-Id", "retry-chunk-org")
+	statusAfterFailureRec := httptest.NewRecorder()
+	router.ServeHTTP(statusAfterFailureRec, statusAfterFailureReq)
+	if statusAfterFailureRec.Code != http.StatusOK {
+		t.Fatalf("status after failed chunk attempt = %d body=%s", statusAfterFailureRec.Code, statusAfterFailureRec.Body.String())
+	}
+	var failedStatus struct {
+		Session domain.UploadSessionRecord `json:"session"`
+		Chunks  []domain.UploadChunkRecord `json:"chunks"`
+	}
+	if err := json.Unmarshal(statusAfterFailureRec.Body.Bytes(), &failedStatus); err != nil {
+		t.Fatalf("decode status after failed chunk attempt: %v", err)
+	}
+	if failedStatus.Session.BytesReceived != 0 || failedStatus.Session.BytesVerified != 0 || len(failedStatus.Chunks) != 1 || failedStatus.Chunks[0].Status != "failed" {
+		t.Fatalf("status after failed chunk attempt = session %+v chunks %+v, want one uncounted failed chunk", failedStatus.Session, failedStatus.Chunks)
+	}
+
+	uploadChunkForTest(t, router, created.Session.SessionID, "retry-failed-chunk-file", 0, 0, payload, hex.EncodeToString(payloadSHA[:]), "retry-chunk-user", "retry-chunk-org")
+
+	statusAfterRetryReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusAfterRetryReq.Header.Set("X-Ultra-User-Id", "retry-chunk-user")
+	statusAfterRetryReq.Header.Set("X-Ultra-Org-Id", "retry-chunk-org")
+	statusAfterRetryRec := httptest.NewRecorder()
+	router.ServeHTTP(statusAfterRetryRec, statusAfterRetryReq)
+	if statusAfterRetryRec.Code != http.StatusOK {
+		t.Fatalf("status after chunk retry = %d body=%s", statusAfterRetryRec.Code, statusAfterRetryRec.Body.String())
+	}
+	var retriedStatus struct {
+		Session domain.UploadSessionRecord `json:"session"`
+		Chunks  []domain.UploadChunkRecord `json:"chunks"`
+	}
+	if err := json.Unmarshal(statusAfterRetryRec.Body.Bytes(), &retriedStatus); err != nil {
+		t.Fatalf("decode status after chunk retry: %v", err)
+	}
+	if retriedStatus.Session.BytesReceived != int64(len(payload)) || retriedStatus.Session.BytesVerified != int64(len(payload)) {
+		t.Fatalf("status after chunk retry = %+v, want only retried bytes counted", retriedStatus.Session)
+	}
+	if len(retriedStatus.Chunks) != 1 || retriedStatus.Chunks[0].Status != "verified" || retriedStatus.Chunks[0].Error != "" {
+		t.Fatalf("chunks after retry = %+v, want failed manifest replaced by verified chunk", retriedStatus.Chunks)
+	}
+
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "retry-failed-chunk-file", "retry-chunk-user", "retry-chunk-org", http.StatusOK)
+	if completed.Session.Status != "completed" || completed.Session.BytesCommitted != int64(len(payload)) || completed.Resource.SHA256 != hex.EncodeToString(payloadSHA[:]) {
+		t.Fatalf("completed after failed chunk retry = session %+v resource %+v, want committed retried payload", completed.Session, completed.Resource)
+	}
+}
+
+func TestV2UploadSessionCompleteFileRetryIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	files, body, totalBytes := largeFolderUploadFixture(t, 2, "idempotent-complete-session")
+	created := createUploadSessionForTest(t, router, string(body), "complete-retry-user", "complete-retry-org", http.StatusCreated)
+
+	firstFile := files[0]
+	uploadChunkForTest(t, router, created.Session.SessionID, firstFile.token, 0, 0, firstFile.payload, firstFile.sha, "complete-retry-user", "complete-retry-org")
+	firstComplete := completeUploadSessionFileForTest(t, router, created.Session.SessionID, firstFile.token, "complete-retry-user", "complete-retry-org", http.StatusOK)
+	if firstComplete.Session.Status != "active" || firstComplete.File.Status != "completed" || firstComplete.Resource.FileID == "" {
+		t.Fatalf("first complete = session %+v file %+v resource %+v, want active session with completed file", firstComplete.Session, firstComplete.File, firstComplete.Resource)
+	}
+
+	retriedComplete := completeUploadSessionFileForTest(t, router, created.Session.SessionID, firstFile.token, "complete-retry-user", "complete-retry-org", http.StatusOK)
+	if retriedComplete.Session.Status != "active" || retriedComplete.File.Status != "completed" || retriedComplete.Resource.FileID != firstComplete.Resource.FileID {
+		t.Fatalf("retried complete = session %+v file %+v resource %+v, want same completed file/resource on active session", retriedComplete.Session, retriedComplete.File, retriedComplete.Resource)
+	}
+
+	secondFile := files[1]
+	uploadChunkForTest(t, router, created.Session.SessionID, secondFile.token, 0, 0, secondFile.payload, secondFile.sha, "complete-retry-user", "complete-retry-org")
+	secondComplete := completeUploadSessionFileForTest(t, router, created.Session.SessionID, secondFile.token, "complete-retry-user", "complete-retry-org", http.StatusOK)
+	if secondComplete.Session.Status != "completed" || secondComplete.Session.BytesCommitted != totalBytes {
+		t.Fatalf("second complete = %+v, want completed session with %d committed bytes", secondComplete.Session, totalBytes)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", "complete-retry-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "complete-retry-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after idempotent complete retry = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var current struct {
+		Events []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode upload session events after idempotent complete retry: %v", err)
+	}
+	firstFileCompletedEvents := 0
+	for _, event := range current.Events {
+		if event.EventType == "upload_session.file_completed" && event.Metadata["file_token"] == firstFile.token {
+			firstFileCompletedEvents++
+		}
+	}
+	if firstFileCompletedEvents != 1 {
+		t.Fatalf("upload session events = %+v, want one file_completed event for retried file", current.Events)
+	}
+}
+
+func TestV2UploadSessionResumesAfterHandlerRestart(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("restart durable upload bytes")
+	firstChunk := payload[:8]
+	secondChunk := payload[8:]
+	payloadSHA := sha256.Sum256(payload)
+	firstSHA := sha256.Sum256(firstChunk)
+	secondSHA := sha256.Sum256(secondChunk)
+	createBody := uploadSessionCreateBody("restart-session-1", "restart-file", "restart-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+
+	created := createUploadSessionForTest(t, router, createBody, "restart-user", "restart-org", http.StatusCreated)
+	if created.Limits.MaxParallelChunks != 4 || created.Limits.MaxParallelFiles != 4 || created.Limits.MaxFilesPerSession < 1000 {
+		t.Fatalf("upload session limits = %+v, want default backpressure hints", created.Limits)
+	}
+	uploadChunkForTest(t, router, created.Session.SessionID, "restart-file", 0, 0, firstChunk, hex.EncodeToString(firstSHA[:]), "restart-user", "restart-org")
+
+	restartedRouter := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	resumed := createUploadSessionForTest(t, restartedRouter, createBody, "restart-user", "restart-org", http.StatusOK)
+	if resumed.Session.SessionID != created.Session.SessionID || resumed.Session.BytesVerified != int64(len(firstChunk)) || len(resumed.Chunks) != 1 {
+		t.Fatalf("resumed after restart = %+v chunks=%+v, want same verified partial session", resumed.Session, resumed.Chunks)
+	}
+
+	uploadChunkForTest(t, restartedRouter, resumed.Session.SessionID, "restart-file", 1, int64(len(firstChunk)), secondChunk, hex.EncodeToString(secondSHA[:]), "restart-user", "restart-org")
+	completed := completeUploadSessionFileForTest(t, restartedRouter, resumed.Session.SessionID, "restart-file", "restart-user", "restart-org", http.StatusOK)
+	if completed.Session.Status != "completed" || completed.Resource.SHA256 != hex.EncodeToString(payloadSHA[:]) {
+		t.Fatalf("completed after restart = %+v resource=%+v, want completed expected sha", completed.Session, completed.Resource)
+	}
+}
+
+func TestV2UploadSessionRejectsIdempotencyReplayWithDifferentManifest(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: t.TempDir(),
+	})
+	firstPayload := []byte("first folder manifest")
+	firstSHA := sha256.Sum256(firstPayload)
+	firstBody := uploadSessionCreateBody("field-folder-idem", "scan-a", "scan-a.nii.gz", "application/gzip", firstPayload, hex.EncodeToString(firstSHA[:]))
+
+	created := createUploadSessionForTest(t, router, firstBody, "idem-user", "idem-org", http.StatusCreated)
+	replayed := createUploadSessionForTest(t, router, firstBody, "idem-user", "idem-org", http.StatusOK)
+	if replayed.Session.SessionID != created.Session.SessionID {
+		t.Fatalf("exact idempotency replay returned session %q, want original %q", replayed.Session.SessionID, created.Session.SessionID)
+	}
+
+	secondPayload := []byte("different folder manifest")
+	secondSHA := sha256.Sum256(secondPayload)
+	secondBody := uploadSessionCreateBody("field-folder-idem", "scan-b", "scan-b.nii.gz", "application/gzip", secondPayload, hex.EncodeToString(secondSHA[:]))
+	req := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(secondBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "idem-user")
+	req.Header.Set("X-Ultra-Org-Id", "idem-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("changed idempotency replay status = %d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "idempotency") {
+		t.Fatalf("changed idempotency replay body = %s, want idempotency conflict", rec.Body.String())
+	}
+}
+
+func TestV2UploadSessionResumesAfterPostgresBackedHandlerRestart(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	firstPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New first: %v", err)
+	}
+	if err := store.ApplyPostgresSchema(ctx, firstPool); err != nil {
+		firstPool.Close()
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+
+	uploadRoot := t.TempDir()
+	firstStore := store.NewPostgresStore(firstPool)
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(firstStore, eventbus.NewMemoryBus()),
+		Store:      firstStore,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("postgres durable restart upload bytes")
+	firstChunk := payload[:17]
+	secondChunk := payload[17:]
+	payloadSHA := sha256.Sum256(payload)
+	firstSHA := sha256.Sum256(firstChunk)
+	secondSHA := sha256.Sum256(secondChunk)
+	suffix := strings.ReplaceAll(domain.NewID("pg_restart"), "-", "_")
+	userID := "pg-restart-user-" + suffix
+	orgID := "pg-restart-org-" + suffix
+	fileToken := "pg-restart-file-" + suffix
+	createBody := uploadSessionCreateBody("pg-restart-session-"+suffix, fileToken, "postgres-restart-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+
+	created := createUploadSessionForTest(t, router, createBody, userID, orgID, http.StatusCreated)
+	uploadChunkForTest(t, router, created.Session.SessionID, fileToken, 0, 0, firstChunk, hex.EncodeToString(firstSHA[:]), userID, orgID)
+	firstPool.Close()
+
+	secondPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New second: %v", err)
+	}
+	defer secondPool.Close()
+	secondStore := store.NewPostgresStore(secondPool)
+	restartedRouter := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(secondStore, eventbus.NewMemoryBus()),
+		Store:      secondStore,
+		UploadRoot: uploadRoot,
+	})
+
+	resumed := createUploadSessionForTest(t, restartedRouter, createBody, userID, orgID, http.StatusOK)
+	if resumed.Session.SessionID != created.Session.SessionID || resumed.Session.BytesVerified != int64(len(firstChunk)) || len(resumed.Chunks) != 1 {
+		t.Fatalf("postgres resumed session = %+v chunks=%+v, want same verified partial session", resumed.Session, resumed.Chunks)
+	}
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", userID)
+	statusReq.Header.Set("X-Ultra-Org-Id", orgID)
+	statusRec := httptest.NewRecorder()
+	restartedRouter.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("postgres status after restart = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var status uploadSessionResponse
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode postgres status after restart: %v", err)
+	}
+	if status.Session.BytesVerified != int64(len(firstChunk)) || len(status.Chunks) != 1 || status.Chunks[0].Status != "verified" {
+		t.Fatalf("postgres status after restart = %+v chunks=%+v, want persisted verified chunk", status.Session, status.Chunks)
+	}
+
+	uploadChunkForTest(t, restartedRouter, resumed.Session.SessionID, fileToken, 1, int64(len(firstChunk)), secondChunk, hex.EncodeToString(secondSHA[:]), userID, orgID)
+	completed := completeUploadSessionFileForTest(t, restartedRouter, resumed.Session.SessionID, fileToken, userID, orgID, http.StatusOK)
+	if completed.Session.Status != "completed" || completed.Session.BytesCommitted != int64(len(payload)) || completed.Resource.SHA256 != hex.EncodeToString(payloadSHA[:]) {
+		t.Fatalf("postgres completed after restart = %+v resource=%+v, want committed expected sha", completed.Session, completed.Resource)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=postgres-restart-paper.pdf&limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", userID)
+	listReq.Header.Set("X-Ultra-Org-Id", orgID)
+	listRec := httptest.NewRecorder()
+	restartedRouter.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("postgres list resources after restart = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode postgres listed resources: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Resources) != 1 || listed.Resources[0].FileID != completed.Resource.FileID {
+		t.Fatalf("postgres listed resources = %+v, want committed upload resource", listed)
+	}
+}
+
+func TestV2UploadSessionRejectsTooManyFilesForBackpressure(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: t.TempDir(),
+	})
+	createReq := createUploadSessionRequest{
+		IdempotencyKey: "too-many-files-session",
+		TotalBytes:     int64(uploadSessionMaxFilesPerBatch + 1),
+		Files:          make([]createUploadSessionFileRequest, 0, uploadSessionMaxFilesPerBatch+1),
+	}
+	for i := 0; i <= uploadSessionMaxFilesPerBatch; i++ {
+		createReq.Files = append(createReq.Files, createUploadSessionFileRequest{
+			FileToken:    fmt.Sprintf("tile-%05d", i),
+			OriginalName: fmt.Sprintf("tile_%05d.ome.tiff", i),
+			ContentType:  "image/tiff",
+			SizeBytes:    1,
+		})
+	}
+	body, err := json.Marshal(createReq)
+	if err != nil {
+		t.Fatalf("marshal oversized upload-session manifest: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "too-many-user")
+	req.Header.Set("X-Ultra-Org-Id", "too-many-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized upload-session manifest status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cannot include more than 10000 files") {
+		t.Fatalf("oversized upload-session body = %s, want file-count limit", rec.Body.String())
+	}
+}
+
+func TestV2UploadSessionDeduplicatesExistingResourceByChecksum(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("duplicate scientific payload")
+	payloadSHA := sha256.Sum256(payload)
+	chunkSHA := sha256.Sum256(payload)
+
+	firstBody := uploadSessionCreateBody("dedupe-session-1", "dedupe-a", "same-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+	first := createUploadSessionForTest(t, router, firstBody, "dedupe-user", "dedupe-org", http.StatusCreated)
+	uploadChunkForTest(t, router, first.Session.SessionID, "dedupe-a", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "dedupe-user", "dedupe-org")
+	firstComplete := completeUploadSessionFileForTest(t, router, first.Session.SessionID, "dedupe-a", "dedupe-user", "dedupe-org", http.StatusOK)
+
+	secondBody := uploadSessionCreateBody("dedupe-session-2", "dedupe-b", "same-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
+	second := createUploadSessionForTest(t, router, secondBody, "dedupe-user", "dedupe-org", http.StatusCreated)
+	uploadChunkForTest(t, router, second.Session.SessionID, "dedupe-b", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "dedupe-user", "dedupe-org")
+	secondComplete := completeUploadSessionFileForTest(t, router, second.Session.SessionID, "dedupe-b", "dedupe-user", "dedupe-org", http.StatusOK)
+
+	if secondComplete.Resource.FileID != firstComplete.Resource.FileID {
+		t.Fatalf("duplicate upload returned file_id %q, want existing %q", secondComplete.Resource.FileID, firstComplete.Resource.FileID)
+	}
+	resources, err := listUploadResources(uploadRoot)
+	if err != nil {
+		t.Fatalf("list upload resources: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("upload root resources = %+v, want one committed blob after dedupe", resources)
+	}
+}
+
+func TestV2UploadSessionCompletesZeroByteFileWithoutChunks(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	emptySHA := sha256.Sum256(nil)
+	createBody := uploadSessionCreateBody("empty-file-session-1", "empty-file", "empty-marker.txt", "text/plain", nil, hex.EncodeToString(emptySHA[:]))
+	created := createUploadSessionForTest(t, router, createBody, "empty-user", "empty-org", http.StatusCreated)
+	if created.Session.TotalBytes != 0 || len(created.Chunks) != 0 {
+		t.Fatalf("created empty file session = %+v chunks=%+v, want zero-byte session with no chunks", created.Session, created.Chunks)
+	}
+
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "empty-file", "empty-user", "empty-org", http.StatusOK)
+	if completed.Session.Status != "completed" || completed.Session.BytesCommitted != 0 {
+		t.Fatalf("completed empty file session = %+v, want completed with zero committed bytes", completed.Session)
+	}
+	if completed.File.Status != "completed" || completed.File.SizeBytes != 0 {
+		t.Fatalf("completed empty file record = %+v, want completed zero-byte file", completed.File)
+	}
+	if completed.Resource.OriginalName != "empty-marker.txt" || completed.Resource.SizeBytes != 0 || completed.Resource.SHA256 != hex.EncodeToString(emptySHA[:]) {
+		t.Fatalf("completed empty resource = %+v, want empty file catalog record", completed.Resource)
+	}
+	committedPath := filepath.Join(uploadRoot, completed.Resource.FileID+"__empty-marker.txt")
+	committedBytes, err := os.ReadFile(committedPath)
+	if err != nil {
+		t.Fatalf("read committed empty upload: %v", err)
+	}
+	if len(committedBytes) != 0 {
+		t.Fatalf("committed empty file length = %d, want 0", len(committedBytes))
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=empty-marker.txt&limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "empty-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "empty-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list resources after empty upload = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode empty upload resources: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Resources) != 1 || listed.Resources[0].FileID != completed.Resource.FileID {
+		t.Fatalf("listed empty upload resources = %+v, want committed empty resource", listed)
+	}
+}
+
+func TestV2UploadSessionLargeFolderCatalogsManySmallFilesWithoutPerFileChunkScans(t *testing.T) {
+	t.Parallel()
+
+	const fileCount = 64
+	uploadRoot := t.TempDir()
+	counted := &countingUploadStore{
+		MemoryStore:     store.NewMemoryStore(),
+		chunksBySession: map[string][]domain.UploadChunkRecord{},
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(counted, eventbus.NewMemoryBus()),
+		Store:      counted,
+		UploadRoot: uploadRoot,
+	})
+
+	files, body, totalBytes := largeFolderUploadFixture(t, fileCount, "large-folder-session-1")
+
+	created := createUploadSessionForTest(t, router, string(body), "large-folder-user", "large-folder-org", http.StatusCreated)
+	if len(created.Files) != fileCount || created.Session.TotalBytes != totalBytes {
+		t.Fatalf("created large folder session files=%d total=%d, want files=%d total=%d", len(created.Files), created.Session.TotalBytes, fileCount, totalBytes)
+	}
+	if counted.listSessionFilesCalls != 0 {
+		t.Fatalf("large folder create re-listed all session files %d times; want create response to reuse inserted file records", counted.listSessionFilesCalls)
+	}
+	if counted.listChunksBySessionCalls != 0 || counted.listChunkByFileCalls != 0 {
+		t.Fatalf("large folder create listed chunks by session=%d by file=%d; want no chunk hydration before uploads start", counted.listChunksBySessionCalls, counted.listChunkByFileCalls)
+	}
+	if counted.upsertSessionFileCalls != 0 {
+		t.Fatalf("large folder create upserted files individually %d times; want batched manifest insert", counted.upsertSessionFileCalls)
+	}
+	for _, file := range created.Files {
+		if file.RelativePath == "" {
+			t.Fatalf("created file %q lost relative path", file.FileToken)
+		}
+	}
+	counted.listSessionFilesCalls = 0
+	counted.updateSessionCalls = 0
+	counted.listResourcesCalls = 0
+
+	var lastComplete uploadSessionFileCompleteResponse
+	for _, file := range files {
+		uploadChunkForTest(t, router, created.Session.SessionID, file.token, 0, 0, file.payload, file.sha, "large-folder-user", "large-folder-org")
+		lastComplete = completeUploadSessionFileForTest(t, router, created.Session.SessionID, file.token, "large-folder-user", "large-folder-org", http.StatusOK)
+	}
+	if lastComplete.Session.Status != "completed" || lastComplete.Session.BytesCommitted != totalBytes {
+		t.Fatalf("completed large folder session = %+v, want completed with %d committed bytes", lastComplete.Session, totalBytes)
+	}
+	counted.upsertResourceCalls = 0
+	counted.ownerLookupCalls = 0
+	counted.ownerBatchLookupCalls = 0
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=100", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "large-folder-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "large-folder-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list large folder resources status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode large folder resources: %v", err)
+	}
+	if listed.Count != fileCount || len(listed.Resources) != fileCount {
+		t.Fatalf("listed large folder resources count=%d len=%d, want %d", listed.Count, len(listed.Resources), fileCount)
+	}
+	if counted.listChunkByFileCalls > fileCount+2 {
+		t.Fatalf("large folder upload made %d per-file chunk scans for %d files; want aggregate session accounting", counted.listChunkByFileCalls, fileCount)
+	}
+	if counted.sessionTotalsCalls > 2 {
+		t.Fatalf("large folder upload read aggregate session totals %d times for %d files; want stored counters on the hot path", counted.sessionTotalsCalls, fileCount)
+	}
+	if counted.listChunksBySessionCalls > 1 {
+		t.Fatalf("large folder upload materialized session chunks %d times; want totals aggregation for byte accounting", counted.listChunksBySessionCalls)
+	}
+	if counted.listSessionFilesCalls > 2 {
+		t.Fatalf("large folder upload listed all session files %d times after create for %d files; want direct file lookup during chunk and complete", counted.listSessionFilesCalls, fileCount)
+	}
+	if counted.updateSessionCalls > 2 {
+		t.Fatalf("large folder upload updated session %d times for %d one-chunk files; want stored accounting to avoid per-file session writes", counted.updateSessionCalls, fileCount)
+	}
+	if counted.listResourcesCalls != 0 {
+		t.Fatalf("large folder upload scanned the full resource catalog %d times with no configured quotas; want quota accounting to stay lazy", counted.listResourcesCalls)
+	}
+	if counted.upsertResourceCalls != 0 {
+		t.Fatalf("large folder first list re-cataloged %d already committed resources; want migration to skip catalog rows created during upload completion", counted.upsertResourceCalls)
+	}
+	if counted.ownerLookupCalls != 0 {
+		t.Fatalf("large folder first list checked %d already committed resources one by one; want batched owner/resource existence checks", counted.ownerLookupCalls)
+	}
+	if counted.ownerBatchLookupCalls > 1 {
+		t.Fatalf("large folder first list made %d batched owner/resource checks for one owner; want at most one", counted.ownerBatchLookupCalls)
+	}
+}
+
+func TestOrganizationByIDUsesExactLookupWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	org := domain.Organization{
+		OrgID:     "bench-org",
+		Name:      "Benchmark Organization",
+		Status:    "active",
+		CreatedAt: domain.Now(),
+		UpdatedAt: domain.Now(),
+		Metadata:  domain.JSONMap{"source": "test"},
+	}
+	mem := store.NewMemoryStore()
+	store := &exactOrganizationLookupStore{MemoryStore: mem, org: org}
+	found, ok, err := (ServerDeps{Store: store}).organizationByID(context.Background(), " bench-org ")
+	if err != nil {
+		t.Fatalf("organizationByID: %v", err)
+	}
+	if !ok || found.OrgID != org.OrgID {
+		t.Fatalf("organizationByID = %+v found=%t, want exact org", found, ok)
+	}
+	if store.getCalls != 1 {
+		t.Fatalf("GetOrganization calls = %d, want 1", store.getCalls)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("ListOrganizations calls = %d, want exact lookup without full list scan", store.listCalls)
+	}
+}
+
+func BenchmarkV2UploadSessionManySmallFiles(b *testing.B) {
+	for _, fileCount := range []int{1000, 10000} {
+		b.Run(fmt.Sprintf("%d_files", fileCount), func(b *testing.B) {
+			files, body, totalBytes := largeFolderUploadFixture(b, fileCount, "bench-folder-session")
+			b.ReportAllocs()
+			b.SetBytes(totalBytes)
+			for i := 0; i < b.N; i++ {
+				uploadRoot := b.TempDir()
+				mem := store.NewMemoryStore()
+				router := NewRouter(ServerDeps{
+					Version:    "test-version",
+					Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+					Store:      mem,
+					UploadRoot: uploadRoot,
+				})
+				created := createUploadSessionForBench(b, router, string(body), "bench-folder-user", "bench-folder-org", http.StatusCreated)
+				for _, file := range files {
+					uploadChunkForBench(b, router, created.Session.SessionID, file.token, 0, 0, file.payload, file.sha, "bench-folder-user", "bench-folder-org")
+					completeUploadSessionFileForBench(b, router, created.Session.SessionID, file.token, "bench-folder-user", "bench-folder-org", http.StatusOK)
+				}
+				totalListed := 0
+				for offset := 0; offset < fileCount; offset += 1000 {
+					listReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v2/resources?limit=1000&offset=%d", offset), nil)
+					listReq.Header.Set("X-Ultra-User-Id", "bench-folder-user")
+					listReq.Header.Set("X-Ultra-Org-Id", "bench-folder-org")
+					listRec := httptest.NewRecorder()
+					router.ServeHTTP(listRec, listReq)
+					if listRec.Code != http.StatusOK {
+						b.Fatalf("list benchmark resources status = %d body=%s", listRec.Code, listRec.Body.String())
+					}
+					var listed resourcesResponse
+					if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+						b.Fatalf("decode benchmark resources: %v", err)
+					}
+					totalListed += len(listed.Resources)
+					if listed.Count != fileCount {
+						b.Fatalf("benchmark listed resources count=%d, want %d", listed.Count, fileCount)
+					}
+				}
+				if totalListed != fileCount {
+					b.Fatalf("benchmark listed resources across pages=%d, want %d", totalListed, fileCount)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkV2UploadSessionManySmallFilesPostgres(b *testing.B) {
+	dsn := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL"))
+	if dsn == "" {
+		b.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		b.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		b.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+
+	for _, fileCount := range []int{1000, 10000} {
+		b.Run(fmt.Sprintf("%d_files", fileCount), func(b *testing.B) {
+			files, body, totalBytes := largeFolderUploadFixture(b, fileCount, "bench-postgres-folder-session")
+			b.ReportAllocs()
+			b.SetBytes(totalBytes)
+			for i := 0; i < b.N; i++ {
+				uploadRoot := b.TempDir()
+				pgStore := store.NewPostgresStore(pool)
+				router := NewRouter(ServerDeps{
+					Version:    "test-version",
+					Runs:       runcontrol.NewService(pgStore, eventbus.NewMemoryBus()),
+					Store:      pgStore,
+					UploadRoot: uploadRoot,
+				})
+				suffix := strings.ReplaceAll(domain.NewID("pg_bench"), "-", "_")
+				userID := "bench-postgres-folder-user-" + suffix
+				orgID := "bench-postgres-folder-org-" + suffix
+				created := createUploadSessionForBench(b, router, string(body), userID, orgID, http.StatusCreated)
+				for _, file := range files {
+					uploadChunkForBench(b, router, created.Session.SessionID, file.token, 0, 0, file.payload, file.sha, userID, orgID)
+					completeUploadSessionFileForBench(b, router, created.Session.SessionID, file.token, userID, orgID, http.StatusOK)
+				}
+				totalListed := 0
+				for offset := 0; offset < fileCount; offset += 1000 {
+					listReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v2/resources?limit=1000&offset=%d", offset), nil)
+					listReq.Header.Set("X-Ultra-User-Id", userID)
+					listReq.Header.Set("X-Ultra-Org-Id", orgID)
+					listRec := httptest.NewRecorder()
+					router.ServeHTTP(listRec, listReq)
+					if listRec.Code != http.StatusOK {
+						b.Fatalf("list postgres benchmark resources status = %d body=%s", listRec.Code, listRec.Body.String())
+					}
+					var listed resourcesResponse
+					if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+						b.Fatalf("decode postgres benchmark resources: %v", err)
+					}
+					totalListed += len(listed.Resources)
+					if listed.Count != fileCount {
+						b.Fatalf("postgres benchmark listed resources count=%d, want %d", listed.Count, fileCount)
+					}
+				}
+				if totalListed != fileCount {
+					b.Fatalf("postgres benchmark listed resources across pages=%d, want %d", totalListed, fileCount)
+				}
+			}
+		})
+	}
+}
+
+func TestV2UploadSessionRejectsTamperedVerifiedChunkBeforeCommit(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	payload := []byte("science-data")
+	chunkSHA := sha256.Sum256(payload)
+	createBody := uploadSessionCreateBody("tamper-session-1", "tamper-file", "tamper.bin", "application/octet-stream", payload, "")
+
+	created := createUploadSessionForTest(t, router, createBody, "tamper-user", "tamper-org", http.StatusCreated)
+	uploadChunkForTest(t, router, created.Session.SessionID, "tamper-file", 0, 0, payload, hex.EncodeToString(chunkSHA[:]), "tamper-user", "tamper-org")
+	chunkPath := uploadSessionChunkPath(uploadRoot, created.Session.SessionID, "tamper-file", 0)
+	if err := os.WriteFile(chunkPath, []byte("changed-data"), 0o644); err != nil {
+		t.Fatalf("tamper staged chunk: %v", err)
+	}
+
+	rec := completeUploadSessionFileRaw(t, router, created.Session.SessionID, "tamper-file", "tamper-user", "tamper-org")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("tampered complete status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "chunk checksum mismatch") {
+		t.Fatalf("tampered complete body = %s, want chunk checksum mismatch", rec.Body.String())
+	}
+	resources, err := listUploadResources(uploadRoot)
+	if err != nil {
+		t.Fatalf("list upload resources: %v", err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("resources after tampered commit = %+v, want none", resources)
+	}
+}
+
+func TestV2UploadSessionRejectsConflictingVerifiedChunkReplay(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	original := []byte("chunk-v1")
+	conflicting := []byte("chunk-v2")
+	originalSHA := sha256.Sum256(original)
+	conflictingSHA := sha256.Sum256(conflicting)
+	createBody := uploadSessionCreateBody("verified-conflict-session-1", "verified-conflict-file", "field-scan.bin", "application/octet-stream", original, "")
+
+	created := createUploadSessionForTest(t, router, createBody, "verified-conflict-user", "verified-conflict-org", http.StatusCreated)
+	uploadChunkForTest(t, router, created.Session.SessionID, "verified-conflict-file", 0, 0, original, hex.EncodeToString(originalSHA[:]), "verified-conflict-user", "verified-conflict-org")
+
+	conflictReq := httptest.NewRequest(
+		http.MethodPut,
+		"/v2/upload-sessions/"+created.Session.SessionID+"/files/verified-conflict-file/chunks/0",
+		bytes.NewReader(conflicting),
+	)
+	conflictReq.Header.Set("X-Ultra-User-Id", "verified-conflict-user")
+	conflictReq.Header.Set("X-Ultra-Org-Id", "verified-conflict-org")
+	conflictReq.Header.Set("X-Upload-Offset", "0")
+	conflictReq.Header.Set("X-Upload-Chunk-Sha256", hex.EncodeToString(conflictingSHA[:]))
+	conflictRec := httptest.NewRecorder()
+	router.ServeHTTP(conflictRec, conflictReq)
+	if conflictRec.Code != http.StatusConflict {
+		t.Fatalf("conflicting verified chunk replay status = %d body=%s, want 409", conflictRec.Code, conflictRec.Body.String())
+	}
+
+	completed := completeUploadSessionFileForTest(t, router, created.Session.SessionID, "verified-conflict-file", "verified-conflict-user", "verified-conflict-org", http.StatusOK)
+	committedPath := filepath.Join(uploadRoot, completed.Resource.FileID+"__field-scan.bin")
+	committedBytes, err := os.ReadFile(committedPath)
+	if err != nil {
+		t.Fatalf("read committed upload: %v", err)
+	}
+	if !bytes.Equal(committedBytes, original) {
+		t.Fatalf("committed bytes = %q, want original verified chunk %q", committedBytes, original)
+	}
+	if completed.Resource.SHA256 != hex.EncodeToString(originalSHA[:]) {
+		t.Fatalf("completed resource sha = %q, want original verified digest", completed.Resource.SHA256)
+	}
+}
+
+type countingUploadStore struct {
+	*store.MemoryStore
+	listSessionFilesCalls    int
+	listChunkByFileCalls     int
+	listChunksBySessionCalls int
+	sessionTotalsCalls       int
+	updateSessionCalls       int
+	listResourcesCalls       int
+	upsertSessionFileCalls   int
+	upsertResourceCalls      int
+	ownerLookupCalls         int
+	ownerBatchLookupCalls    int
+	chunksBySession          map[string][]domain.UploadChunkRecord
+}
+
+type exactOrganizationLookupStore struct {
+	*store.MemoryStore
+	org       domain.Organization
+	getCalls  int
+	listCalls int
+}
+
+func (s *exactOrganizationLookupStore) ListOrganizations(context.Context, int, string) ([]domain.Organization, error) {
+	s.listCalls++
+	return []domain.Organization{s.org}, nil
+}
+
+func (s *exactOrganizationLookupStore) GetOrganization(_ context.Context, orgID string) (domain.Organization, bool, error) {
+	s.getCalls++
+	if strings.TrimSpace(orgID) != s.org.OrgID {
+		return domain.Organization{}, false, nil
+	}
+	return s.org, true, nil
+}
+
+type uploadFileFixture struct {
+	token   string
+	name    string
+	path    string
+	payload []byte
+	sha     string
+}
+
+type testHelper interface {
+	Helper()
+	Fatalf(string, ...any)
+}
+
+func largeFolderUploadFixture(tb testHelper, fileCount int, idempotencyKey string) ([]uploadFileFixture, []byte, int64) {
+	tb.Helper()
+	files := make([]uploadFileFixture, 0, fileCount)
+	createReq := createUploadSessionRequest{
+		IdempotencyKey:     idempotencyKey,
+		BrowserFingerprint: "field-folder-2026-06",
+		ProjectID:          "frontier-field-project",
+		Files:              make([]createUploadSessionFileRequest, 0, fileCount),
+	}
+	var totalBytes int64
+	for i := 0; i < fileCount; i++ {
+		payload := []byte(fmt.Sprintf("small microscopy tile %03d", i))
+		sum := sha256.Sum256(payload)
+		name := fmt.Sprintf("tile_%03d.ome.tiff", i)
+		token := fmt.Sprintf("tile-%03d", i)
+		relativePath := fmt.Sprintf("field-run-a/plate-%02d/%s", i/16, name)
+		files = append(files, uploadFileFixture{
+			token:   token,
+			name:    name,
+			path:    relativePath,
+			payload: payload,
+			sha:     hex.EncodeToString(sum[:]),
+		})
+		totalBytes += int64(len(payload))
+		createReq.Files = append(createReq.Files, createUploadSessionFileRequest{
+			FileToken:      token,
+			OriginalName:   name,
+			RelativePath:   relativePath,
+			ContentType:    "image/tiff",
+			SizeBytes:      int64(len(payload)),
+			DeclaredSHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	createReq.TotalBytes = totalBytes
+	body, err := json.Marshal(createReq)
+	if err != nil {
+		tb.Fatalf("marshal large folder create request: %v", err)
+	}
+	return files, body, totalBytes
+}
+
+func (s *countingUploadStore) UpsertUploadChunk(ctx context.Context, input domain.UpsertUploadChunkInput) (domain.UploadChunkRecord, error) {
+	chunk, err := s.MemoryStore.UpsertUploadChunk(ctx, input)
+	if err != nil {
+		return domain.UploadChunkRecord{}, err
+	}
+	existing := s.chunksBySession[chunk.SessionID]
+	replaced := false
+	for i := range existing {
+		if existing[i].FileToken == chunk.FileToken && existing[i].ChunkIndex == chunk.ChunkIndex {
+			existing[i] = chunk
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		existing = append(existing, chunk)
+	}
+	s.chunksBySession[chunk.SessionID] = existing
+	return chunk, nil
+}
+
+func (s *countingUploadStore) UpdateUploadSession(ctx context.Context, input domain.UpdateUploadSessionInput) (domain.UploadSessionRecord, error) {
+	s.updateSessionCalls++
+	return s.MemoryStore.UpdateUploadSession(ctx, input)
+}
+
+func (s *countingUploadStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	s.upsertResourceCalls++
+	return s.MemoryStore.UpsertResource(ctx, input)
+}
+
+func (s *countingUploadStore) GetResourceForOwner(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	s.ownerLookupCalls++
+	return s.MemoryStore.GetResourceForOwner(ctx, resourceID, userID, orgID)
+}
+
+func (s *countingUploadStore) ListResourceIDsForOwner(ctx context.Context, userID string, orgID string, resourceIDs []string) (map[string]bool, error) {
+	s.ownerBatchLookupCalls++
+	return s.MemoryStore.ListResourceIDsForOwner(ctx, userID, orgID, resourceIDs)
+}
+
+func (s *countingUploadStore) UpsertUploadSessionFile(ctx context.Context, input domain.UpsertUploadSessionFileInput) (domain.UploadSessionFileRecord, error) {
+	s.upsertSessionFileCalls++
+	return s.MemoryStore.UpsertUploadSessionFile(ctx, input)
+}
+
+func (s *countingUploadStore) ListResources(ctx context.Context, limit int, offset int) ([]domain.ResourceRecord, error) {
+	s.listResourcesCalls++
+	return s.MemoryStore.ListResources(ctx, limit, offset)
+}
+
+func (s *countingUploadStore) ListUploadSessionFiles(ctx context.Context, sessionID string) ([]domain.UploadSessionFileRecord, error) {
+	s.listSessionFilesCalls++
+	return s.MemoryStore.ListUploadSessionFiles(ctx, sessionID)
+}
+
+func (s *countingUploadStore) ListUploadChunks(ctx context.Context, sessionID string, fileToken string) ([]domain.UploadChunkRecord, error) {
+	s.listChunkByFileCalls++
+	return s.MemoryStore.ListUploadChunks(ctx, sessionID, fileToken)
+}
+
+func (s *countingUploadStore) ListUploadSessionChunks(ctx context.Context, sessionID string) ([]domain.UploadChunkRecord, error) {
+	_ = ctx
+	s.listChunksBySessionCalls++
+	chunks := append([]domain.UploadChunkRecord(nil), s.chunksBySession[strings.TrimSpace(sessionID)]...)
+	sort.Slice(chunks, func(i, j int) bool {
+		if chunks[i].FileToken == chunks[j].FileToken {
+			return chunks[i].ChunkIndex < chunks[j].ChunkIndex
+		}
+		return chunks[i].FileToken < chunks[j].FileToken
+	})
+	return chunks, nil
+}
+
+func (s *countingUploadStore) GetUploadSessionTotals(ctx context.Context, sessionID string) (domain.UploadSessionTotals, error) {
+	s.sessionTotalsCalls++
+	return s.MemoryStore.GetUploadSessionTotals(ctx, sessionID)
+}
+
+type overLimitDataAgentQueryStore struct {
+	*store.MemoryStore
+	totalCount    int
+	lastListInput domain.ResourceListInput
+}
+
+func (s *overLimitDataAgentQueryStore) ListResourcesForUser(ctx context.Context, input domain.ResourceListInput) (domain.ResourceListPage, error) {
+	s.lastListInput = input
+	if s.totalCount <= 0 {
+		return s.MemoryStore.ListResourcesForUser(ctx, input)
+	}
+	return domain.ResourceListPage{
+		TotalCount: s.totalCount,
+		Limit:      input.Limit,
+		Offset:     input.Offset,
+	}, nil
+}
+
+func uploadSessionCreateBody(idempotencyKey string, fileToken string, originalName string, contentType string, payload []byte, declaredSHA string) string {
+	declaredField := ""
+	if declaredSHA != "" {
+		declaredField = fmt.Sprintf(`,"declared_sha256":%q`, declaredSHA)
+	}
+	return fmt.Sprintf(`{
+		"idempotency_key":%q,
+		"total_bytes":%d,
+		"files":[{
+			"file_token":%q,
+			"original_name":%q,
+			"content_type":%q,
+			"size_bytes":%d%s
+		}]
+	}`, idempotencyKey, len(payload), fileToken, originalName, contentType, len(payload), declaredField)
+}
+
+func createUploadSessionForTest(t *testing.T, router http.Handler, body string, userID string, orgID string, wantStatus int) uploadSessionResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != wantStatus {
+		t.Fatalf("create upload session status = %d body=%s, want %d", rec.Code, rec.Body.String(), wantStatus)
+	}
+	var response uploadSessionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode upload session response: %v", err)
+	}
+	return response
+}
+
+func createUploadSessionForBench(b *testing.B, router http.Handler, body string, userID string, orgID string, wantStatus int) uploadSessionResponse {
+	b.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v2/upload-sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != wantStatus {
+		b.Fatalf("create upload session status = %d body=%s, want %d", rec.Code, rec.Body.String(), wantStatus)
+	}
+	var response uploadSessionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		b.Fatalf("decode upload session response: %v", err)
+	}
+	return response
+}
+
+func uploadChunkForTest(t *testing.T, router http.Handler, sessionID string, fileToken string, chunkIndex int, offset int64, payload []byte, chunkSHA string, userID string, orgID string) uploadChunkResponse {
+	t.Helper()
+	req := httptest.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("/v2/upload-sessions/%s/files/%s/chunks/%d", sessionID, fileToken, chunkIndex),
+		bytes.NewReader(payload),
+	)
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	req.Header.Set("X-Upload-Offset", strconv.FormatInt(offset, 10))
+	req.Header.Set("X-Upload-Chunk-Sha256", chunkSHA)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload chunk status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var response uploadChunkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode upload chunk response: %v", err)
+	}
+	return response
+}
+
+func uploadChunkForBench(b *testing.B, router http.Handler, sessionID string, fileToken string, chunkIndex int, offset int64, payload []byte, chunkSHA string, userID string, orgID string) uploadChunkResponse {
+	b.Helper()
+	req := httptest.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("/v2/upload-sessions/%s/files/%s/chunks/%d", sessionID, fileToken, chunkIndex),
+		bytes.NewReader(payload),
+	)
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	req.Header.Set("X-Upload-Offset", strconv.FormatInt(offset, 10))
+	req.Header.Set("X-Upload-Chunk-Sha256", chunkSHA)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		b.Fatalf("upload chunk status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var response uploadChunkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		b.Fatalf("decode upload chunk response: %v", err)
+	}
+	return response
+}
+
+func completeUploadSessionFileForTest(t *testing.T, router http.Handler, sessionID string, fileToken string, userID string, orgID string, wantStatus int) uploadSessionFileCompleteResponse {
+	t.Helper()
+	rec := completeUploadSessionFileRaw(t, router, sessionID, fileToken, userID, orgID)
+	if rec.Code != wantStatus {
+		t.Fatalf("complete upload session file status = %d body=%s, want %d", rec.Code, rec.Body.String(), wantStatus)
+	}
+	var response uploadSessionFileCompleteResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode upload session complete response: %v", err)
+	}
+	return response
+}
+
+func completeUploadSessionFileForBench(b *testing.B, router http.Handler, sessionID string, fileToken string, userID string, orgID string, wantStatus int) uploadSessionFileCompleteResponse {
+	b.Helper()
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/v2/upload-sessions/%s/files/%s/complete", sessionID, fileToken), nil)
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != wantStatus {
+		b.Fatalf("complete upload session file status = %d body=%s, want %d", rec.Code, rec.Body.String(), wantStatus)
+	}
+	var response uploadSessionFileCompleteResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		b.Fatalf("decode upload session complete response: %v", err)
+	}
+	return response
+}
+
+func completeUploadSessionFileRaw(t *testing.T, router http.Handler, sessionID string, fileToken string, userID string, orgID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/v2/upload-sessions/%s/files/%s/complete", sessionID, fileToken), nil)
+	req.Header.Set("X-Ultra-User-Id", userID)
+	req.Header.Set("X-Ultra-Org-Id", orgID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestUploadCatalogMigrationSmokeExistingRoot(t *testing.T) {
 	root := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_UPLOAD_ROOT_SMOKE"))
 	if root == "" {
@@ -2709,6 +6550,1857 @@ func TestUploadCatalogMigrationSmokeExistingRoot(t *testing.T) {
 	}
 	if len(records) != len(before) {
 		t.Fatalf("migrated catalog rows = %d, want %d existing upload resources from %s", len(records), len(before), absRoot)
+	}
+}
+
+func TestV2ResourceCollectionsCreateAndBulkAddResources(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_nph_a",
+			OriginalName: "nph-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			OwnerUserID:  "nph-user",
+			OwnerOrgID:   "nph-org",
+			ProjectID:    "nph-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_nph_b",
+			OriginalName: "nph-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			OwnerUserID:  "nph-user",
+			OwnerOrgID:   "nph-org",
+			ProjectID:    "nph-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections", strings.NewReader(`{
+		"name":"NPH NIfTI cohort",
+		"description":"NIfTI files labeled NPH for header inspection",
+		"collection_type":"folder",
+		"project_id":"nph-study",
+		"metadata":{"label":"NPH"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create resource collection status = %d body=%s, want 201", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		Collection domain.ResourceCollectionRecord `json:"collection"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created collection: %v", err)
+	}
+	if created.Collection.CollectionID == "" || created.Collection.Name != "NPH NIfTI cohort" || created.Collection.CollectionType != "folder" {
+		t.Fatalf("created collection = %+v, want folder with id", created.Collection)
+	}
+
+	addReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resource-collections/"+created.Collection.CollectionID+"/resources",
+		strings.NewReader(`{"resource_ids":["file_nph_a","file_nph_b"]}`),
+	)
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	addReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	addRec := httptest.NewRecorder()
+	router.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add collection resources status = %d body=%s, want 200", addRec.Code, addRec.Body.String())
+	}
+	var added struct {
+		Collection domain.ResourceCollectionRecord `json:"collection"`
+		AddedCount int                             `json:"added_count"`
+	}
+	if err := json.Unmarshal(addRec.Body.Bytes(), &added); err != nil {
+		t.Fatalf("decode add resources response: %v", err)
+	}
+	if added.AddedCount != 2 || added.Collection.ResourceCount != 2 {
+		t.Fatalf("added response = %+v, want two members and updated count", added)
+	}
+
+	membersReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+created.Collection.CollectionID+"/resources?limit=10", nil)
+	membersReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	membersReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	membersRec := httptest.NewRecorder()
+	router.ServeHTTP(membersRec, membersReq)
+	if membersRec.Code != http.StatusOK {
+		t.Fatalf("list collection resources status = %d body=%s, want 200", membersRec.Code, membersRec.Body.String())
+	}
+	var members resourcesResponse
+	if err := json.Unmarshal(membersRec.Body.Bytes(), &members); err != nil {
+		t.Fatalf("decode collection resources: %v", err)
+	}
+	if members.Count != 2 || len(members.Resources) != 2 || members.Resources[0].FileID != "file_nph_a" || members.Resources[1].FileID != "file_nph_b" {
+		t.Fatalf("collection resources = %+v, want two NPH files in insertion order", members)
+	}
+
+	filteredMembersReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+created.Collection.CollectionID+"/resources?q=nph-a&kind=image&source=upload&limit=10", nil)
+	filteredMembersReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	filteredMembersReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	filteredMembersRec := httptest.NewRecorder()
+	router.ServeHTTP(filteredMembersRec, filteredMembersReq)
+	if filteredMembersRec.Code != http.StatusOK {
+		t.Fatalf("filtered collection resources status = %d body=%s, want 200", filteredMembersRec.Code, filteredMembersRec.Body.String())
+	}
+	var filteredMembers resourcesResponse
+	if err := json.Unmarshal(filteredMembersRec.Body.Bytes(), &filteredMembers); err != nil {
+		t.Fatalf("decode filtered collection resources: %v", err)
+	}
+	if filteredMembers.Count != 1 || len(filteredMembers.Resources) != 1 || filteredMembers.Resources[0].FileID != "file_nph_a" {
+		t.Fatalf("filtered collection resources = %+v, want only file_nph_a", filteredMembers)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections?collection_type=folder&limit=10", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list resource collections status = %d body=%s, want 200", listRec.Code, listRec.Body.String())
+	}
+	var listed struct {
+		Count       int                               `json:"count"`
+		Collections []domain.ResourceCollectionRecord `json:"collections"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode collection list: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Collections) != 1 || listed.Collections[0].ResourceCount != 2 {
+		t.Fatalf("collection list = %+v, want one folder with resource count", listed)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_nph_a/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "nph-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "nph-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	foundCollectionEvent := false
+	for _, event := range events.Events {
+		if event.EventType == "resource.collection_added" && event.Metadata["collection_id"] == created.Collection.CollectionID {
+			foundCollectionEvent = true
+			break
+		}
+	}
+	if !foundCollectionEvent {
+		t.Fatalf("resource events = %+v, want collection membership audit event", events.Events)
+	}
+}
+
+func TestV2ResourcesFileManagerRenameAndRemoveFromFolder(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_manager_a",
+			OriginalName: "nph-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			OwnerUserID:  "file-manager-user",
+			OwnerOrgID:   "file-manager-org",
+			ProjectID:    "nph-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_manager_b",
+			OriginalName: "nph-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			OwnerUserID:  "file-manager-user",
+			OwnerOrgID:   "file-manager-org",
+			ProjectID:    "nph-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	renameFileReq := httptest.NewRequest(http.MethodPatch, "/v2/resources/file_manager_a", strings.NewReader(`{"original_name":"nph-a-reviewed.nii.gz"}`))
+	renameFileReq.Header.Set("Content-Type", "application/json")
+	renameFileReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	renameFileReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	renameFileRec := httptest.NewRecorder()
+	router.ServeHTTP(renameFileRec, renameFileReq)
+	if renameFileRec.Code != http.StatusOK {
+		t.Fatalf("rename resource status = %d body=%s, want 200", renameFileRec.Code, renameFileRec.Body.String())
+	}
+	var renamedFile resourceResponse
+	if err := json.Unmarshal(renameFileRec.Body.Bytes(), &renamedFile); err != nil {
+		t.Fatalf("decode renamed resource: %v", err)
+	}
+	if renamedFile.Resource.OriginalName != "nph-a-reviewed.nii.gz" {
+		t.Fatalf("renamed resource = %+v, want updated original_name", renamedFile.Resource)
+	}
+
+	collection, err := mem.CreateResourceCollection(context.Background(), domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_file_manager",
+		OwnerUserID:    "file-manager-user",
+		OwnerOrgID:     "file-manager-org",
+		ProjectID:      "nph-study",
+		Name:           "NPH review",
+		CollectionType: "folder",
+		Status:         "active",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := mem.AddResourcesToCollection(context.Background(), domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "file-manager-user",
+		OwnerOrgID:    "file-manager-org",
+		ResourceIDs:   []string{"file_manager_a", "file_manager_b"},
+		AddedByUserID: "file-manager-user",
+		AddedAt:       now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+
+	renameFolderReq := httptest.NewRequest(http.MethodPatch, "/v2/resource-collections/"+collection.CollectionID, strings.NewReader(`{"name":"NPH review renamed"}`))
+	renameFolderReq.Header.Set("Content-Type", "application/json")
+	renameFolderReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	renameFolderReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	renameFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(renameFolderRec, renameFolderReq)
+	if renameFolderRec.Code != http.StatusOK {
+		t.Fatalf("rename folder status = %d body=%s, want 200", renameFolderRec.Code, renameFolderRec.Body.String())
+	}
+	var renamedFolder resourceCollectionResponse
+	if err := json.Unmarshal(renameFolderRec.Body.Bytes(), &renamedFolder); err != nil {
+		t.Fatalf("decode renamed folder: %v", err)
+	}
+	if renamedFolder.Collection.Name != "NPH review renamed" || renamedFolder.Collection.ResourceCount != 2 {
+		t.Fatalf("renamed folder = %+v, want renamed folder preserving resource count", renamedFolder.Collection)
+	}
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/v2/resource-collections/"+collection.CollectionID+"/resources/file_manager_a", nil)
+	removeReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	removeReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	removeRec := httptest.NewRecorder()
+	router.ServeHTTP(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("remove resource from folder status = %d body=%s, want 200", removeRec.Code, removeRec.Body.String())
+	}
+	var removed removeResourcesFromCollectionResponse
+	if err := json.Unmarshal(removeRec.Body.Bytes(), &removed); err != nil {
+		t.Fatalf("decode removed membership: %v", err)
+	}
+	if removed.RemovedCount != 1 || removed.Collection.ResourceCount != 1 {
+		t.Fatalf("removed membership = %+v, want one removed and one remaining", removed)
+	}
+
+	membersReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+collection.CollectionID+"/resources?limit=10", nil)
+	membersReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	membersReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	membersRec := httptest.NewRecorder()
+	router.ServeHTTP(membersRec, membersReq)
+	if membersRec.Code != http.StatusOK {
+		t.Fatalf("list folder resources status = %d body=%s, want 200", membersRec.Code, membersRec.Body.String())
+	}
+	var members resourcesResponse
+	if err := json.Unmarshal(membersRec.Body.Bytes(), &members); err != nil {
+		t.Fatalf("decode folder resources: %v", err)
+	}
+	if members.Count != 1 || len(members.Resources) != 1 || members.Resources[0].FileID != "file_manager_b" {
+		t.Fatalf("folder resources = %+v, want only file_manager_b after removing file_manager_a", members)
+	}
+
+	libraryReq := httptest.NewRequest(http.MethodGet, "/v2/resources?q=nph-a-reviewed&limit=10", nil)
+	libraryReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	libraryReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	libraryRec := httptest.NewRecorder()
+	router.ServeHTTP(libraryRec, libraryReq)
+	if libraryRec.Code != http.StatusOK {
+		t.Fatalf("library resources after folder removal status = %d body=%s, want 200", libraryRec.Code, libraryRec.Body.String())
+	}
+	var library resourcesResponse
+	if err := json.Unmarshal(libraryRec.Body.Bytes(), &library); err != nil {
+		t.Fatalf("decode library resources after folder removal: %v", err)
+	}
+	if library.Count != 1 || len(library.Resources) != 1 || library.Resources[0].FileID != "file_manager_a" {
+		t.Fatalf("library resources after folder removal = %+v, want removed resource still present in all resources", library)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_manager_a/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "file-manager-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "file-manager-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	seenRename := false
+	seenFolderRename := false
+	seenRemoved := false
+	for _, event := range events.Events {
+		switch event.EventType {
+		case "resource.renamed":
+			seenRename = event.Metadata["previous_name"] == "nph-a.nii.gz" && event.Metadata["name"] == "nph-a-reviewed.nii.gz"
+		case "resource.collection_renamed":
+			seenFolderRename = event.Metadata["collection_id"] == collection.CollectionID && event.Metadata["collection_name"] == "NPH review renamed"
+		case "resource.collection_removed":
+			seenRemoved = event.Metadata["collection_id"] == collection.CollectionID
+		}
+	}
+	if !seenRename || !seenFolderRename || !seenRemoved {
+		t.Fatalf("resource events = %+v, want resource rename, folder rename, and folder removal events", events.Events)
+	}
+}
+
+func TestV2ResourceCollectionDeleteAndRestoreLifecycle(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_folder_lifecycle_a",
+			OriginalName: "folder-lifecycle-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			OwnerUserID:  "folder-user",
+			OwnerOrgID:   "folder-org",
+			ProjectID:    "folder-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_folder_lifecycle_b",
+			OriginalName: "folder-lifecycle-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			OwnerUserID:  "folder-user",
+			OwnerOrgID:   "folder-org",
+			ProjectID:    "folder-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	collection, err := mem.CreateResourceCollection(context.Background(), domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_folder_lifecycle",
+		OwnerUserID:    "folder-user",
+		OwnerOrgID:     "folder-org",
+		ProjectID:      "folder-study",
+		Name:           "Recoverable NPH folder",
+		CollectionType: "folder",
+		Status:         "active",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := mem.AddResourcesToCollection(context.Background(), domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "folder-user",
+		OwnerOrgID:    "folder-org",
+		ResourceIDs:   []string{"file_folder_lifecycle_a", "file_folder_lifecycle_b"},
+		AddedByUserID: "folder-user",
+		AddedAt:       now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resource-collections/"+collection.CollectionID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete resource collection status = %d body=%s, want 200", deleteRec.Code, deleteRec.Body.String())
+	}
+	var deleted resourceCollectionResponse
+	if err := json.Unmarshal(deleteRec.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode deleted collection: %v", err)
+	}
+	if deleted.Collection.Status != "deleted" || deleted.Collection.ResourceCount != 2 {
+		t.Fatalf("deleted collection = %+v, want deleted folder preserving member count", deleted.Collection)
+	}
+
+	activeListReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections?collection_type=folder&limit=10", nil)
+	activeListReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	activeListReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	activeListRec := httptest.NewRecorder()
+	router.ServeHTTP(activeListRec, activeListReq)
+	if activeListRec.Code != http.StatusOK {
+		t.Fatalf("active collection list status = %d body=%s, want 200", activeListRec.Code, activeListRec.Body.String())
+	}
+	var activeListed resourceCollectionsResponse
+	if err := json.Unmarshal(activeListRec.Body.Bytes(), &activeListed); err != nil {
+		t.Fatalf("decode active collection list: %v", err)
+	}
+	if activeListed.Count != 0 {
+		t.Fatalf("active collection list = %+v, want deleted folder hidden", activeListed.Collections)
+	}
+
+	deletedListReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections?collection_type=folder&status=deleted&limit=10", nil)
+	deletedListReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	deletedListReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	deletedListRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedListRec, deletedListReq)
+	if deletedListRec.Code != http.StatusOK {
+		t.Fatalf("deleted collection list status = %d body=%s, want 200", deletedListRec.Code, deletedListRec.Body.String())
+	}
+	var deletedListed resourceCollectionsResponse
+	if err := json.Unmarshal(deletedListRec.Body.Bytes(), &deletedListed); err != nil {
+		t.Fatalf("decode deleted collection list: %v", err)
+	}
+	if deletedListed.Count != 1 || deletedListed.Collections[0].Status != "deleted" || deletedListed.Collections[0].ResourceCount != 2 {
+		t.Fatalf("deleted collection list = %+v, want recoverable deleted folder", deletedListed.Collections)
+	}
+
+	membersWhileDeletedReq := httptest.NewRequest(http.MethodGet, "/v2/resource-collections/"+collection.CollectionID+"/resources?limit=10", nil)
+	membersWhileDeletedReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	membersWhileDeletedReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	membersWhileDeletedRec := httptest.NewRecorder()
+	router.ServeHTTP(membersWhileDeletedRec, membersWhileDeletedReq)
+	if membersWhileDeletedRec.Code != http.StatusNotFound {
+		t.Fatalf("deleted collection members status = %d body=%s, want 404", membersWhileDeletedRec.Code, membersWhileDeletedRec.Body.String())
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections/"+collection.CollectionID+"/restore", nil)
+	restoreReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	restoreReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore resource collection status = %d body=%s, want 200", restoreRec.Code, restoreRec.Body.String())
+	}
+	var restored resourceCollectionResponse
+	if err := json.Unmarshal(restoreRec.Body.Bytes(), &restored); err != nil {
+		t.Fatalf("decode restored collection: %v", err)
+	}
+	if restored.Collection.Status != "active" || restored.Collection.ResourceCount != 2 {
+		t.Fatalf("restored collection = %+v, want active folder preserving member count", restored.Collection)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_folder_lifecycle_a/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "folder-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "folder-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	seenDelete := false
+	seenRestore := false
+	for _, event := range events.Events {
+		if event.Metadata["collection_id"] != collection.CollectionID {
+			continue
+		}
+		switch event.EventType {
+		case "resource.collection_deleted":
+			seenDelete = true
+		case "resource.collection_restored":
+			seenRestore = true
+		}
+	}
+	if !seenDelete || !seenRestore {
+		t.Fatalf("resource events = %+v, want folder delete and restore audit events", events.Events)
+	}
+}
+
+func TestV2DatasetSnapshotsCreateFromFolder(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_dataset_a",
+			OriginalName: "dataset-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-dataset-a",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_dataset_b",
+			OriginalName: "dataset-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-dataset-b",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	collection, err := mem.CreateResourceCollection(context.Background(), domain.CreateResourceCollectionInput{
+		OwnerUserID:    "dataset-user",
+		OwnerOrgID:     "dataset-org",
+		ProjectID:      "dataset-study",
+		Name:           "NPH dataset source folder",
+		CollectionType: "folder",
+		Status:         "active",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := mem.AddResourcesToCollection(context.Background(), domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "dataset-user",
+		OwnerOrgID:    "dataset-org",
+		ResourceIDs:   []string{"file_dataset_a", "file_dataset_b"},
+		AddedByUserID: "dataset-user",
+		AddedAt:       now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/dataset-snapshots", strings.NewReader(`{
+		"name":"NPH training cohort v1",
+		"description":"Frozen folder manifest for training",
+		"source_collection_id":"`+collection.CollectionID+`",
+		"project_id":"dataset-study",
+		"metadata":{"label":"NPH"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create dataset snapshot status = %d body=%s, want 201", createRec.Code, createRec.Body.String())
+	}
+	var created datasetSnapshotResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode dataset snapshot: %v", err)
+	}
+	if created.Snapshot.Name != "NPH training cohort v1" || created.Snapshot.ResourceCount != 2 || created.Snapshot.TotalBytes != 384 {
+		t.Fatalf("created snapshot = %+v, want two-resource frozen dataset", created.Snapshot)
+	}
+	if len(created.Resources) != 2 || created.Resources[0].ResourceID != "file_dataset_a" || created.Resources[0].SHA256 != "sha-dataset-a" {
+		t.Fatalf("created snapshot resources = %+v, want frozen ordered manifest", created.Resources)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+created.Snapshot.SnapshotID, nil)
+	getReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	getReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get dataset snapshot status = %d body=%s, want 200", getRec.Code, getRec.Body.String())
+	}
+	var loaded datasetSnapshotResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &loaded); err != nil {
+		t.Fatalf("decode loaded dataset snapshot: %v", err)
+	}
+	if loaded.Snapshot.SnapshotID != created.Snapshot.SnapshotID || len(loaded.Resources) != 2 || loaded.Resources[1].ResourceID != "file_dataset_b" {
+		t.Fatalf("loaded snapshot = %+v resources=%+v, want created manifest", loaded.Snapshot, loaded.Resources)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots?project_id=dataset-study", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list dataset snapshots status = %d body=%s, want 200", listRec.Code, listRec.Body.String())
+	}
+	var listed datasetSnapshotsResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode listed dataset snapshots: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Snapshots) != 1 || listed.Snapshots[0].SnapshotID != created.Snapshot.SnapshotID {
+		t.Fatalf("listed snapshots = %+v, want created project-scoped dataset snapshot", listed)
+	}
+}
+
+func TestV2DatasetSnapshotDeleteAndRestoreLifecycle(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_dataset_lifecycle_a",
+			OriginalName: "lifecycle-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-lifecycle-a",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_dataset_lifecycle_b",
+			OriginalName: "lifecycle-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-lifecycle-b",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	snapshot, _, err := mem.CreateDatasetSnapshot(context.Background(), domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_lifecycle",
+		OwnerUserID:     "dataset-user",
+		OwnerOrgID:      "dataset-org",
+		ProjectID:       "dataset-study",
+		Name:            "Lifecycle dataset snapshot",
+		ResourceIDs:     []string{"file_dataset_lifecycle_a", "file_dataset_lifecycle_b"},
+		CreatedByUserID: "dataset-user",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"source": "test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot: %v", err)
+	}
+	if _, err := mem.CreateDatasetSnapshotShareGrant(context.Background(), domain.CreateDatasetSnapshotShareGrantInput{
+		SnapshotID:      snapshot.SnapshotID,
+		OwnerUserID:     "dataset-user",
+		OwnerOrgID:      "dataset-org",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "dataset-org",
+		Role:            "read",
+		CreatedByUserID: "dataset-user",
+		CreatedAt:       now.Add(3 * time.Second),
+		UpdatedAt:       now.Add(3 * time.Second),
+		Metadata:        domain.JSONMap{"reason": "collaboration"},
+	}); err != nil {
+		t.Fatalf("CreateDatasetSnapshotShareGrant: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/dataset-snapshots/"+snapshot.SnapshotID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete dataset snapshot status = %d body=%s, want 200", deleteRec.Code, deleteRec.Body.String())
+	}
+	var deleted datasetSnapshotResponse
+	if err := json.Unmarshal(deleteRec.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode deleted dataset snapshot: %v", err)
+	}
+	if deleted.Snapshot.Status != "deleted" || deleted.Snapshot.ResourceCount != 2 || len(deleted.Resources) != 2 {
+		t.Fatalf("deleted snapshot = %+v resources=%+v, want deleted manifest response", deleted.Snapshot, deleted.Resources)
+	}
+
+	activeListReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots?project_id=dataset-study", nil)
+	activeListReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	activeListReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	activeListRec := httptest.NewRecorder()
+	router.ServeHTTP(activeListRec, activeListReq)
+	if activeListRec.Code != http.StatusOK {
+		t.Fatalf("active list dataset snapshots status = %d body=%s, want 200", activeListRec.Code, activeListRec.Body.String())
+	}
+	var activeList datasetSnapshotsResponse
+	if err := json.Unmarshal(activeListRec.Body.Bytes(), &activeList); err != nil {
+		t.Fatalf("decode active list: %v", err)
+	}
+	if activeList.Count != 0 || len(activeList.Snapshots) != 0 {
+		t.Fatalf("active snapshots = %+v, want deleted snapshot hidden", activeList)
+	}
+
+	deletedListReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots?project_id=dataset-study&status=deleted", nil)
+	deletedListReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	deletedListReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	deletedListRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedListRec, deletedListReq)
+	if deletedListRec.Code != http.StatusOK {
+		t.Fatalf("deleted list dataset snapshots status = %d body=%s, want 200", deletedListRec.Code, deletedListRec.Body.String())
+	}
+	var deletedList datasetSnapshotsResponse
+	if err := json.Unmarshal(deletedListRec.Body.Bytes(), &deletedList); err != nil {
+		t.Fatalf("decode deleted list: %v", err)
+	}
+	if deletedList.Count != 1 || len(deletedList.Snapshots) != 1 || deletedList.Snapshots[0].SnapshotID != snapshot.SnapshotID {
+		t.Fatalf("deleted snapshots = %+v, want owner-visible deleted snapshot", deletedList)
+	}
+
+	bobDeletedListReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots?status=deleted", nil)
+	bobDeletedListReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDeletedListReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	bobDeletedListRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDeletedListRec, bobDeletedListReq)
+	if bobDeletedListRec.Code != http.StatusOK {
+		t.Fatalf("bob deleted list status = %d body=%s, want 200", bobDeletedListRec.Code, bobDeletedListRec.Body.String())
+	}
+	var bobDeletedList datasetSnapshotsResponse
+	if err := json.Unmarshal(bobDeletedListRec.Body.Bytes(), &bobDeletedList); err != nil {
+		t.Fatalf("decode Bob deleted list: %v", err)
+	}
+	if bobDeletedList.Count != 0 || len(bobDeletedList.Snapshots) != 0 {
+		t.Fatalf("bob deleted snapshots = %+v, want deleted snapshot hidden from collaborators", bobDeletedList)
+	}
+
+	getDeletedReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID, nil)
+	getDeletedReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	getDeletedReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	getDeletedRec := httptest.NewRecorder()
+	router.ServeHTTP(getDeletedRec, getDeletedReq)
+	if getDeletedRec.Code != http.StatusNotFound {
+		t.Fatalf("get deleted dataset snapshot status = %d body=%s, want 404", getDeletedRec.Code, getDeletedRec.Body.String())
+	}
+
+	eventsWhileDeletedReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/events?limit=10", nil)
+	eventsWhileDeletedReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	eventsWhileDeletedReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	eventsWhileDeletedRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsWhileDeletedRec, eventsWhileDeletedReq)
+	if eventsWhileDeletedRec.Code != http.StatusOK {
+		t.Fatalf("events while deleted status = %d body=%s, want 200", eventsWhileDeletedRec.Code, eventsWhileDeletedRec.Body.String())
+	}
+	var eventsWhileDeleted datasetSnapshotEventsResponse
+	if err := json.Unmarshal(eventsWhileDeletedRec.Body.Bytes(), &eventsWhileDeleted); err != nil {
+		t.Fatalf("decode events while deleted: %v", err)
+	}
+	if len(eventsWhileDeleted.Events) == 0 || eventsWhileDeleted.Events[0].EventType != "dataset_snapshot.deleted" {
+		t.Fatalf("events while deleted = %+v, want latest deleted audit event", eventsWhileDeleted)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/restore", nil)
+	restoreReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	restoreReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore dataset snapshot status = %d body=%s, want 200", restoreRec.Code, restoreRec.Body.String())
+	}
+	var restored datasetSnapshotResponse
+	if err := json.Unmarshal(restoreRec.Body.Bytes(), &restored); err != nil {
+		t.Fatalf("decode restored dataset snapshot: %v", err)
+	}
+	if restored.Snapshot.Status != "active" || len(restored.Resources) != 2 || restored.Resources[1].SHA256 != "sha-lifecycle-b" {
+		t.Fatalf("restored snapshot = %+v resources=%+v, want active frozen manifest", restored.Snapshot, restored.Resources)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/events?limit=10", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events after restore status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events datasetSnapshotEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode restored events: %v", err)
+	}
+	seenDeleted := false
+	seenRestored := false
+	for _, event := range events.Events {
+		switch event.EventType {
+		case "dataset_snapshot.deleted":
+			seenDeleted = true
+			if event.Metadata["snapshot_id"] != snapshot.SnapshotID {
+				t.Fatalf("deleted event metadata = %+v, want snapshot_id", event.Metadata)
+			}
+		case "dataset_snapshot.restored":
+			seenRestored = true
+			if event.Metadata["resource_count"] != float64(2) {
+				t.Fatalf("restored event metadata = %+v, want resource_count 2", event.Metadata)
+			}
+		}
+	}
+	if !seenDeleted || !seenRestored {
+		t.Fatalf("events = %+v, want deleted and restored lifecycle events", events.Events)
+	}
+}
+
+func TestV2DatasetSnapshotsCreateFromResourceQuery(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_query_dataset_a",
+			OriginalName: "NPH_shunt_001_69yo.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-query-dataset-a",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata:     domain.JSONMap{"age": 69, "diagnosis": "NPH"},
+		},
+		{
+			ResourceID:   "file_query_dataset_b",
+			OriginalName: "NPH_shunt_002_62yo.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-query-dataset-b",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+			Metadata:     domain.JSONMap{"age": 62, "diagnosis": "NPH"},
+		},
+		{
+			ResourceID:   "file_query_dataset_over70",
+			OriginalName: "NPH_shunt_003_74yo.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    512,
+			SHA256:       "sha-query-dataset-over70",
+			OwnerUserID:  "dataset-user",
+			OwnerOrgID:   "dataset-org",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Over 70"},
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+			Metadata:     domain.JSONMap{"age": 74, "diagnosis": "NPH"},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/dataset-snapshots", strings.NewReader(`{
+		"name":"NPH under 70 query cohort",
+		"description":"Frozen Resources query result for training",
+		"metadata":{"source":"resources_query_toolbar"},
+		"resource_query":{
+			"q":"NPH",
+			"kind":"file",
+			"source":"upload",
+			"project_id":"dataset-study",
+			"tags":["Under 70"]
+		}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "dataset-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "dataset-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create query dataset snapshot status = %d body=%s, want 201", createRec.Code, createRec.Body.String())
+	}
+	var created datasetSnapshotResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode query dataset snapshot: %v", err)
+	}
+	if created.Snapshot.Name != "NPH under 70 query cohort" || created.Snapshot.ResourceCount != 2 || created.Snapshot.TotalBytes != 384 {
+		t.Fatalf("created query snapshot = %+v, want two under-70 matching resources", created.Snapshot)
+	}
+	got := []string{created.Resources[0].ResourceID, created.Resources[1].ResourceID}
+	if got[0] != "file_query_dataset_b" || got[1] != "file_query_dataset_a" {
+		t.Fatalf("created query resources = %v, want newest matching resources first", got)
+	}
+}
+
+func TestV2DatasetSnapshotShareGrantAllowsCollaboratorInspect(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_shared_dataset_a",
+			OriginalName: "shared-dataset-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-shared-dataset-a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_shared_dataset_b",
+			OriginalName: "shared-dataset-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-shared-dataset-b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "dataset-study",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	snapshot, _, err := mem.CreateDatasetSnapshot(context.Background(), domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_shared_http",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "dataset-study",
+		Name:            "Shared dataset snapshot",
+		ResourceIDs:     []string{"file_shared_dataset_a", "file_shared_dataset_b"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"label": "NPH"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot: %v", err)
+	}
+
+	bobGetBefore := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID, nil)
+	bobGetBefore.Header.Set("X-Ultra-User-Id", "bob")
+	bobGetBefore.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobGetBeforeRec := httptest.NewRecorder()
+	router.ServeHTTP(bobGetBeforeRec, bobGetBefore)
+	if bobGetBeforeRec.Code != http.StatusNotFound {
+		t.Fatalf("bob pre-share get status = %d body=%s, want 404", bobGetBeforeRec.Code, bobGetBeforeRec.Body.String())
+	}
+
+	shareReq := httptest.NewRequest(http.MethodPost, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/shares", strings.NewReader(`{
+		"grantee_user_id":"bob",
+		"grantee_org_id":"org-b",
+		"role":"read",
+		"metadata":{"reason":"collaborator review"}
+	}`))
+	shareReq.Header.Set("Content-Type", "application/json")
+	shareReq.Header.Set("X-Ultra-User-Id", "alice")
+	shareReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	shareRec := httptest.NewRecorder()
+	router.ServeHTTP(shareRec, shareReq)
+	if shareRec.Code != http.StatusCreated {
+		t.Fatalf("create dataset snapshot share status = %d body=%s, want 201", shareRec.Code, shareRec.Body.String())
+	}
+	var shared datasetSnapshotShareGrantResponse
+	if err := json.Unmarshal(shareRec.Body.Bytes(), &shared); err != nil {
+		t.Fatalf("decode created dataset snapshot share: %v", err)
+	}
+	if shared.Grant.SnapshotID != snapshot.SnapshotID || shared.Grant.GranteeUserID != "bob" || shared.Grant.Status != "active" {
+		t.Fatalf("created share = %+v, want active Bob grant", shared.Grant)
+	}
+
+	bobEventsReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/events?limit=10", nil)
+	bobEventsReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobEventsReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobEventsRec := httptest.NewRecorder()
+	router.ServeHTTP(bobEventsRec, bobEventsReq)
+	if bobEventsRec.Code != http.StatusOK {
+		t.Fatalf("bob dataset snapshot events status = %d body=%s, want 200", bobEventsRec.Code, bobEventsRec.Body.String())
+	}
+	var bobEvents datasetSnapshotEventsResponse
+	if err := json.Unmarshal(bobEventsRec.Body.Bytes(), &bobEvents); err != nil {
+		t.Fatalf("decode Bob dataset snapshot events: %v", err)
+	}
+	if bobEvents.Count != 2 || len(bobEvents.Events) != 2 || bobEvents.Events[0].EventType != "dataset_snapshot.shared" {
+		t.Fatalf("bob dataset snapshot events = %+v, want shared plus created audit events", bobEvents)
+	}
+
+	bobGet := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID, nil)
+	bobGet.Header.Set("X-Ultra-User-Id", "bob")
+	bobGet.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobGetRec := httptest.NewRecorder()
+	router.ServeHTTP(bobGetRec, bobGet)
+	if bobGetRec.Code != http.StatusOK {
+		t.Fatalf("bob shared get status = %d body=%s, want 200", bobGetRec.Code, bobGetRec.Body.String())
+	}
+	var loaded datasetSnapshotResponse
+	if err := json.Unmarshal(bobGetRec.Body.Bytes(), &loaded); err != nil {
+		t.Fatalf("decode Bob dataset snapshot: %v", err)
+	}
+	if loaded.Snapshot.OwnerUserID != "alice" || len(loaded.Resources) != 2 || loaded.Resources[0].SHA256 != "sha-shared-dataset-a" {
+		t.Fatalf("bob loaded snapshot = %+v resources=%+v, want frozen shared manifest", loaded.Snapshot, loaded.Resources)
+	}
+
+	bobList := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots?limit=20", nil)
+	bobList.Header.Set("X-Ultra-User-Id", "bob")
+	bobList.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobListRec := httptest.NewRecorder()
+	router.ServeHTTP(bobListRec, bobList)
+	if bobListRec.Code != http.StatusOK {
+		t.Fatalf("bob shared list status = %d body=%s, want 200", bobListRec.Code, bobListRec.Body.String())
+	}
+	var listed datasetSnapshotsResponse
+	if err := json.Unmarshal(bobListRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode Bob shared dataset snapshots: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Snapshots) != 1 || listed.Snapshots[0].SnapshotID != snapshot.SnapshotID {
+		t.Fatalf("bob listed snapshots = %+v, want shared snapshot", listed)
+	}
+
+	listSharesReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/shares?status=active", nil)
+	listSharesReq.Header.Set("X-Ultra-User-Id", "alice")
+	listSharesReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	listSharesRec := httptest.NewRecorder()
+	router.ServeHTTP(listSharesRec, listSharesReq)
+	if listSharesRec.Code != http.StatusOK {
+		t.Fatalf("list dataset snapshot shares status = %d body=%s, want 200", listSharesRec.Code, listSharesRec.Body.String())
+	}
+	var listedShares datasetSnapshotShareGrantsResponse
+	if err := json.Unmarshal(listSharesRec.Body.Bytes(), &listedShares); err != nil {
+		t.Fatalf("decode dataset snapshot shares: %v", err)
+	}
+	if listedShares.Count != 1 || listedShares.Grants[0].GrantID != shared.Grant.GrantID {
+		t.Fatalf("listed shares = %+v, want created grant", listedShares)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/shares/"+shared.Grant.GrantID, nil)
+	revokeReq.Header.Set("X-Ultra-User-Id", "alice")
+	revokeReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	revokeRec := httptest.NewRecorder()
+	router.ServeHTTP(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke dataset snapshot share status = %d body=%s, want 200", revokeRec.Code, revokeRec.Body.String())
+	}
+	var revoked datasetSnapshotShareGrantResponse
+	if err := json.Unmarshal(revokeRec.Body.Bytes(), &revoked); err != nil {
+		t.Fatalf("decode revoked dataset snapshot share: %v", err)
+	}
+	if revoked.Grant.Status != "revoked" || revoked.Grant.RevokedAt.IsZero() {
+		t.Fatalf("revoked share = %+v, want revoked lifecycle", revoked.Grant)
+	}
+
+	ownerEventsReq := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID+"/events?limit=10", nil)
+	ownerEventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	ownerEventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	ownerEventsRec := httptest.NewRecorder()
+	router.ServeHTTP(ownerEventsRec, ownerEventsReq)
+	if ownerEventsRec.Code != http.StatusOK {
+		t.Fatalf("owner dataset snapshot events status = %d body=%s, want 200", ownerEventsRec.Code, ownerEventsRec.Body.String())
+	}
+	var ownerEvents datasetSnapshotEventsResponse
+	if err := json.Unmarshal(ownerEventsRec.Body.Bytes(), &ownerEvents); err != nil {
+		t.Fatalf("decode owner dataset snapshot events: %v", err)
+	}
+	gotEventTypes := []string{}
+	for _, event := range ownerEvents.Events {
+		gotEventTypes = append(gotEventTypes, event.EventType)
+	}
+	if !reflect.DeepEqual(gotEventTypes, []string{"dataset_snapshot.share_revoked", "dataset_snapshot.shared", "dataset_snapshot.created"}) {
+		t.Fatalf("owner dataset snapshot event types = %v, want revoke/share/create", gotEventTypes)
+	}
+
+	bobGetAfter := httptest.NewRequest(http.MethodGet, "/v2/dataset-snapshots/"+snapshot.SnapshotID, nil)
+	bobGetAfter.Header.Set("X-Ultra-User-Id", "bob")
+	bobGetAfter.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobGetAfterRec := httptest.NewRecorder()
+	router.ServeHTTP(bobGetAfterRec, bobGetAfter)
+	if bobGetAfterRec.Code != http.StatusNotFound {
+		t.Fatalf("bob post-revoke get status = %d body=%s, want 404", bobGetAfterRec.Code, bobGetAfterRec.Body.String())
+	}
+}
+
+func TestV2DataAgentJobsCreateListInspectAndAudit(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_agent_http_a",
+			OriginalName: "agent-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-agent-a",
+			OwnerUserID:  "agent-user",
+			OwnerOrgID:   "agent-org",
+			ProjectID:    "agent-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata:     domain.JSONMap{"diagnosis": "NPH", "age": 69},
+		},
+		{
+			ResourceID:   "file_agent_http_b",
+			OriginalName: "agent-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-agent-b",
+			OwnerUserID:  "agent-user",
+			OwnerOrgID:   "agent-org",
+			ProjectID:    "agent-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+			Metadata:     domain.JSONMap{"diagnosis": "NPH", "age": 62},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"caption_resources",
+		"resource_ids":["file_agent_http_a","file_agent_http_b"],
+		"project_id":"agent-study",
+		"input_selector":{"mode":"short_caption","label":"NPH"},
+		"metadata":{"requested_from":"resources_page"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+	if created.Job.JobType != "caption_resources" || created.Job.Status != "queued" || created.Job.ResourceCount != 2 {
+		t.Fatalf("created job = %+v, want queued caption_resources over two resources", created.Job)
+	}
+	if len(created.Events) != 1 || created.Events[0].EventType != "data_agent.job.created" {
+		t.Fatalf("created job events = %+v, want created event", created.Events)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs?status=queued&job_type=caption_resources&limit=10", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	listReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list data-agent jobs status = %d body=%s, want 200", listRec.Code, listRec.Body.String())
+	}
+	var listed dataAgentJobsResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode listed data-agent jobs: %v", err)
+	}
+	if listed.Count != 1 || len(listed.Jobs) != 1 || listed.Jobs[0].JobID != created.Job.JobID {
+		t.Fatalf("listed jobs = %+v, want created job", listed)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs/"+created.Job.JobID, nil)
+	getReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	getReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get data-agent job status = %d body=%s, want 200", getRec.Code, getRec.Body.String())
+	}
+	var loaded dataAgentJobResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &loaded); err != nil {
+		t.Fatalf("decode loaded data-agent job: %v", err)
+	}
+	if loaded.Job.JobID != created.Job.JobID || len(loaded.Events) != 1 || loaded.Events[0].Sequence != 1 {
+		t.Fatalf("loaded job = %+v events=%+v, want created job with audit trail", loaded.Job, loaded.Events)
+	}
+
+	progressReq := httptest.NewRequest(
+		http.MethodPatch,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/status",
+		strings.NewReader(`{"status":"running","progress_completed":1,"progress_total":2,"message":"Captioned first resource","event_metadata":{"resource_id":"file_agent_http_a"}}`),
+	)
+	progressReq.Header.Set("Content-Type", "application/json")
+	progressReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	progressReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	progressRec := httptest.NewRecorder()
+	router.ServeHTTP(progressRec, progressReq)
+	if progressRec.Code != http.StatusOK {
+		t.Fatalf("progress data-agent job status = %d body=%s, want 200", progressRec.Code, progressRec.Body.String())
+	}
+	var progressed dataAgentJobResponse
+	if err := json.Unmarshal(progressRec.Body.Bytes(), &progressed); err != nil {
+		t.Fatalf("decode progressed data-agent job: %v", err)
+	}
+	if progressed.Job.Status != "running" || progressed.Job.ProgressCompleted != 1 || len(progressed.Events) != 2 || progressed.Events[1].EventType != "data_agent.job.progressed" {
+		t.Fatalf("progressed job = %+v events=%+v, want running job with progress event", progressed.Job, progressed.Events)
+	}
+
+	cancelReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/control",
+		strings.NewReader(`{"action":"cancel","reason":"User paused the field upload."}`),
+	)
+	cancelReq.Header.Set("Content-Type", "application/json")
+	cancelReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	cancelReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	cancelRec := httptest.NewRecorder()
+	router.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel data-agent job status = %d body=%s, want 200", cancelRec.Code, cancelRec.Body.String())
+	}
+	var canceled dataAgentJobResponse
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &canceled); err != nil {
+		t.Fatalf("decode canceled data-agent job: %v", err)
+	}
+	if canceled.Job.Status != "canceled" || canceled.Job.Error == "" || len(canceled.Events) != 3 || canceled.Events[2].EventType != "data_agent.job.canceled" {
+		t.Fatalf("canceled job = %+v events=%+v, want canceled job with audit event", canceled.Job, canceled.Events)
+	}
+
+	retryReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/control",
+		strings.NewReader(`{"action":"retry","reason":"Connectivity recovered."}`),
+	)
+	retryReq.Header.Set("Content-Type", "application/json")
+	retryReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	retryReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	retryRec := httptest.NewRecorder()
+	router.ServeHTTP(retryRec, retryReq)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("retry data-agent job status = %d body=%s, want 200", retryRec.Code, retryRec.Body.String())
+	}
+	var retried dataAgentJobResponse
+	if err := json.Unmarshal(retryRec.Body.Bytes(), &retried); err != nil {
+		t.Fatalf("decode retried data-agent job: %v", err)
+	}
+	if retried.Job.Status != "queued" || retried.Job.ProgressCompleted != 0 || retried.Job.Error != "" || len(retried.Events) != 4 || retried.Events[3].EventType != "data_agent.job.retried" {
+		t.Fatalf("retried job = %+v events=%+v, want reset queued job with retry event", retried.Job, retried.Events)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/file_agent_http_a/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var resourceEvents resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &resourceEvents); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	foundJobEvent := false
+	for _, event := range resourceEvents.Events {
+		if event.EventType == "resource.data_agent_job_queued" && event.Metadata["job_id"] == created.Job.JobID {
+			foundJobEvent = true
+			break
+		}
+	}
+	if !foundJobEvent {
+		t.Fatalf("resource events = %+v, want data-agent queued audit event", resourceEvents.Events)
+	}
+}
+
+func seedDataAgentHTTPResources(t *testing.T, mem *store.MemoryStore) {
+	t.Helper()
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_agent_http_a",
+			OriginalName: "agent-a.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    128,
+			SHA256:       "sha-agent-a",
+			OwnerUserID:  "agent-user",
+			OwnerOrgID:   "agent-org",
+			ProjectID:    "agent-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata:     domain.JSONMap{"diagnosis": "NPH", "age": 69},
+		},
+		{
+			ResourceID:   "file_agent_http_b",
+			OriginalName: "agent-b.nii.gz",
+			ContentType:  "application/gzip",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    256,
+			SHA256:       "sha-agent-b",
+			OwnerUserID:  "agent-user",
+			OwnerOrgID:   "agent-org",
+			ProjectID:    "agent-study",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+			Metadata:     domain.JSONMap{"diagnosis": "NPH", "age": 62},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+}
+
+func TestV2DataAgentJobCreateDispatchesQueueEnvelopeAndAuditEvent(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	dispatcher := &recordingDataAgentJobPublisher{}
+	router := NewRouter(ServerDeps{
+		Version:       "test-version",
+		Runs:          runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:         mem,
+		UploadRoot:    uploadRoot,
+		DataAgentJobs: dispatcher,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"caption_resources",
+		"resource_ids":["file_agent_http_a","file_agent_http_b"],
+		"project_id":"agent-study",
+		"input_selector":{"mode":"short_caption","label":"NPH"},
+		"metadata":{"requested_from":"resources_page"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("published data-agent jobs = %+v, want exactly one dispatch", dispatcher.jobs)
+	}
+	dispatched := dispatcher.jobs[0]
+	if dispatched.JobID != created.Job.JobID || dispatched.JobType != "caption_resources" {
+		t.Fatalf("dispatched job = %+v, want created caption job", dispatched)
+	}
+	if dispatched.DispatchID == "" {
+		t.Fatalf("dispatched job missing dispatch_id")
+	}
+	if dispatched.OwnerUserID != "agent-user" || dispatched.OwnerOrgID != "agent-org" || dispatched.ProjectID != "agent-study" {
+		t.Fatalf("dispatched owner/project = %+v, want request principal/project", dispatched)
+	}
+	if !reflect.DeepEqual(dispatched.ResourceIDs, []string{"file_agent_http_a", "file_agent_http_b"}) {
+		t.Fatalf("dispatched resource ids = %#v, want selected resources", dispatched.ResourceIDs)
+	}
+	if dispatched.InputSelector["label"] != "NPH" || dispatched.InputSelector["mode"] != "short_caption" {
+		t.Fatalf("dispatched input selector = %#v, want original selector", dispatched.InputSelector)
+	}
+	if dispatched.Metadata["requested_from"] != "resources_page" {
+		t.Fatalf("dispatched metadata = %#v, want original metadata", dispatched.Metadata)
+	}
+	if len(created.Events) != 2 || created.Events[1].EventType != "data_agent.job.dispatched" {
+		t.Fatalf("created events = %+v, want created plus dispatched audit event", created.Events)
+	}
+	if created.Events[1].Metadata["dispatch_id"] != dispatched.DispatchID {
+		t.Fatalf("dispatch event metadata = %#v, want dispatch_id %q", created.Events[1].Metadata, dispatched.DispatchID)
+	}
+}
+
+func TestV2DataAgentJobCreateDispatchesResourceQuerySelector(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	dispatcher := &recordingDataAgentJobPublisher{}
+	router := NewRouter(ServerDeps{
+		Version:       "test-version",
+		Runs:          runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:         mem,
+		UploadRoot:    uploadRoot,
+		DataAgentJobs: dispatcher,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"create_dataset_snapshot",
+		"project_id":"agent-study",
+		"input_selector":{"snapshot_name":"NPH under 70 query cohort"},
+		"resource_query":{
+			"q":"NPH",
+			"kind":"file",
+			"source":"upload",
+			"project_id":"agent-study",
+			"tags":["Under 70"]
+		},
+		"metadata":{"requested_from":"resources_query_toolbar"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create query data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created query data-agent job: %v", err)
+	}
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("published data-agent jobs = %+v, want one query dispatch", dispatcher.jobs)
+	}
+	dispatched := dispatcher.jobs[0]
+	if dispatched.JobType != "create_dataset_snapshot" || len(dispatched.ResourceIDs) != 0 || dispatched.ResourceCount != 2 {
+		t.Fatalf("dispatched job = %+v, want query selector with counted resources and no preselected IDs", dispatched)
+	}
+	query, ok := dispatched.InputSelector["resource_query"].(domain.JSONMap)
+	if !ok {
+		t.Fatalf("dispatched input selector = %#v, want resource_query object", dispatched.InputSelector)
+	}
+	if query["q"] != "NPH" || query["kind"] != "file" || query["source"] != "upload" || query["project_id"] != "agent-study" {
+		t.Fatalf("dispatched query = %#v, want normalized Resources query", query)
+	}
+	tags, ok := query["tags"].([]string)
+	if !ok || !reflect.DeepEqual(tags, []string{"Under 70"}) {
+		t.Fatalf("dispatched query tags = %#v, want normalized tag filter", query["tags"])
+	}
+	if dispatched.InputSelector["snapshot_name"] != "NPH under 70 query cohort" {
+		t.Fatalf("dispatched input selector = %#v, want snapshot name preserved", dispatched.InputSelector)
+	}
+	if created.Job.ResourceCount != 2 || created.Job.ProgressTotal != 2 || created.Job.InputSelector["resource_ids"] != nil {
+		t.Fatalf("created job = %+v, want counted selector job without expanded resource ids", created.Job)
+	}
+	if len(created.Events) != 2 || created.Events[1].EventType != "data_agent.job.dispatched" {
+		t.Fatalf("created events = %+v, want created plus dispatched audit event", created.Events)
+	}
+}
+
+func TestV2DataAgentJobCreateRejectsResourceQueryAboveWorkerLimit(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	limited := &overLimitDataAgentQueryStore{
+		MemoryStore: mem,
+		totalCount:  domain.DataAgentQueryResourceHardLimit + 1,
+	}
+	dispatcher := &recordingDataAgentJobPublisher{}
+	router := NewRouter(ServerDeps{
+		Version:       "test-version",
+		Runs:          runcontrol.NewService(limited, eventbus.NewMemoryBus()),
+		Store:         limited,
+		UploadRoot:    uploadRoot,
+		DataAgentJobs: dispatcher,
+	})
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"extract_metadata",
+		"project_id":"agent-study",
+		"resource_query":{
+			"q":"NPH",
+			"kind":"file",
+			"source":"upload",
+			"project_id":"agent-study"
+		}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusBadRequest {
+		t.Fatalf("create over-limit query data-agent job status = %d body=%s, want 400", createRec.Code, createRec.Body.String())
+	}
+	if len(dispatcher.jobs) != 0 {
+		t.Fatalf("published data-agent jobs = %+v, want no dispatch for over-limit query", dispatcher.jobs)
+	}
+	if !strings.Contains(createRec.Body.String(), strconv.Itoa(domain.DataAgentQueryResourceHardLimit+1)+" resources") {
+		t.Fatalf("create over-limit query body = %s, want resource count in error", createRec.Body.String())
+	}
+	if limited.lastListInput.Query != "NPH" || limited.lastListInput.Limit != 1 || limited.lastListInput.UserID != "agent-user" {
+		t.Fatalf("count query input = %+v, want owner-scoped one-row count query", limited.lastListInput)
+	}
+}
+
+func TestV2DataAgentJobCreateAcceptsBatchTagResources(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	dispatcher := &recordingDataAgentJobPublisher{}
+	router := NewRouter(ServerDeps{
+		Version:       "test-version",
+		Runs:          runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:         mem,
+		UploadRoot:    uploadRoot,
+		DataAgentJobs: dispatcher,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"batch_tag_resources",
+		"resource_ids":["file_agent_http_a","file_agent_http_b"],
+		"input_selector":{"tags":["NPH","Under 70","NPH"]},
+		"metadata":{"requested_from":"resources_data_agent_launcher"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create batch-tag data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+	if created.Job.JobType != "batch_tag_resources" {
+		t.Fatalf("created job type = %q, want batch_tag_resources", created.Job.JobType)
+	}
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("published data-agent jobs = %+v, want exactly one dispatch", dispatcher.jobs)
+	}
+	dispatched := dispatcher.jobs[0]
+	if dispatched.JobType != "batch_tag_resources" || !reflect.DeepEqual(dispatched.ResourceIDs, []string{"file_agent_http_a", "file_agent_http_b"}) {
+		t.Fatalf("dispatched job = %+v, want batch tag over selected resources", dispatched)
+	}
+	if !reflect.DeepEqual(metadataStringSlice(dispatched.InputSelector["tags"]), []string{"NPH", "Under 70", "NPH"}) {
+		t.Fatalf("dispatched input selector = %#v, want tag request preserved", dispatched.InputSelector)
+	}
+}
+
+func TestV2DataAgentJobRetryDispatchesFreshQueueEnvelope(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	dispatcher := &recordingDataAgentJobPublisher{}
+	router := NewRouter(ServerDeps{
+		Version:       "test-version",
+		Runs:          runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:         mem,
+		UploadRoot:    uploadRoot,
+		DataAgentJobs: dispatcher,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"extract_metadata",
+		"resource_ids":["file_agent_http_a"],
+		"project_id":"agent-study",
+		"input_selector":{"format":"nifti"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+	if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].DispatchID == "" {
+		t.Fatalf("initial dispatched jobs = %+v, want one dispatch with id", dispatcher.jobs)
+	}
+	initialDispatchID := dispatcher.jobs[0].DispatchID
+
+	cancelReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/control",
+		strings.NewReader(`{"action":"cancel","reason":"field connection dropped"}`),
+	)
+	cancelReq.Header.Set("Content-Type", "application/json")
+	cancelReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	cancelReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	cancelRec := httptest.NewRecorder()
+	router.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel data-agent job status = %d body=%s, want 200", cancelRec.Code, cancelRec.Body.String())
+	}
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("cancel published data-agent jobs = %+v, want no new dispatch", dispatcher.jobs)
+	}
+
+	retryReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/control",
+		strings.NewReader(`{"action":"retry","reason":"connection recovered"}`),
+	)
+	retryReq.Header.Set("Content-Type", "application/json")
+	retryReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	retryReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	retryRec := httptest.NewRecorder()
+	router.ServeHTTP(retryRec, retryReq)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("retry data-agent job status = %d body=%s, want 200", retryRec.Code, retryRec.Body.String())
+	}
+	var retried dataAgentJobResponse
+	if err := json.Unmarshal(retryRec.Body.Bytes(), &retried); err != nil {
+		t.Fatalf("decode retried data-agent job: %v", err)
+	}
+	if len(dispatcher.jobs) != 2 {
+		t.Fatalf("published data-agent jobs = %+v, want initial and retry dispatches", dispatcher.jobs)
+	}
+	retryDispatch := dispatcher.jobs[1]
+	if retryDispatch.JobID != created.Job.JobID || retryDispatch.DispatchID == "" || retryDispatch.DispatchID == initialDispatchID {
+		t.Fatalf("retry dispatch = %+v, want same job with fresh dispatch id different from %q", retryDispatch, initialDispatchID)
+	}
+	if retryDispatch.JobType != "extract_metadata" || !reflect.DeepEqual(retryDispatch.ResourceIDs, []string{"file_agent_http_a"}) {
+		t.Fatalf("retry dispatch = %+v, want original metadata extraction selection", retryDispatch)
+	}
+	if len(retried.Events) < 2 || retried.Events[len(retried.Events)-2].EventType != "data_agent.job.retried" || retried.Events[len(retried.Events)-1].EventType != "data_agent.job.dispatched" {
+		t.Fatalf("retry events = %+v, want retried then dispatched audit events", retried.Events)
+	}
+	if retried.Events[len(retried.Events)-1].Metadata["dispatch_id"] != retryDispatch.DispatchID {
+		t.Fatalf("retry dispatch event metadata = %#v, want dispatch_id %q", retried.Events[len(retried.Events)-1].Metadata, retryDispatch.DispatchID)
+	}
+}
+
+func TestV2DataAgentJobLeaseClaimRenewAndRelease(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"extract_metadata",
+		"resource_ids":["file_agent_http_a"],
+		"project_id":"agent-study",
+		"input_selector":{"format":"nifti"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+
+	claim := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs/"+created.Job.JobID+"/lease", strings.NewReader(`{"worker_id":"data-agent-worker-a","ttl_seconds":60}`))
+	claim.Header.Set("Content-Type", "application/json")
+	claim.Header.Set("X-Ultra-User-Id", "agent-user")
+	claim.Header.Set("X-Ultra-Org-Id", "agent-org")
+	claimRec := httptest.NewRecorder()
+	router.ServeHTTP(claimRec, claim)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("claim data-agent lease status = %d body=%s, want 200", claimRec.Code, claimRec.Body.String())
+	}
+	var lease domain.DataAgentJobLeaseRecord
+	if err := json.Unmarshal(claimRec.Body.Bytes(), &lease); err != nil {
+		t.Fatalf("decode data-agent lease: %v body=%s", err, claimRec.Body.String())
+	}
+	if lease.JobID != created.Job.JobID || lease.WorkerID != "data-agent-worker-a" || lease.LeaseToken == "" {
+		t.Fatalf("lease = %+v, want worker-a token for created job", lease)
+	}
+
+	competing := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs/"+created.Job.JobID+"/lease", strings.NewReader(`{"worker_id":"data-agent-worker-b","ttl_seconds":60}`))
+	competing.Header.Set("Content-Type", "application/json")
+	competing.Header.Set("X-Ultra-User-Id", "agent-user")
+	competing.Header.Set("X-Ultra-Org-Id", "agent-org")
+	competingRec := httptest.NewRecorder()
+	router.ServeHTTP(competingRec, competing)
+	if competingRec.Code != http.StatusConflict {
+		t.Fatalf("competing data-agent lease status = %d body=%s, want 409", competingRec.Code, competingRec.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs/"+created.Job.JobID, nil)
+	getReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	getReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get leased data-agent job status = %d body=%s, want 200", getRec.Code, getRec.Body.String())
+	}
+	var loaded dataAgentJobResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &loaded); err != nil {
+		t.Fatalf("decode loaded data-agent job: %v", err)
+	}
+	if loaded.Job.Status != "running" || len(loaded.Events) != 2 || loaded.Events[1].EventType != "data_agent.job.leased" {
+		t.Fatalf("loaded leased job = %+v events=%+v, want running job with lease audit event", loaded.Job, loaded.Events)
+	}
+
+	renewBody := `{"lease_token":"` + lease.LeaseToken + `","ttl_seconds":120}`
+	renew := httptest.NewRequest(http.MethodPatch, "/v2/data-agent/jobs/"+created.Job.JobID+"/lease", strings.NewReader(renewBody))
+	renew.Header.Set("Content-Type", "application/json")
+	renew.Header.Set("X-Ultra-User-Id", "agent-user")
+	renew.Header.Set("X-Ultra-Org-Id", "agent-org")
+	renewRec := httptest.NewRecorder()
+	router.ServeHTTP(renewRec, renew)
+	if renewRec.Code != http.StatusOK {
+		t.Fatalf("renew data-agent lease status = %d body=%s, want 200", renewRec.Code, renewRec.Body.String())
+	}
+
+	releaseBody := `{"lease_token":"` + lease.LeaseToken + `"}`
+	release := httptest.NewRequest(http.MethodDelete, "/v2/data-agent/jobs/"+created.Job.JobID+"/lease", strings.NewReader(releaseBody))
+	release.Header.Set("Content-Type", "application/json")
+	release.Header.Set("X-Ultra-User-Id", "agent-user")
+	release.Header.Set("X-Ultra-Org-Id", "agent-org")
+	releaseRec := httptest.NewRecorder()
+	router.ServeHTTP(releaseRec, release)
+	if releaseRec.Code != http.StatusOK {
+		t.Fatalf("release data-agent lease status = %d body=%s, want 200", releaseRec.Code, releaseRec.Body.String())
+	}
+
+	reclaim := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs/"+created.Job.JobID+"/lease", strings.NewReader(`{"worker_id":"data-agent-worker-b","ttl_seconds":60}`))
+	reclaim.Header.Set("Content-Type", "application/json")
+	reclaim.Header.Set("X-Ultra-User-Id", "agent-user")
+	reclaim.Header.Set("X-Ultra-Org-Id", "agent-org")
+	reclaimRec := httptest.NewRecorder()
+	router.ServeHTTP(reclaimRec, reclaim)
+	if reclaimRec.Code != http.StatusOK {
+		t.Fatalf("reclaim data-agent lease status = %d body=%s, want 200", reclaimRec.Code, reclaimRec.Body.String())
 	}
 }
 
@@ -2819,6 +8511,406 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	router.ServeHTTP(foreignEventsRec, foreignEventsReq)
 	if foreignEventsRec.Code != http.StatusNotFound {
 		t.Fatalf("foreign events status = %d body=%s, want 404", foreignEventsRec.Code, foreignEventsRec.Body.String())
+	}
+}
+
+func TestV2ResourceBulkDeleteIsAtomicAndAudited(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "bulk_delete_a",
+			OriginalName: "bulk-delete-a.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    64,
+			SHA256:       "sha-bulk-delete-a",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "bulk_delete_b",
+			OriginalName: "bulk-delete-b.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    96,
+			SHA256:       "sha-bulk-delete-b",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "bulk_delete_foreign",
+			OriginalName: "foreign.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SHA256:       "sha-bulk-delete-foreign",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "carol",
+			OwnerOrgID:   "org-c",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	atomicReq := httptest.NewRequest(http.MethodPost, "/v2/resources/delete/bulk", strings.NewReader(`{
+		"resource_ids":["bulk_delete_a","bulk_delete_foreign"]
+	}`))
+	atomicReq.Header.Set("Content-Type", "application/json")
+	atomicReq.Header.Set("X-Ultra-User-Id", "alice")
+	atomicReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	atomicRec := httptest.NewRecorder()
+	router.ServeHTTP(atomicRec, atomicReq)
+	if atomicRec.Code != http.StatusNotFound {
+		t.Fatalf("atomic delete status = %d body=%s, want 404", atomicRec.Code, atomicRec.Body.String())
+	}
+	if _, err := mem.GetResourceForUser(context.Background(), "bulk_delete_a", "alice", "org-a"); err != nil {
+		t.Fatalf("owned resource was mutated after failed atomic bulk delete: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodPost, "/v2/resources/delete/bulk", strings.NewReader(`{
+		"resource_ids":["bulk_delete_a","bulk_delete_b","bulk_delete_a"]
+	}`))
+	deleteReq.Header.Set("Content-Type", "application/json")
+	deleteReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("bulk delete status = %d body=%s, want 200", deleteRec.Code, deleteRec.Body.String())
+	}
+	var deleted bulkLifecycleResourcesResponse
+	if err := json.Unmarshal(deleteRec.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode bulk delete response: %v", err)
+	}
+	if deleted.Count != 2 || len(deleted.Resources) != 2 || len(deleted.Events) != 2 {
+		t.Fatalf("bulk delete response = %+v, want two resources and events", deleted)
+	}
+	for _, resource := range deleted.Resources {
+		if resource.Status != "deleted" {
+			t.Fatalf("deleted resource %s status = %q, want deleted", resource.FileID, resource.Status)
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "alice")
+	listReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list after bulk delete status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list after bulk delete: %v", err)
+	}
+	if listed.Count != 0 || len(listed.Resources) != 0 {
+		t.Fatalf("active resources after bulk delete = %+v, want none", listed)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?event_type=resource.deleted&limit=20", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource event list status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventListResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource events: %v", err)
+	}
+	if events.Count != 2 || events.TotalCount != 2 {
+		t.Fatalf("bulk delete events = %+v, want two deleted events", events)
+	}
+}
+
+func TestV2ResourceBulkRestoreIsAtomicAndAudited(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "bulk_restore_a",
+			OriginalName: "bulk-restore-a.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    64,
+			SHA256:       "sha-bulk-restore-a",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "bulk_restore_b",
+			OriginalName: "bulk-restore-b.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    96,
+			SHA256:       "sha-bulk-restore-b",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "bulk_restore_foreign",
+			OriginalName: "foreign-restore.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SHA256:       "sha-bulk-restore-foreign",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "carol",
+			OwnerOrgID:   "org-c",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	for _, resourceID := range []string{"bulk_restore_a", "bulk_restore_b"} {
+		if _, err := mem.SoftDeleteResourceForUser(context.Background(), resourceID, "alice", "org-a", now.Add(time.Minute)); err != nil {
+			t.Fatalf("SoftDeleteResourceForUser(%s): %v", resourceID, err)
+		}
+	}
+	if _, err := mem.SoftDeleteResourceForUser(context.Background(), "bulk_restore_foreign", "carol", "org-c", now.Add(time.Minute)); err != nil {
+		t.Fatalf("SoftDeleteResourceForUser(foreign): %v", err)
+	}
+
+	atomicReq := httptest.NewRequest(http.MethodPost, "/v2/resources/restore/bulk", strings.NewReader(`{
+		"resource_ids":["bulk_restore_a","bulk_restore_foreign"]
+	}`))
+	atomicReq.Header.Set("Content-Type", "application/json")
+	atomicReq.Header.Set("X-Ultra-User-Id", "alice")
+	atomicReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	atomicRec := httptest.NewRecorder()
+	router.ServeHTTP(atomicRec, atomicReq)
+	if atomicRec.Code != http.StatusNotFound {
+		t.Fatalf("atomic restore status = %d body=%s, want 404", atomicRec.Code, atomicRec.Body.String())
+	}
+	deletedAfterFailedRestore, err := mem.ListResourcesForUser(context.Background(), domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Status: "deleted",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser deleted after failed restore: %v", err)
+	}
+	if deletedAfterFailedRestore.TotalCount != 2 {
+		t.Fatalf("deleted resources after failed restore = %+v, want both owned resources untouched", deletedAfterFailedRestore)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/v2/resources/restore/bulk", strings.NewReader(`{
+		"resource_ids":["bulk_restore_a","bulk_restore_b","bulk_restore_a"]
+	}`))
+	restoreReq.Header.Set("Content-Type", "application/json")
+	restoreReq.Header.Set("X-Ultra-User-Id", "alice")
+	restoreReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("bulk restore status = %d body=%s, want 200", restoreRec.Code, restoreRec.Body.String())
+	}
+	var restored bulkLifecycleResourcesResponse
+	if err := json.Unmarshal(restoreRec.Body.Bytes(), &restored); err != nil {
+		t.Fatalf("decode bulk restore response: %v", err)
+	}
+	if restored.Count != 2 || len(restored.Resources) != 2 || len(restored.Events) != 2 {
+		t.Fatalf("bulk restore response = %+v, want two resources and events", restored)
+	}
+	for _, resource := range restored.Resources {
+		if resource.Status != "active" {
+			t.Fatalf("restored resource %s status = %q, want active", resource.FileID, resource.Status)
+		}
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resource-events?event_type=resource.restored&limit=20", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "alice")
+	eventsReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource restored event list status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventListResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode resource restored events: %v", err)
+	}
+	if events.Count != 2 || events.TotalCount != 2 {
+		t.Fatalf("bulk restore events = %+v, want two restored events", events)
+	}
+	for _, event := range events.Events {
+		if event.EventType != "resource.restored" {
+			t.Fatalf("bulk restore event = %+v, want resource.restored", event)
+		}
+	}
+}
+
+func TestV2ResourcesListDeletedStatusIsOwnerOnlyAndRestorable(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "deleted_alice_resource",
+			OriginalName: "deleted-alice.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SHA256:       "sha-deleted-alice",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "active_alice_resource",
+			OriginalName: "active-alice.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SHA256:       "sha-active-alice",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	if _, err := mem.CreateResourceShareGrant(context.Background(), domain.CreateResourceShareGrantInput{
+		ResourceID:      "deleted_alice_resource",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "alice",
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(context.Background(), "deleted_alice_resource", "alice", "org-a", now.Add(time.Minute)); err != nil {
+		t.Fatalf("SoftDeleteResourceForUser: %v", err)
+	}
+
+	activeReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	activeReq.Header.Set("X-Ultra-User-Id", "alice")
+	activeReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	activeRec := httptest.NewRecorder()
+	router.ServeHTTP(activeRec, activeReq)
+	if activeRec.Code != http.StatusOK {
+		t.Fatalf("active list status = %d body=%s", activeRec.Code, activeRec.Body.String())
+	}
+	var active resourcesResponse
+	if err := json.Unmarshal(activeRec.Body.Bytes(), &active); err != nil {
+		t.Fatalf("decode active resources: %v", err)
+	}
+	if active.Count != 1 || active.Resources[0].FileID != "active_alice_resource" {
+		t.Fatalf("active resources = %+v, want only active resource", active)
+	}
+
+	deletedReq := httptest.NewRequest(http.MethodGet, "/v2/resources?status=deleted&limit=20", nil)
+	deletedReq.Header.Set("X-Ultra-User-Id", "alice")
+	deletedReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deletedRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedRec, deletedReq)
+	if deletedRec.Code != http.StatusOK {
+		t.Fatalf("deleted list status = %d body=%s", deletedRec.Code, deletedRec.Body.String())
+	}
+	var deleted resourcesResponse
+	if err := json.Unmarshal(deletedRec.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode deleted resources: %v", err)
+	}
+	if deleted.Count != 1 || deleted.Resources[0].FileID != "deleted_alice_resource" || deleted.Resources[0].Status != "deleted" {
+		t.Fatalf("deleted resources = %+v, want owner-visible deleted resource", deleted)
+	}
+
+	bobDeletedReq := httptest.NewRequest(http.MethodGet, "/v2/resources?status=deleted&limit=20", nil)
+	bobDeletedReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDeletedReq.Header.Set("X-Ultra-Org-Id", "org-b")
+	bobDeletedRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDeletedRec, bobDeletedReq)
+	if bobDeletedRec.Code != http.StatusOK {
+		t.Fatalf("bob deleted list status = %d body=%s", bobDeletedRec.Code, bobDeletedRec.Body.String())
+	}
+	var bobDeleted resourcesResponse
+	if err := json.Unmarshal(bobDeletedRec.Body.Bytes(), &bobDeleted); err != nil {
+		t.Fatalf("decode bob deleted resources: %v", err)
+	}
+	if bobDeleted.Count != 0 || len(bobDeleted.Resources) != 0 {
+		t.Fatalf("bob deleted resources = %+v, want no deleted resource leak through stale share", bobDeleted)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/v2/resources/deleted_alice_resource/restore", nil)
+	restoreReq.Header.Set("X-Ultra-User-Id", "alice")
+	restoreReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore status = %d body=%s", restoreRec.Code, restoreRec.Body.String())
+	}
+	var restored resourceResponse
+	if err := json.Unmarshal(restoreRec.Body.Bytes(), &restored); err != nil {
+		t.Fatalf("decode restored resource: %v", err)
+	}
+	if restored.Resource.FileID != "deleted_alice_resource" || restored.Resource.Status != "active" {
+		t.Fatalf("restored resource = %+v, want active restored resource", restored.Resource)
 	}
 }
 
@@ -4655,9 +10747,11 @@ func TestV2BisqueImportDownloadsResourceIntoUploadStore(t *testing.T) {
 	defer bisque.Close()
 
 	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
 	router := NewRouter(ServerDeps{
 		Version:    "test-version",
 		UploadRoot: uploadRoot,
+		Store:      mem,
 		Bisque: NewBisqueService(BisqueServiceConfig{
 			RootURL:       bisque.URL,
 			DevUsername:   "ada",
@@ -4722,6 +10816,34 @@ func TestV2BisqueImportDownloadsResourceIntoUploadStore(t *testing.T) {
 	}
 	if !bytes.Equal(data, pngBytes) {
 		t.Fatalf("imported bytes changed: got %d want %d", len(data), len(pngBytes))
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+body.Uploaded[0].FileID+"/events", nil)
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("resource events status = %d body=%s, want 200", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode import resource events: %v", err)
+	}
+	foundImportEvent := false
+	for _, event := range events.Events {
+		if event.EventType != "resource.imported" {
+			continue
+		}
+		if event.Metadata["source_type"] == "bisque_import" &&
+			event.Metadata["source_uri"] == bisque.URL+"/data_service/image/abc" &&
+			event.Metadata["bisque_resource_uri"] == body.Imports[0].ResourceURI &&
+			event.Metadata["bisque_resource_uniq"] == "abc" &&
+			event.Metadata["import_status"] == "imported" {
+			foundImportEvent = true
+			break
+		}
+	}
+	if !foundImportEvent {
+		t.Fatalf("resource events = %+v, want resource.imported audit metadata with BisQue source provenance", events.Events)
 	}
 }
 
@@ -5767,6 +11889,41 @@ func TestArtifactPromotionCopiesArtifactIntoResourceCatalog(t *testing.T) {
 	}
 	if list.Count != 1 || len(list.Resources) != 1 || list.Resources[0].FileID != promoted.Resource.FileID {
 		t.Fatalf("resources = %+v, want promoted resource only", list)
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+promoted.Resource.FileID+"/events", nil)
+	eventsReq.Header.Set("X-Ultra-User-Id", "user-1")
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		t.Fatalf("events status = %d body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var events resourceEventsResponse
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode promoted resource events: %v", err)
+	}
+	promotionEvent, ok := resourceEventByType(events.Events, "resource.artifact_promoted")
+	if !ok {
+		t.Fatalf("promoted resource events = %+v, want resource.artifact_promoted", events.Events)
+	}
+	if !resourceEventsContain(events.Events, "resource.promoted") {
+		t.Fatalf("promoted resource events = %+v, want resource.promoted catalog event", events.Events)
+	}
+	wantMetadata := map[string]string{
+		"artifact_id":            artifact.ArtifactID,
+		"run_id":                 run.RunID,
+		"artifact_kind":          artifact.Kind,
+		"artifact_path":          artifact.Path,
+		"artifact_title":         artifact.Title,
+		"artifact_mime_type":     artifact.MimeType,
+		"promoted_original_name": "saved-detections.csv",
+		"source_uri":             promoted.Resource.SourceURI,
+		"resource_kind":          promoted.Resource.ResourceKind,
+	}
+	for key, want := range wantMetadata {
+		if got, _ := promotionEvent.Metadata[key].(string); got != want {
+			t.Fatalf("resource.artifact_promoted metadata[%q] = %#v, want %q; metadata=%+v", key, promotionEvent.Metadata[key], want, promotionEvent.Metadata)
+		}
 	}
 
 	bobReq := httptest.NewRequest(http.MethodPost, "/v2/artifacts/"+artifact.ArtifactID+"/promote-resource", nil)

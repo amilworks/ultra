@@ -35,6 +35,16 @@ class RuntimeSettings:
     nats_events_subject: str = "ultra.runs.events"
     nats_cancel_subject: str = "ultra.runs.cancel"
     nats_worker_durable: str = "ultra-deepagents-worker"
+    data_agent_nats_url: str = "nats://127.0.0.1:4222"
+    data_agent_nats_stream: str = "ULTRA_RUNS"
+    data_agent_nats_jobs_subject: str = "ultra.data_agent.jobs"
+    data_agent_nats_worker_durable: str = "ultra-data-agent-worker"
+    data_agent_nats_ack_wait_seconds: float = 300.0
+    data_agent_nats_ack_progress_interval_seconds: float = 60.0
+    data_agent_worker_id: str = "ultra-data-agent-worker"
+    data_agent_worker_kind: str = "data_agent"
+    data_agent_control_lease_ttl_seconds: float = 600.0
+    data_agent_control_lease_required: bool = False
     worker_max_concurrency: int = DEFAULT_WORKER_MAX_CONCURRENCY
     worker_ack_wait_seconds: float = 300.0
     worker_ack_progress_interval_seconds: float = 60.0
@@ -145,6 +155,47 @@ class RuntimeSettings:
             nats_worker_durable=os.getenv(
                 "ULTRA_DEEPAGENTS_WORKER_DURABLE",
                 "ultra-deepagents-worker",
+            ),
+            data_agent_nats_url=os.getenv(
+                "ULTRA_DATA_AGENT_NATS_URL",
+                os.getenv(
+                    "ULTRA_CONTROL_NATS_URL",
+                    os.getenv("ULTRA_NATS_URL", "nats://127.0.0.1:4222"),
+                ),
+            ),
+            data_agent_nats_stream=os.getenv(
+                "ULTRA_DATA_AGENT_NATS_STREAM",
+                os.getenv(
+                    "ULTRA_CONTROL_NATS_STREAM",
+                    os.getenv("ULTRA_NATS_STREAM", "ULTRA_RUNS"),
+                ),
+            ),
+            data_agent_nats_jobs_subject=os.getenv(
+                "ULTRA_DATA_AGENT_NATS_JOBS_SUBJECT",
+                os.getenv("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", "ultra.data_agent.jobs"),
+            ),
+            data_agent_nats_worker_durable=os.getenv(
+                "ULTRA_DATA_AGENT_NATS_WORKER_DURABLE",
+                os.getenv("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
+            ),
+            data_agent_nats_ack_wait_seconds=float(
+                os.getenv("ULTRA_DATA_AGENT_NATS_ACK_WAIT_SECONDS", "300")
+            ),
+            data_agent_nats_ack_progress_interval_seconds=float(
+                os.getenv("ULTRA_DATA_AGENT_NATS_ACK_PROGRESS_INTERVAL_SECONDS", "60")
+            ),
+            data_agent_worker_id=os.getenv(
+                "ULTRA_DATA_AGENT_WORKER_ID",
+                f"ultra-data-agent-worker@{gethostname()}:{os.getpid()}",
+            ),
+            data_agent_worker_kind=os.getenv("ULTRA_DATA_AGENT_WORKER_KIND", "data_agent"),
+            data_agent_control_lease_ttl_seconds=max(
+                1.0,
+                float(os.getenv("ULTRA_DATA_AGENT_CONTROL_LEASE_TTL_SECONDS", "600")),
+            ),
+            data_agent_control_lease_required=_env_bool(
+                "ULTRA_DATA_AGENT_REQUIRE_CONTROL_LEASE",
+                False,
             ),
             worker_max_concurrency=max(
                 1,

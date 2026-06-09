@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,11 +21,110 @@ type PostgresStore struct {
 	queries *sqlc.Queries
 }
 
+func upsertResourceSearchDocumentTx(ctx context.Context, tx pgx.Tx, resource domain.ResourceRecord) error {
+	searchText := resourceSearchDocument(resource)
+	updatedAt := resource.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	_, err := tx.Exec(ctx, `
+INSERT INTO control_resource_search_documents (
+  resource_id, owner_user_id, owner_org_id, project_id, status, search_text, search_vector, updated_at
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, to_tsvector('simple', $6), $7)
+ON CONFLICT (resource_id) DO UPDATE SET
+  owner_user_id = EXCLUDED.owner_user_id,
+  owner_org_id = EXCLUDED.owner_org_id,
+  project_id = EXCLUDED.project_id,
+  status = EXCLUDED.status,
+  search_text = EXCLUDED.search_text,
+  search_vector = EXCLUDED.search_vector,
+  updated_at = EXCLUDED.updated_at`,
+		strings.TrimSpace(resource.ResourceID),
+		strings.TrimSpace(resource.OwnerUserID),
+		strings.TrimSpace(resource.OwnerOrgID),
+		strings.TrimSpace(resource.ProjectID),
+		strings.TrimSpace(resource.Status),
+		searchText,
+		timestamptz(updatedAt),
+	)
+	return err
+}
+
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{
 		pool:    pool,
 		queries: sqlc.New(pool),
 	}
+}
+
+func postgresResourceDescriptorFilterSQL(placeholder string) string {
+	param := strings.TrimSpace(placeholder)
+	if param == "" {
+		param = "$1"
+	}
+	return strings.ReplaceAll(`
+  AND (
+    cardinality(__PARAM__::text[]) = 0
+    OR NOT EXISTS (
+      SELECT 1
+      FROM unnest(__PARAM__::text[]) AS descriptor_filters(filter)
+      WHERE NOT (
+        COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ? lower(descriptor_filters.filter)
+        OR lower(COALESCE(r.metadata->>'label', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'scientific_descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'diagnosis', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'modality', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'organism', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata->>'species', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,label}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,scientific_descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'labels') = 'array' THEN r.metadata->'labels' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'descriptors') = 'array' THEN r.metadata->'descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'scientific_descriptors') = 'array' THEN r.metadata->'scientific_descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'diagnoses') = 'array' THEN r.metadata->'diagnoses' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,labels}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,labels}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+          WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+        )
+      )
+    )
+  )`, "__PARAM__", param)
 }
 
 func (s *PostgresStore) CreateUser(ctx context.Context, input domain.CreateUserInput) (domain.UserAccount, error) {
@@ -84,6 +184,25 @@ RETURNING org_id, name, status, created_at, updated_at, metadata`,
 		jsonBytes(input.Metadata),
 	)
 	return scanOrganization(row)
+}
+
+func (s *PostgresStore) GetOrganization(ctx context.Context, orgID string) (domain.Organization, bool, error) {
+	orgID = normalizeOrgID(orgID)
+	if orgID == "" {
+		return domain.Organization{}, false, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+SELECT org_id, name, status, created_at, updated_at, metadata
+FROM control_organizations
+WHERE org_id = $1`, orgID)
+	org, err := scanOrganization(row)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.Organization{}, false, nil
+		}
+		return domain.Organization{}, false, err
+	}
+	return org, true, nil
 }
 
 func (s *PostgresStore) ListOrganizations(ctx context.Context, limit int, query string) ([]domain.Organization, error) {
@@ -1389,7 +1508,498 @@ func (s *PostgresStore) GetArtifactForUser(ctx context.Context, artifactID strin
 	return artifactFromRow(row), nil
 }
 
+func (s *PostgresStore) CreateUploadSession(ctx context.Context, input domain.CreateUploadSessionInput) (domain.UploadSessionRecord, error) {
+	sessionID := strings.TrimSpace(input.SessionID)
+	if sessionID == "" {
+		sessionID = domain.NewID("upload_session")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	sourceType := strings.TrimSpace(input.SourceType)
+	if sourceType == "" {
+		sourceType = "upload"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	row, err := s.queries.CreateUploadSession(ctx, sqlc.CreateUploadSessionParams{
+		SessionID:          sessionID,
+		OwnerUserID:        ownerUserID,
+		OwnerOrgID:         nullableText(input.OwnerOrgID),
+		OwnerRole:          nullableText(input.OwnerRole),
+		ProjectID:          nullableText(input.ProjectID),
+		SourceType:         sourceType,
+		Status:             status,
+		TotalBytes:         input.TotalBytes,
+		BytesReceived:      input.BytesReceived,
+		BytesVerified:      input.BytesVerified,
+		BytesCommitted:     input.BytesCommitted,
+		IdempotencyKey:     nullableText(input.IdempotencyKey),
+		BrowserFingerprint: nullableText(input.BrowserFingerprint),
+		Error:              nullableText(input.Error),
+		CreatedAt:          timestamptz(createdAt),
+		UpdatedAt:          timestamptz(updatedAt),
+		CompletedAt:        nullableTimestamptz(input.CompletedAt),
+		Metadata:           jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.UploadSessionRecord{}, mapPgError(err)
+	}
+	return uploadSessionFromRow(row), nil
+}
+
+func (s *PostgresStore) GetUploadSessionForUser(ctx context.Context, sessionID string, userID string, orgID string) (domain.UploadSessionRecord, error) {
+	row, err := s.queries.GetUploadSessionForUser(ctx, sqlc.GetUploadSessionForUserParams{
+		SessionID:   strings.TrimSpace(sessionID),
+		OwnerUserID: strings.TrimSpace(userID),
+		OwnerOrgID:  nullableText(orgID),
+	})
+	if err != nil {
+		return domain.UploadSessionRecord{}, mapPgError(err)
+	}
+	return uploadSessionFromRow(row), nil
+}
+
+func (s *PostgresStore) GetUploadSessionByIdempotencyKeyForUser(ctx context.Context, idempotencyKey string, userID string, orgID string) (domain.UploadSessionRecord, error) {
+	row, err := s.queries.GetUploadSessionByIdempotencyKey(ctx, sqlc.GetUploadSessionByIdempotencyKeyParams{
+		OwnerUserID:    strings.TrimSpace(userID),
+		Column2:        strings.TrimSpace(orgID),
+		IdempotencyKey: nullableText(idempotencyKey),
+	})
+	if err != nil {
+		return domain.UploadSessionRecord{}, mapPgError(err)
+	}
+	return uploadSessionFromRow(row), nil
+}
+
+func (s *PostgresStore) UpdateUploadSession(ctx context.Context, input domain.UpdateUploadSessionInput) (domain.UploadSessionRecord, error) {
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	row, err := s.queries.UpdateUploadSession(ctx, sqlc.UpdateUploadSessionParams{
+		SessionID:      strings.TrimSpace(input.SessionID),
+		OwnerUserID:    strings.TrimSpace(input.OwnerUserID),
+		OwnerOrgID:     nullableText(input.OwnerOrgID),
+		Status:         strings.TrimSpace(input.Status),
+		BytesReceived:  input.BytesReceived,
+		BytesVerified:  input.BytesVerified,
+		BytesCommitted: input.BytesCommitted,
+		Error:          nullableText(input.Error),
+		UpdatedAt:      timestamptz(updatedAt),
+		CompletedAt:    nullableTimestamptz(input.CompletedAt),
+		Metadata:       jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.UploadSessionRecord{}, mapPgError(err)
+	}
+	return uploadSessionFromRow(row), nil
+}
+
+func (s *PostgresStore) UpsertUploadSessionFile(ctx context.Context, input domain.UpsertUploadSessionFileInput) (domain.UploadSessionFileRecord, error) {
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.UploadSessionFileRecord{}, mapPgError(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var previousStatus string
+	var previousSize int64
+	err = tx.QueryRow(ctx, `
+SELECT status, size_bytes
+FROM control_upload_session_files
+WHERE session_id = $1 AND file_token = $2
+FOR UPDATE`,
+		strings.TrimSpace(input.SessionID),
+		strings.TrimSpace(input.FileToken),
+	).Scan(&previousStatus, &previousSize)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return domain.UploadSessionFileRecord{}, mapPgError(err)
+	}
+	row, err := s.queries.WithTx(tx).UpsertUploadSessionFile(ctx, sqlc.UpsertUploadSessionFileParams{
+		SessionID:      strings.TrimSpace(input.SessionID),
+		FileToken:      strings.TrimSpace(input.FileToken),
+		ResourceID:     nullableText(input.ResourceID),
+		OriginalName:   strings.TrimSpace(input.OriginalName),
+		RelativePath:   nullableText(input.RelativePath),
+		ContentType:    nullableText(input.ContentType),
+		SizeBytes:      input.SizeBytes,
+		DeclaredSha256: nullableText(input.DeclaredSHA256),
+		ComputedSha256: nullableText(input.ComputedSHA256),
+		Status:         status,
+		Error:          nullableText(input.Error),
+		CreatedAt:      timestamptz(createdAt),
+		UpdatedAt:      timestamptz(updatedAt),
+		CompletedAt:    nullableTimestamptz(input.CompletedAt),
+		Metadata:       jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.UploadSessionFileRecord{}, mapPgError(err)
+	}
+	file := uploadSessionFileFromRow(row)
+	previousCommitted := uploadSessionFileCommittedContribution(previousStatus, previousSize)
+	nextCommitted := uploadSessionFileCommittedContribution(file.Status, file.SizeBytes)
+	if delta := nextCommitted - previousCommitted; delta != 0 {
+		if _, err := tx.Exec(ctx, `
+UPDATE control_upload_sessions
+SET bytes_committed = GREATEST(0, bytes_committed + $2),
+    updated_at = GREATEST(updated_at, $3)
+WHERE session_id = $1`,
+			file.SessionID,
+			delta,
+			timestamptz(updatedAt),
+		); err != nil {
+			return domain.UploadSessionFileRecord{}, mapPgError(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.UploadSessionFileRecord{}, mapPgError(err)
+	}
+	return file, nil
+}
+
+const postgresUpsertUploadSessionFileSQL = `
+INSERT INTO control_upload_session_files (
+  session_id, file_token, resource_id, original_name, relative_path, content_type,
+  size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at, completed_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+ON CONFLICT (session_id, file_token) DO UPDATE SET
+  resource_id = EXCLUDED.resource_id,
+  original_name = EXCLUDED.original_name,
+  relative_path = EXCLUDED.relative_path,
+  content_type = EXCLUDED.content_type,
+  size_bytes = EXCLUDED.size_bytes,
+  declared_sha256 = EXCLUDED.declared_sha256,
+  computed_sha256 = EXCLUDED.computed_sha256,
+  status = EXCLUDED.status,
+  error = EXCLUDED.error,
+  updated_at = EXCLUDED.updated_at,
+  completed_at = EXCLUDED.completed_at,
+  metadata = EXCLUDED.metadata
+RETURNING session_id, file_token, resource_id, original_name, relative_path, content_type,
+          size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at,
+          completed_at, metadata`
+
+func (s *PostgresStore) CreateUploadSessionFiles(ctx context.Context, inputs []domain.UpsertUploadSessionFileInput) ([]domain.UploadSessionFileRecord, error) {
+	if len(inputs) == 0 {
+		return []domain.UploadSessionFileRecord{}, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	batch := &pgx.Batch{}
+	for _, input := range inputs {
+		createdAt := input.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = domain.Now()
+		}
+		updatedAt := input.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = createdAt
+		}
+		status := strings.TrimSpace(input.Status)
+		if status == "" {
+			status = "active"
+		}
+		batch.Queue(
+			postgresUpsertUploadSessionFileSQL,
+			strings.TrimSpace(input.SessionID),
+			strings.TrimSpace(input.FileToken),
+			nullableText(input.ResourceID),
+			strings.TrimSpace(input.OriginalName),
+			nullableText(input.RelativePath),
+			nullableText(input.ContentType),
+			input.SizeBytes,
+			nullableText(input.DeclaredSHA256),
+			nullableText(input.ComputedSHA256),
+			status,
+			nullableText(input.Error),
+			timestamptz(createdAt),
+			timestamptz(updatedAt),
+			nullableTimestamptz(input.CompletedAt),
+			jsonBytes(input.Metadata),
+		)
+	}
+	results := tx.SendBatch(ctx, batch)
+	files := make([]domain.UploadSessionFileRecord, 0, len(inputs))
+	for range inputs {
+		file, err := scanUploadSessionFileRow(results.QueryRow())
+		if err != nil {
+			_ = results.Close()
+			return nil, mapPgError(err)
+		}
+		files = append(files, file)
+	}
+	if err := results.Close(); err != nil {
+		return nil, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapPgError(err)
+	}
+	return files, nil
+}
+
+func uploadSessionFileCommittedContribution(status string, sizeBytes int64) int64 {
+	if strings.TrimSpace(status) == "completed" {
+		return sizeBytes
+	}
+	return 0
+}
+
+func (s *PostgresStore) ListUploadSessionFiles(ctx context.Context, sessionID string) ([]domain.UploadSessionFileRecord, error) {
+	rows, err := s.queries.ListUploadSessionFiles(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	files := make([]domain.UploadSessionFileRecord, 0, len(rows))
+	for _, row := range rows {
+		files = append(files, uploadSessionFileFromRow(row))
+	}
+	return files, nil
+}
+
+func (s *PostgresStore) GetUploadSessionFile(ctx context.Context, sessionID string, fileToken string) (domain.UploadSessionFileRecord, error) {
+	row, err := s.queries.GetUploadSessionFile(ctx, sqlc.GetUploadSessionFileParams{
+		SessionID: strings.TrimSpace(sessionID),
+		FileToken: strings.TrimSpace(fileToken),
+	})
+	if err != nil {
+		return domain.UploadSessionFileRecord{}, mapPgError(err)
+	}
+	return uploadSessionFileFromRow(row), nil
+}
+
+func (s *PostgresStore) UpsertUploadChunk(ctx context.Context, input domain.UpsertUploadChunkInput) (domain.UploadChunkRecord, error) {
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "received"
+	}
+	counterUpdatedAt := input.ReceivedAt
+	if counterUpdatedAt.IsZero() {
+		counterUpdatedAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.UploadChunkRecord{}, mapPgError(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var previousStatus string
+	var previousSize int64
+	err = tx.QueryRow(ctx, `
+SELECT status, size_bytes
+FROM control_upload_chunks
+WHERE session_id = $1 AND file_token = $2 AND chunk_index = $3
+FOR UPDATE`,
+		strings.TrimSpace(input.SessionID),
+		strings.TrimSpace(input.FileToken),
+		int32(input.ChunkIndex),
+	).Scan(&previousStatus, &previousSize)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return domain.UploadChunkRecord{}, mapPgError(err)
+	}
+	row, err := s.queries.WithTx(tx).UpsertUploadChunk(ctx, sqlc.UpsertUploadChunkParams{
+		SessionID:  strings.TrimSpace(input.SessionID),
+		FileToken:  strings.TrimSpace(input.FileToken),
+		ChunkIndex: int32(input.ChunkIndex),
+		ByteOffset: input.Offset,
+		SizeBytes:  input.SizeBytes,
+		Sha256:     strings.TrimSpace(input.SHA256),
+		Status:     status,
+		StorageUri: nullableText(input.StorageURI),
+		ReceivedAt: nullableTimestamptz(input.ReceivedAt),
+		VerifiedAt: nullableTimestamptz(input.VerifiedAt),
+		Error:      nullableText(input.Error),
+		Metadata:   jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		mapped := mapPgError(err)
+		if errors.Is(mapped, ErrNotFound) {
+			return domain.UploadChunkRecord{}, fmt.Errorf("%w: verified upload chunk cannot be replaced with different bytes", ErrConflict)
+		}
+		return domain.UploadChunkRecord{}, mapped
+	}
+	chunk := uploadChunkFromRow(row)
+	previousReceived, previousVerified := uploadSessionChunkByteContribution(previousStatus, previousSize)
+	nextReceived, nextVerified := uploadSessionChunkByteContribution(chunk.Status, chunk.SizeBytes)
+	receivedDelta := nextReceived - previousReceived
+	verifiedDelta := nextVerified - previousVerified
+	if receivedDelta != 0 || verifiedDelta != 0 {
+		if _, err := tx.Exec(ctx, `
+UPDATE control_upload_sessions
+SET bytes_received = GREATEST(0, bytes_received + $2),
+    bytes_verified = GREATEST(0, bytes_verified + $3),
+    updated_at = GREATEST(updated_at, $4)
+WHERE session_id = $1`,
+			chunk.SessionID,
+			receivedDelta,
+			verifiedDelta,
+			timestamptz(counterUpdatedAt),
+		); err != nil {
+			return domain.UploadChunkRecord{}, mapPgError(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.UploadChunkRecord{}, mapPgError(err)
+	}
+	return chunk, nil
+}
+
+func uploadSessionChunkByteContribution(status string, sizeBytes int64) (int64, int64) {
+	switch strings.TrimSpace(status) {
+	case "received":
+		return sizeBytes, 0
+	case "verified":
+		return sizeBytes, sizeBytes
+	default:
+		return 0, 0
+	}
+}
+
+func (s *PostgresStore) ListUploadChunks(ctx context.Context, sessionID string, fileToken string) ([]domain.UploadChunkRecord, error) {
+	rows, err := s.queries.ListUploadChunks(ctx, sqlc.ListUploadChunksParams{
+		SessionID: strings.TrimSpace(sessionID),
+		FileToken: strings.TrimSpace(fileToken),
+	})
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]domain.UploadChunkRecord, 0, len(rows))
+	for _, row := range rows {
+		chunks = append(chunks, uploadChunkFromRow(row))
+	}
+	return chunks, nil
+}
+
+func (s *PostgresStore) ListUploadSessionChunks(ctx context.Context, sessionID string) ([]domain.UploadChunkRecord, error) {
+	rows, err := s.queries.ListUploadSessionChunks(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]domain.UploadChunkRecord, 0, len(rows))
+	for _, row := range rows {
+		chunks = append(chunks, uploadChunkFromRow(row))
+	}
+	return chunks, nil
+}
+
+func (s *PostgresStore) GetUploadSessionTotals(ctx context.Context, sessionID string) (domain.UploadSessionTotals, error) {
+	row, err := s.queries.GetUploadSessionTotals(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return domain.UploadSessionTotals{}, mapPgError(err)
+	}
+	return domain.UploadSessionTotals{
+		BytesReceived:  row.BytesReceived,
+		BytesVerified:  row.BytesVerified,
+		BytesCommitted: row.BytesCommitted,
+		AllComplete:    row.AllComplete.Valid && row.AllComplete.Bool,
+	}, nil
+}
+
+func (s *PostgresStore) UploadSessionOperationalMetrics(ctx context.Context) (domain.UploadSessionOperationalMetrics, error) {
+	row, err := s.queries.UploadSessionOperationalMetrics(ctx)
+	if err != nil {
+		return domain.UploadSessionOperationalMetrics{}, mapPgError(err)
+	}
+	return domain.UploadSessionOperationalMetrics{
+		Total:          int(row.Total),
+		Active:         int(row.Active),
+		Paused:         int(row.Paused),
+		Completed:      int(row.Completed),
+		Failed:         int(row.Failed),
+		Canceled:       int(row.Canceled),
+		Other:          int(row.Other),
+		BytesTotal:     row.BytesTotal,
+		BytesReceived:  row.BytesReceived,
+		BytesVerified:  row.BytesVerified,
+		BytesCommitted: row.BytesCommitted,
+	}, nil
+}
+
+func (s *PostgresStore) AppendUploadSessionEvent(ctx context.Context, input domain.AppendUploadSessionEventInput) (domain.UploadSessionEventRecord, error) {
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("upload_session_event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	row, err := s.queries.AppendUploadSessionEvent(ctx, sqlc.AppendUploadSessionEventParams{
+		EventID:     eventID,
+		SessionID:   strings.TrimSpace(input.SessionID),
+		ActorUserID: nullableText(input.ActorUserID),
+		ActorOrgID:  nullableText(input.ActorOrgID),
+		EventType:   strings.TrimSpace(input.EventType),
+		Ts:          timestamptz(ts),
+		Metadata:    jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.UploadSessionEventRecord{}, mapPgError(err)
+	}
+	return uploadSessionEventFromRow(row), nil
+}
+
+func (s *PostgresStore) ListUploadSessionEvents(ctx context.Context, sessionID string, limit int) ([]domain.UploadSessionEventRecord, error) {
+	rows, err := s.queries.ListUploadSessionEvents(ctx, sqlc.ListUploadSessionEventsParams{
+		SessionID: strings.TrimSpace(sessionID),
+		Limit:     limit32(limit, 200),
+	})
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	events := make([]domain.UploadSessionEventRecord, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, uploadSessionEventFromRow(row))
+	}
+	return events, nil
+}
+
+func (s *PostgresStore) FindActiveResourceByShaForUser(ctx context.Context, userID string, orgID string, sha256 string, sizeBytes int64) (domain.ResourceRecord, error) {
+	row, err := s.queries.FindActiveResourceByShaForUser(ctx, sqlc.FindActiveResourceByShaForUserParams{
+		OwnerUserID: strings.TrimSpace(userID),
+		OwnerOrgID:  nullableText(orgID),
+		Sha256:      nullableText(sha256),
+		SizeBytes:   sizeBytes,
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
 func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	defer tx.Rollback(ctx)
 	resourceID := strings.TrimSpace(input.ResourceID)
 	if resourceID == "" {
 		resourceID = domain.NewID("file")
@@ -1419,7 +2029,13 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertR
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
-	row, err := s.queries.UpsertResource(ctx, sqlc.UpsertResourceParams{
+	tags := normalizeResourceTags(input.Tags)
+	metadata := mapOrEmpty(input.Metadata)
+	if len(tags) == 0 {
+		tags = resourceTagsFromMetadata(metadata)
+	}
+	metadata = resourceMetadataWithTags(metadata, tags)
+	row, err := s.queries.WithTx(tx).UpsertResource(ctx, sqlc.UpsertResourceParams{
 		ResourceID:         resourceID,
 		OwnerUserID:        ownerUserID,
 		OwnerOrgID:         nullableText(input.OwnerOrgID),
@@ -1439,12 +2055,108 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertR
 		UpdatedAt:          timestamptz(updatedAt),
 		DeletedAt:          nullableTimestamptz(input.DeletedAt),
 		RetentionExpiresAt: nullableTimestamptz(input.RetentionExpiresAt),
-		Metadata:           jsonBytes(input.Metadata),
+		Metadata:           jsonBytes(metadata),
 	})
 	if err != nil {
 		return domain.ResourceRecord{}, mapPgError(err)
 	}
-	return resourceFromRow(row), nil
+	resource := resourceFromRow(row)
+	if err := upsertResourceSearchDocumentTx(ctx, tx, resource); err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	return resource, nil
+}
+
+func (s *PostgresStore) MergeResourceMetadataForUser(ctx context.Context, input domain.MergeResourceMetadataInput) (domain.ResourceRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	resourceID := strings.TrimSpace(input.ResourceID)
+	userID := strings.TrimSpace(input.UserID)
+	orgID := strings.TrimSpace(input.OrgID)
+	selected, err := scanControlResourceRow(tx.QueryRow(ctx, `
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256,
+       storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at,
+       updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND COALESCE(owner_org_id, '') = $3
+FOR UPDATE`, resourceID, userID, orgID))
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	resource := resourceFromRow(selected)
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	metadata := mergeResourceMetadata(resource.Metadata, input.Patch)
+	updated, err := scanControlResourceRow(tx.QueryRow(ctx, `
+UPDATE control_resources
+SET metadata = $2,
+    updated_at = $3
+WHERE resource_id = $1
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256,
+          storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at,
+          updated_at, deleted_at, retention_expires_at, metadata`, resourceID, jsonBytes(metadata), timestamptz(updatedAt)))
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	resource = resourceFromRow(updated)
+	if err := upsertResourceSearchDocumentTx(ctx, tx, resource); err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	return resource, nil
+}
+
+func (s *PostgresStore) RenameResourceForUser(ctx context.Context, input domain.RenameResourceInput) (domain.ResourceRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	resourceID := strings.TrimSpace(input.ResourceID)
+	userID := strings.TrimSpace(input.UserID)
+	orgID := strings.TrimSpace(input.OrgID)
+	name := strings.TrimSpace(input.OriginalName)
+	if name == "" {
+		return domain.ResourceRecord{}, ErrNotFound
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	updated, err := scanControlResourceRow(tx.QueryRow(ctx, `
+UPDATE control_resources
+SET original_name = $4,
+    updated_at = $5
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND COALESCE(owner_org_id, '') = $3
+  AND status = 'active'
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256,
+          storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at,
+          updated_at, deleted_at, retention_expires_at, metadata`, resourceID, userID, orgID, name, timestamptz(updatedAt)))
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	resource := resourceFromRow(updated)
+	if err := upsertResourceSearchDocumentTx(ctx, tx, resource); err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	return resource, nil
 }
 
 func (s *PostgresStore) GetResourceForUser(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
@@ -1459,11 +2171,58 @@ func (s *PostgresStore) GetResourceForUser(ctx context.Context, resourceID strin
 	return resourceFromRow(row), nil
 }
 
+func (s *PostgresStore) GetResourceForOwner(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	row, err := s.queries.GetResourceForOwner(ctx, sqlc.GetResourceForOwnerParams{
+		ResourceID:  strings.TrimSpace(resourceID),
+		OwnerUserID: strings.TrimSpace(userID),
+		OwnerOrgID:  nullableText(orgID),
+	})
+	if err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
+	}
+	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) ListResourceIDsForOwner(ctx context.Context, userID string, orgID string, resourceIDs []string) (map[string]bool, error) {
+	resourceIDs = uniqueTrimmedStrings(resourceIDs)
+	existing := make(map[string]bool, len(resourceIDs))
+	if len(resourceIDs) == 0 {
+		return existing, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT resource_id
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND resource_id = ANY($3::text[])`,
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+		resourceIDs,
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var resourceID string
+		if err := rows.Scan(&resourceID); err != nil {
+			return nil, mapPgError(err)
+		}
+		existing[resourceID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return existing, nil
+}
+
 func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.ResourceListInput) (domain.ResourceListPage, error) {
 	status := strings.TrimSpace(input.Status)
 	if status == "" {
 		status = "active"
 	}
+	metadataFilterSpecs := resourceMetadataFilterSpecs(input.MetadataFilters)
+	descriptorFilters := normalizeResourceDescriptors(input.Descriptors)
 	params := sqlc.ListResourcesForUserParams{
 		OwnerUserID: strings.TrimSpace(input.UserID),
 		OwnerOrgID:  nullableText(input.OrgID),
@@ -1472,6 +2231,13 @@ func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.R
 		Column5:     strings.TrimSpace(input.Source),
 		Column6:     strings.TrimSpace(input.ProjectID),
 		Column7:     strings.TrimSpace(input.Query),
+		Column8:     resourceTagKeys(input.Tags),
+		Column9:     metadataFilterSpecs,
+		Column10:    nullableTimestamptz(input.CreatedAfter),
+		Column11:    nullableTimestamptz(input.CreatedBefore),
+		Column12:    strings.ToLower(strings.TrimSpace(input.ProcessingStatus)),
+		Column13:    strings.ToLower(strings.TrimSpace(input.Sharing)),
+		Column14:    descriptorFilters,
 		Limit:       limit32(input.Limit, 200),
 		Offset:      offset32(input.Offset),
 	}
@@ -1487,19 +2253,122 @@ func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.R
 		Column5:     params.Column5,
 		Column6:     params.Column6,
 		Column7:     params.Column7,
+		Column8:     params.Column8,
+		Column9:     params.Column9,
+		Column10:    params.Column10,
+		Column11:    params.Column11,
+		Column12:    params.Column12,
+		Column13:    params.Column13,
+		Column14:    params.Column14,
 	})
 	if err != nil {
 		return domain.ResourceListPage{}, err
 	}
 	resources := make([]domain.ResourceRecord, 0, len(rows))
 	for _, row := range rows {
-		resources = append(resources, resourceFromRow(row))
+		resources = append(resources, resourceFromListResourcesForUserRow(row))
 	}
 	return domain.ResourceListPage{
 		Resources:  resources,
 		TotalCount: int(count),
 		Limit:      int(params.Limit),
 		Offset:     int(params.Offset),
+	}, nil
+}
+
+func (s *PostgresStore) BulkTagResourcesForUser(ctx context.Context, input domain.BulkTagResourcesInput) (domain.BulkTagResourcesResult, error) {
+	resourceIDs := uniqueTrimmedStrings(input.ResourceIDs)
+	tags := normalizeResourceTags(input.Tags)
+	if len(resourceIDs) == 0 || len(tags) == 0 {
+		return domain.BulkTagResourcesResult{}, ErrNotFound
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	actorUserID := strings.TrimSpace(input.ActorUserID)
+	if actorUserID == "" {
+		actorUserID = ownerUserID
+	}
+	actorOrgID := strings.TrimSpace(input.ActorOrgID)
+	if actorOrgID == "" {
+		actorOrgID = ownerOrgID
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.BulkTagResourcesResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	resources := make([]domain.ResourceRecord, 0, len(resourceIDs))
+	events := make([]domain.ResourceEventRecord, 0, len(resourceIDs))
+	for _, resourceID := range resourceIDs {
+		selected, err := scanControlResourceRow(tx.QueryRow(ctx, `
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256,
+       storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at,
+       updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND COALESCE(owner_org_id, '') = $3
+  AND status = 'active'
+FOR UPDATE`, resourceID, ownerUserID, ownerOrgID))
+		if err != nil {
+			return domain.BulkTagResourcesResult{}, mapPgError(err)
+		}
+		resource := resourceFromRow(selected)
+		resource.Tags = mergeResourceTags(tagsForResource(resource), tags)
+		resource.Metadata = resourceMetadataWithTags(resource.Metadata, resource.Tags)
+		updated, err := scanControlResourceRow(tx.QueryRow(ctx, `
+UPDATE control_resources
+SET metadata = $2,
+    updated_at = $3
+WHERE resource_id = $1
+RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256,
+          storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at,
+          updated_at, deleted_at, retention_expires_at, metadata`, resourceID, jsonBytes(resource.Metadata), timestamptz(ts)))
+		if err != nil {
+			return domain.BulkTagResourcesResult{}, mapPgError(err)
+		}
+		updatedResource := resourceFromRow(updated)
+		if err := upsertResourceSearchDocumentTx(ctx, tx, updatedResource); err != nil {
+			return domain.BulkTagResourcesResult{}, mapPgError(err)
+		}
+		eventMetadata := domain.JSONMap{
+			"tags_added": append([]string(nil), tags...),
+			"tags":       append([]string(nil), resource.Tags...),
+		}
+		if len(input.Metadata) > 0 {
+			eventMetadata["request"] = cloneResourceMetadataValue(input.Metadata)
+		}
+		eventID := domain.NewID("resource_event")
+		event, err := scanResourceEventRow(tx.QueryRow(ctx, `
+INSERT INTO control_resource_events (event_id, resource_id, actor_user_id, actor_org_id, event_type, ts, metadata)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), 'resource.tagged', $5, $6)
+RETURNING event_id, resource_id, COALESCE(actor_user_id, ''), COALESCE(actor_org_id, ''), event_type, ts, metadata`,
+			eventID,
+			resourceID,
+			actorUserID,
+			actorOrgID,
+			ts.UTC(),
+			jsonBytes(eventMetadata),
+		))
+		if err != nil {
+			return domain.BulkTagResourcesResult{}, mapPgError(err)
+		}
+		resources = append(resources, updatedResource)
+		events = append(events, event)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.BulkTagResourcesResult{}, err
+	}
+	return domain.BulkTagResourcesResult{
+		UpdatedCount: len(resources),
+		Resources:    resources,
+		Events:       events,
 	}, nil
 }
 
@@ -1516,6 +2385,2994 @@ func (s *PostgresStore) ListResources(ctx context.Context, limit int, offset int
 		resources = append(resources, resourceFromRow(row))
 	}
 	return resources, nil
+}
+
+func (s *PostgresStore) CreateResourceCollection(ctx context.Context, input domain.CreateResourceCollectionInput) (domain.ResourceCollectionRecord, error) {
+	collectionID := strings.TrimSpace(input.CollectionID)
+	if collectionID == "" {
+		collectionID = domain.NewID("collection")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	collectionType := strings.ToLower(strings.TrimSpace(input.CollectionType))
+	if collectionType == "" {
+		collectionType = "collection"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO control_resource_collections (
+  collection_id, owner_user_id, owner_org_id, owner_role, project_id, parent_collection_id,
+  name, description, collection_type, status, created_at, updated_at, metadata
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+        $7, NULLIF($8, ''), $9, $10, $11, $12, $13)
+RETURNING collection_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), COALESCE(parent_collection_id, ''), name,
+          COALESCE(description, ''), collection_type, status, 0::bigint,
+          created_at, updated_at, metadata`,
+		collectionID,
+		ownerUserID,
+		strings.TrimSpace(input.OwnerOrgID),
+		strings.TrimSpace(input.OwnerRole),
+		strings.TrimSpace(input.ProjectID),
+		strings.TrimSpace(input.ParentCollectionID),
+		strings.TrimSpace(input.Name),
+		strings.TrimSpace(input.Description),
+		collectionType,
+		status,
+		createdAt.UTC(),
+		updatedAt.UTC(),
+		jsonBytes(input.Metadata),
+	)
+	collection, err := scanResourceCollectionRow(row)
+	if err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	return collection, nil
+}
+
+func (s *PostgresStore) GetResourceCollectionForUser(ctx context.Context, collectionID string, userID string, orgID string) (domain.ResourceCollectionRecord, error) {
+	collection, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.status = 'active'
+  AND (
+    (c.owner_user_id = $2 AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3))
+    OR EXISTS (
+      SELECT 1
+      FROM control_resource_collection_share_grants g
+      WHERE g.collection_id = c.collection_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    )
+  )
+GROUP BY c.collection_id`,
+		strings.TrimSpace(collectionID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+	))
+	if err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	return collection, nil
+}
+
+func (s *PostgresStore) RenameResourceCollectionForUser(ctx context.Context, input domain.RenameResourceCollectionInput) (domain.ResourceCollectionRecord, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return domain.ResourceCollectionRecord{}, ErrNotFound
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	collection, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
+UPDATE control_resource_collections c
+SET name = $4,
+    updated_at = $5
+WHERE c.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+  AND c.status = 'active'
+RETURNING c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+          COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+          COALESCE(c.description, ''), c.collection_type, c.status,
+          (
+            SELECT COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint
+            FROM control_resource_collection_members m
+            LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+            WHERE m.collection_id = c.collection_id
+          ) AS resource_count,
+          c.created_at, c.updated_at, c.metadata`,
+		strings.TrimSpace(input.CollectionID),
+		strings.TrimSpace(input.UserID),
+		strings.TrimSpace(input.OrgID),
+		name,
+		updatedAt.UTC(),
+	))
+	if err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	return collection, nil
+}
+
+func (s *PostgresStore) ListResourceCollectionsForUser(ctx context.Context, input domain.ResourceCollectionListInput) (domain.ResourceCollectionListPage, error) {
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	ownerUserID := strings.TrimSpace(input.UserID)
+	ownerOrgID := strings.TrimSpace(input.OrgID)
+	collectionType := strings.ToLower(strings.TrimSpace(input.Type))
+	projectID := strings.TrimSpace(input.ProjectID)
+	query := strings.TrimSpace(input.Query)
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	countRow := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM control_resource_collections c
+WHERE c.status = $3
+  AND (
+    (c.owner_user_id = $1 AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $2))
+    OR ($3::text = 'active' AND EXISTS (
+      SELECT 1
+      FROM control_resource_collection_share_grants g
+      WHERE g.collection_id = c.collection_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $1 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $2)
+        )
+    ))
+  )
+  AND ($4::text = '' OR c.collection_type = $4)
+  AND ($5::text = '' OR COALESCE(c.project_id, '') = $5)
+  AND ($6::text = '' OR c.name ILIKE '%' || $6 || '%' OR COALESCE(c.description, '') ILIKE '%' || $6 || '%' OR c.collection_id ILIKE '%' || $6 || '%')`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		collectionType,
+		projectID,
+		query,
+	)
+	var total int
+	if err := countRow.Scan(&total); err != nil {
+		return domain.ResourceCollectionListPage{}, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.status = $3
+  AND (
+    (c.owner_user_id = $1 AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $2))
+    OR ($3::text = 'active' AND EXISTS (
+      SELECT 1
+      FROM control_resource_collection_share_grants g
+      WHERE g.collection_id = c.collection_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $1 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $2)
+        )
+    ))
+  )
+  AND ($4::text = '' OR c.collection_type = $4)
+  AND ($5::text = '' OR COALESCE(c.project_id, '') = $5)
+  AND ($6::text = '' OR c.name ILIKE '%' || $6 || '%' OR COALESCE(c.description, '') ILIKE '%' || $6 || '%' OR c.collection_id ILIKE '%' || $6 || '%')
+GROUP BY c.collection_id
+ORDER BY c.updated_at DESC, c.collection_id ASC
+LIMIT $7 OFFSET $8`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		collectionType,
+		projectID,
+		query,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return domain.ResourceCollectionListPage{}, mapPgError(err)
+	}
+	defer rows.Close()
+	collections, err := scanResourceCollectionRows(rows)
+	if err != nil {
+		return domain.ResourceCollectionListPage{}, err
+	}
+	return domain.ResourceCollectionListPage{
+		Collections: collections,
+		TotalCount:  total,
+		Limit:       int(limit),
+		Offset:      int(offset),
+	}, nil
+}
+
+func (s *PostgresStore) SoftDeleteResourceCollectionForUser(ctx context.Context, collectionID string, userID string, orgID string, deletedAt time.Time) (domain.ResourceCollectionRecord, error) {
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	collection, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
+	UPDATE control_resource_collections c
+	SET status = 'deleted',
+	    updated_at = $4
+	WHERE c.collection_id = $1
+	  AND c.owner_user_id = $2
+	  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+	  AND c.status <> 'deleted'
+	RETURNING c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+	          COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+	          COALESCE(c.description, ''), c.collection_type, c.status,
+	          (
+	            SELECT COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint
+	            FROM control_resource_collection_members m
+	            LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+	            WHERE m.collection_id = c.collection_id
+	          ) AS resource_count,
+	          c.created_at, c.updated_at, c.metadata`,
+		strings.TrimSpace(collectionID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+		deletedAt.UTC(),
+	))
+	if err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	return collection, nil
+}
+
+func (s *PostgresStore) RestoreResourceCollectionForUser(ctx context.Context, collectionID string, userID string, orgID string, restoredAt time.Time) (domain.ResourceCollectionRecord, error) {
+	if restoredAt.IsZero() {
+		restoredAt = domain.Now()
+	}
+	collection, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
+	UPDATE control_resource_collections c
+	SET status = 'active',
+	    updated_at = $4
+	WHERE c.collection_id = $1
+	  AND c.owner_user_id = $2
+	  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+	RETURNING c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+	          COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+	          COALESCE(c.description, ''), c.collection_type, c.status,
+	          (
+	            SELECT COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint
+	            FROM control_resource_collection_members m
+	            LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+	            WHERE m.collection_id = c.collection_id
+	          ) AS resource_count,
+	          c.created_at, c.updated_at, c.metadata`,
+		strings.TrimSpace(collectionID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+		restoredAt.UTC(),
+	))
+	if err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	return collection, nil
+}
+
+func (s *PostgresStore) AddResourcesToCollection(ctx context.Context, input domain.AddResourcesToCollectionInput) (domain.AddResourcesToCollectionResult, error) {
+	resourceIDs := uniqueTrimmedStrings(input.ResourceIDs)
+	if len(resourceIDs) == 0 {
+		return domain.AddResourcesToCollectionResult{}, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.AddResourcesToCollectionResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	collection, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+  AND c.status = 'active'
+GROUP BY c.collection_id`,
+		strings.TrimSpace(input.CollectionID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	))
+	if err != nil {
+		return domain.AddResourcesToCollectionResult{}, mapPgError(err)
+	}
+	resourceRows, err := tx.Query(ctx, `
+SELECT resource_id
+FROM control_resources
+WHERE resource_id = ANY($1::text[])
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'`,
+		resourceIDs,
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	)
+	if err != nil {
+		return domain.AddResourcesToCollectionResult{}, mapPgError(err)
+	}
+	found := map[string]struct{}{}
+	for resourceRows.Next() {
+		var resourceID string
+		if err := resourceRows.Scan(&resourceID); err != nil {
+			resourceRows.Close()
+			return domain.AddResourcesToCollectionResult{}, err
+		}
+		found[resourceID] = struct{}{}
+	}
+	if err := resourceRows.Err(); err != nil {
+		resourceRows.Close()
+		return domain.AddResourcesToCollectionResult{}, err
+	}
+	resourceRows.Close()
+	if len(found) != len(resourceIDs) {
+		return domain.AddResourcesToCollectionResult{}, ErrNotFound
+	}
+	var nextPosition int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(position), -1) + 1 FROM control_resource_collection_members WHERE collection_id = $1`, collection.CollectionID).Scan(&nextPosition); err != nil {
+		return domain.AddResourcesToCollectionResult{}, mapPgError(err)
+	}
+	addedAt := input.AddedAt
+	if addedAt.IsZero() {
+		addedAt = domain.Now()
+	}
+	collectionGrants, err := activeResourceCollectionShareGrantsTx(ctx, tx, collection.CollectionID)
+	if err != nil {
+		return domain.AddResourcesToCollectionResult{}, err
+	}
+	memberships := make([]domain.ResourceCollectionMembershipRecord, 0, len(resourceIDs))
+	inheritedShareGrants := make([]domain.ResourceShareGrantRecord, 0)
+	addedCount := 0
+	for _, resourceID := range resourceIDs {
+		member, inserted, err := upsertCollectionMemberTx(ctx, tx, collection.CollectionID, resourceID, nextPosition, strings.TrimSpace(input.AddedByUserID), addedAt, input.Metadata)
+		if err != nil {
+			return domain.AddResourcesToCollectionResult{}, err
+		}
+		if inserted {
+			nextPosition++
+			addedCount++
+			for _, collectionGrant := range collectionGrants {
+				grant, err := createInheritedResourceShareGrantTx(ctx, tx, resourceID, collectionGrant, addedAt, "resource_collection_share_inherited")
+				if err != nil {
+					return domain.AddResourcesToCollectionResult{}, err
+				}
+				inheritedShareGrants = append(inheritedShareGrants, grant)
+			}
+		}
+		memberships = append(memberships, member)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE control_resource_collections SET updated_at = $2 WHERE collection_id = $1`, collection.CollectionID, addedAt.UTC()); err != nil {
+		return domain.AddResourcesToCollectionResult{}, mapPgError(err)
+	}
+	updated, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+GROUP BY c.collection_id`, collection.CollectionID))
+	if err != nil {
+		return domain.AddResourcesToCollectionResult{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.AddResourcesToCollectionResult{}, err
+	}
+	return domain.AddResourcesToCollectionResult{
+		Collection:           updated,
+		AddedCount:           addedCount,
+		Memberships:          memberships,
+		InheritedShareGrants: inheritedShareGrants,
+	}, nil
+}
+
+func (s *PostgresStore) RemoveResourcesFromCollection(ctx context.Context, input domain.RemoveResourcesFromCollectionInput) (domain.RemoveResourcesFromCollectionResult, error) {
+	resourceIDs := uniqueTrimmedStrings(input.ResourceIDs)
+	if len(resourceIDs) == 0 {
+		return domain.RemoveResourcesFromCollectionResult{}, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	collection, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+  AND c.status = 'active'
+GROUP BY c.collection_id`,
+		strings.TrimSpace(input.CollectionID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	))
+	if err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+	}
+	resourceRows, err := tx.Query(ctx, `
+SELECT resource_id
+FROM control_resources
+WHERE resource_id = ANY($1::text[])
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)`,
+		resourceIDs,
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	)
+	if err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+	}
+	found := map[string]struct{}{}
+	for resourceRows.Next() {
+		var resourceID string
+		if err := resourceRows.Scan(&resourceID); err != nil {
+			resourceRows.Close()
+			return domain.RemoveResourcesFromCollectionResult{}, err
+		}
+		found[resourceID] = struct{}{}
+	}
+	if err := resourceRows.Err(); err != nil {
+		resourceRows.Close()
+		return domain.RemoveResourcesFromCollectionResult{}, err
+	}
+	resourceRows.Close()
+	if len(found) != len(resourceIDs) {
+		return domain.RemoveResourcesFromCollectionResult{}, ErrNotFound
+	}
+	removedAt := input.RemovedAt
+	if removedAt.IsZero() {
+		removedAt = domain.Now()
+	}
+	rows, err := tx.Query(ctx, `
+DELETE FROM control_resource_collection_members
+WHERE collection_id = $1
+  AND resource_id = ANY($2::text[])
+RETURNING collection_id, resource_id, position, COALESCE(added_by_user_id, ''), added_at, metadata`,
+		collection.CollectionID,
+		resourceIDs,
+	)
+	if err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+	}
+	memberships := make([]domain.ResourceCollectionMembershipRecord, 0, len(resourceIDs))
+	removedResourceIDs := make([]string, 0, len(resourceIDs))
+	for rows.Next() {
+		var member domain.ResourceCollectionMembershipRecord
+		var metadata []byte
+		if err := rows.Scan(&member.CollectionID, &member.ResourceID, &member.Position, &member.AddedByUserID, &member.AddedAt, &metadata); err != nil {
+			rows.Close()
+			return domain.RemoveResourcesFromCollectionResult{}, err
+		}
+		member.AddedAt = member.AddedAt.UTC()
+		member.Metadata = jsonMap(metadata)
+		memberships = append(memberships, member)
+		removedResourceIDs = append(removedResourceIDs, member.ResourceID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.RemoveResourcesFromCollectionResult{}, err
+	}
+	rows.Close()
+	revokedShareGrants := make([]domain.ResourceShareGrantRecord, 0)
+	if len(removedResourceIDs) > 0 {
+		revokedRows, err := tx.Query(ctx, `
+UPDATE control_resource_share_grants AS g
+SET status = 'revoked',
+    revoked_at = $3,
+    updated_at = $3
+FROM control_resource_collection_share_grants AS cg
+WHERE g.resource_id = ANY($1::text[])
+  AND cg.collection_id = $2
+  AND g.status = 'active'
+  AND g.metadata->>'collection_share_grant_id' = cg.grant_id
+RETURNING g.grant_id, g.resource_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+          COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+          COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata`,
+			removedResourceIDs,
+			collection.CollectionID,
+			timestamptz(removedAt),
+		)
+		if err != nil {
+			return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+		}
+		for revokedRows.Next() {
+			grant, err := scanResourceShareGrantRow(revokedRows)
+			if err != nil {
+				revokedRows.Close()
+				return domain.RemoveResourcesFromCollectionResult{}, err
+			}
+			revokedShareGrants = append(revokedShareGrants, grant)
+		}
+		if err := revokedRows.Err(); err != nil {
+			revokedRows.Close()
+			return domain.RemoveResourcesFromCollectionResult{}, err
+		}
+		revokedRows.Close()
+		if _, err := tx.Exec(ctx, `UPDATE control_resource_collections SET updated_at = $2 WHERE collection_id = $1`, collection.CollectionID, removedAt.UTC()); err != nil {
+			return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+		}
+	}
+	updated, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+GROUP BY c.collection_id`, collection.CollectionID))
+	if err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.RemoveResourcesFromCollectionResult{}, err
+	}
+	return domain.RemoveResourcesFromCollectionResult{
+		Collection:                  updated,
+		RemovedCount:                len(memberships),
+		Memberships:                 memberships,
+		RevokedInheritedShareGrants: revokedShareGrants,
+	}, nil
+}
+
+func (s *PostgresStore) CreateResourceCollectionShareGrant(ctx context.Context, input domain.CreateResourceCollectionShareGrantInput) (domain.CreateResourceCollectionShareGrantResult, error) {
+	collectionID := strings.TrimSpace(input.CollectionID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	granteeUserID := strings.TrimSpace(input.GranteeUserID)
+	granteeOrgID := strings.TrimSpace(input.GranteeOrgID)
+	if input.Public {
+		granteeUserID = domain.PublicResourceGranteeUserID
+		granteeOrgID = ""
+	}
+	if granteeUserID == "" && granteeOrgID == "" {
+		return domain.CreateResourceCollectionShareGrantResult{}, ErrNotFound
+	}
+	grantID := strings.TrimSpace(input.GrantID)
+	if grantID == "" {
+		grantID = domain.NewID("collection_grant")
+	}
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		role = "read"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = domain.Now()
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	createdByUserID := strings.TrimSpace(input.CreatedByUserID)
+	if createdByUserID == "" {
+		createdByUserID = ownerUserID
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.CreateResourceCollectionShareGrantResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	collection, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+  AND c.status = 'active'
+GROUP BY c.collection_id`,
+		collectionID,
+		ownerUserID,
+		ownerOrgID,
+	))
+	if err != nil {
+		return domain.CreateResourceCollectionShareGrantResult{}, mapPgError(err)
+	}
+	grant, err := scanResourceCollectionShareGrantRow(tx.QueryRow(ctx, `
+INSERT INTO control_resource_collection_share_grants (
+  grant_id, collection_id, owner_user_id, owner_org_id, owner_role,
+  grantee_user_id, grantee_org_id, role, status, created_by_user_id,
+  created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING grant_id, collection_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(grantee_user_id, ''), COALESCE(grantee_org_id, ''), role, status,
+          COALESCE(created_by_user_id, ''), created_at, updated_at, revoked_at, metadata`,
+		grantID,
+		collection.CollectionID,
+		collection.OwnerUserID,
+		nullableText(collection.OwnerOrgID),
+		nullableText(collection.OwnerRole),
+		nullableText(granteeUserID),
+		nullableText(granteeOrgID),
+		role,
+		status,
+		nullableText(createdByUserID),
+		timestamptz(createdAt),
+		timestamptz(updatedAt),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.CreateResourceCollectionShareGrantResult{}, mapPgError(err)
+	}
+	rows, err := tx.Query(ctx, `
+SELECT r.resource_id
+FROM control_resource_collection_members m
+JOIN control_resources r ON r.resource_id = m.resource_id
+LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+WHERE m.collection_id = $1
+  AND r.owner_user_id = $2
+  AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)
+  AND r.status = 'active'
+ORDER BY m.position ASC, m.added_at ASC, m.resource_id ASC`,
+		collection.CollectionID,
+		collection.OwnerUserID,
+		collection.OwnerOrgID,
+	)
+	if err != nil {
+		return domain.CreateResourceCollectionShareGrantResult{}, mapPgError(err)
+	}
+	resourceIDs := make([]string, 0)
+	for rows.Next() {
+		var resourceID string
+		if err := rows.Scan(&resourceID); err != nil {
+			rows.Close()
+			return domain.CreateResourceCollectionShareGrantResult{}, err
+		}
+		resourceIDs = append(resourceIDs, resourceID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.CreateResourceCollectionShareGrantResult{}, err
+	}
+	rows.Close()
+	resourceGrants := make([]domain.ResourceShareGrantRecord, 0, len(resourceIDs))
+	for _, resourceID := range resourceIDs {
+		resourceGrant, err := createInheritedResourceShareGrantTx(ctx, tx, resourceID, grant, createdAt, "resource_collection_share")
+		if err != nil {
+			return domain.CreateResourceCollectionShareGrantResult{}, err
+		}
+		resourceGrants = append(resourceGrants, resourceGrant)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.CreateResourceCollectionShareGrantResult{}, err
+	}
+	return domain.CreateResourceCollectionShareGrantResult{
+		Grant:          grant,
+		ResourceGrants: resourceGrants,
+	}, nil
+}
+
+func (s *PostgresStore) ListResourcesForCollectionForUser(ctx context.Context, input domain.ResourceCollectionResourceListInput) (domain.ResourceListPage, error) {
+	collectionID := strings.TrimSpace(input.CollectionID)
+	ownerUserID := strings.TrimSpace(input.UserID)
+	ownerOrgID := strings.TrimSpace(input.OrgID)
+	kind := strings.TrimSpace(input.Kind)
+	source := strings.TrimSpace(input.Source)
+	projectID := strings.TrimSpace(input.ProjectID)
+	query := strings.TrimSpace(input.Query)
+	sharing := strings.ToLower(strings.TrimSpace(input.Sharing))
+	tagKeys := resourceTagKeys(input.Tags)
+	descriptorFilters := normalizeResourceDescriptors(input.Descriptors)
+	metadataFilterSpecs := resourceMetadataFilterSpecs(input.MetadataFilters)
+	processingStatus := strings.ToLower(strings.TrimSpace(input.ProcessingStatus))
+	if _, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.status = 'active'
+  AND (
+    (c.owner_user_id = $2 AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3))
+    OR EXISTS (
+      SELECT 1
+      FROM control_resource_collection_share_grants g
+      WHERE g.collection_id = c.collection_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    )
+  )
+GROUP BY c.collection_id`, collectionID, ownerUserID, ownerOrgID)); err != nil {
+		return domain.ResourceListPage{}, mapPgError(err)
+	}
+	var total int
+	if err := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM control_resource_collection_members m
+JOIN control_resources r ON r.resource_id = m.resource_id
+LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+WHERE m.collection_id = $1
+  AND (
+    (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3))
+    OR EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    )
+  )
+  AND r.status = 'active'
+  AND ($4::text = '' OR r.resource_kind = $4)
+  AND ($5::text = '' OR r.source_type = $5)
+  AND ($6::text = '' OR r.project_id = $6)
+  AND (
+    $7::text = ''
+    OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
+    OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
+  )
+  AND (
+    cardinality($8::text[]) = 0
+    OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
+  )
+	AND (
+		cardinality($10::text[]) = 0
+		OR NOT EXISTS (
+      SELECT 1
+      FROM unnest($10::text[]) AS metadata_filters(filter)
+      CROSS JOIN LATERAL (
+        SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+               split_part(metadata_filters.filter, ':', 2) AS operator,
+               substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+      ) mf
+      CROSS JOIN LATERAL (
+        SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+               r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+      ) mv
+      WHERE NOT (
+        (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+        OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+        OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+        OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+      )
+		)
+	)
+  AND ($11::timestamptz IS NULL OR r.created_at >= $11)
+  AND ($12::timestamptz IS NULL OR r.created_at <= $12)
+  AND (
+    $13::text = ''
+    OR $13::text = 'all'
+    OR ($13::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_ready' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+    ))
+    OR ($13::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_failed' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+    ))
+  )
+`+postgresResourceDescriptorFilterSQL("$14")+`
+  AND (
+    $9::text = ''
+    OR $9::text = 'all'
+    OR ($9::text = 'private' AND NOT EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+    OR ($9::text = 'public' AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+    ))
+    OR ($9::text = 'shared' AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+    OR ($9::text = 'shared_by_me' AND NOT EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+    ) AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+  )`, collectionID, ownerUserID, ownerOrgID, kind, source, projectID, query, tagKeys, sharing, metadataFilterSpecs, nullableTimestamptz(input.CreatedAfter), nullableTimestamptz(input.CreatedBefore), processingStatus, descriptorFilters).Scan(&total); err != nil {
+		return domain.ResourceListPage{}, mapPgError(err)
+	}
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	rows, err := s.pool.Query(ctx, `
+SELECT r.resource_id, r.owner_user_id, COALESCE(r.owner_org_id, ''), COALESCE(r.owner_role, ''),
+       r.original_name, COALESCE(r.content_type, ''), r.size_bytes, COALESCE(r.sha256, ''),
+       COALESCE(r.storage_uri, ''), COALESCE(r.storage_path, ''), r.source_type, r.resource_kind,
+       COALESCE(r.source_uri, ''), COALESCE(r.project_id, ''), r.status, r.created_at, r.updated_at,
+       r.deleted_at, r.retention_expires_at, r.metadata,
+       CASE
+         WHEN EXISTS (
+           SELECT 1
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+         ) THEN 'public'
+         WHEN (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)) AND EXISTS (
+           SELECT 1
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+         ) THEN 'shared_by_me'
+         WHEN NOT (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)) AND EXISTS (
+           SELECT 1
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND (
+               COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+               OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+               OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+             )
+         ) THEN 'shared_with_me'
+         ELSE 'private'
+       END AS share_status,
+       CASE
+         WHEN EXISTS (
+           SELECT 1
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+         ) THEN (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+         )
+         WHEN r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3) THEN (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+         )
+         ELSE (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND (
+               COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+               OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+               OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+             )
+         )
+       END AS active_grant_count,
+       NOT EXISTS (
+         SELECT 1
+         FROM control_resource_share_grants g
+         WHERE g.resource_id = r.resource_id
+           AND g.status = 'active'
+           AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+       ) AND (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)) AND EXISTS (
+         SELECT 1
+         FROM control_resource_share_grants g
+         WHERE g.resource_id = r.resource_id
+           AND g.status = 'active'
+       ) AS shared_by_me,
+       NOT (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)) AND EXISTS (
+         SELECT 1
+         FROM control_resource_share_grants g
+         WHERE g.resource_id = r.resource_id
+           AND g.status = 'active'
+           AND (
+             COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+             OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+             OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+           )
+       ) AS shared_with_me
+FROM control_resource_collection_members m
+JOIN control_resources r ON r.resource_id = m.resource_id
+LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+WHERE m.collection_id = $1
+  AND (
+    (r.owner_user_id = $2 AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3))
+    OR EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+          OR (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    )
+  )
+  AND r.status = 'active'
+  AND ($4::text = '' OR r.resource_kind = $4)
+  AND ($5::text = '' OR r.source_type = $5)
+  AND ($6::text = '' OR r.project_id = $6)
+  AND (
+    $7::text = ''
+    OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
+    OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
+  )
+  AND (
+    cardinality($8::text[]) = 0
+    OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
+  )
+	AND (
+		cardinality($10::text[]) = 0
+		OR NOT EXISTS (
+      SELECT 1
+      FROM unnest($10::text[]) AS metadata_filters(filter)
+      CROSS JOIN LATERAL (
+        SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+               split_part(metadata_filters.filter, ':', 2) AS operator,
+               substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+      ) mf
+      CROSS JOIN LATERAL (
+        SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+               r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+      ) mv
+      WHERE NOT (
+        (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+        OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+        OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+        OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+      )
+		)
+	)
+  AND ($11::timestamptz IS NULL OR r.created_at >= $11)
+  AND ($12::timestamptz IS NULL OR r.created_at <= $12)
+  AND (
+    $13::text = ''
+    OR $13::text = 'all'
+    OR ($13::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_ready' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+    ))
+    OR ($13::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_failed' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+    ))
+  )
+`+postgresResourceDescriptorFilterSQL("$14")+`
+  AND (
+    $9::text = ''
+    OR $9::text = 'all'
+    OR ($9::text = 'private' AND NOT EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+    OR ($9::text = 'public' AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+    ))
+    OR ($9::text = 'shared' AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+    OR ($9::text = 'shared_by_me' AND NOT EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND COALESCE(g.grantee_user_id, '') = '`+domain.PublicResourceGranteeUserID+`'
+    ) AND EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+    ))
+  )
+ORDER BY m.position ASC, m.added_at ASC, m.resource_id ASC
+LIMIT $15 OFFSET $16`, collectionID, ownerUserID, ownerOrgID, kind, source, projectID, query, tagKeys, sharing, metadataFilterSpecs, nullableTimestamptz(input.CreatedAfter), nullableTimestamptz(input.CreatedBefore), processingStatus, descriptorFilters, limit, offset)
+	if err != nil {
+		return domain.ResourceListPage{}, mapPgError(err)
+	}
+	defer rows.Close()
+	resources, err := scanResourceRowsWithShareSummary(rows)
+	if err != nil {
+		return domain.ResourceListPage{}, err
+	}
+	return domain.ResourceListPage{
+		Resources:  resources,
+		TotalCount: total,
+		Limit:      int(limit),
+		Offset:     int(offset),
+	}, nil
+}
+
+func (s *PostgresStore) CreateDatasetSnapshot(ctx context.Context, input domain.CreateDatasetSnapshotInput) (domain.DatasetSnapshotRecord, []domain.DatasetSnapshotResourceRecord, error) {
+	resourceIDs := uniqueTrimmedStrings(input.ResourceIDs)
+	if len(resourceIDs) == 0 && input.ResourceQuery == nil {
+		return domain.DatasetSnapshotRecord{}, nil, ErrNotFound
+	}
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	if snapshotID == "" {
+		snapshotID = domain.NewID("dataset_snapshot")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	createdByUserID := strings.TrimSpace(input.CreatedByUserID)
+	if createdByUserID == "" {
+		createdByUserID = ownerUserID
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = snapshotID
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if len(resourceIDs) == 0 && input.ResourceQuery != nil {
+		resourceIDs, err = s.datasetSnapshotResourceIDsForQueryTx(ctx, tx, input)
+		if err != nil {
+			return domain.DatasetSnapshotRecord{}, nil, err
+		}
+		if len(resourceIDs) == 0 {
+			return domain.DatasetSnapshotRecord{}, nil, ErrNotFound
+		}
+	}
+
+	rows, err := tx.Query(ctx, `
+SELECT resource_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       original_name, COALESCE(content_type, ''), size_bytes, COALESCE(sha256, ''),
+       COALESCE(storage_uri, ''), COALESCE(storage_path, ''), source_type, resource_kind,
+       COALESCE(source_uri, ''), COALESCE(project_id, ''), status, created_at, updated_at,
+       deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE resource_id = ANY($1::text[])
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'`,
+		resourceIDs,
+		ownerUserID,
+		ownerOrgID,
+	)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	resources, err := scanResourceRows(rows)
+	rows.Close()
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	resourcesByID := make(map[string]domain.ResourceRecord, len(resources))
+	for _, resource := range resources {
+		resourcesByID[resource.ResourceID] = resource
+	}
+	if len(resourcesByID) != len(resourceIDs) {
+		return domain.DatasetSnapshotRecord{}, nil, ErrNotFound
+	}
+	var totalBytes int64
+	for _, resourceID := range resourceIDs {
+		totalBytes += resourcesByID[resourceID].SizeBytes
+	}
+	projectID := strings.TrimSpace(input.ProjectID)
+	if projectID == "" && input.ResourceQuery != nil {
+		projectID = strings.TrimSpace(input.ResourceQuery.ProjectID)
+	}
+
+	snapshot, err := scanDatasetSnapshotRow(tx.QueryRow(ctx, `
+INSERT INTO control_dataset_snapshots (
+  snapshot_id, owner_user_id, owner_org_id, owner_role, project_id, source_collection_id,
+  name, description, status, resource_count, total_bytes, created_by_user_id, created_at, metadata
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+        $7, NULLIF($8, ''), 'active', $9, $10, NULLIF($11, ''), $12, $13)
+RETURNING snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), COALESCE(source_collection_id, ''), name,
+          COALESCE(description, ''), status, resource_count, total_bytes,
+          COALESCE(created_by_user_id, ''), created_at, metadata`,
+		snapshotID,
+		ownerUserID,
+		ownerOrgID,
+		strings.TrimSpace(input.OwnerRole),
+		projectID,
+		strings.TrimSpace(input.SourceCollectionID),
+		name,
+		strings.TrimSpace(input.Description),
+		int64(len(resourceIDs)),
+		totalBytes,
+		createdByUserID,
+		createdAt.UTC(),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+
+	entries := make([]domain.DatasetSnapshotResourceRecord, 0, len(resourceIDs))
+	for position, resourceID := range resourceIDs {
+		resource := resourcesByID[resourceID]
+		entry, err := scanDatasetSnapshotResourceRow(tx.QueryRow(ctx, `
+INSERT INTO control_dataset_snapshot_resources (
+  snapshot_id, resource_id, position, original_name, content_type, size_bytes, sha256,
+  source_type, resource_kind, storage_uri, source_uri, project_id, resource_created_at, metadata
+)
+VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''),
+        $8, $9, NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14)
+RETURNING snapshot_id, resource_id, position, original_name, COALESCE(content_type, ''),
+          size_bytes, COALESCE(sha256, ''), source_type, resource_kind, COALESCE(storage_uri, ''),
+          COALESCE(source_uri, ''), COALESCE(project_id, ''), resource_created_at, metadata`,
+			snapshot.SnapshotID,
+			resource.ResourceID,
+			int64(position),
+			resource.OriginalName,
+			resource.ContentType,
+			resource.SizeBytes,
+			resource.SHA256,
+			resource.SourceType,
+			resource.ResourceKind,
+			resource.StorageURI,
+			resource.SourceURI,
+			resource.ProjectID,
+			resource.CreatedAt.UTC(),
+			jsonBytes(resource.Metadata),
+		))
+		if err != nil {
+			return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+		}
+		entries = append(entries, entry)
+	}
+	if _, err := insertDatasetSnapshotEventTx(ctx, tx, domain.DatasetSnapshotEventRecord{
+		SnapshotID:  snapshot.SnapshotID,
+		ActorUserID: createdByUserID,
+		ActorOrgID:  ownerOrgID,
+		EventType:   "dataset_snapshot.created",
+		TS:          snapshot.CreatedAt,
+		Metadata: domain.JSONMap{
+			"snapshot_name":        snapshot.Name,
+			"resource_count":       snapshot.ResourceCount,
+			"total_bytes":          snapshot.TotalBytes,
+			"project_id":           snapshot.ProjectID,
+			"source_collection_id": snapshot.SourceCollectionID,
+			"source":               snapshot.Metadata["source"],
+		},
+	}); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	return snapshot, entries, nil
+}
+
+func (s *PostgresStore) datasetSnapshotResourceIDsForQueryTx(ctx context.Context, tx pgx.Tx, input domain.CreateDatasetSnapshotInput) ([]string, error) {
+	if input.ResourceQuery == nil {
+		return nil, nil
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	querySelector := input.ResourceQuery
+	query := strings.TrimSpace(querySelector.Query)
+	kind := strings.ToLower(strings.TrimSpace(querySelector.Kind))
+	source := strings.ToLower(strings.TrimSpace(querySelector.Source))
+	projectID := strings.TrimSpace(querySelector.ProjectID)
+	if projectID == "" {
+		projectID = strings.TrimSpace(input.ProjectID)
+	}
+	sharing := strings.ToLower(strings.TrimSpace(querySelector.Sharing))
+	tagKeys := resourceTagKeys(querySelector.Tags)
+	descriptorFilters := normalizeResourceDescriptors(querySelector.Descriptors)
+	metadataFilterSpecs := resourceMetadataFilterSpecs(querySelector.MetadataFilters)
+	processingStatus := strings.ToLower(strings.TrimSpace(querySelector.ProcessingStatus))
+	sourceCollectionID := strings.TrimSpace(input.SourceCollectionID)
+	var rows pgx.Rows
+	var err error
+	if sourceCollectionID != "" {
+		if _, err := scanResourceCollectionRow(tx.QueryRow(ctx, `
+SELECT c.collection_id, c.owner_user_id, COALESCE(c.owner_org_id, ''), COALESCE(c.owner_role, ''),
+       COALESCE(c.project_id, ''), COALESCE(c.parent_collection_id, ''), c.name,
+       COALESCE(c.description, ''), c.collection_type, c.status,
+       COUNT(m.resource_id) FILTER (WHERE r.status = 'active')::bigint AS resource_count,
+       c.created_at, c.updated_at, c.metadata
+FROM control_resource_collections c
+LEFT JOIN control_resource_collection_members m ON m.collection_id = c.collection_id
+LEFT JOIN control_resources r ON r.resource_id = m.resource_id
+WHERE c.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+  AND c.status = 'active'
+GROUP BY c.collection_id`, sourceCollectionID, ownerUserID, ownerOrgID)); err != nil {
+			return nil, mapPgError(err)
+		}
+		rows, err = tx.Query(ctx, `
+SELECT r.resource_id
+FROM control_resource_collection_members m
+JOIN control_resources r ON r.resource_id = m.resource_id
+LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+WHERE m.collection_id = $1
+  AND r.owner_user_id = $2
+  AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)
+  AND r.status = 'active'
+  AND ($4::text = '' OR r.resource_kind = $4)
+  AND ($5::text = '' OR r.source_type = $5)
+  AND ($6::text = '' OR COALESCE(r.project_id, '') = $6)
+  AND (
+    $7::text = ''
+    OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
+    OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
+  )
+  AND (
+    cardinality($8::text[]) = 0
+    OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
+  )
+  AND (
+    cardinality($10::text[]) = 0
+    OR NOT EXISTS (
+      SELECT 1
+      FROM unnest($10::text[]) AS metadata_filters(filter)
+      CROSS JOIN LATERAL (
+        SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+               split_part(metadata_filters.filter, ':', 2) AS operator,
+               substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+      ) mf
+      CROSS JOIN LATERAL (
+        SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+               r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+      ) mv
+      WHERE NOT (
+        (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+        OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+        OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+        OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+      )
+    )
+  )
+  AND ($11::timestamptz IS NULL OR r.created_at >= $11)
+  AND ($12::timestamptz IS NULL OR r.created_at <= $12)
+  AND (
+    $13::text = ''
+    OR $13::text = 'all'
+    OR ($13::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_ready' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+    ))
+    OR ($13::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($13::text = 'data_agent_failed' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+    ))
+  )
+`+postgresResourceDescriptorFilterSQL("$14")+`
+  AND (
+    $9::text = ''
+    OR $9::text = 'all'
+    OR ($9::text = 'private' AND NOT EXISTS (
+      SELECT 1 FROM control_resource_share_grants g WHERE g.resource_id = r.resource_id AND g.status = 'active'
+    ))
+    OR ($9::text IN ('shared', 'shared_by_me') AND EXISTS (
+      SELECT 1 FROM control_resource_share_grants g WHERE g.resource_id = r.resource_id AND g.status = 'active'
+    ))
+  )
+ORDER BY m.position ASC, m.added_at ASC, m.resource_id ASC`,
+			sourceCollectionID,
+			ownerUserID,
+			ownerOrgID,
+			kind,
+			source,
+			projectID,
+			query,
+			tagKeys,
+			sharing,
+			metadataFilterSpecs,
+			nullableTimestamptz(querySelector.CreatedAfter),
+			nullableTimestamptz(querySelector.CreatedBefore),
+			processingStatus,
+			descriptorFilters,
+		)
+	} else {
+		rows, err = tx.Query(ctx, `
+SELECT r.resource_id
+FROM control_resources r
+LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+WHERE r.owner_user_id = $1
+  AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+  AND r.status = 'active'
+  AND ($3::text = '' OR r.resource_kind = $3)
+  AND ($4::text = '' OR r.source_type = $4)
+  AND ($5::text = '' OR COALESCE(r.project_id, '') = $5)
+  AND (
+    $6::text = ''
+    OR sd.search_vector @@ plainto_tsquery('simple', $6::text)
+    OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($6::text) || '%'
+  )
+  AND (
+    cardinality($7::text[]) = 0
+    OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $7::text[]
+  )
+  AND (
+    cardinality($9::text[]) = 0
+    OR NOT EXISTS (
+      SELECT 1
+      FROM unnest($9::text[]) AS metadata_filters(filter)
+      CROSS JOIN LATERAL (
+        SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+               split_part(metadata_filters.filter, ':', 2) AS operator,
+               substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+      ) mf
+      CROSS JOIN LATERAL (
+        SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+               r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+      ) mv
+      WHERE NOT (
+        (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+        OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+        OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+        OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+        OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+      )
+    )
+  )
+  AND ($10::timestamptz IS NULL OR r.created_at >= $10)
+  AND ($11::timestamptz IS NULL OR r.created_at <= $11)
+  AND (
+    $12::text = ''
+    OR $12::text = 'all'
+    OR ($12::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+    OR ($12::text = 'data_agent_ready' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+    ))
+    OR ($12::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($12::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+    OR ($12::text = 'data_agent_failed' AND (
+      lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+      OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+    ))
+  )
+`+postgresResourceDescriptorFilterSQL("$13")+`
+  AND (
+    $8::text = ''
+    OR $8::text = 'all'
+    OR ($8::text = 'private' AND NOT EXISTS (
+      SELECT 1 FROM control_resource_share_grants g WHERE g.resource_id = r.resource_id AND g.status = 'active'
+    ))
+    OR ($8::text IN ('shared', 'shared_by_me') AND EXISTS (
+      SELECT 1 FROM control_resource_share_grants g WHERE g.resource_id = r.resource_id AND g.status = 'active'
+    ))
+  )
+ORDER BY r.created_at DESC, r.resource_id ASC`,
+			ownerUserID,
+			ownerOrgID,
+			kind,
+			source,
+			projectID,
+			query,
+			tagKeys,
+			sharing,
+			metadataFilterSpecs,
+			nullableTimestamptz(querySelector.CreatedAfter),
+			nullableTimestamptz(querySelector.CreatedBefore),
+			processingStatus,
+			descriptorFilters,
+		)
+	}
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	resourceIDs := []string{}
+	for rows.Next() {
+		var resourceID string
+		if err := rows.Scan(&resourceID); err != nil {
+			return nil, err
+		}
+		resourceIDs = append(resourceIDs, resourceID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return resourceIDs, nil
+}
+
+func (s *PostgresStore) GetDatasetSnapshotForUser(ctx context.Context, snapshotID string, userID string, orgID string) (domain.DatasetSnapshotRecord, []domain.DatasetSnapshotResourceRecord, error) {
+	snapshot, err := scanDatasetSnapshotRow(s.pool.QueryRow(ctx, `
+SELECT snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), COALESCE(source_collection_id, ''), name,
+       COALESCE(description, ''), status, resource_count, total_bytes,
+       COALESCE(created_by_user_id, ''), created_at, metadata
+FROM control_dataset_snapshots s
+WHERE s.snapshot_id = $1
+  AND s.status = 'active'
+  AND (
+    (s.owner_user_id = $2 AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $3))
+    OR EXISTS (
+      SELECT 1
+      FROM control_dataset_snapshot_share_grants g
+      WHERE g.snapshot_id = s.snapshot_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    )
+  )`,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT snapshot_id, resource_id, position, original_name, COALESCE(content_type, ''),
+       size_bytes, COALESCE(sha256, ''), source_type, resource_kind, COALESCE(storage_uri, ''),
+       COALESCE(source_uri, ''), COALESCE(project_id, ''), resource_created_at, metadata
+FROM control_dataset_snapshot_resources
+WHERE snapshot_id = $1
+ORDER BY position ASC, resource_id ASC`, snapshot.SnapshotID)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	defer rows.Close()
+	entries, err := scanDatasetSnapshotResourceRows(rows)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	return snapshot, entries, nil
+}
+
+func (s *PostgresStore) SoftDeleteDatasetSnapshotForUser(ctx context.Context, snapshotID string, userID string, orgID string, deletedAt time.Time) (domain.DatasetSnapshotRecord, []domain.DatasetSnapshotResourceRecord, error) {
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	snapshot, err := scanDatasetSnapshotRow(tx.QueryRow(ctx, `
+UPDATE control_dataset_snapshots
+SET status = 'deleted'
+WHERE snapshot_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status <> 'deleted'
+RETURNING snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), COALESCE(source_collection_id, ''), name,
+          COALESCE(description, ''), status, resource_count, total_bytes,
+          COALESCE(created_by_user_id, ''), created_at, metadata`,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	rows, err := tx.Query(ctx, `
+SELECT snapshot_id, resource_id, position, original_name, COALESCE(content_type, ''),
+       size_bytes, COALESCE(sha256, ''), source_type, resource_kind, COALESCE(storage_uri, ''),
+       COALESCE(source_uri, ''), COALESCE(project_id, ''), resource_created_at, metadata
+FROM control_dataset_snapshot_resources
+WHERE snapshot_id = $1
+ORDER BY position ASC, resource_id ASC`, snapshot.SnapshotID)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	entries, err := scanDatasetSnapshotResourceRows(rows)
+	rows.Close()
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	if _, err := insertDatasetSnapshotEventTx(ctx, tx, domain.DatasetSnapshotEventRecord{
+		SnapshotID:  snapshot.SnapshotID,
+		ActorUserID: strings.TrimSpace(userID),
+		ActorOrgID:  strings.TrimSpace(orgID),
+		EventType:   "dataset_snapshot.deleted",
+		TS:          afterEventTime(latestDatasetSnapshotEventTimeTx(ctx, tx, snapshot.SnapshotID, snapshot.CreatedAt), deletedAt),
+		Metadata: domain.JSONMap{
+			"snapshot_id":          snapshot.SnapshotID,
+			"snapshot_name":        snapshot.Name,
+			"resource_count":       snapshot.ResourceCount,
+			"total_bytes":          snapshot.TotalBytes,
+			"project_id":           snapshot.ProjectID,
+			"source_collection_id": snapshot.SourceCollectionID,
+			"source":               "dataset_snapshot_lifecycle",
+			"deleted_at":           deletedAt.UTC().Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	return snapshot, entries, nil
+}
+
+func (s *PostgresStore) RestoreDatasetSnapshotForUser(ctx context.Context, snapshotID string, userID string, orgID string, restoredAt time.Time) (domain.DatasetSnapshotRecord, []domain.DatasetSnapshotResourceRecord, error) {
+	if restoredAt.IsZero() {
+		restoredAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	snapshot, err := scanDatasetSnapshotRow(tx.QueryRow(ctx, `
+UPDATE control_dataset_snapshots
+SET status = 'active'
+WHERE snapshot_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+RETURNING snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), COALESCE(source_collection_id, ''), name,
+          COALESCE(description, ''), status, resource_count, total_bytes,
+          COALESCE(created_by_user_id, ''), created_at, metadata`,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	rows, err := tx.Query(ctx, `
+SELECT snapshot_id, resource_id, position, original_name, COALESCE(content_type, ''),
+       size_bytes, COALESCE(sha256, ''), source_type, resource_kind, COALESCE(storage_uri, ''),
+       COALESCE(source_uri, ''), COALESCE(project_id, ''), resource_created_at, metadata
+FROM control_dataset_snapshot_resources
+WHERE snapshot_id = $1
+ORDER BY position ASC, resource_id ASC`, snapshot.SnapshotID)
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	entries, err := scanDatasetSnapshotResourceRows(rows)
+	rows.Close()
+	if err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	if _, err := insertDatasetSnapshotEventTx(ctx, tx, domain.DatasetSnapshotEventRecord{
+		SnapshotID:  snapshot.SnapshotID,
+		ActorUserID: strings.TrimSpace(userID),
+		ActorOrgID:  strings.TrimSpace(orgID),
+		EventType:   "dataset_snapshot.restored",
+		TS:          afterEventTime(latestDatasetSnapshotEventTimeTx(ctx, tx, snapshot.SnapshotID, snapshot.CreatedAt), restoredAt),
+		Metadata: domain.JSONMap{
+			"snapshot_id":          snapshot.SnapshotID,
+			"snapshot_name":        snapshot.Name,
+			"resource_count":       snapshot.ResourceCount,
+			"total_bytes":          snapshot.TotalBytes,
+			"project_id":           snapshot.ProjectID,
+			"source_collection_id": snapshot.SourceCollectionID,
+			"source":               "dataset_snapshot_lifecycle",
+			"restored_at":          restoredAt.UTC().Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DatasetSnapshotRecord{}, nil, err
+	}
+	return snapshot, entries, nil
+}
+
+func (s *PostgresStore) ListDatasetSnapshotsForUser(ctx context.Context, input domain.DatasetSnapshotListInput) (domain.DatasetSnapshotListPage, error) {
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	ownerUserID := strings.TrimSpace(input.UserID)
+	ownerOrgID := strings.TrimSpace(input.OrgID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	sourceCollectionID := strings.TrimSpace(input.SourceCollectionID)
+	query := strings.TrimSpace(input.Query)
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	countRow := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM control_dataset_snapshots s
+WHERE s.status = $3
+  AND (
+    (s.owner_user_id = $1 AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $2))
+    OR ($3::text = 'active' AND EXISTS (
+      SELECT 1
+      FROM control_dataset_snapshot_share_grants g
+      WHERE g.snapshot_id = s.snapshot_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $1 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $2)
+        )
+    ))
+  )
+  AND ($4::text = '' OR COALESCE(s.project_id, '') = $4)
+  AND ($5::text = '' OR COALESCE(s.source_collection_id, '') = $5)
+  AND ($6::text = '' OR s.name ILIKE '%' || $6 || '%' OR COALESCE(s.description, '') ILIKE '%' || $6 || '%' OR s.snapshot_id ILIKE '%' || $6 || '%' OR s.metadata::text ILIKE '%' || $6 || '%')`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		projectID,
+		sourceCollectionID,
+		query,
+	)
+	var total int
+	if err := countRow.Scan(&total); err != nil {
+		return domain.DatasetSnapshotListPage{}, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), COALESCE(source_collection_id, ''), name,
+       COALESCE(description, ''), status, resource_count, total_bytes,
+       COALESCE(created_by_user_id, ''), created_at, metadata
+FROM control_dataset_snapshots s
+WHERE s.status = $3
+  AND (
+    (s.owner_user_id = $1 AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $2))
+    OR ($3::text = 'active' AND EXISTS (
+      SELECT 1
+      FROM control_dataset_snapshot_share_grants g
+      WHERE g.snapshot_id = s.snapshot_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $1 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $2)
+        )
+    ))
+  )
+  AND ($4::text = '' OR COALESCE(s.project_id, '') = $4)
+  AND ($5::text = '' OR COALESCE(s.source_collection_id, '') = $5)
+  AND ($6::text = '' OR s.name ILIKE '%' || $6 || '%' OR COALESCE(s.description, '') ILIKE '%' || $6 || '%' OR s.snapshot_id ILIKE '%' || $6 || '%' OR s.metadata::text ILIKE '%' || $6 || '%')
+ORDER BY s.created_at DESC, s.snapshot_id ASC
+LIMIT $7 OFFSET $8`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		projectID,
+		sourceCollectionID,
+		query,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return domain.DatasetSnapshotListPage{}, mapPgError(err)
+	}
+	defer rows.Close()
+	snapshots, err := scanDatasetSnapshotRows(rows)
+	if err != nil {
+		return domain.DatasetSnapshotListPage{}, err
+	}
+	return domain.DatasetSnapshotListPage{
+		Snapshots:  snapshots,
+		TotalCount: total,
+		Limit:      int(limit),
+		Offset:     int(offset),
+	}, nil
+}
+
+func (s *PostgresStore) CreateDatasetSnapshotShareGrant(ctx context.Context, input domain.CreateDatasetSnapshotShareGrantInput) (domain.DatasetSnapshotShareGrantRecord, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	granteeUserID := strings.TrimSpace(input.GranteeUserID)
+	granteeOrgID := strings.TrimSpace(input.GranteeOrgID)
+	if granteeUserID == "" && granteeOrgID == "" {
+		return domain.DatasetSnapshotShareGrantRecord{}, ErrNotFound
+	}
+	grantID := strings.TrimSpace(input.GrantID)
+	if grantID == "" {
+		grantID = domain.NewID("dataset_snapshot_grant")
+	}
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		role = "read"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = domain.Now()
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	createdByUserID := strings.TrimSpace(input.CreatedByUserID)
+	if createdByUserID == "" {
+		createdByUserID = ownerUserID
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var canonicalOwnerUserID string
+	var canonicalOwnerOrgID string
+	var canonicalOwnerRole string
+	var canonicalSnapshotCreatedAt time.Time
+	if err := tx.QueryRow(ctx, `
+SELECT owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''), created_at
+FROM control_dataset_snapshots
+WHERE snapshot_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'
+FOR UPDATE`, snapshotID, ownerUserID, ownerOrgID).Scan(&canonicalOwnerUserID, &canonicalOwnerOrgID, &canonicalOwnerRole, &canonicalSnapshotCreatedAt); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+
+	grant, err := scanDatasetSnapshotShareGrantRow(tx.QueryRow(ctx, `
+INSERT INTO control_dataset_snapshot_share_grants (
+  grant_id, snapshot_id, owner_user_id, owner_org_id, owner_role,
+  grantee_user_id, grantee_org_id, role, status, created_by_user_id,
+  created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING grant_id, snapshot_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(grantee_user_id, ''), COALESCE(grantee_org_id, ''), role, status,
+          COALESCE(created_by_user_id, ''), created_at, updated_at, revoked_at, metadata`,
+		grantID,
+		snapshotID,
+		canonicalOwnerUserID,
+		nullableText(canonicalOwnerOrgID),
+		nullableText(canonicalOwnerRole),
+		nullableText(granteeUserID),
+		nullableText(granteeOrgID),
+		role,
+		status,
+		nullableText(createdByUserID),
+		timestamptz(createdAt),
+		timestamptz(updatedAt),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+	if _, err := insertDatasetSnapshotEventTx(ctx, tx, domain.DatasetSnapshotEventRecord{
+		SnapshotID:  grant.SnapshotID,
+		ActorUserID: createdByUserID,
+		ActorOrgID:  grant.OwnerOrgID,
+		EventType:   "dataset_snapshot.shared",
+		TS:          afterEventTime(latestDatasetSnapshotEventTimeTx(ctx, tx, grant.SnapshotID, canonicalSnapshotCreatedAt), grant.CreatedAt),
+		Metadata: domain.JSONMap{
+			"grant_id":        grant.GrantID,
+			"grantee_user_id": grant.GranteeUserID,
+			"grantee_org_id":  grant.GranteeOrgID,
+			"role":            grant.Role,
+		},
+	}); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, err
+	}
+	return grant, nil
+}
+
+func (s *PostgresStore) ListDatasetSnapshotShareGrants(ctx context.Context, input domain.ListDatasetSnapshotShareGrantsInput) ([]domain.DatasetSnapshotShareGrantRecord, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	status := strings.TrimSpace(input.Status)
+	var exists int
+	if err := s.pool.QueryRow(ctx, `
+SELECT 1
+FROM control_dataset_snapshots
+WHERE snapshot_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'`, snapshotID, ownerUserID, ownerOrgID).Scan(&exists); err != nil {
+		return nil, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT g.grant_id, g.snapshot_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+       COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+       COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata
+FROM control_dataset_snapshot_share_grants g
+JOIN control_dataset_snapshots s ON s.snapshot_id = g.snapshot_id
+WHERE g.snapshot_id = $1
+  AND s.owner_user_id = $2
+  AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $3)
+  AND s.status = 'active'
+  AND ($4::text = '' OR g.status = $4)
+ORDER BY g.created_at DESC, g.grant_id ASC
+LIMIT $5`, snapshotID, ownerUserID, ownerOrgID, status, limit32(input.Limit, 200))
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	grants := make([]domain.DatasetSnapshotShareGrantRecord, 0)
+	for rows.Next() {
+		grant, err := scanDatasetSnapshotShareGrantRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return grants, nil
+}
+
+func (s *PostgresStore) RevokeDatasetSnapshotShareGrant(ctx context.Context, input domain.RevokeDatasetSnapshotShareGrantInput) (domain.DatasetSnapshotShareGrantRecord, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	grantID := strings.TrimSpace(input.GrantID)
+	revokedAt := input.RevokedAt
+	if revokedAt.IsZero() {
+		revokedAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	grant, err := scanDatasetSnapshotShareGrantRow(tx.QueryRow(ctx, `
+UPDATE control_dataset_snapshot_share_grants AS g
+SET status = 'revoked',
+    revoked_at = $5,
+    updated_at = $5,
+    metadata = CASE
+      WHEN $6::text = '' AND $7::text = '' THEN g.metadata
+      ELSE g.metadata
+        || CASE WHEN $6::text = '' THEN '{}'::jsonb ELSE jsonb_build_object('revoked_by_user_id', $6::text) END
+        || CASE WHEN $7::text = '' THEN '{}'::jsonb ELSE jsonb_build_object('revocation_reason', $7::text) END
+    END
+FROM control_dataset_snapshots s
+WHERE g.snapshot_id = s.snapshot_id
+  AND g.grant_id = $1
+  AND g.snapshot_id = $2
+  AND s.owner_user_id = $3
+  AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $4)
+  AND s.status = 'active'
+  AND g.status = 'active'
+RETURNING g.grant_id, g.snapshot_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+          COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+          COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata`,
+		grantID,
+		snapshotID,
+		ownerUserID,
+		ownerOrgID,
+		timestamptz(revokedAt),
+		strings.TrimSpace(input.RevokedByUserID),
+		strings.TrimSpace(input.RevocationReason),
+	))
+	if err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+	previousEventTS := latestDatasetSnapshotEventTimeTx(ctx, tx, grant.SnapshotID, grant.CreatedAt)
+	actorUserID := strings.TrimSpace(input.RevokedByUserID)
+	if actorUserID == "" {
+		actorUserID = ownerUserID
+	}
+	if _, err := insertDatasetSnapshotEventTx(ctx, tx, domain.DatasetSnapshotEventRecord{
+		SnapshotID:  grant.SnapshotID,
+		ActorUserID: actorUserID,
+		ActorOrgID:  grant.OwnerOrgID,
+		EventType:   "dataset_snapshot.share_revoked",
+		TS:          afterEventTime(previousEventTS, grant.RevokedAt),
+		Metadata: domain.JSONMap{
+			"grant_id":        grant.GrantID,
+			"grantee_user_id": grant.GranteeUserID,
+			"grantee_org_id":  grant.GranteeOrgID,
+			"role":            grant.Role,
+		},
+	}); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, err
+	}
+	return grant, nil
+}
+
+func (s *PostgresStore) ListDatasetSnapshotEventsForUser(ctx context.Context, input domain.DatasetSnapshotEventListInput) (domain.DatasetSnapshotEventListPage, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	userID := strings.TrimSpace(input.UserID)
+	orgID := strings.TrimSpace(input.OrgID)
+	eventType := strings.TrimSpace(input.EventType)
+	actorUserID := strings.TrimSpace(input.ActorUserID)
+	var visible int
+	if err := s.pool.QueryRow(ctx, `
+SELECT 1
+FROM control_dataset_snapshots s
+WHERE s.snapshot_id = $1
+  AND (
+    (s.owner_user_id = $2 AND (COALESCE(s.owner_org_id, '') = '' OR s.owner_org_id = $3))
+    OR (s.status = 'active' AND EXISTS (
+      SELECT 1
+      FROM control_dataset_snapshot_share_grants g
+      WHERE g.snapshot_id = s.snapshot_id
+        AND g.status = 'active'
+        AND g.role = 'read'
+        AND (
+          (COALESCE(g.grantee_user_id, '') <> '' AND g.grantee_user_id = $2 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3))
+          OR (COALESCE(g.grantee_user_id, '') = '' AND COALESCE(g.grantee_org_id, '') <> '' AND g.grantee_org_id = $3)
+        )
+    ))
+  )`, snapshotID, userID, orgID).Scan(&visible); err != nil {
+		return domain.DatasetSnapshotEventListPage{}, mapPgError(err)
+	}
+	var total int
+	if err := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM control_dataset_snapshot_events
+WHERE snapshot_id = $1
+  AND ($2::text = '' OR event_type = $2)
+  AND ($3::text = '' OR actor_user_id = $3)`, snapshotID, eventType, actorUserID).Scan(&total); err != nil {
+		return domain.DatasetSnapshotEventListPage{}, mapPgError(err)
+	}
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	rows, err := s.pool.Query(ctx, `
+SELECT event_id, snapshot_id, COALESCE(actor_user_id, ''), COALESCE(actor_org_id, ''),
+       event_type, ts, metadata
+FROM control_dataset_snapshot_events
+WHERE snapshot_id = $1
+  AND ($2::text = '' OR event_type = $2)
+  AND ($3::text = '' OR actor_user_id = $3)
+ORDER BY ts DESC, event_id ASC
+LIMIT $4 OFFSET $5`, snapshotID, eventType, actorUserID, limit, offset)
+	if err != nil {
+		return domain.DatasetSnapshotEventListPage{}, mapPgError(err)
+	}
+	defer rows.Close()
+	events := make([]domain.DatasetSnapshotEventRecord, 0)
+	for rows.Next() {
+		event, err := scanDatasetSnapshotEventRow(rows)
+		if err != nil {
+			return domain.DatasetSnapshotEventListPage{}, err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.DatasetSnapshotEventListPage{}, mapPgError(err)
+	}
+	return domain.DatasetSnapshotEventListPage{
+		Events:     events,
+		TotalCount: total,
+		Limit:      int(limit),
+		Offset:     int(offset),
+	}, nil
+}
+
+func (s *PostgresStore) CreateDataAgentJob(ctx context.Context, input domain.CreateDataAgentJobInput) (domain.DataAgentJobRecord, error) {
+	resourceIDs := uniqueTrimmedStrings(input.ResourceIDs)
+	jobID := strings.TrimSpace(input.JobID)
+	if jobID == "" {
+		jobID = domain.NewID("data_agent_job")
+	}
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
+		ownerUserID = "local-user"
+	}
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	now := domain.Now()
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if status == "" {
+		status = "queued"
+	}
+	jobType := strings.ToLower(strings.TrimSpace(input.JobType))
+	resourceCount := input.ResourceCount
+	if len(resourceIDs) > 0 || resourceCount == 0 {
+		resourceCount = len(resourceIDs)
+	}
+	progressTotal := input.ProgressTotal
+	if progressTotal == 0 {
+		progressTotal = resourceCount
+	}
+	createdByUserID := strings.TrimSpace(input.CreatedByUserID)
+	if createdByUserID == "" {
+		createdByUserID = ownerUserID
+	}
+	inputSelector := cloneJSONMap(input.InputSelector)
+	if len(inputSelector) == 0 && len(resourceIDs) > 0 {
+		inputSelector["resource_ids"] = append([]string(nil), resourceIDs...)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DataAgentJobRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if len(resourceIDs) > 0 {
+		rows, err := tx.Query(ctx, `
+SELECT resource_id
+FROM control_resources
+WHERE resource_id = ANY($1::text[])
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'`,
+			resourceIDs,
+			ownerUserID,
+			ownerOrgID,
+		)
+		if err != nil {
+			return domain.DataAgentJobRecord{}, mapPgError(err)
+		}
+		visible := map[string]struct{}{}
+		for rows.Next() {
+			var resourceID string
+			if err := rows.Scan(&resourceID); err != nil {
+				rows.Close()
+				return domain.DataAgentJobRecord{}, err
+			}
+			visible[resourceID] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return domain.DataAgentJobRecord{}, err
+		}
+		rows.Close()
+		if len(visible) != len(resourceIDs) {
+			return domain.DataAgentJobRecord{}, ErrNotFound
+		}
+	}
+
+	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+INSERT INTO control_data_agent_jobs (
+  job_id, owner_user_id, owner_org_id, owner_role, project_id, job_type, status,
+  resource_count, progress_completed, progress_total, error, created_by_user_id,
+  created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7,
+        $8, $9, $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19)
+RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+          progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+          created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata`,
+		jobID,
+		ownerUserID,
+		ownerOrgID,
+		strings.TrimSpace(input.OwnerRole),
+		strings.TrimSpace(input.ProjectID),
+		jobType,
+		status,
+		int64(resourceCount),
+		int64(input.ProgressCompleted),
+		int64(progressTotal),
+		strings.TrimSpace(input.Error),
+		createdByUserID,
+		createdAt.UTC(),
+		updatedAt.UTC(),
+		nullableTimestamptz(input.StartedAt),
+		nullableTimestamptz(input.CompletedAt),
+		jsonBytes(inputSelector),
+		jsonBytes(input.OutputSummary),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, mapPgError(err)
+	}
+
+	for position, resourceID := range resourceIDs {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO control_data_agent_job_resources (job_id, resource_id, position, metadata)
+VALUES ($1, $2, $3, '{}')
+ON CONFLICT (job_id, resource_id) DO NOTHING`,
+			job.JobID,
+			resourceID,
+			int64(position),
+		); err != nil {
+			return domain.DataAgentJobRecord{}, mapPgError(err)
+		}
+	}
+
+	if _, err := scanDataAgentJobEventRow(tx.QueryRow(ctx, `
+INSERT INTO control_data_agent_job_events (
+  event_id, job_id, sequence, event_type, actor_user_id, actor_org_id, ts, message, metadata
+)
+VALUES ($1, $2, 1, 'data_agent.job.created', NULLIF($3, ''), NULLIF($4, ''), $5,
+        'Data Agent job queued.', $6)
+RETURNING event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
+          COALESCE(actor_org_id, ''), ts, COALESCE(message, ''), metadata`,
+		domain.NewID("data_agent_job_event"),
+		job.JobID,
+		createdByUserID,
+		ownerOrgID,
+		job.CreatedAt,
+		jsonBytes(domain.JSONMap{
+			"job_type":       job.JobType,
+			"resource_count": job.ResourceCount,
+		}),
+	)); err != nil {
+		return domain.DataAgentJobRecord{}, mapPgError(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DataAgentJobRecord{}, err
+	}
+	return job, nil
+}
+
+func (s *PostgresStore) GetDataAgentJobForUser(ctx context.Context, jobID string, userID string, orgID string) (domain.DataAgentJobRecord, error) {
+	job, err := scanDataAgentJobRow(s.pool.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)`,
+		strings.TrimSpace(jobID),
+		strings.TrimSpace(userID),
+		strings.TrimSpace(orgID),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, mapPgError(err)
+	}
+	return job, nil
+}
+
+func (s *PostgresStore) ListDataAgentJobsForUser(ctx context.Context, input domain.DataAgentJobListInput) (domain.DataAgentJobListPage, error) {
+	ownerUserID := strings.TrimSpace(input.UserID)
+	ownerOrgID := strings.TrimSpace(input.OrgID)
+	jobType := strings.ToLower(strings.TrimSpace(input.JobType))
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	projectID := strings.TrimSpace(input.ProjectID)
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	countRow := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM control_data_agent_jobs
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND ($3::text = '' OR status = $3)
+  AND ($4::text = '' OR job_type = $4)
+  AND ($5::text = '' OR COALESCE(project_id, '') = $5)`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		jobType,
+		projectID,
+	)
+	var total int
+	if err := countRow.Scan(&total); err != nil {
+		return domain.DataAgentJobListPage{}, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND ($3::text = '' OR status = $3)
+  AND ($4::text = '' OR job_type = $4)
+  AND ($5::text = '' OR COALESCE(project_id, '') = $5)
+ORDER BY updated_at DESC, job_id ASC
+LIMIT $6 OFFSET $7`,
+		ownerUserID,
+		ownerOrgID,
+		status,
+		jobType,
+		projectID,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return domain.DataAgentJobListPage{}, mapPgError(err)
+	}
+	defer rows.Close()
+	jobs, err := scanDataAgentJobRows(rows)
+	if err != nil {
+		return domain.DataAgentJobListPage{}, err
+	}
+	return domain.DataAgentJobListPage{
+		Jobs:       jobs,
+		TotalCount: total,
+		Limit:      int(limit),
+		Offset:     int(offset),
+	}, nil
+}
+
+func (s *PostgresStore) UpdateDataAgentJob(ctx context.Context, input domain.UpdateDataAgentJobInput) (domain.DataAgentJobRecord, domain.DataAgentJobEventRecord, error) {
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if !validDataAgentJobStatus(status) {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, errors.New("invalid data agent job status")
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	existing, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+FOR UPDATE`,
+		strings.TrimSpace(input.JobID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	progressCompleted := clampDataAgentProgress(input.ProgressCompleted, input.ProgressTotal)
+	progressTotal := input.ProgressTotal
+	if progressTotal <= 0 {
+		progressTotal = existing.ProgressTotal
+	}
+	if progressTotal < progressCompleted {
+		progressTotal = progressCompleted
+	}
+	startedAt := existing.StartedAt
+	if !input.StartedAt.IsZero() {
+		startedAt = input.StartedAt.UTC()
+	} else if status == "running" && startedAt.IsZero() {
+		startedAt = updatedAt.UTC()
+	}
+	completedAt := existing.CompletedAt
+	if !input.CompletedAt.IsZero() {
+		completedAt = input.CompletedAt.UTC()
+	} else if dataAgentJobStatusIsTerminal(status) {
+		completedAt = updatedAt.UTC()
+	} else if !dataAgentJobStatusIsTerminal(status) {
+		completedAt = time.Time{}
+	}
+	outputSummary := existing.OutputSummary
+	if input.OutputSummary != nil {
+		outputSummary = cloneJSONMap(input.OutputSummary)
+	}
+	metadata := existing.Metadata
+	if input.Metadata != nil {
+		metadata = cloneJSONMap(input.Metadata)
+	}
+	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+UPDATE control_data_agent_jobs
+SET status = $2,
+    progress_completed = $3,
+    progress_total = $4,
+    error = NULLIF($5, ''),
+    updated_at = $6,
+    started_at = $7,
+    completed_at = $8,
+    output_summary = $9,
+    metadata = $10
+WHERE job_id = $1
+RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+          progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+          created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata`,
+		existing.JobID,
+		status,
+		int64(progressCompleted),
+		int64(progressTotal),
+		strings.TrimSpace(input.Error),
+		updatedAt.UTC(),
+		nullableTimestamptz(startedAt),
+		nullableTimestamptz(completedAt),
+		jsonBytes(outputSummary),
+		jsonBytes(metadata),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	eventMetadata := cloneJSONMap(input.EventMetadata)
+	if len(eventMetadata) == 0 {
+		eventMetadata["status"] = status
+	}
+	event, err := appendDataAgentJobEventTx(ctx, tx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		EventType:   dataAgentJobStatusEventType(status),
+		ActorUserID: strings.TrimSpace(input.ActorUserID),
+		ActorOrgID:  strings.TrimSpace(input.ActorOrgID),
+		TS:          updatedAt,
+		Message:     strings.TrimSpace(input.Message),
+		Metadata:    eventMetadata,
+	})
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	return job, event, nil
+}
+
+func (s *PostgresStore) ControlDataAgentJob(ctx context.Context, input domain.ControlDataAgentJobInput) (domain.DataAgentJobRecord, domain.DataAgentJobEventRecord, error) {
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	existing, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+FOR UPDATE`,
+		strings.TrimSpace(input.JobID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	action := strings.ToLower(strings.TrimSpace(input.Action))
+	reason := strings.TrimSpace(input.Reason)
+	status := existing.Status
+	progressCompleted := existing.ProgressCompleted
+	errorText := existing.Error
+	startedAt := existing.StartedAt
+	completedAt := existing.CompletedAt
+	eventType := ""
+	switch action {
+	case "cancel":
+		status = "canceled"
+		errorText = reason
+		completedAt = ts.UTC()
+		eventType = "data_agent.job.canceled"
+	case "retry":
+		status = "queued"
+		progressCompleted = 0
+		errorText = ""
+		startedAt = time.Time{}
+		completedAt = time.Time{}
+		eventType = "data_agent.job.retried"
+	default:
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, errors.New("data agent job control action must be cancel or retry")
+	}
+	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+UPDATE control_data_agent_jobs
+SET status = $2,
+    progress_completed = $3,
+    error = NULLIF($4, ''),
+    updated_at = $5,
+    started_at = $6,
+    completed_at = $7
+WHERE job_id = $1
+RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+          progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+          created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata`,
+		existing.JobID,
+		status,
+		int64(progressCompleted),
+		errorText,
+		ts.UTC(),
+		nullableTimestamptz(startedAt),
+		nullableTimestamptz(completedAt),
+	))
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	event, err := appendDataAgentJobEventTx(ctx, tx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		EventType:   eventType,
+		ActorUserID: strings.TrimSpace(input.ActorUserID),
+		ActorOrgID:  strings.TrimSpace(input.ActorOrgID),
+		TS:          ts,
+		Message:     reason,
+		Metadata:    cloneJSONMap(input.Metadata),
+	})
+	if err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	return job, event, nil
+}
+
+func (s *PostgresStore) AcquireDataAgentJobLease(ctx context.Context, input domain.AcquireDataAgentJobLeaseInput) (domain.DataAgentJobLeaseRecord, domain.DataAgentJobRecord, domain.DataAgentJobEventRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+FOR UPDATE`,
+		strings.TrimSpace(input.JobID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	))
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	if dataAgentJobStatusIsTerminal(job.Status) {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, ErrConflict
+	}
+	now := leaseNow(input.Now)
+	existingLease, err := scanDataAgentJobLeaseRow(tx.QueryRow(ctx, `
+SELECT job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at
+FROM control_data_agent_job_leases
+WHERE job_id = $1
+FOR UPDATE`, job.JobID))
+	if err == nil && existingLease.LeaseExpiresAt.After(now) {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, ErrConflict
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	leaseInput := domain.DataAgentJobLeaseRecord{
+		JobID:          job.JobID,
+		WorkerID:       strings.TrimSpace(input.WorkerID),
+		LeaseToken:     domain.NewID("lease"),
+		LeaseExpiresAt: now.Add(positiveLeaseTTL(input.TTL)),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	lease, err := scanDataAgentJobLeaseRow(tx.QueryRow(ctx, `
+INSERT INTO control_data_agent_job_leases (job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (job_id) DO UPDATE
+SET worker_id = EXCLUDED.worker_id,
+    lease_token = EXCLUDED.lease_token,
+    lease_expires_at = EXCLUDED.lease_expires_at,
+    updated_at = EXCLUDED.updated_at
+RETURNING job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at`,
+		leaseInput.JobID,
+		leaseInput.WorkerID,
+		leaseInput.LeaseToken,
+		leaseInput.LeaseExpiresAt,
+		leaseInput.CreatedAt,
+		leaseInput.UpdatedAt,
+	))
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	job, err = scanDataAgentJobRow(tx.QueryRow(ctx, `
+UPDATE control_data_agent_jobs
+SET status = 'running',
+    updated_at = $2,
+    started_at = COALESCE(started_at, $2)
+WHERE job_id = $1
+RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+          progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+          created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata`,
+		job.JobID,
+		now,
+	))
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	event, err := appendDataAgentJobEventTx(ctx, tx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		EventType:   "data_agent.job.leased",
+		ActorUserID: strings.TrimSpace(input.OwnerUserID),
+		ActorOrgID:  strings.TrimSpace(input.OwnerOrgID),
+		TS:          now,
+		Message:     "Data Agent job leased.",
+		Metadata: domain.JSONMap{
+			"worker_id":        lease.WorkerID,
+			"lease_expires_at": lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DataAgentJobLeaseRecord{}, domain.DataAgentJobRecord{}, domain.DataAgentJobEventRecord{}, err
+	}
+	return lease, job, event, nil
+}
+
+func (s *PostgresStore) RenewDataAgentJobLease(ctx context.Context, input domain.RenewDataAgentJobLeaseInput) (domain.DataAgentJobLeaseRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	if err := tx.QueryRow(ctx, `
+SELECT status
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+FOR UPDATE`,
+		strings.TrimSpace(input.JobID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	).Scan(&status); err != nil {
+		return domain.DataAgentJobLeaseRecord{}, mapPgError(err)
+	}
+	if dataAgentJobStatusIsTerminal(status) {
+		return domain.DataAgentJobLeaseRecord{}, ErrConflict
+	}
+	now := leaseNow(input.Now)
+	existing, err := scanDataAgentJobLeaseRow(tx.QueryRow(ctx, `
+SELECT job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at
+FROM control_data_agent_job_leases
+WHERE job_id = $1
+FOR UPDATE`, strings.TrimSpace(input.JobID)))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.DataAgentJobLeaseRecord{}, ErrConflict
+		}
+		return domain.DataAgentJobLeaseRecord{}, err
+	}
+	if existing.LeaseToken != strings.TrimSpace(input.LeaseToken) || !existing.LeaseExpiresAt.After(now) {
+		return domain.DataAgentJobLeaseRecord{}, ErrConflict
+	}
+	lease, err := scanDataAgentJobLeaseRow(tx.QueryRow(ctx, `
+UPDATE control_data_agent_job_leases
+SET lease_expires_at = $3,
+    updated_at = $4
+WHERE job_id = $1 AND lease_token = $2
+RETURNING job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at`,
+		strings.TrimSpace(input.JobID),
+		strings.TrimSpace(input.LeaseToken),
+		now.Add(positiveLeaseTTL(input.TTL)),
+		now,
+	))
+	if err != nil {
+		return domain.DataAgentJobLeaseRecord{}, mapPgError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE control_data_agent_jobs SET updated_at = $2 WHERE job_id = $1`, strings.TrimSpace(input.JobID), now); err != nil {
+		return domain.DataAgentJobLeaseRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DataAgentJobLeaseRecord{}, err
+	}
+	return lease, nil
+}
+
+func (s *PostgresStore) ReleaseDataAgentJobLease(ctx context.Context, input domain.ReleaseDataAgentJobLeaseInput) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	jobID := strings.TrimSpace(input.JobID)
+	if err := tx.QueryRow(ctx, `
+SELECT job_id
+FROM control_data_agent_jobs
+WHERE job_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)`,
+		jobID,
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	).Scan(&jobID); err != nil {
+		return mapPgError(err)
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM control_data_agent_job_leases WHERE job_id = $1 AND lease_token = $2`, jobID, strings.TrimSpace(input.LeaseToken))
+	if err != nil {
+		return mapPgError(err)
+	}
+	if tag.RowsAffected() > 0 {
+		return tx.Commit(ctx)
+	}
+	var activeToken string
+	err = tx.QueryRow(ctx, `SELECT lease_token FROM control_data_agent_job_leases WHERE job_id = $1`, jobID).Scan(&activeToken)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tx.Commit(ctx)
+	}
+	if err != nil {
+		return mapPgError(err)
+	}
+	return ErrConflict
+}
+
+func (s *PostgresStore) RecoverExpiredDataAgentJobLeases(ctx context.Context, input domain.RecoverExpiredDataAgentJobLeasesInput) (domain.RecoverExpiredDataAgentJobLeasesResult, error) {
+	now := input.Now
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" {
+		reason = "automatic expired data-agent lease recovery"
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.RecoverExpiredDataAgentJobLeasesResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+SELECT j.job_id
+FROM control_data_agent_jobs j
+JOIN control_data_agent_job_leases l ON l.job_id = j.job_id
+WHERE j.status IN ('queued', 'running')
+ORDER BY j.updated_at ASC, j.job_id ASC
+LIMIT $1
+FOR UPDATE OF j, l`, int32(limit))
+	if err != nil {
+		return domain.RecoverExpiredDataAgentJobLeasesResult{}, mapPgError(err)
+	}
+	jobIDs := []string{}
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			rows.Close()
+			return domain.RecoverExpiredDataAgentJobLeasesResult{}, mapPgError(err)
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.RecoverExpiredDataAgentJobLeasesResult{}, mapPgError(err)
+	}
+	rows.Close()
+	result := domain.RecoverExpiredDataAgentJobLeasesResult{Checked: len(jobIDs)}
+	for _, jobID := range jobIDs {
+		job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1`, jobID))
+		if err != nil {
+			return result, mapPgError(err)
+		}
+		lease, err := scanDataAgentJobLeaseRow(tx.QueryRow(ctx, `
+SELECT job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at
+FROM control_data_agent_job_leases
+WHERE job_id = $1`, job.JobID))
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return result, err
+		}
+		if lease.LeaseExpiresAt.After(now) {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM control_data_agent_job_leases WHERE job_id = $1`, job.JobID); err != nil {
+			return result, mapPgError(err)
+		}
+		progressTotal := job.ProgressTotal
+		if progressTotal <= 0 {
+			progressTotal = job.ResourceCount
+		}
+		requeued, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+UPDATE control_data_agent_jobs
+SET status = 'queued',
+    progress_completed = 0,
+    progress_total = $2,
+    error = NULL,
+    updated_at = $3,
+    started_at = NULL,
+    completed_at = NULL
+WHERE job_id = $1
+RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+          progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+          created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata`,
+			job.JobID,
+			int64(progressTotal),
+			now.UTC(),
+		))
+		if err != nil {
+			return result, mapPgError(err)
+		}
+		if _, err := appendDataAgentJobEventTx(ctx, tx, domain.AppendDataAgentJobEventInput{
+			JobID:       requeued.JobID,
+			EventType:   "data_agent.job.requeued",
+			ActorUserID: requeued.OwnerUserID,
+			ActorOrgID:  requeued.OwnerOrgID,
+			TS:          now,
+			Message:     reason,
+			Metadata: domain.JSONMap{
+				"reason":           reason,
+				"recovery":         "expired_data_agent_job_lease",
+				"lease_worker_id":  lease.WorkerID,
+				"lease_expires_at": lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+			},
+		}); err != nil {
+			return result, err
+		}
+		result.RequeuedJobs = append(result.RequeuedJobs, requeued)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.RecoverExpiredDataAgentJobLeasesResult{}, err
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) AppendDataAgentJobEvent(ctx context.Context, input domain.AppendDataAgentJobEventInput) (domain.DataAgentJobEventRecord, error) {
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("data_agent_job_event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	sequence := input.Sequence
+	event, err := scanDataAgentJobEventRow(s.pool.QueryRow(ctx, `
+INSERT INTO control_data_agent_job_events (
+  event_id, job_id, sequence, event_type, actor_user_id, actor_org_id, ts, message, metadata
+)
+VALUES (
+  $1, $2,
+  CASE WHEN $3::bigint > 0 THEN $3::bigint ELSE (SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_data_agent_job_events WHERE job_id = $2) END,
+  $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, ''), $9
+)
+RETURNING event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
+          COALESCE(actor_org_id, ''), ts, COALESCE(message, ''), metadata`,
+		eventID,
+		strings.TrimSpace(input.JobID),
+		sequence,
+		strings.TrimSpace(input.EventType),
+		strings.TrimSpace(input.ActorUserID),
+		strings.TrimSpace(input.ActorOrgID),
+		ts.UTC(),
+		strings.TrimSpace(input.Message),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	return event, nil
+}
+
+func (s *PostgresStore) ListDataAgentJobEvents(ctx context.Context, jobID string, userID string, orgID string, limit int) ([]domain.DataAgentJobEventRecord, error) {
+	if _, err := s.GetDataAgentJobForUser(ctx, jobID, userID, orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
+       COALESCE(actor_org_id, ''), ts, COALESCE(message, ''), metadata
+FROM control_data_agent_job_events
+WHERE job_id = $1
+ORDER BY sequence ASC, event_id ASC
+LIMIT $2`,
+		strings.TrimSpace(jobID),
+		limit32(limit, 200),
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	return scanDataAgentJobEventRows(rows)
+}
+
+func appendDataAgentJobEventTx(ctx context.Context, tx pgx.Tx, input domain.AppendDataAgentJobEventInput) (domain.DataAgentJobEventRecord, error) {
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("data_agent_job_event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	sequence := input.Sequence
+	event, err := scanDataAgentJobEventRow(tx.QueryRow(ctx, `
+INSERT INTO control_data_agent_job_events (
+  event_id, job_id, sequence, event_type, actor_user_id, actor_org_id, ts, message, metadata
+)
+VALUES (
+  $1, $2,
+  CASE WHEN $3::bigint > 0 THEN $3::bigint ELSE (SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_data_agent_job_events WHERE job_id = $2) END,
+  $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, ''), $9
+)
+RETURNING event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
+          COALESCE(actor_org_id, ''), ts, COALESCE(message, ''), metadata`,
+		eventID,
+		strings.TrimSpace(input.JobID),
+		sequence,
+		strings.TrimSpace(input.EventType),
+		strings.TrimSpace(input.ActorUserID),
+		strings.TrimSpace(input.ActorOrgID),
+		ts.UTC(),
+		strings.TrimSpace(input.Message),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.DataAgentJobEventRecord{}, mapPgError(err)
+	}
+	return event, nil
 }
 
 func (s *PostgresStore) SoftDeleteResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, deletedAt time.Time) (domain.ResourceRecord, error) {
@@ -1586,6 +5443,187 @@ func (s *PostgresStore) CreateResourceEvent(ctx context.Context, input domain.Ap
 	return resourceEventFromRow(row), nil
 }
 
+func (s *PostgresStore) CreateResourceShareGrant(ctx context.Context, input domain.CreateResourceShareGrantInput) (domain.ResourceShareGrantRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceShareGrantRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	grant, err := createResourceShareGrantTx(ctx, tx, input)
+	if err != nil {
+		return domain.ResourceShareGrantRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceShareGrantRecord{}, err
+	}
+	return grant, nil
+}
+
+func createResourceShareGrantTx(ctx context.Context, tx pgx.Tx, input domain.CreateResourceShareGrantInput) (domain.ResourceShareGrantRecord, error) {
+	resourceID := strings.TrimSpace(input.ResourceID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	granteeUserID := strings.TrimSpace(input.GranteeUserID)
+	granteeOrgID := strings.TrimSpace(input.GranteeOrgID)
+	if input.Public {
+		granteeUserID = domain.PublicResourceGranteeUserID
+		granteeOrgID = ""
+	}
+	if granteeUserID == "" && granteeOrgID == "" {
+		return domain.ResourceShareGrantRecord{}, ErrNotFound
+	}
+	grantID := strings.TrimSpace(input.GrantID)
+	if grantID == "" {
+		grantID = domain.NewID("resource_grant")
+	}
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		role = "read"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "active"
+	}
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = domain.Now()
+	}
+	updatedAt := input.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	createdByUserID := strings.TrimSpace(input.CreatedByUserID)
+	if createdByUserID == "" {
+		createdByUserID = ownerUserID
+	}
+
+	var canonicalOwnerUserID string
+	var canonicalOwnerOrgID string
+	var canonicalOwnerRole string
+	if err := tx.QueryRow(ctx, `
+SELECT owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, '')
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'
+FOR UPDATE`, resourceID, ownerUserID, ownerOrgID).Scan(&canonicalOwnerUserID, &canonicalOwnerOrgID, &canonicalOwnerRole); err != nil {
+		return domain.ResourceShareGrantRecord{}, mapPgError(err)
+	}
+
+	grant, err := scanResourceShareGrantRow(tx.QueryRow(ctx, `
+INSERT INTO control_resource_share_grants (
+  grant_id, resource_id, owner_user_id, owner_org_id, owner_role,
+  grantee_user_id, grantee_org_id, role, status, created_by_user_id,
+  created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING grant_id, resource_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+          COALESCE(grantee_user_id, ''), COALESCE(grantee_org_id, ''), role, status,
+          COALESCE(created_by_user_id, ''), created_at, updated_at, revoked_at, metadata`,
+		grantID,
+		resourceID,
+		canonicalOwnerUserID,
+		nullableText(canonicalOwnerOrgID),
+		nullableText(canonicalOwnerRole),
+		nullableText(granteeUserID),
+		nullableText(granteeOrgID),
+		role,
+		status,
+		nullableText(createdByUserID),
+		timestamptz(createdAt),
+		timestamptz(updatedAt),
+		jsonBytes(input.Metadata),
+	))
+	if err != nil {
+		return domain.ResourceShareGrantRecord{}, mapPgError(err)
+	}
+	return grant, nil
+}
+
+func (s *PostgresStore) ListResourceShareGrantsForResource(ctx context.Context, input domain.ListResourceShareGrantsInput) ([]domain.ResourceShareGrantRecord, error) {
+	resourceID := strings.TrimSpace(input.ResourceID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	status := strings.TrimSpace(input.Status)
+	var exists int
+	if err := s.pool.QueryRow(ctx, `
+SELECT 1
+FROM control_resources
+WHERE resource_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'active'`, resourceID, ownerUserID, ownerOrgID).Scan(&exists); err != nil {
+		return nil, mapPgError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT g.grant_id, g.resource_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+       COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+       COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata
+FROM control_resource_share_grants g
+JOIN control_resources r ON r.resource_id = g.resource_id
+WHERE g.resource_id = $1
+  AND r.owner_user_id = $2
+  AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)
+  AND r.status = 'active'
+  AND ($4::text = '' OR g.status = $4)
+ORDER BY g.created_at DESC, g.grant_id ASC
+LIMIT $5`, resourceID, ownerUserID, ownerOrgID, status, limit32(input.Limit, 200))
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	grants := make([]domain.ResourceShareGrantRecord, 0)
+	for rows.Next() {
+		grant, err := scanResourceShareGrantRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return grants, nil
+}
+
+func (s *PostgresStore) RevokeResourceShareGrant(ctx context.Context, input domain.RevokeResourceShareGrantInput) (domain.ResourceShareGrantRecord, error) {
+	resourceID := strings.TrimSpace(input.ResourceID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	ownerOrgID := strings.TrimSpace(input.OwnerOrgID)
+	grantID := strings.TrimSpace(input.GrantID)
+	revokedAt := input.RevokedAt
+	if revokedAt.IsZero() {
+		revokedAt = domain.Now()
+	}
+	grant, err := scanResourceShareGrantRow(s.pool.QueryRow(ctx, `
+UPDATE control_resource_share_grants AS g
+SET status = 'revoked',
+    revoked_at = $5,
+    updated_at = $5
+FROM control_resources r
+WHERE g.resource_id = r.resource_id
+  AND g.grant_id = $1
+  AND g.resource_id = $2
+  AND r.owner_user_id = $3
+  AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $4)
+  AND r.status = 'active'
+  AND g.status = 'active'
+RETURNING g.grant_id, g.resource_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+          COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+          COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata`,
+		grantID,
+		resourceID,
+		ownerUserID,
+		ownerOrgID,
+		timestamptz(revokedAt),
+	))
+	if err != nil {
+		return domain.ResourceShareGrantRecord{}, mapPgError(err)
+	}
+	return grant, nil
+}
+
 func (s *PostgresStore) ListResourceEvents(ctx context.Context, resourceID string, limit int) ([]domain.ResourceEventRecord, error) {
 	rows, err := s.queries.ListResourceEvents(ctx, sqlc.ListResourceEventsParams{
 		ResourceID: strings.TrimSpace(resourceID),
@@ -1599,6 +5637,42 @@ func (s *PostgresStore) ListResourceEvents(ctx context.Context, resourceID strin
 		events = append(events, resourceEventFromRow(row))
 	}
 	return events, nil
+}
+
+func (s *PostgresStore) ListResourceEventsForUser(ctx context.Context, input domain.ResourceEventListInput) (domain.ResourceEventListPage, error) {
+	params := sqlc.ListResourceEventsForUserParams{
+		OwnerUserID: strings.TrimSpace(input.UserID),
+		OwnerOrgID:  nullableText(input.OrgID),
+		Column3:     strings.TrimSpace(input.ResourceID),
+		Column4:     strings.TrimSpace(input.EventType),
+		Column5:     strings.TrimSpace(input.ActorUserID),
+		Limit:       limit32(input.Limit, 200),
+		Offset:      offset32(input.Offset),
+	}
+	rows, err := s.queries.ListResourceEventsForUser(ctx, params)
+	if err != nil {
+		return domain.ResourceEventListPage{}, mapPgError(err)
+	}
+	count, err := s.queries.CountResourceEventsForUser(ctx, sqlc.CountResourceEventsForUserParams{
+		OwnerUserID: params.OwnerUserID,
+		OwnerOrgID:  params.OwnerOrgID,
+		Column3:     params.Column3,
+		Column4:     params.Column4,
+		Column5:     params.Column5,
+	})
+	if err != nil {
+		return domain.ResourceEventListPage{}, mapPgError(err)
+	}
+	events := make([]domain.ResourceEventRecord, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, resourceEventFromRow(row))
+	}
+	return domain.ResourceEventListPage{
+		Events:     events,
+		TotalCount: int(count),
+		Limit:      int(params.Limit),
+		Offset:     int(params.Offset),
+	}, nil
 }
 
 func threadFromRow(row sqlc.ControlThread) domain.ThreadRecord {
@@ -1698,8 +5772,35 @@ func artifactFromRow(row sqlc.ControlArtifact) domain.ArtifactRecord {
 	}
 }
 
+func scanControlResourceRow(row pgx.Row) (sqlc.ControlResource, error) {
+	var resource sqlc.ControlResource
+	err := row.Scan(
+		&resource.ResourceID,
+		&resource.OwnerUserID,
+		&resource.OwnerOrgID,
+		&resource.OwnerRole,
+		&resource.OriginalName,
+		&resource.ContentType,
+		&resource.SizeBytes,
+		&resource.Sha256,
+		&resource.StorageUri,
+		&resource.StoragePath,
+		&resource.SourceType,
+		&resource.ResourceKind,
+		&resource.SourceUri,
+		&resource.ProjectID,
+		&resource.Status,
+		&resource.CreatedAt,
+		&resource.UpdatedAt,
+		&resource.DeletedAt,
+		&resource.RetentionExpiresAt,
+		&resource.Metadata,
+	)
+	return resource, err
+}
+
 func resourceFromRow(row sqlc.ControlResource) domain.ResourceRecord {
-	return domain.ResourceRecord{
+	resource := domain.ResourceRecord{
 		ResourceID:         row.ResourceID,
 		OriginalName:       row.OriginalName,
 		ContentType:        textValue(row.ContentType),
@@ -1721,6 +5822,633 @@ func resourceFromRow(row sqlc.ControlResource) domain.ResourceRecord {
 		RetentionExpiresAt: timeValue(row.RetentionExpiresAt),
 		Metadata:           jsonMap(row.Metadata),
 	}
+	return resourceWithNormalizedTags(resource)
+}
+
+func resourceFromListResourcesForUserRow(row sqlc.ListResourcesForUserRow) domain.ResourceRecord {
+	resource := domain.ResourceRecord{
+		ResourceID:         row.ResourceID,
+		OriginalName:       row.OriginalName,
+		ContentType:        textValue(row.ContentType),
+		SizeBytes:          row.SizeBytes,
+		SHA256:             textValue(row.Sha256),
+		StorageURI:         textValue(row.StorageUri),
+		StoragePath:        textValue(row.StoragePath),
+		SourceType:         row.SourceType,
+		ResourceKind:       row.ResourceKind,
+		SourceURI:          textValue(row.SourceUri),
+		ProjectID:          textValue(row.ProjectID),
+		OwnerUserID:        row.OwnerUserID,
+		OwnerOrgID:         textValue(row.OwnerOrgID),
+		OwnerRole:          textValue(row.OwnerRole),
+		Status:             row.Status,
+		CreatedAt:          timeValue(row.CreatedAt),
+		UpdatedAt:          timeValue(row.UpdatedAt),
+		DeletedAt:          timeValue(row.DeletedAt),
+		RetentionExpiresAt: timeValue(row.RetentionExpiresAt),
+		Metadata:           jsonMap(row.Metadata),
+		ShareSummary: domain.ResourceShareSummary{
+			ShareStatus:      row.ShareStatus,
+			ActiveGrantCount: int(row.ActiveGrantCount),
+			SharedByMe:       row.SharedByMe,
+			SharedWithMe:     row.SharedWithMe,
+			Public:           row.ShareStatus == "public",
+		},
+	}
+	return resourceWithNormalizedTags(resource)
+}
+
+func uploadSessionFromRow(row sqlc.ControlUploadSession) domain.UploadSessionRecord {
+	return domain.UploadSessionRecord{
+		SessionID:          row.SessionID,
+		OwnerUserID:        row.OwnerUserID,
+		OwnerOrgID:         textValue(row.OwnerOrgID),
+		OwnerRole:          textValue(row.OwnerRole),
+		ProjectID:          textValue(row.ProjectID),
+		SourceType:         row.SourceType,
+		Status:             row.Status,
+		TotalBytes:         row.TotalBytes,
+		BytesReceived:      row.BytesReceived,
+		BytesVerified:      row.BytesVerified,
+		BytesCommitted:     row.BytesCommitted,
+		IdempotencyKey:     textValue(row.IdempotencyKey),
+		BrowserFingerprint: textValue(row.BrowserFingerprint),
+		Error:              textValue(row.Error),
+		CreatedAt:          timeValue(row.CreatedAt),
+		UpdatedAt:          timeValue(row.UpdatedAt),
+		CompletedAt:        timeValue(row.CompletedAt),
+		Metadata:           jsonMap(row.Metadata),
+	}
+}
+
+func uploadSessionFileFromRow(row sqlc.ControlUploadSessionFile) domain.UploadSessionFileRecord {
+	return domain.UploadSessionFileRecord{
+		SessionID:      row.SessionID,
+		FileToken:      row.FileToken,
+		ResourceID:     textValue(row.ResourceID),
+		OriginalName:   row.OriginalName,
+		RelativePath:   textValue(row.RelativePath),
+		ContentType:    textValue(row.ContentType),
+		SizeBytes:      row.SizeBytes,
+		DeclaredSHA256: textValue(row.DeclaredSha256),
+		ComputedSHA256: textValue(row.ComputedSha256),
+		Status:         row.Status,
+		Error:          textValue(row.Error),
+		CreatedAt:      timeValue(row.CreatedAt),
+		UpdatedAt:      timeValue(row.UpdatedAt),
+		CompletedAt:    timeValue(row.CompletedAt),
+		Metadata:       jsonMap(row.Metadata),
+	}
+}
+
+func scanUploadSessionFileRow(row pgx.Row) (domain.UploadSessionFileRecord, error) {
+	var record sqlc.ControlUploadSessionFile
+	if err := row.Scan(
+		&record.SessionID,
+		&record.FileToken,
+		&record.ResourceID,
+		&record.OriginalName,
+		&record.RelativePath,
+		&record.ContentType,
+		&record.SizeBytes,
+		&record.DeclaredSha256,
+		&record.ComputedSha256,
+		&record.Status,
+		&record.Error,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+		&record.CompletedAt,
+		&record.Metadata,
+	); err != nil {
+		return domain.UploadSessionFileRecord{}, err
+	}
+	return uploadSessionFileFromRow(record), nil
+}
+
+func uploadSessionEventFromRow(row sqlc.ControlUploadSessionEvent) domain.UploadSessionEventRecord {
+	return domain.UploadSessionEventRecord{
+		EventID:     row.EventID,
+		SessionID:   row.SessionID,
+		ActorUserID: textValue(row.ActorUserID),
+		ActorOrgID:  textValue(row.ActorOrgID),
+		EventType:   row.EventType,
+		TS:          timeValue(row.Ts),
+		Metadata:    jsonMap(row.Metadata),
+	}
+}
+
+func uploadChunkFromRow(row sqlc.ControlUploadChunk) domain.UploadChunkRecord {
+	return domain.UploadChunkRecord{
+		SessionID:  row.SessionID,
+		FileToken:  row.FileToken,
+		ChunkIndex: int(row.ChunkIndex),
+		Offset:     row.ByteOffset,
+		SizeBytes:  row.SizeBytes,
+		SHA256:     row.Sha256,
+		Status:     row.Status,
+		StorageURI: textValue(row.StorageUri),
+		ReceivedAt: timeValue(row.ReceivedAt),
+		VerifiedAt: timeValue(row.VerifiedAt),
+		Error:      textValue(row.Error),
+		Metadata:   jsonMap(row.Metadata),
+	}
+}
+
+type resourceCollectionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanResourceCollectionRow(row resourceCollectionScanner) (domain.ResourceCollectionRecord, error) {
+	var collection domain.ResourceCollectionRecord
+	var resourceCount int64
+	var metadata []byte
+	if err := row.Scan(
+		&collection.CollectionID,
+		&collection.OwnerUserID,
+		&collection.OwnerOrgID,
+		&collection.OwnerRole,
+		&collection.ProjectID,
+		&collection.ParentCollectionID,
+		&collection.Name,
+		&collection.Description,
+		&collection.CollectionType,
+		&collection.Status,
+		&resourceCount,
+		&collection.CreatedAt,
+		&collection.UpdatedAt,
+		&metadata,
+	); err != nil {
+		return domain.ResourceCollectionRecord{}, err
+	}
+	collection.ResourceCount = int(resourceCount)
+	collection.CreatedAt = collection.CreatedAt.UTC()
+	collection.UpdatedAt = collection.UpdatedAt.UTC()
+	collection.Metadata = jsonMap(metadata)
+	return collection, nil
+}
+
+func scanResourceCollectionRows(rows pgx.Rows) ([]domain.ResourceCollectionRecord, error) {
+	collections := []domain.ResourceCollectionRecord{}
+	for rows.Next() {
+		collection, err := scanResourceCollectionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		collections = append(collections, collection)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return collections, nil
+}
+
+func scanDatasetSnapshotRow(row scanner) (domain.DatasetSnapshotRecord, error) {
+	var snapshot domain.DatasetSnapshotRecord
+	var resourceCount int64
+	var metadata []byte
+	if err := row.Scan(
+		&snapshot.SnapshotID,
+		&snapshot.OwnerUserID,
+		&snapshot.OwnerOrgID,
+		&snapshot.OwnerRole,
+		&snapshot.ProjectID,
+		&snapshot.SourceCollectionID,
+		&snapshot.Name,
+		&snapshot.Description,
+		&snapshot.Status,
+		&resourceCount,
+		&snapshot.TotalBytes,
+		&snapshot.CreatedByUserID,
+		&snapshot.CreatedAt,
+		&metadata,
+	); err != nil {
+		return domain.DatasetSnapshotRecord{}, err
+	}
+	snapshot.ResourceCount = int(resourceCount)
+	snapshot.CreatedAt = snapshot.CreatedAt.UTC()
+	snapshot.Metadata = jsonMap(metadata)
+	return snapshot, nil
+}
+
+func scanDatasetSnapshotRows(rows pgx.Rows) ([]domain.DatasetSnapshotRecord, error) {
+	snapshots := []domain.DatasetSnapshotRecord{}
+	for rows.Next() {
+		snapshot, err := scanDatasetSnapshotRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+func scanDatasetSnapshotResourceRow(row scanner) (domain.DatasetSnapshotResourceRecord, error) {
+	var entry domain.DatasetSnapshotResourceRecord
+	var resourceCreatedAt pgtype.Timestamptz
+	var metadata []byte
+	if err := row.Scan(
+		&entry.SnapshotID,
+		&entry.ResourceID,
+		&entry.Position,
+		&entry.OriginalName,
+		&entry.ContentType,
+		&entry.SizeBytes,
+		&entry.SHA256,
+		&entry.SourceType,
+		&entry.ResourceKind,
+		&entry.StorageURI,
+		&entry.SourceURI,
+		&entry.ProjectID,
+		&resourceCreatedAt,
+		&metadata,
+	); err != nil {
+		return domain.DatasetSnapshotResourceRecord{}, err
+	}
+	entry.ResourceCreatedAt = timeValue(resourceCreatedAt)
+	entry.Metadata = jsonMap(metadata)
+	return entry, nil
+}
+
+func scanDatasetSnapshotResourceRows(rows pgx.Rows) ([]domain.DatasetSnapshotResourceRecord, error) {
+	entries := []domain.DatasetSnapshotResourceRecord{}
+	for rows.Next() {
+		entry, err := scanDatasetSnapshotResourceRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func scanDatasetSnapshotShareGrantRow(row scanner) (domain.DatasetSnapshotShareGrantRecord, error) {
+	var grant domain.DatasetSnapshotShareGrantRecord
+	var revokedAt pgtype.Timestamptz
+	var metadata []byte
+	if err := row.Scan(
+		&grant.GrantID,
+		&grant.SnapshotID,
+		&grant.OwnerUserID,
+		&grant.OwnerOrgID,
+		&grant.OwnerRole,
+		&grant.GranteeUserID,
+		&grant.GranteeOrgID,
+		&grant.Role,
+		&grant.Status,
+		&grant.CreatedByUserID,
+		&grant.CreatedAt,
+		&grant.UpdatedAt,
+		&revokedAt,
+		&metadata,
+	); err != nil {
+		return domain.DatasetSnapshotShareGrantRecord{}, mapPgError(err)
+	}
+	grant.CreatedAt = grant.CreatedAt.UTC()
+	grant.UpdatedAt = grant.UpdatedAt.UTC()
+	grant.RevokedAt = timeValue(revokedAt)
+	grant.Metadata = jsonMap(metadata)
+	return grant, nil
+}
+
+func insertDatasetSnapshotEventTx(ctx context.Context, tx pgx.Tx, event domain.DatasetSnapshotEventRecord) (domain.DatasetSnapshotEventRecord, error) {
+	eventID := strings.TrimSpace(event.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("dataset_snapshot_event")
+	}
+	ts := event.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	return scanDatasetSnapshotEventRow(tx.QueryRow(ctx, `
+INSERT INTO control_dataset_snapshot_events (
+  event_id, snapshot_id, actor_user_id, actor_org_id, event_type, ts, metadata
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7)
+RETURNING event_id, snapshot_id, COALESCE(actor_user_id, ''), COALESCE(actor_org_id, ''),
+          event_type, ts, metadata`,
+		eventID,
+		strings.TrimSpace(event.SnapshotID),
+		strings.TrimSpace(event.ActorUserID),
+		strings.TrimSpace(event.ActorOrgID),
+		strings.TrimSpace(event.EventType),
+		timestamptz(ts.UTC()),
+		jsonBytes(event.Metadata),
+	))
+}
+
+func latestDatasetSnapshotEventTimeTx(ctx context.Context, tx pgx.Tx, snapshotID string, fallback time.Time) time.Time {
+	var latest pgtype.Timestamptz
+	if err := tx.QueryRow(ctx, `
+SELECT MAX(ts)
+FROM control_dataset_snapshot_events
+WHERE snapshot_id = $1`, strings.TrimSpace(snapshotID)).Scan(&latest); err != nil {
+		return fallback
+	}
+	value := timeValue(latest)
+	if value.IsZero() {
+		return fallback
+	}
+	return value
+}
+
+func scanDatasetSnapshotEventRow(row scanner) (domain.DatasetSnapshotEventRecord, error) {
+	var event domain.DatasetSnapshotEventRecord
+	var metadata []byte
+	if err := row.Scan(
+		&event.EventID,
+		&event.SnapshotID,
+		&event.ActorUserID,
+		&event.ActorOrgID,
+		&event.EventType,
+		&event.TS,
+		&metadata,
+	); err != nil {
+		return domain.DatasetSnapshotEventRecord{}, mapPgError(err)
+	}
+	event.TS = event.TS.UTC()
+	event.Metadata = jsonMap(metadata)
+	return event, nil
+}
+
+func scanDataAgentJobRow(row scanner) (domain.DataAgentJobRecord, error) {
+	var job domain.DataAgentJobRecord
+	var resourceCount int64
+	var progressCompleted int64
+	var progressTotal int64
+	var startedAt pgtype.Timestamptz
+	var completedAt pgtype.Timestamptz
+	var inputSelector []byte
+	var outputSummary []byte
+	var metadata []byte
+	if err := row.Scan(
+		&job.JobID,
+		&job.OwnerUserID,
+		&job.OwnerOrgID,
+		&job.OwnerRole,
+		&job.ProjectID,
+		&job.JobType,
+		&job.Status,
+		&resourceCount,
+		&progressCompleted,
+		&progressTotal,
+		&job.Error,
+		&job.CreatedByUserID,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&startedAt,
+		&completedAt,
+		&inputSelector,
+		&outputSummary,
+		&metadata,
+	); err != nil {
+		return domain.DataAgentJobRecord{}, err
+	}
+	job.ResourceCount = int(resourceCount)
+	job.ProgressCompleted = int(progressCompleted)
+	job.ProgressTotal = int(progressTotal)
+	job.CreatedAt = job.CreatedAt.UTC()
+	job.UpdatedAt = job.UpdatedAt.UTC()
+	job.StartedAt = timeValue(startedAt)
+	job.CompletedAt = timeValue(completedAt)
+	job.InputSelector = jsonMap(inputSelector)
+	job.OutputSummary = jsonMap(outputSummary)
+	job.Metadata = jsonMap(metadata)
+	return job, nil
+}
+
+func scanDataAgentJobRows(rows pgx.Rows) ([]domain.DataAgentJobRecord, error) {
+	jobs := []domain.DataAgentJobRecord{}
+	for rows.Next() {
+		job, err := scanDataAgentJobRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func scanDataAgentJobEventRow(row scanner) (domain.DataAgentJobEventRecord, error) {
+	var event domain.DataAgentJobEventRecord
+	var metadata []byte
+	if err := row.Scan(
+		&event.EventID,
+		&event.JobID,
+		&event.Sequence,
+		&event.EventType,
+		&event.ActorUserID,
+		&event.ActorOrgID,
+		&event.TS,
+		&event.Message,
+		&metadata,
+	); err != nil {
+		return domain.DataAgentJobEventRecord{}, err
+	}
+	event.TS = event.TS.UTC()
+	event.Metadata = jsonMap(metadata)
+	return event, nil
+}
+
+func scanDataAgentJobEventRows(rows pgx.Rows) ([]domain.DataAgentJobEventRecord, error) {
+	events := []domain.DataAgentJobEventRecord{}
+	for rows.Next() {
+		event, err := scanDataAgentJobEventRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func upsertCollectionMemberTx(ctx context.Context, tx pgx.Tx, collectionID string, resourceID string, position int64, addedByUserID string, addedAt time.Time, metadata domain.JSONMap) (domain.ResourceCollectionMembershipRecord, bool, error) {
+	var member domain.ResourceCollectionMembershipRecord
+	var metadataBytes []byte
+	err := tx.QueryRow(ctx, `
+INSERT INTO control_resource_collection_members (collection_id, resource_id, position, added_by_user_id, added_at, metadata)
+VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6)
+ON CONFLICT (collection_id, resource_id) DO NOTHING
+RETURNING collection_id, resource_id, position, COALESCE(added_by_user_id, ''), added_at, metadata`,
+		collectionID,
+		resourceID,
+		position,
+		addedByUserID,
+		addedAt.UTC(),
+		jsonBytes(metadata),
+	).Scan(&member.CollectionID, &member.ResourceID, &member.Position, &member.AddedByUserID, &member.AddedAt, &metadataBytes)
+	if err == nil {
+		member.AddedAt = member.AddedAt.UTC()
+		member.Metadata = jsonMap(metadataBytes)
+		return member, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.ResourceCollectionMembershipRecord{}, false, mapPgError(err)
+	}
+	err = tx.QueryRow(ctx, `
+SELECT collection_id, resource_id, position, COALESCE(added_by_user_id, ''), added_at, metadata
+FROM control_resource_collection_members
+WHERE collection_id = $1 AND resource_id = $2`, collectionID, resourceID).
+		Scan(&member.CollectionID, &member.ResourceID, &member.Position, &member.AddedByUserID, &member.AddedAt, &metadataBytes)
+	if err != nil {
+		return domain.ResourceCollectionMembershipRecord{}, false, mapPgError(err)
+	}
+	member.AddedAt = member.AddedAt.UTC()
+	member.Metadata = jsonMap(metadataBytes)
+	return member, false, nil
+}
+
+func activeResourceCollectionShareGrantsTx(ctx context.Context, tx pgx.Tx, collectionID string) ([]domain.ResourceCollectionShareGrantRecord, error) {
+	rows, err := tx.Query(ctx, `
+SELECT grant_id, collection_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(grantee_user_id, ''), COALESCE(grantee_org_id, ''), role, status,
+       COALESCE(created_by_user_id, ''), created_at, updated_at, revoked_at, metadata
+FROM control_resource_collection_share_grants
+WHERE collection_id = $1
+  AND status = 'active'
+ORDER BY created_at ASC, grant_id ASC`, strings.TrimSpace(collectionID))
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	grants := make([]domain.ResourceCollectionShareGrantRecord, 0)
+	for rows.Next() {
+		grant, err := scanResourceCollectionShareGrantRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
+func createInheritedResourceShareGrantTx(ctx context.Context, tx pgx.Tx, resourceID string, collectionGrant domain.ResourceCollectionShareGrantRecord, createdAt time.Time, source string) (domain.ResourceShareGrantRecord, error) {
+	metadata := cloneJSONMap(collectionGrant.Metadata)
+	metadata["collection_id"] = collectionGrant.CollectionID
+	metadata["collection_share_grant_id"] = collectionGrant.GrantID
+	metadata["source"] = source
+	return createResourceShareGrantTx(ctx, tx, domain.CreateResourceShareGrantInput{
+		ResourceID:      resourceID,
+		OwnerUserID:     collectionGrant.OwnerUserID,
+		OwnerOrgID:      collectionGrant.OwnerOrgID,
+		OwnerRole:       collectionGrant.OwnerRole,
+		GranteeUserID:   collectionGrant.GranteeUserID,
+		GranteeOrgID:    collectionGrant.GranteeOrgID,
+		Role:            collectionGrant.Role,
+		Status:          "active",
+		CreatedByUserID: collectionGrant.CreatedByUserID,
+		CreatedAt:       createdAt,
+		Metadata:        metadata,
+	})
+}
+
+func scanResourceRows(rows pgx.Rows) ([]domain.ResourceRecord, error) {
+	resources := []domain.ResourceRecord{}
+	for rows.Next() {
+		var resource domain.ResourceRecord
+		var deletedAt pgtype.Timestamptz
+		var retentionExpiresAt pgtype.Timestamptz
+		var metadata []byte
+		if err := rows.Scan(
+			&resource.ResourceID,
+			&resource.OwnerUserID,
+			&resource.OwnerOrgID,
+			&resource.OwnerRole,
+			&resource.OriginalName,
+			&resource.ContentType,
+			&resource.SizeBytes,
+			&resource.SHA256,
+			&resource.StorageURI,
+			&resource.StoragePath,
+			&resource.SourceType,
+			&resource.ResourceKind,
+			&resource.SourceURI,
+			&resource.ProjectID,
+			&resource.Status,
+			&resource.CreatedAt,
+			&resource.UpdatedAt,
+			&deletedAt,
+			&retentionExpiresAt,
+			&metadata,
+		); err != nil {
+			return nil, err
+		}
+		resource.CreatedAt = resource.CreatedAt.UTC()
+		resource.UpdatedAt = resource.UpdatedAt.UTC()
+		resource.DeletedAt = timeValue(deletedAt)
+		resource.RetentionExpiresAt = timeValue(retentionExpiresAt)
+		resource.Metadata = jsonMap(metadata)
+		resources = append(resources, resource)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return resources, nil
+}
+
+func scanResourceRowsWithShareSummary(rows pgx.Rows) ([]domain.ResourceRecord, error) {
+	resources := []domain.ResourceRecord{}
+	for rows.Next() {
+		var resource domain.ResourceRecord
+		var deletedAt pgtype.Timestamptz
+		var retentionExpiresAt pgtype.Timestamptz
+		var metadata []byte
+		var activeGrantCount int64
+		if err := rows.Scan(
+			&resource.ResourceID,
+			&resource.OwnerUserID,
+			&resource.OwnerOrgID,
+			&resource.OwnerRole,
+			&resource.OriginalName,
+			&resource.ContentType,
+			&resource.SizeBytes,
+			&resource.SHA256,
+			&resource.StorageURI,
+			&resource.StoragePath,
+			&resource.SourceType,
+			&resource.ResourceKind,
+			&resource.SourceURI,
+			&resource.ProjectID,
+			&resource.Status,
+			&resource.CreatedAt,
+			&resource.UpdatedAt,
+			&deletedAt,
+			&retentionExpiresAt,
+			&metadata,
+			&resource.ShareSummary.ShareStatus,
+			&activeGrantCount,
+			&resource.ShareSummary.SharedByMe,
+			&resource.ShareSummary.SharedWithMe,
+		); err != nil {
+			return nil, err
+		}
+		resource.CreatedAt = resource.CreatedAt.UTC()
+		resource.UpdatedAt = resource.UpdatedAt.UTC()
+		resource.DeletedAt = timeValue(deletedAt)
+		resource.RetentionExpiresAt = timeValue(retentionExpiresAt)
+		resource.Metadata = jsonMap(metadata)
+		resource.ShareSummary.ActiveGrantCount = int(activeGrantCount)
+		resource.ShareSummary.Public = resource.ShareSummary.ShareStatus == "public"
+		resources = append(resources, resourceWithNormalizedTags(resource))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return resources, nil
 }
 
 func resourceEventFromRow(row sqlc.ControlResourceEvent) domain.ResourceEventRecord {
@@ -1733,6 +6461,82 @@ func resourceEventFromRow(row sqlc.ControlResourceEvent) domain.ResourceEventRec
 		TS:          timeValue(row.Ts),
 		Metadata:    jsonMap(row.Metadata),
 	}
+}
+
+func scanResourceEventRow(row scanner) (domain.ResourceEventRecord, error) {
+	var event domain.ResourceEventRecord
+	var metadata []byte
+	if err := row.Scan(
+		&event.EventID,
+		&event.ResourceID,
+		&event.ActorUserID,
+		&event.ActorOrgID,
+		&event.EventType,
+		&event.TS,
+		&metadata,
+	); err != nil {
+		return domain.ResourceEventRecord{}, mapPgError(err)
+	}
+	event.Metadata = jsonMap(metadata)
+	return event, nil
+}
+
+func scanResourceCollectionShareGrantRow(row scanner) (domain.ResourceCollectionShareGrantRecord, error) {
+	var grant domain.ResourceCollectionShareGrantRecord
+	var revokedAt pgtype.Timestamptz
+	var metadata []byte
+	if err := row.Scan(
+		&grant.GrantID,
+		&grant.CollectionID,
+		&grant.OwnerUserID,
+		&grant.OwnerOrgID,
+		&grant.OwnerRole,
+		&grant.GranteeUserID,
+		&grant.GranteeOrgID,
+		&grant.Role,
+		&grant.Status,
+		&grant.CreatedByUserID,
+		&grant.CreatedAt,
+		&grant.UpdatedAt,
+		&revokedAt,
+		&metadata,
+	); err != nil {
+		return domain.ResourceCollectionShareGrantRecord{}, mapPgError(err)
+	}
+	grant.CreatedAt = grant.CreatedAt.UTC()
+	grant.UpdatedAt = grant.UpdatedAt.UTC()
+	grant.RevokedAt = timeValue(revokedAt)
+	grant.Metadata = jsonMap(metadata)
+	return grant, nil
+}
+
+func scanResourceShareGrantRow(row scanner) (domain.ResourceShareGrantRecord, error) {
+	var grant domain.ResourceShareGrantRecord
+	var revokedAt pgtype.Timestamptz
+	var metadata []byte
+	if err := row.Scan(
+		&grant.GrantID,
+		&grant.ResourceID,
+		&grant.OwnerUserID,
+		&grant.OwnerOrgID,
+		&grant.OwnerRole,
+		&grant.GranteeUserID,
+		&grant.GranteeOrgID,
+		&grant.Role,
+		&grant.Status,
+		&grant.CreatedByUserID,
+		&grant.CreatedAt,
+		&grant.UpdatedAt,
+		&revokedAt,
+		&metadata,
+	); err != nil {
+		return domain.ResourceShareGrantRecord{}, mapPgError(err)
+	}
+	grant.CreatedAt = grant.CreatedAt.UTC()
+	grant.UpdatedAt = grant.UpdatedAt.UTC()
+	grant.RevokedAt = timeValue(revokedAt)
+	grant.Metadata = jsonMap(metadata)
+	return grant, nil
 }
 
 type scanner interface {
@@ -1822,6 +6626,24 @@ func scanRunLease(row scanner) (domain.RunLeaseRecord, error) {
 		&lease.UpdatedAt,
 	); err != nil {
 		return domain.RunLeaseRecord{}, mapPgError(err)
+	}
+	lease.LeaseExpiresAt = lease.LeaseExpiresAt.UTC()
+	lease.CreatedAt = lease.CreatedAt.UTC()
+	lease.UpdatedAt = lease.UpdatedAt.UTC()
+	return lease, nil
+}
+
+func scanDataAgentJobLeaseRow(row scanner) (domain.DataAgentJobLeaseRecord, error) {
+	var lease domain.DataAgentJobLeaseRecord
+	if err := row.Scan(
+		&lease.JobID,
+		&lease.WorkerID,
+		&lease.LeaseToken,
+		&lease.LeaseExpiresAt,
+		&lease.CreatedAt,
+		&lease.UpdatedAt,
+	); err != nil {
+		return domain.DataAgentJobLeaseRecord{}, mapPgError(err)
 	}
 	lease.LeaseExpiresAt = lease.LeaseExpiresAt.UTC()
 	lease.CreatedAt = lease.CreatedAt.UTC()

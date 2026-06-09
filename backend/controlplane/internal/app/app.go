@@ -18,15 +18,22 @@ import (
 )
 
 type App struct {
-	Handler   http.Handler
-	Store     runcontrol.Store
-	Bus       eventbus.Bus
-	RunEvents eventbus.RunEventSource
-	Runs      *runcontrol.Service
-	JobSource <-chan eventbus.Job
-	Worker    *worker.StubWorker
-	Start     func(context.Context) error
-	closeFns  []func()
+	Handler            http.Handler
+	Store              runcontrol.Store
+	Bus                eventbus.Bus
+	RunEvents          eventbus.RunEventSource
+	Runs               *runcontrol.Service
+	JobSource          <-chan eventbus.Job
+	Worker             *worker.StubWorker
+	DataAgentJobSource <-chan eventbus.DataAgentJob
+	DataAgentWorker    *worker.DataAgentWorker
+	Start              func(context.Context) error
+	closeFns           []func()
+}
+
+type dataAgentLeaseRecoveryStore interface {
+	RecoverExpiredDataAgentJobLeases(context.Context, domain.RecoverExpiredDataAgentJobLeasesInput) (domain.RecoverExpiredDataAgentJobLeasesResult, error)
+	AppendDataAgentJobEvent(context.Context, domain.AppendDataAgentJobEventInput) (domain.DataAgentJobEventRecord, error)
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -60,40 +67,45 @@ func New(cfg config.Config) (*App, error) {
 	var bus eventbus.Bus
 	var runEvents eventbus.RunEventSource
 	var jobSource <-chan eventbus.Job
+	var dataAgentJobSource <-chan eventbus.DataAgentJob
+	var dataAgentJobs eventbus.DataAgentJobPublisher
 	var natsBus *eventbus.NATSBus
 	runtime := httpapi.RuntimeSummary{
-		AppVersion:              cfg.AppVersion,
-		StoreBackend:            storeBackend,
-		DispatchMode:            "local_memory",
-		JobTransport:            "local_memory",
-		EventTransport:          "local_memory",
-		StubWorkerEnabled:       true,
-		NATSConfigured:          false,
-		NATSStream:              cfg.NATSStream,
-		NATSJobsSubject:         cfg.NATSJobsSubject,
-		NATSRareSpotJobsSubject: cfg.NATSRareSpotJobsSubject,
-		NATSEventsSubject:       cfg.NATSEventsSubject,
-		NATSCancelSubject:       cfg.NATSCancelSubject,
-		NATSEventConsumer:       cfg.NATSEventConsumer,
-		ArtifactRoot:            cfg.ArtifactRoot,
-		UploadRoot:              cfg.UploadRoot,
-		RunRecoveryEnabled:      cfg.RunRecoveryEnabled,
-		RunRecoveryIntervalSecs: cfg.RunRecoveryInterval.Seconds(),
-		RunRecoveryBatchLimit:   cfg.RunRecoveryBatchLimit,
+		AppVersion:               cfg.AppVersion,
+		StoreBackend:             storeBackend,
+		DispatchMode:             "local_memory",
+		JobTransport:             "local_memory",
+		EventTransport:           "local_memory",
+		StubWorkerEnabled:        true,
+		NATSConfigured:           false,
+		NATSStream:               cfg.NATSStream,
+		NATSJobsSubject:          cfg.NATSJobsSubject,
+		NATSRareSpotJobsSubject:  cfg.NATSRareSpotJobsSubject,
+		NATSDataAgentJobsSubject: cfg.NATSDataAgentJobsSubject,
+		NATSEventsSubject:        cfg.NATSEventsSubject,
+		NATSCancelSubject:        cfg.NATSCancelSubject,
+		NATSEventConsumer:        cfg.NATSEventConsumer,
+		ArtifactRoot:             cfg.ArtifactRoot,
+		UploadRoot:               cfg.UploadRoot,
+		RunRecoveryEnabled:       cfg.RunRecoveryEnabled,
+		RunRecoveryIntervalSecs:  cfg.RunRecoveryInterval.Seconds(),
+		RunRecoveryBatchLimit:    cfg.RunRecoveryBatchLimit,
 	}
 	if cfg.NATSURL != "" {
 		var err error
 		natsBus, err = eventbus.NewNATSBus(ctx, eventbus.NATSConfig{
-			URL:                 cfg.NATSURL,
-			Stream:              cfg.NATSStream,
-			JobsSubject:         cfg.NATSJobsSubject,
-			RareSpotJobsSubject: cfg.NATSRareSpotJobsSubject,
-			EventsSubject:       cfg.NATSEventsSubject,
-			CancelSubject:       cfg.NATSCancelSubject,
-			EventConsumer:       cfg.NATSEventConsumer,
+			URL:                  cfg.NATSURL,
+			Stream:               cfg.NATSStream,
+			JobsSubject:          cfg.NATSJobsSubject,
+			RareSpotJobsSubject:  cfg.NATSRareSpotJobsSubject,
+			DataAgentJobsSubject: cfg.NATSDataAgentJobsSubject,
+			EventsSubject:        cfg.NATSEventsSubject,
+			CancelSubject:        cfg.NATSCancelSubject,
+			EventConsumer:        cfg.NATSEventConsumer,
 			ConsumerTargets: []eventbus.QueueConsumerTarget{
 				{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
 				{Name: cfg.NATSRareSpotWorkerDurable, Role: "rarespot", Subject: cfg.NATSRareSpotJobsSubject},
+				{Name: cfg.NATSDataAgentWorkerDurable, Role: "data_agent", Subject: cfg.NATSDataAgentJobsSubject},
 				{Name: cfg.NATSEventConsumer, Role: "event_ingest", Subject: cfg.NATSEventsSubject},
 			},
 		})
@@ -107,6 +119,7 @@ func New(cfg config.Config) (*App, error) {
 		localEvents := eventbus.NewMemoryBus()
 		bus = eventbus.NewSplitBus(natsBus, localEvents)
 		runEvents = localEvents
+		dataAgentJobs = natsBus
 		runtime.DispatchMode = "nats_jetstream"
 		runtime.JobTransport = "nats_jetstream"
 		runtime.EventTransport = "nats_jetstream_to_local_fanout"
@@ -117,12 +130,22 @@ func New(cfg config.Config) (*App, error) {
 		bus = memBus
 		runEvents = memBus
 		jobSource = memBus.Jobs()
+		dataAgentJobSource = memBus.DataAgentJobs()
+		dataAgentJobs = memBus
 	}
 
 	runService := runcontrol.NewService(controlStore, bus)
 	var stubWorker *worker.StubWorker
 	if jobSource != nil {
 		stubWorker = worker.NewStubWorker(controlStore, bus)
+	}
+	var dataAgentWorker *worker.DataAgentWorker
+	if dataAgentJobSource != nil {
+		if dataAgentStore, ok := controlStore.(worker.DataAgentWorkerStore); ok {
+			dataAgentWorker = worker.NewDataAgentWorker(dataAgentStore, worker.DataAgentWorkerConfig{
+				WorkerID: cfg.NATSDataAgentWorkerDurable,
+			})
+		}
 	}
 	var startFns []func(context.Context) error
 	if natsBus != nil {
@@ -136,6 +159,9 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.RunRecoveryEnabled {
 		startFns = append(startFns, func(ctx context.Context) error {
 			startRunRecoveryLoop(ctx, runService, cfg.RunRecoveryInterval, cfg.RunRecoveryBatchLimit)
+			if recoveryStore, ok := controlStore.(dataAgentLeaseRecoveryStore); ok && dataAgentJobs != nil {
+				startDataAgentRecoveryLoop(ctx, recoveryStore, dataAgentJobs, cfg.RunRecoveryInterval, cfg.RunRecoveryBatchLimit)
+			}
 			return nil
 		})
 	}
@@ -207,20 +233,23 @@ func New(cfg config.Config) (*App, error) {
 		DevAdminEnabled:   cfg.DevAdminEnabled,
 		Runtime:           runtime,
 		QueueDiagnostics:  natsBus,
+		DataAgentJobs:     dataAgentJobs,
 		Bisque:            bisqueService,
 		BisqueCredentials: bisqueCredentialStore,
 		WorkOS:            workOSAuth,
 	})
 	return &App{
-		Handler:   handler,
-		Store:     controlStore,
-		Bus:       bus,
-		RunEvents: runEvents,
-		Runs:      runService,
-		JobSource: jobSource,
-		Worker:    stubWorker,
-		Start:     start,
-		closeFns:  closeFns,
+		Handler:            handler,
+		Store:              controlStore,
+		Bus:                bus,
+		RunEvents:          runEvents,
+		Runs:               runService,
+		JobSource:          jobSource,
+		Worker:             stubWorker,
+		DataAgentJobSource: dataAgentJobSource,
+		DataAgentWorker:    dataAgentWorker,
+		Start:              start,
+		closeFns:           closeFns,
 	}, nil
 }
 
@@ -251,6 +280,121 @@ func recoverExpiredRunLeases(ctx context.Context, runs *runcontrol.Service, limi
 		Reason: "automatic expired run lease recovery",
 		Limit:  limit,
 	})
+}
+
+func startDataAgentRecoveryLoop(ctx context.Context, store dataAgentLeaseRecoveryStore, publisher eventbus.DataAgentJobPublisher, interval time.Duration, limit int) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	go func() {
+		recoverExpiredDataAgentJobLeases(ctx, store, publisher, limit)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				recoverExpiredDataAgentJobLeases(ctx, store, publisher, limit)
+			}
+		}
+	}()
+}
+
+func recoverExpiredDataAgentJobLeases(ctx context.Context, store dataAgentLeaseRecoveryStore, publisher eventbus.DataAgentJobPublisher, limit int) {
+	result, err := store.RecoverExpiredDataAgentJobLeases(ctx, domain.RecoverExpiredDataAgentJobLeasesInput{
+		Reason: "automatic expired data-agent lease recovery",
+		Limit:  limit,
+	})
+	if err != nil {
+		return
+	}
+	for _, job := range result.RequeuedJobs {
+		dispatchID := domain.NewID("dispatch")
+		envelope := eventbus.DataAgentJob{
+			JobID:         job.JobID,
+			DispatchID:    dispatchID,
+			OwnerUserID:   job.OwnerUserID,
+			OwnerOrgID:    job.OwnerOrgID,
+			ProjectID:     job.ProjectID,
+			JobType:       job.JobType,
+			ResourceIDs:   dataAgentRecoveryResourceIDs(job.InputSelector),
+			ResourceCount: job.ResourceCount,
+			InputSelector: cloneAppJSONMap(job.InputSelector),
+			Metadata:      cloneAppJSONMap(job.Metadata),
+		}
+		if err := publisher.PublishDataAgentJob(ctx, envelope); err != nil {
+			continue
+		}
+		_, _ = store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+			JobID:       job.JobID,
+			EventType:   "data_agent.job.dispatched",
+			ActorUserID: job.OwnerUserID,
+			ActorOrgID:  job.OwnerOrgID,
+			TS:          domain.Now(),
+			Message:     "Data Agent job dispatched after expired lease recovery.",
+			Metadata: domain.JSONMap{
+				"dispatch_id": dispatchID,
+				"job_type":    job.JobType,
+				"recovery":    "expired_data_agent_job_lease",
+			},
+		})
+	}
+}
+
+func dataAgentRecoveryResourceIDs(selector domain.JSONMap) []string {
+	if selector == nil {
+		return nil
+	}
+	value, ok := selector["resource_ids"]
+	if !ok {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		return uniqueAppStrings(typed)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				values = append(values, text)
+			}
+		}
+		return uniqueAppStrings(values)
+	default:
+		return nil
+	}
+}
+
+func uniqueAppStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func cloneAppJSONMap(value domain.JSONMap) domain.JSONMap {
+	if value == nil {
+		return nil
+	}
+	out := domain.JSONMap{}
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
 }
 
 func pingPostgres(ctx context.Context, pool *pgxpool.Pool) error {

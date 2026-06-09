@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiClient } from "./api";
+import { ApiClient, UploadPausedError } from "./api";
 
 describe("ApiClient browser auth hardening", () => {
   afterEach(() => {
@@ -19,6 +19,7 @@ describe("ApiClient browser auth hardening", () => {
 
     const urls = [
       client.resourceThumbnailUrl("file-123"),
+      client.resourceDownloadUrl("file-123"),
       client.uploadPreviewUrl("file-123"),
       client.uploadDisplayUrl("file-123"),
       client.uploadSliceUrl("file-123", { axis: "z", z: 2 }),
@@ -33,6 +34,14 @@ describe("ApiClient browser auth hardening", () => {
       const parsed = new URL(value);
       expect(parsed.searchParams.has("api_key")).toBe(false);
     });
+  });
+
+  it("builds resource download URLs through the scoped V2 resource API", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    expect(client.resourceDownloadUrl("file/with spaces")).toBe(
+      "https://ultra.example.org/v2/resources/file%2Fwith%20spaces/download"
+    );
   });
 
   it("builds uploaded image slice URLs through the V2 upload API", () => {
@@ -486,25 +495,407 @@ describe("ApiClient V2 chat bridge", () => {
     });
   });
 
-  it("uploads local chat files through V2 without probing legacy upload routes", async () => {
+  it("loads V2 upload-session status for refresh reconciliation", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://ultra.example.org/v2/upload-sessions/upload_session_active");
+      expect(init?.method).toBe("GET");
+      return new Response(
+        JSON.stringify({
+          session: {
+            session_id: "upload_session_active",
+            owner_user_id: "field-user",
+            source_type: "upload",
+            status: "active",
+            total_bytes: 1000,
+            bytes_received: 512,
+            bytes_verified: 512,
+            bytes_committed: 0,
+            created_at: "2026-06-08T00:00:00Z",
+            updated_at: "2026-06-08T00:00:01Z",
+            metadata: {},
+          },
+          files: [],
+          chunks: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const status = await client.getUploadSessionStatus("upload_session_active");
+
+    expect(status.session.bytes_verified).toBe(512);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses and resumes V2 upload sessions through explicit controls", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "https://ultra.example.org/v2/uploads") {
-        expect(init?.method).toBe("POST");
-        expect(init?.body).toBeInstanceOf(FormData);
+      expect(init?.method).toBe("POST");
+      if (url === "https://ultra.example.org/v2/upload-sessions/upload_session_field/pause") {
         return new Response(
           JSON.stringify({
-            file_count: 1,
-            uploaded: [
+            session: {
+              session_id: "upload_session_field",
+              owner_user_id: "field-user",
+              source_type: "upload",
+              status: "paused",
+              total_bytes: 1000,
+              bytes_received: 512,
+              bytes_verified: 512,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            files: [],
+            chunks: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/upload-sessions/upload_session_field/resume") {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_field",
+              owner_user_id: "field-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 1000,
+              bytes_received: 512,
+              bytes_verified: 512,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            files: [],
+            chunks: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`unexpected upload-session control URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const paused = await client.pauseUploadSession("upload_session_field");
+    const resumed = await client.resumeUploadSession("upload_session_field");
+
+    expect(paused.session.status).toBe("paused");
+    expect(resumed.session.status).toBe("active");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops scheduling chunks when an upload session is paused locally", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const firstChunk = new Uint8Array(chunkSize);
+    firstChunk.fill(7);
+    const tail = new Uint8Array([8, 9, 10]);
+    const file = new File([firstChunk, tail], "paused-field-volume.nii", {
+      type: "application/x-nifti",
+      lastModified: 1_780_915_200_000,
+    });
+
+    let fileToken = "";
+    let paused = false;
+    const urls: string[] = [];
+    const progressEvents: Array<{ status: string; bytesVerified: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body)) as {
+          files: Array<{ file_token: string; original_name: string; size_bytes: number }>;
+        };
+        fileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_pause_local",
+              owner_user_id: "field-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
               {
-                file_id: "file_v2_image",
+                session_id: "upload_session_pause_local",
+                file_token: fileToken,
+                original_name: "paused-field-volume.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+            limits: {
+              max_parallel_files: 1,
+              max_parallel_chunks: 1,
+              max_files_per_session: 1000,
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${fileToken}/chunks/0`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_pause_local",
+              owner_user_id: "field-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: chunkSize,
+              bytes_verified: chunkSize,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_pause_local",
+              file_token: fileToken,
+              original_name: "paused-field-volume.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_pause_local",
+              file_token: fileToken,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: chunkSize,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/chunks/1")) {
+        throw new Error("paused upload should not schedule the next chunk");
+      }
+      if (url.endsWith(`/files/${fileToken}/complete`)) {
+        throw new Error("paused upload should not commit the file");
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await expect(
+      client.uploadFiles([file], {
+        pauseSignal: {
+          isPaused: () => paused,
+        },
+        onProgress: (event) => {
+          progressEvents.push({ status: event.status, bytesVerified: event.bytesVerified });
+          if (event.status === "uploading" && event.bytesVerified >= chunkSize) {
+            paused = true;
+          }
+        },
+      })
+    ).rejects.toBeInstanceOf(UploadPausedError);
+
+    expect(urls.some((url) => url.includes("/chunks/1"))).toBe(false);
+    expect(urls.some((url) => url.endsWith(`/files/${fileToken}/complete`))).toBe(false);
+    expect(progressEvents).toContainEqual({ status: "paused", bytesVerified: chunkSize });
+  });
+
+  it("cancels V2 upload sessions through an explicit control", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://ultra.example.org/v2/upload-sessions/upload_session_field/cancel");
+      expect(init?.method).toBe("POST");
+      return new Response(
+        JSON.stringify({
+          session: {
+            session_id: "upload_session_field",
+            owner_user_id: "field-user",
+            source_type: "upload",
+            status: "canceled",
+            total_bytes: 1000,
+            bytes_received: 512,
+            bytes_verified: 512,
+            bytes_committed: 0,
+            error: "canceled by user",
+            created_at: "2026-06-08T00:00:00Z",
+            updated_at: "2026-06-08T00:00:04Z",
+            metadata: {},
+          },
+          files: [],
+          chunks: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const canceled = await client.cancelUploadSession("upload_session_field");
+
+    expect(canceled.session.status).toBe("canceled");
+    expect(canceled.session.error).toBe("canceled by user");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads local chat files through V2 upload sessions without probing legacy upload routes", async () => {
+    let createdFileToken = "";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body));
+        expect(body).toMatchObject({
+          total_bytes: 4,
+          files: [
+            {
+              original_name: "prairie.jpg",
+              content_type: "image/jpeg",
+              size_bytes: 4,
+            },
+          ],
+        });
+        createdFileToken = body.files[0].file_token;
+        expect(createdFileToken).toMatch(/^file-0-/);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_v2_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 4,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_v2_1",
+                file_token: createdFileToken,
                 original_name: "prairie.jpg",
                 content_type: "image/jpeg",
                 size_bytes: 4,
-                sha256: "abc123",
+                status: "pending",
                 created_at: "2026-05-31T00:00:00Z",
+                updated_at: "2026-05-31T00:00:00Z",
               },
             ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        createdFileToken &&
+        url ===
+          `https://ultra.example.org/v2/upload-sessions/upload_session_v2_1/files/${createdFileToken}/chunks/0`
+      ) {
+        expect(init?.method).toBe("PUT");
+        const headers = new Headers(init?.headers);
+        expect(headers.get("content-type")).toBe("application/octet-stream");
+        expect(headers.get("x-upload-offset")).toBe("0");
+        expect(headers.get("x-upload-chunk-sha256")).toMatch(/^[a-f0-9]{64}$/);
+        expect(init?.body).toBeInstanceOf(Blob);
+        expect(await (init?.body as Blob).text()).toBe("data");
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_v2_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 4,
+              bytes_received: 4,
+              bytes_verified: 4,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_v2_1",
+              file_token: createdFileToken,
+              original_name: "prairie.jpg",
+              content_type: "image/jpeg",
+              size_bytes: 4,
+              status: "uploading",
+              created_at: "2026-05-31T00:00:00Z",
+              updated_at: "2026-05-31T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_v2_1",
+              file_token: createdFileToken,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: 4,
+              sha256: headers.get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        createdFileToken &&
+        url ===
+          `https://ultra.example.org/v2/upload-sessions/upload_session_v2_1/files/${createdFileToken}/complete`
+      ) {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_v2_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: 4,
+              bytes_received: 4,
+              bytes_verified: 4,
+              bytes_committed: 4,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_v2_1",
+              file_token: createdFileToken,
+              resource_id: "file_v2_image",
+              original_name: "prairie.jpg",
+              content_type: "image/jpeg",
+              size_bytes: 4,
+              computed_sha256: "abc123",
+              status: "completed",
+              created_at: "2026-05-31T00:00:00Z",
+              updated_at: "2026-05-31T00:00:02Z",
+            },
+            resource: {
+              file_id: "file_v2_image",
+              original_name: "prairie.jpg",
+              content_type: "image/jpeg",
+              size_bytes: 4,
+              sha256: "abc123",
+              created_at: "2026-05-31T00:00:00Z",
+            },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
@@ -514,21 +905,2249 @@ describe("ApiClient V2 chat bridge", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const progressEvents: Array<{
+      status: string;
+      bytesVerified: number;
+      fingerprint?: string;
+      contentType?: string;
+      chunkSizeBytes?: number;
+      fileToken?: string;
+      sessionId?: string;
+    }> = [];
+    const file = new File(["data"], "prairie.jpg", {
+      type: "image/jpeg",
+      lastModified: 1_780_915_200_000,
+    });
     const response = await client.uploadFiles([
-      new File(["data"], "prairie.jpg", { type: "image/jpeg" }),
-    ]);
+      file,
+    ], {
+      onProgress: (event) => {
+        progressEvents.push({
+          status: event.status,
+          bytesVerified: event.bytesVerified,
+          fingerprint: event.fingerprint,
+          contentType: event.contentType,
+          chunkSizeBytes: event.chunkSizeBytes,
+          fileToken: event.fileToken,
+          sessionId: event.sessionId,
+        });
+      },
+    });
 
     expect(response.uploaded[0].file_id).toBe("file_v2_image");
-    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
-      "https://ultra.example.org/v2/uploads",
+    expect(progressEvents).toMatchObject([
+      {
+        status: "creating",
+        bytesVerified: 0,
+        contentType: "image/jpeg",
+        chunkSizeBytes: 8 * 1024 * 1024,
+        fileToken: createdFileToken,
+      },
+      {
+        status: "uploading",
+        bytesVerified: 4,
+        contentType: "image/jpeg",
+        chunkSizeBytes: 8 * 1024 * 1024,
+        fileToken: createdFileToken,
+        sessionId: "upload_session_v2_1",
+      },
+      {
+        status: "completed",
+        bytesVerified: 4,
+        contentType: "image/jpeg",
+        chunkSizeBytes: 8 * 1024 * 1024,
+        fileToken: createdFileToken,
+        sessionId: "upload_session_v2_1",
+      },
     ]);
+    expect(progressEvents.every((event) =>
+      event.fingerprint?.startsWith("prairie.jpg:4:1780915200000:image/jpeg")
+    )).toBe(true);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/upload-sessions",
+      `https://ultra.example.org/v2/upload-sessions/upload_session_v2_1/files/${createdFileToken}/chunks/0`,
+      `https://ultra.example.org/v2/upload-sessions/upload_session_v2_1/files/${createdFileToken}/complete`,
+    ]);
+  });
+
+  it("completes zero-byte V2 uploads without sending empty chunk requests", async () => {
+    let createdFileToken = "";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body));
+        expect(body).toMatchObject({
+          total_bytes: 0,
+          files: [
+            {
+              original_name: "empty-marker.txt",
+              content_type: "text/plain",
+              size_bytes: 0,
+            },
+          ],
+        });
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_empty",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 0,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_empty",
+                file_token: createdFileToken,
+                original_name: "empty-marker.txt",
+                content_type: "text/plain",
+                size_bytes: 0,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/chunks/")) {
+        throw new Error(`Unexpected zero-byte chunk upload: ${url}`);
+      }
+      if (
+        createdFileToken &&
+        url ===
+          `https://ultra.example.org/v2/upload-sessions/upload_session_empty/files/${createdFileToken}/complete`
+      ) {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_empty",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: 0,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              completed_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_empty",
+              file_token: createdFileToken,
+              resource_id: "file_empty_marker",
+              original_name: "empty-marker.txt",
+              content_type: "text/plain",
+              size_bytes: 0,
+              computed_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              completed_at: "2026-06-08T00:00:01Z",
+            },
+            resource: {
+              file_id: "file_empty_marker",
+              original_name: "empty-marker.txt",
+              content_type: "text/plain",
+              size_bytes: 0,
+              sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              created_at: "2026-06-08T00:00:01Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const progressEvents: Array<{ status: string; bytesVerified: number; bytesCommitted: number }> = [];
+    const response = await client.uploadFiles(
+      [new File([], "empty-marker.txt", { type: "text/plain", lastModified: 1_780_915_200_000 })],
+      {
+        onProgress: (event) => {
+          progressEvents.push({
+            status: event.status,
+            bytesVerified: event.bytesVerified,
+            bytesCommitted: event.bytesCommitted,
+          });
+        },
+      }
+    );
+
+    expect(response.uploaded[0]).toMatchObject({
+      file_id: "file_empty_marker",
+      size_bytes: 0,
+    });
+    expect(progressEvents).toEqual([
+      { status: "creating", bytesVerified: 0, bytesCommitted: 0 },
+      { status: "completed", bytesVerified: 0, bytesCommitted: 0 },
+    ]);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/upload-sessions",
+      `https://ultra.example.org/v2/upload-sessions/upload_session_empty/files/${createdFileToken}/complete`,
+    ]);
+  });
+
+  it("preserves browser folder relative paths in V2 upload sessions", async () => {
+    const file = new File(["tile"], "cells.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_200_000,
+    });
+    Object.defineProperty(file, "webkitRelativePath", {
+      value: "experiment-a/day-1/cells.ome.tiff",
+      configurable: true,
+    });
+
+    let createdFileToken = "";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        expect(body.idempotency_key).toMatch(
+          /^experiment-a\/day-1\/cells\.ome\.tiff:4:1780915200000:image\/tiff/
+        );
+        expect(body.browser_fingerprint).toBe(body.idempotency_key);
+        expect(body.files[0]).toMatchObject({
+          file_token: createdFileToken,
+          original_name: "cells.ome.tiff",
+          relative_path: "experiment-a/day-1/cells.ome.tiff",
+          content_type: "image/tiff",
+          size_bytes: 4,
+        });
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 4,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_folder_1",
+                file_token: createdFileToken,
+                original_name: "cells.ome.tiff",
+                relative_path: "experiment-a/day-1/cells.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: 4,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/0`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 4,
+              bytes_received: 4,
+              bytes_verified: 4,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_1",
+              file_token: createdFileToken,
+              original_name: "cells.ome.tiff",
+              relative_path: "experiment-a/day-1/cells.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 4,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_folder_1",
+              file_token: createdFileToken,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: 4,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: 4,
+              bytes_received: 4,
+              bytes_verified: 4,
+              bytes_committed: 4,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_1",
+              file_token: createdFileToken,
+              resource_id: "file_folder_tile",
+              original_name: "cells.ome.tiff",
+              relative_path: "experiment-a/day-1/cells.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 4,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            resource: {
+              file_id: "file_folder_tile",
+              original_name: "cells.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 4,
+              sha256: "folder-sha",
+              created_at: "2026-06-08T00:00:02Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const progressFingerprints: string[] = [];
+    const response = await client.uploadFiles([file], {
+      onProgress: (event) => {
+        if (event.fingerprint) {
+          progressFingerprints.push(event.fingerprint);
+        }
+      },
+    });
+
+    expect(response.uploaded[0].file_id).toBe("file_folder_tile");
+    expect(progressFingerprints.every((value) =>
+      value.startsWith("experiment-a/day-1/cells.ome.tiff:4:1780915200000:image/tiff")
+    )).toBe(true);
+  });
+
+  it("creates one V2 upload session manifest for multi-file folder selections", async () => {
+    const firstFile = new File(["alpha"], "alpha.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_200_000,
+    });
+    Object.defineProperty(firstFile, "webkitRelativePath", {
+      value: "experiment-a/alpha.ome.tiff",
+      configurable: true,
+    });
+    const secondFile = new File(["beta"], "beta.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_201_000,
+    });
+    Object.defineProperty(secondFile, "webkitRelativePath", {
+      value: "experiment-a/nested/beta.ome.tiff",
+      configurable: true,
+    });
+    const fileTokens: string[] = [];
+    const completedTokens: string[] = [];
+    const uploadedChunkTokens: string[] = [];
+    const sessionPosts: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body)) as {
+          idempotency_key: string;
+          total_bytes: number;
+          files: Array<{
+            file_token: string;
+            original_name: string;
+            relative_path?: string;
+            size_bytes: number;
+          }>;
+        };
+        sessionPosts.push(body);
+        expect(body.total_bytes).toBe(9);
+        expect(body.files).toHaveLength(2);
+        expect(body.files.map((file) => file.relative_path)).toEqual([
+          "experiment-a/alpha.ome.tiff",
+          "experiment-a/nested/beta.ome.tiff",
+        ]);
+        fileTokens.splice(0, fileTokens.length, ...body.files.map((file) => file.file_token));
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_manifest",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 9,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: body.files.map((file) => ({
+              session_id: "upload_session_folder_manifest",
+              file_token: file.file_token,
+              original_name: file.original_name,
+              relative_path: file.relative_path,
+              content_type: "image/tiff",
+              size_bytes: file.size_bytes,
+              status: "pending",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+            })),
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/files\/([^/]+)\/chunks\/0$/);
+      if (chunkMatch) {
+        const token = decodeURIComponent(chunkMatch[1]);
+        uploadedChunkTokens.push(token);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_manifest",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 9,
+              bytes_received: uploadedChunkTokens.length === 1 ? 5 : 9,
+              bytes_verified: uploadedChunkTokens.length === 1 ? 5 : 9,
+              bytes_committed: completedTokens.length === 0 ? 0 : 5,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_manifest",
+              file_token: token,
+              original_name: token === fileTokens[0] ? "alpha.ome.tiff" : "beta.ome.tiff",
+              relative_path:
+                token === fileTokens[0]
+                  ? "experiment-a/alpha.ome.tiff"
+                  : "experiment-a/nested/beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: token === fileTokens[0] ? 5 : 4,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_folder_manifest",
+              file_token: token,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: token === fileTokens[0] ? 5 : 4,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const completeMatch = url.match(/\/files\/([^/]+)\/complete$/);
+      if (completeMatch) {
+        const token = decodeURIComponent(completeMatch[1]);
+        completedTokens.push(token);
+        const isFirst = token === fileTokens[0];
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_manifest",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: completedTokens.length === 2 ? "completed" : "active",
+              total_bytes: 9,
+              bytes_received: 9,
+              bytes_verified: 9,
+              bytes_committed: completedTokens.length === 1 ? 5 : 9,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_manifest",
+              file_token: token,
+              resource_id: isFirst ? "file_alpha" : "file_beta",
+              original_name: isFirst ? "alpha.ome.tiff" : "beta.ome.tiff",
+              relative_path: isFirst
+                ? "experiment-a/alpha.ome.tiff"
+                : "experiment-a/nested/beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: isFirst ? 5 : 4,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            resource: {
+              file_id: isFirst ? "file_alpha" : "file_beta",
+              original_name: isFirst ? "alpha.ome.tiff" : "beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: isFirst ? 5 : 4,
+              sha256: isFirst ? "alpha-sha" : "beta-sha",
+              created_at: "2026-06-08T00:00:02Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([firstFile, secondFile]);
+
+    expect(response.uploaded.map((file) => file.file_id)).toEqual(["file_alpha", "file_beta"]);
+    expect(sessionPosts).toHaveLength(1);
+    expect(uploadedChunkTokens).toHaveLength(fileTokens.length);
+    expect(new Set(uploadedChunkTokens)).toEqual(new Set(fileTokens));
+    expect(completedTokens).toHaveLength(fileTokens.length);
+    expect(new Set(completedTokens)).toEqual(new Set(fileTokens));
+  });
+
+  it("does not re-upload completed files when reselecting a partially completed folder", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const verifiedBetaChunk = new Uint8Array(chunkSize);
+    verifiedBetaChunk.fill(3);
+    const betaTail = new Uint8Array([4, 5, 6]);
+    const firstFile = new File(["alpha"], "alpha.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_200_000,
+    });
+    Object.defineProperty(firstFile, "webkitRelativePath", {
+      value: "experiment-a/alpha.ome.tiff",
+      configurable: true,
+    });
+    const secondFile = new File([verifiedBetaChunk, betaTail], "beta.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_201_000,
+    });
+    Object.defineProperty(secondFile, "webkitRelativePath", {
+      value: "experiment-a/beta.ome.tiff",
+      configurable: true,
+    });
+
+    let alphaToken = "";
+    let betaToken = "";
+    const urls: string[] = [];
+    const completedTokens: string[] = [];
+    const progressEvents: Array<{ fileName: string; status: string; bytesVerified: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body)) as {
+          total_bytes: number;
+          files: Array<{ file_token: string; original_name: string; relative_path?: string; size_bytes: number }>;
+        };
+        expect(body.total_bytes).toBe(firstFile.size + secondFile.size);
+        alphaToken = body.files[0].file_token;
+        betaToken = body.files[1].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_reselect",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: firstFile.size + secondFile.size,
+              bytes_received: firstFile.size + chunkSize,
+              bytes_verified: firstFile.size + chunkSize,
+              bytes_committed: firstFile.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_folder_reselect",
+                file_token: alphaToken,
+                resource_id: "file_alpha_done",
+                original_name: "alpha.ome.tiff",
+                relative_path: "experiment-a/alpha.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: firstFile.size,
+                status: "completed",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+                completed_at: "2026-06-08T00:00:01Z",
+              },
+              {
+                session_id: "upload_session_folder_reselect",
+                file_token: betaToken,
+                original_name: "beta.ome.tiff",
+                relative_path: "experiment-a/beta.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: secondFile.size,
+                status: "uploading",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+              },
+            ],
+            chunks: [
+              {
+                session_id: "upload_session_folder_reselect",
+                file_token: betaToken,
+                chunk_index: 0,
+                offset: 0,
+                size_bytes: chunkSize,
+                sha256: "already-verified-beta",
+                status: "verified",
+              },
+            ],
+            limits: {
+              max_parallel_files: 1,
+              max_parallel_chunks: 1,
+              max_files_per_session: 1000,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${alphaToken}/chunks/0`)) {
+        throw new Error("completed alpha should not be re-uploaded");
+      }
+      if (url.endsWith(`/files/${betaToken}/chunks/0`)) {
+        throw new Error("verified beta chunk should not be re-uploaded");
+      }
+      if (url.endsWith(`/files/${betaToken}/chunks/1`)) {
+        expect(init?.method).toBe("PUT");
+        expect(new Headers(init?.headers).get("x-upload-offset")).toBe(String(chunkSize));
+        expect((init?.body as Blob).size).toBe(betaTail.length);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_reselect",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: firstFile.size + secondFile.size,
+              bytes_received: firstFile.size + secondFile.size,
+              bytes_verified: firstFile.size + secondFile.size,
+              bytes_committed: firstFile.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_reselect",
+              file_token: betaToken,
+              original_name: "beta.ome.tiff",
+              relative_path: "experiment-a/beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: secondFile.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            chunk: {
+              session_id: "upload_session_folder_reselect",
+              file_token: betaToken,
+              chunk_index: 1,
+              offset: chunkSize,
+              size_bytes: betaTail.length,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const completeMatch = url.match(/\/files\/([^/]+)\/complete$/);
+      if (completeMatch) {
+        const token = decodeURIComponent(completeMatch[1]);
+        completedTokens.push(token);
+        const isAlpha = token === alphaToken;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_reselect",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: completedTokens.includes(betaToken) ? "completed" : "active",
+              total_bytes: firstFile.size + secondFile.size,
+              bytes_received: firstFile.size + secondFile.size,
+              bytes_verified: firstFile.size + secondFile.size,
+              bytes_committed: isAlpha ? firstFile.size : firstFile.size + secondFile.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_reselect",
+              file_token: token,
+              resource_id: isAlpha ? "file_alpha_done" : "file_beta_done",
+              original_name: isAlpha ? "alpha.ome.tiff" : "beta.ome.tiff",
+              relative_path: isAlpha ? "experiment-a/alpha.ome.tiff" : "experiment-a/beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: isAlpha ? firstFile.size : secondFile.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: isAlpha ? "file_alpha_done" : "file_beta_done",
+              original_name: isAlpha ? "alpha.ome.tiff" : "beta.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: isAlpha ? firstFile.size : secondFile.size,
+              sha256: isAlpha ? "alpha-sha" : "beta-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([firstFile, secondFile], {
+      onProgress: (event) => {
+        progressEvents.push({
+          fileName: event.fileName,
+          status: event.status,
+          bytesVerified: event.bytesVerified,
+        });
+      },
+    });
+
+    expect(response.uploaded.map((file) => file.file_id)).toEqual(["file_alpha_done", "file_beta_done"]);
+    expect(urls.some((url) => url.endsWith(`/files/${alphaToken}/chunks/0`))).toBe(false);
+    expect(urls.some((url) => url.endsWith(`/files/${betaToken}/chunks/0`))).toBe(false);
+    expect(urls).toContain(
+      `https://ultra.example.org/v2/upload-sessions/upload_session_folder_reselect/files/${betaToken}/chunks/1`
+    );
+    expect(new Set(completedTokens)).toEqual(new Set([alphaToken, betaToken]));
+    expect(progressEvents).toContainEqual({
+      fileName: "alpha.ome.tiff",
+      status: "completed",
+      bytesVerified: firstFile.size,
+    });
+    expect(progressEvents).toContainEqual({
+      fileName: "beta.ome.tiff",
+      status: "completed",
+      bytesVerified: secondFile.size,
+    });
+  });
+
+  it("does not mark completed files failed when another file in a folder upload fails", async () => {
+    const firstFile = new File(["alpha"], "alpha.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_200_000,
+    });
+    Object.defineProperty(firstFile, "webkitRelativePath", {
+      value: "experiment-a/alpha.ome.tiff",
+      configurable: true,
+    });
+    const secondFile = new File(["beta"], "beta.ome.tiff", {
+      type: "image/tiff",
+      lastModified: 1_780_915_201_000,
+    });
+    Object.defineProperty(secondFile, "webkitRelativePath", {
+      value: "experiment-a/beta.ome.tiff",
+      configurable: true,
+    });
+    const fileTokens: string[] = [];
+    const progressEvents: Array<{ fileName: string; status: string; bytesVerified: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body)) as {
+          files: Array<{ file_token: string; original_name: string; relative_path?: string; size_bytes: number }>;
+          total_bytes: number;
+        };
+        expect(body.total_bytes).toBe(9);
+        fileTokens.splice(0, fileTokens.length, ...body.files.map((file) => file.file_token));
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_partial_failure",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 9,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: body.files.map((file) => ({
+              session_id: "upload_session_folder_partial_failure",
+              file_token: file.file_token,
+              original_name: file.original_name,
+              relative_path: file.relative_path,
+              content_type: "image/tiff",
+              size_bytes: file.size_bytes,
+              status: "pending",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+            })),
+            chunks: [],
+            limits: {
+              max_parallel_files: 1,
+              max_parallel_chunks: 1,
+              max_files_per_session: 1000,
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/files\/([^/]+)\/chunks\/0$/);
+      if (chunkMatch) {
+        const token = decodeURIComponent(chunkMatch[1]);
+        if (token === fileTokens[1]) {
+          return new Response(JSON.stringify({ error: "connection dropped" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_partial_failure",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 9,
+              bytes_received: 5,
+              bytes_verified: 5,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_partial_failure",
+              file_token: token,
+              original_name: "alpha.ome.tiff",
+              relative_path: "experiment-a/alpha.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 5,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_folder_partial_failure",
+              file_token: token,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: 5,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${fileTokens[0]}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_folder_partial_failure",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 9,
+              bytes_received: 5,
+              bytes_verified: 5,
+              bytes_committed: 5,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_folder_partial_failure",
+              file_token: fileTokens[0],
+              resource_id: "file_alpha",
+              original_name: "alpha.ome.tiff",
+              relative_path: "experiment-a/alpha.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 5,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            resource: {
+              file_id: "file_alpha",
+              original_name: "alpha.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 5,
+              sha256: "alpha-sha",
+              created_at: "2026-06-08T00:00:02Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(
+      client.uploadFiles([firstFile, secondFile], {
+        onProgress: (event) => {
+          progressEvents.push({
+            fileName: event.fileName,
+            status: event.status,
+            bytesVerified: event.bytesVerified,
+          });
+        },
+      })
+    ).rejects.toThrow("Request failed with status 400");
+
+    expect(progressEvents.filter((event) => event.fileName === "alpha.ome.tiff")).toEqual([
+      { fileName: "alpha.ome.tiff", status: "creating", bytesVerified: 0 },
+      { fileName: "alpha.ome.tiff", status: "uploading", bytesVerified: 5 },
+      { fileName: "alpha.ome.tiff", status: "completed", bytesVerified: 5 },
+    ]);
+    expect(progressEvents).toContainEqual({
+      fileName: "beta.ome.tiff",
+      status: "failed",
+      bytesVerified: 0,
+    });
+  });
+
+  it("uploads files inside a batch V2 session with bounded file parallelism", async () => {
+    const files = Array.from({ length: 4 }, (_value, index) => {
+      const file = new File([`f${index}`], `tile-${index}.ome.tiff`, {
+        type: "image/tiff",
+        lastModified: 1_780_915_200_000 + index,
+      });
+      Object.defineProperty(file, "webkitRelativePath", {
+        value: `experiment-a/tile-${index}.ome.tiff`,
+        configurable: true,
+      });
+      return file;
+    });
+    const fileTokens: string[] = [];
+    const completedTokens: string[] = [];
+    const uploadedChunkTokens: string[] = [];
+    let activeChunkUploads = 0;
+    let maxActiveChunkUploads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body)) as {
+          files: Array<{ file_token: string; original_name: string; relative_path?: string; size_bytes: number }>;
+          total_bytes: number;
+        };
+        expect(body.total_bytes).toBe(8);
+        expect(body.files).toHaveLength(4);
+        fileTokens.splice(0, fileTokens.length, ...body.files.map((file) => file.file_token));
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_files",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 8,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: body.files.map((file) => ({
+              session_id: "upload_session_parallel_files",
+              file_token: file.file_token,
+              original_name: file.original_name,
+              relative_path: file.relative_path,
+              content_type: "image/tiff",
+              size_bytes: file.size_bytes,
+              status: "pending",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+            })),
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/files\/([^/]+)\/chunks\/0$/);
+      if (chunkMatch) {
+        const token = decodeURIComponent(chunkMatch[1]);
+        activeChunkUploads += 1;
+        maxActiveChunkUploads = Math.max(maxActiveChunkUploads, activeChunkUploads);
+        uploadedChunkTokens.push(token);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeChunkUploads -= 1;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_files",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: 8,
+              bytes_received: Math.min(8, uploadedChunkTokens.length * 2),
+              bytes_verified: Math.min(8, uploadedChunkTokens.length * 2),
+              bytes_committed: Math.min(8, completedTokens.length * 2),
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_parallel_files",
+              file_token: token,
+              original_name: "tile.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: 2,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_parallel_files",
+              file_token: token,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: 2,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const completeMatch = url.match(/\/files\/([^/]+)\/complete$/);
+      if (completeMatch) {
+        const token = decodeURIComponent(completeMatch[1]);
+        completedTokens.push(token);
+        const fileIndex = fileTokens.indexOf(token);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_files",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: completedTokens.length === 4 ? "completed" : "active",
+              total_bytes: 8,
+              bytes_received: 8,
+              bytes_verified: 8,
+              bytes_committed: Math.min(8, completedTokens.length * 2),
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_parallel_files",
+              file_token: token,
+              resource_id: `file_tile_${fileIndex}`,
+              original_name: `tile-${fileIndex}.ome.tiff`,
+              content_type: "image/tiff",
+              size_bytes: 2,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            resource: {
+              file_id: `file_tile_${fileIndex}`,
+              original_name: `tile-${fileIndex}.ome.tiff`,
+              content_type: "image/tiff",
+              size_bytes: 2,
+              sha256: `tile-${fileIndex}-sha`,
+              created_at: "2026-06-08T00:00:02Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles(files);
+
+    expect(response.uploaded.map((file) => file.file_id)).toEqual([
+      "file_tile_0",
+      "file_tile_1",
+      "file_tile_2",
+      "file_tile_3",
+    ]);
+    expect(maxActiveChunkUploads).toBeGreaterThan(1);
+    expect(maxActiveChunkUploads).toBeLessThanOrEqual(4);
+    expect(new Set(uploadedChunkTokens)).toEqual(new Set(fileTokens));
+    expect(new Set(completedTokens)).toEqual(new Set(fileTokens));
+  });
+
+  it("skips server-verified chunks when resuming V2 upload sessions", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const firstChunk = new Uint8Array(chunkSize);
+    firstChunk.fill(7);
+    const tailChunk = new Uint8Array([1, 2, 3]);
+    const file = new File([firstChunk, tailChunk], "large-brain.nii", {
+      type: "application/x-nifti",
+      lastModified: 1_780_915_200_000,
+    });
+    let createdFileToken = "";
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_resume_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: chunkSize,
+              bytes_verified: chunkSize,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_resume_1",
+                file_token: createdFileToken,
+                original_name: "large-brain.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "uploading",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+              },
+            ],
+            chunks: [
+              {
+                session_id: "upload_session_resume_1",
+                file_token: createdFileToken,
+                chunk_index: 0,
+                offset: 0,
+                size_bytes: chunkSize,
+                sha256: "already-verified",
+                status: "verified",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/0`)) {
+        throw new Error("chunk 0 should not be re-uploaded");
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/1`)) {
+        const headers = new Headers(init?.headers);
+        expect(headers.get("x-upload-offset")).toBe(String(chunkSize));
+        expect((init?.body as Blob).size).toBe(tailChunk.length);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_resume_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_resume_1",
+              file_token: createdFileToken,
+              original_name: "large-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            chunk: {
+              session_id: "upload_session_resume_1",
+              file_token: createdFileToken,
+              chunk_index: 1,
+              offset: chunkSize,
+              size_bytes: tailChunk.length,
+              sha256: headers.get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_resume_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_resume_1",
+              file_token: createdFileToken,
+              resource_id: "file_large_brain",
+              original_name: "large-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: "file_large_brain",
+              original_name: "large-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              sha256: "final-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file]);
+
+    expect(response.uploaded[0].file_id).toBe("file_large_brain");
+    expect(urls.some((url) => url.endsWith(`/files/${createdFileToken}/chunks/0`))).toBe(false);
+    expect(urls).toContain(
+      `https://ultra.example.org/v2/upload-sessions/upload_session_resume_1/files/${createdFileToken}/chunks/1`
+    );
+  });
+
+  it("uses an explicit V2 upload session when resuming a reselected file", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const firstChunk = new Uint8Array(chunkSize);
+    firstChunk.fill(11);
+    const tailChunk = new Uint8Array([7, 8, 9]);
+    const file = new File([firstChunk, tailChunk], "resume-brain.nii", {
+      type: "application/x-nifti",
+      lastModified: 1_780_915_200_000,
+    });
+    const resumeFileToken = "file-original-folder-token";
+    const urls: string[] = [];
+    const progressEvents: Array<{ id: string; status: string; fileToken?: string; sessionId?: string; bytesVerified: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        throw new Error("resume should not create a fresh upload session");
+      }
+      if (url === "https://ultra.example.org/v2/upload-sessions/upload_session_reselect_1") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_reselect_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: chunkSize,
+              bytes_verified: chunkSize,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_reselect_1",
+                file_token: resumeFileToken,
+                original_name: "resume-brain.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "uploading",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+              },
+            ],
+            chunks: [
+              {
+                session_id: "upload_session_reselect_1",
+                file_token: resumeFileToken,
+                chunk_index: 0,
+                offset: 0,
+                size_bytes: chunkSize,
+                sha256: "already-verified",
+                status: "verified",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${resumeFileToken}/chunks/0`)) {
+        throw new Error("verified chunk 0 should not be re-uploaded");
+      }
+      if (url.endsWith(`/files/${resumeFileToken}/chunks/1`)) {
+        expect(init?.method).toBe("PUT");
+        expect(new Headers(init?.headers).get("x-upload-offset")).toBe(String(chunkSize));
+        expect((init?.body as Blob).size).toBe(tailChunk.length);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_reselect_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_reselect_1",
+              file_token: resumeFileToken,
+              original_name: "resume-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+            },
+            chunk: {
+              session_id: "upload_session_reselect_1",
+              file_token: resumeFileToken,
+              chunk_index: 1,
+              offset: chunkSize,
+              size_bytes: tailChunk.length,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${resumeFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_reselect_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_reselect_1",
+              file_token: resumeFileToken,
+              resource_id: "file_resume_brain",
+              original_name: "resume-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: "file_resume_brain",
+              original_name: "resume-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              sha256: "resume-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file], {
+      resumeSession: {
+        sessionId: "upload_session_reselect_1",
+        fileToken: resumeFileToken,
+        progressId: "upload-progress-reselect",
+      },
+      onProgress: (event) => {
+        progressEvents.push({
+          id: event.id,
+          status: event.status,
+          fileToken: event.fileToken,
+          sessionId: event.sessionId,
+          bytesVerified: event.bytesVerified,
+        });
+      },
+    });
+
+    expect(response.uploaded[0].file_id).toBe("file_resume_brain");
+    expect(urls[0]).toBe("https://ultra.example.org/v2/upload-sessions/upload_session_reselect_1");
+    expect(urls.some((url) => url === "https://ultra.example.org/v2/upload-sessions")).toBe(false);
+    expect(urls.some((url) => url.endsWith(`/files/${resumeFileToken}/chunks/0`))).toBe(false);
+    expect(progressEvents).toMatchObject([
+      {
+        id: "upload-progress-reselect",
+        status: "creating",
+        fileToken: resumeFileToken,
+        sessionId: "upload_session_reselect_1",
+        bytesVerified: 0,
+      },
+      {
+        id: "upload-progress-reselect",
+        status: "uploading",
+        fileToken: resumeFileToken,
+        sessionId: "upload_session_reselect_1",
+        bytesVerified: file.size,
+      },
+      {
+        id: "upload-progress-reselect",
+        status: "completed",
+        fileToken: resumeFileToken,
+        sessionId: "upload_session_reselect_1",
+        bytesVerified: file.size,
+      },
+    ]);
+  });
+
+  it("preserves verified bytes when a later V2 chunk upload fails", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const firstChunk = new Uint8Array(chunkSize);
+    firstChunk.fill(9);
+    const tailChunk = new Uint8Array([4, 5, 6]);
+    const file = new File([firstChunk, tailChunk], "interrupted-brain.nii", {
+      type: "application/x-nifti",
+      lastModified: 1_780_915_200_000,
+    });
+    let createdFileToken = "";
+    const progressEvents: Array<{ status: string; bytesVerified: number; sessionId?: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_interrupted_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_interrupted_1",
+                file_token: createdFileToken,
+                original_name: "interrupted-brain.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+            limits: {
+              max_parallel_files: 1,
+              max_parallel_chunks: 1,
+              max_files_per_session: 1000,
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/0`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_interrupted_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: chunkSize,
+              bytes_verified: chunkSize,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_interrupted_1",
+              file_token: createdFileToken,
+              original_name: "interrupted-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_interrupted_1",
+              file_token: createdFileToken,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: chunkSize,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/1`)) {
+        return new Response(JSON.stringify({ error: "connection dropped" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        throw new Error("interrupted upload should not complete");
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await expect(
+      client.uploadFiles([file], {
+        onProgress: (event) => {
+          progressEvents.push({
+            status: event.status,
+            bytesVerified: event.bytesVerified,
+            sessionId: event.sessionId,
+          });
+        },
+      })
+    ).rejects.toThrow("Request failed with status 400");
+
+    expect(progressEvents).toMatchObject([
+      { status: "creating", bytesVerified: 0 },
+      { status: "uploading", bytesVerified: chunkSize, sessionId: "upload_session_interrupted_1" },
+      { status: "failed", bytesVerified: chunkSize, sessionId: "upload_session_interrupted_1" },
+    ]);
+  });
+
+  it("reopens paused V2 upload sessions before sending resumed chunks", async () => {
+    const file = new File(["paused bytes"], "paused-brain.nii", {
+      type: "application/x-nifti",
+      lastModified: 1_780_915_200_000,
+    });
+    let createdFileToken = "";
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_paused_resume",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "paused",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_paused_resume",
+                file_token: createdFileToken,
+                original_name: "paused-brain.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "uploading",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/upload-sessions/upload_session_paused_resume/resume") {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_paused_resume",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:02Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_paused_resume",
+                file_token: createdFileToken,
+                original_name: "paused-brain.nii",
+                content_type: "application/x-nifti",
+                size_bytes: file.size,
+                status: "uploading",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:02Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/chunks/0`)) {
+        const resumeIndex = urls.indexOf("https://ultra.example.org/v2/upload-sessions/upload_session_paused_resume/resume");
+        expect(resumeIndex).toBeGreaterThan(-1);
+        expect(urls.length - 1).toBeGreaterThan(resumeIndex);
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_paused_resume",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_paused_resume",
+              file_token: createdFileToken,
+              original_name: "paused-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            chunk: {
+              session_id: "upload_session_paused_resume",
+              file_token: createdFileToken,
+              chunk_index: 0,
+              offset: 0,
+              size_bytes: file.size,
+              sha256: new Headers(init?.headers).get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_paused_resume",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:04Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_paused_resume",
+              file_token: createdFileToken,
+              resource_id: "file_paused_brain",
+              original_name: "paused-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:04Z",
+            },
+            resource: {
+              file_id: "file_paused_brain",
+              original_name: "paused-brain.nii",
+              content_type: "application/x-nifti",
+              size_bytes: file.size,
+              sha256: "paused-final-sha",
+              created_at: "2026-06-08T00:00:04Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file]);
+
+    expect(response.uploaded[0].file_id).toBe("file_paused_brain");
+    expect(urls).toContain("https://ultra.example.org/v2/upload-sessions/upload_session_paused_resume/resume");
+  });
+
+  it("retries transient V2 chunk failures without restarting the upload session", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const file = new File(
+      [new Uint8Array(chunkSize), new Uint8Array([4, 5, 6])],
+      "starlink-field-stack.ome.tiff",
+      {
+        type: "image/tiff",
+        lastModified: 1_780_915_200_000,
+      }
+    );
+    let createdFileToken = "";
+    let sessionCreateCount = 0;
+    const chunkAttempts = new Map<number, number>();
+    const progressEvents: Array<{ status: string; bytesVerified: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        sessionCreateCount += 1;
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_starlink_retry",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_starlink_retry",
+                file_token: createdFileToken,
+                original_name: "starlink-field-stack.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: file.size,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/chunks\/(\d+)$/);
+      if (chunkMatch) {
+        const chunkIndex = Number(chunkMatch[1]);
+        const attempt = (chunkAttempts.get(chunkIndex) ?? 0) + 1;
+        chunkAttempts.set(chunkIndex, attempt);
+        if (chunkIndex === 1 && attempt === 1) {
+          return new Response(JSON.stringify({ error: "temporary satellite link drop" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const headers = new Headers(init?.headers);
+        const chunk = init?.body as Blob;
+        const bytesVerified = chunkIndex === 0 ? chunkSize : file.size;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_starlink_retry",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: bytesVerified,
+              bytes_verified: bytesVerified,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_starlink_retry",
+              file_token: createdFileToken,
+              original_name: "starlink-field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_starlink_retry",
+              file_token: createdFileToken,
+              chunk_index: chunkIndex,
+              offset: Number(headers.get("x-upload-offset")),
+              size_bytes: chunk.size,
+              sha256: headers.get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_starlink_retry",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_starlink_retry",
+              file_token: createdFileToken,
+              resource_id: "file_starlink_field_stack",
+              original_name: "starlink-field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: "file_starlink_field_stack",
+              original_name: "starlink-field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              sha256: "final-starlink-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file], {
+      onProgress: (event) => {
+        progressEvents.push({ status: event.status, bytesVerified: event.bytesVerified });
+      },
+    });
+
+    expect(response.uploaded[0].file_id).toBe("file_starlink_field_stack");
+    expect(sessionCreateCount).toBe(1);
+    expect(chunkAttempts.get(0)).toBe(1);
+    expect(chunkAttempts.get(1)).toBe(2);
+    expect(progressEvents[progressEvents.length - 1]).toEqual({
+      status: "completed",
+      bytesVerified: file.size,
+    });
+    expect(progressEvents.some((event) => event.status === "failed")).toBe(false);
+  });
+
+  it("uploads missing V2 chunks with bounded parallelism", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const file = new File(
+      [new Uint8Array(chunkSize), new Uint8Array(chunkSize), new Uint8Array([9, 8, 7])],
+      "field-stack.ome.tiff",
+      {
+        type: "image/tiff",
+        lastModified: 1_780_915_200_000,
+      }
+    );
+    let createdFileToken = "";
+    let activeChunkUploads = 0;
+    let maxActiveChunkUploads = 0;
+    const uploadedChunkIndexes: number[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_parallel_1",
+                file_token: createdFileToken,
+                original_name: "field-stack.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: file.size,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/chunks\/(\d+)$/);
+      if (chunkMatch) {
+        const chunkIndex = Number(chunkMatch[1]);
+        const headers = new Headers(init?.headers);
+        const chunk = init?.body as Blob;
+        activeChunkUploads += 1;
+        maxActiveChunkUploads = Math.max(maxActiveChunkUploads, activeChunkUploads);
+        uploadedChunkIndexes.push(chunkIndex);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeChunkUploads -= 1;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: Math.min(file.size, (chunkIndex + 1) * chunkSize),
+              bytes_verified: Math.min(file.size, (chunkIndex + 1) * chunkSize),
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_parallel_1",
+              file_token: createdFileToken,
+              original_name: "field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_parallel_1",
+              file_token: createdFileToken,
+              chunk_index: chunkIndex,
+              offset: Number(headers.get("x-upload-offset")),
+              size_bytes: chunk.size,
+              sha256: headers.get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_parallel_1",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_parallel_1",
+              file_token: createdFileToken,
+              resource_id: "file_parallel_field_stack",
+              original_name: "field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: "file_parallel_field_stack",
+              original_name: "field-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              sha256: "final-parallel-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file]);
+
+    expect(response.uploaded[0].file_id).toBe("file_parallel_field_stack");
+    expect(uploadedChunkIndexes.sort()).toEqual([0, 1, 2]);
+    expect(maxActiveChunkUploads).toBeGreaterThan(1);
+    expect(maxActiveChunkUploads).toBeLessThanOrEqual(4);
+  });
+
+  it("honors V2 upload-session chunk concurrency limits from the server", async () => {
+    const chunkSize = 8 * 1024 * 1024;
+    const file = new File(
+      [
+        new Uint8Array(chunkSize),
+        new Uint8Array(chunkSize),
+        new Uint8Array(chunkSize),
+        new Uint8Array([7, 6, 5]),
+      ],
+      "server-limited-stack.ome.tiff",
+      {
+        type: "image/tiff",
+        lastModified: 1_780_915_200_000,
+      }
+    );
+    let createdFileToken = "";
+    let activeChunkUploads = 0;
+    let maxActiveChunkUploads = 0;
+    const uploadedChunkIndexes: number[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/upload-sessions") {
+        const body = JSON.parse(String(init?.body));
+        createdFileToken = body.files[0].file_token;
+        return new Response(
+          JSON.stringify({
+            limits: {
+              max_parallel_chunks: 2,
+              max_parallel_files: 4,
+              max_files_per_session: 10000,
+            },
+            session: {
+              session_id: "upload_session_server_limited",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: 0,
+              bytes_verified: 0,
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            files: [
+              {
+                session_id: "upload_session_server_limited",
+                file_token: createdFileToken,
+                original_name: "server-limited-stack.ome.tiff",
+                content_type: "image/tiff",
+                size_bytes: file.size,
+                status: "pending",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+              },
+            ],
+            chunks: [],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const chunkMatch = url.match(/\/chunks\/(\d+)$/);
+      if (chunkMatch) {
+        const chunkIndex = Number(chunkMatch[1]);
+        const headers = new Headers(init?.headers);
+        const chunk = init?.body as Blob;
+        activeChunkUploads += 1;
+        maxActiveChunkUploads = Math.max(maxActiveChunkUploads, activeChunkUploads);
+        uploadedChunkIndexes.push(chunkIndex);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeChunkUploads -= 1;
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_server_limited",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "active",
+              total_bytes: file.size,
+              bytes_received: Math.min(file.size, (chunkIndex + 1) * chunkSize),
+              bytes_verified: Math.min(file.size, (chunkIndex + 1) * chunkSize),
+              bytes_committed: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_server_limited",
+              file_token: createdFileToken,
+              original_name: "server-limited-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "uploading",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+            },
+            chunk: {
+              session_id: "upload_session_server_limited",
+              file_token: createdFileToken,
+              chunk_index: chunkIndex,
+              offset: Number(headers.get("x-upload-offset")),
+              size_bytes: chunk.size,
+              sha256: headers.get("x-upload-chunk-sha256"),
+              status: "verified",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith(`/files/${createdFileToken}/complete`)) {
+        return new Response(
+          JSON.stringify({
+            session: {
+              session_id: "upload_session_server_limited",
+              owner_user_id: "local-user",
+              source_type: "upload",
+              status: "completed",
+              total_bytes: file.size,
+              bytes_received: file.size,
+              bytes_verified: file.size,
+              bytes_committed: file.size,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+              metadata: {},
+            },
+            file: {
+              session_id: "upload_session_server_limited",
+              file_token: createdFileToken,
+              resource_id: "file_server_limited_stack",
+              original_name: "server-limited-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              status: "completed",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:03Z",
+            },
+            resource: {
+              file_id: "file_server_limited_stack",
+              original_name: "server-limited-stack.ome.tiff",
+              content_type: "image/tiff",
+              size_bytes: file.size,
+              sha256: "final-server-limited-sha",
+              created_at: "2026-06-08T00:00:03Z",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.uploadFiles([file]);
+
+    expect(response.uploaded[0].file_id).toBe("file_server_limited_stack");
+    expect(uploadedChunkIndexes.sort()).toEqual([0, 1, 2, 3]);
+    expect(maxActiveChunkUploads).toBeGreaterThan(1);
+    expect(maxActiveChunkUploads).toBeLessThanOrEqual(2);
   });
 
   it("lists resources through V2 without probing legacy resource routes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = String(input);
-      if (url === "https://ultra.example.org/v2/resources?limit=50&offset=0&q=prairie&kind=image") {
+      if (url === "https://ultra.example.org/v2/resources?limit=50&offset=0&q=prairie&kind=image&sharing=shared_with_me&processing_status=metadata_ready&status=deleted&tags=nph%2Cunder+70&descriptors=nph%2Cventriculomegaly&metadata_filter=label%3Aeq%3ANPH&metadata_filter=subject_age%3Alt%3A70&created_after=2026-06-02&created_before=2026-06-04") {
         return new Response(
           JSON.stringify({
             count: 1,
@@ -555,12 +3174,1560 @@ describe("ApiClient V2 chat bridge", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const response = await client.listResources({ limit: 50, query: "prairie", kind: "image" });
+    const response = await client.listResources({
+      limit: 50,
+      query: "prairie",
+      kind: "image",
+      sharing: "shared_with_me",
+      processingStatus: "metadata_ready",
+      status: "deleted",
+      tags: [" nph ", "under 70", "nph"],
+      descriptors: [" nph ", "ventriculomegaly", "nph"],
+      metadataFilters: [
+        { path: "label", operator: "eq", value: "NPH" },
+        { path: "subject_age", operator: "lt", value: 70 },
+      ],
+      createdAfter: "2026-06-02",
+      createdBefore: "2026-06-04",
+    });
 
     expect(response.resources[0].file_id).toBe("file_v2_image");
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
-      "https://ultra.example.org/v2/resources?limit=50&offset=0&q=prairie&kind=image",
+      "https://ultra.example.org/v2/resources?limit=50&offset=0&q=prairie&kind=image&sharing=shared_with_me&processing_status=metadata_ready&status=deleted&tags=nph%2Cunder+70&descriptors=nph%2Cventriculomegaly&metadata_filter=label%3Aeq%3ANPH&metadata_filter=subject_age%3Alt%3A70&created_after=2026-06-02&created_before=2026-06-04",
     ]);
+  });
+
+  it("bulk tags resources through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/tags/bulk") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_ids: ["file_a", "file_b"],
+          tags: ["NPH", "Under 70"],
+          metadata: { source: "resources_bulk_tag_panel" },
+        });
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            resources: [
+              {
+                file_id: "file_a",
+                original_name: "a.nii.gz",
+                size_bytes: 10,
+                sha256: "sha-a",
+                created_at: "2026-06-08T00:00:00Z",
+                source_type: "upload",
+                resource_kind: "file",
+                has_thumbnail: false,
+                tags: ["NPH", "Under 70"],
+              },
+              {
+                file_id: "file_b",
+                original_name: "b.nii.gz",
+                size_bytes: 11,
+                sha256: "sha-b",
+                created_at: "2026-06-08T00:00:01Z",
+                source_type: "upload",
+                resource_kind: "file",
+                has_thumbnail: false,
+                tags: ["NPH", "Under 70"],
+              },
+            ],
+            events: [
+              {
+                event_id: "resource_event_a",
+                resource_id: "file_a",
+                event_type: "resource.tagged",
+                ts: "2026-06-08T00:00:02Z",
+                metadata: { tags_added: ["NPH", "Under 70"] },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.bulkTagResources({
+      resource_ids: ["file_a", "file_b"],
+      tags: ["NPH", "Under 70"],
+      metadata: { source: "resources_bulk_tag_panel" },
+    });
+
+    expect(response.count).toBe(2);
+    expect(response.resources.map((resource) => resource.tags)).toEqual([
+      ["NPH", "Under 70"],
+      ["NPH", "Under 70"],
+    ]);
+  });
+
+  it("patches resource metadata through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/file_a") {
+        expect(init?.method).toBe("PATCH");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          metadata: {
+            cohort: "NPH",
+            review: { status: "checked" },
+          },
+        });
+        return new Response(
+          JSON.stringify({
+            resource: {
+              file_id: "file_a",
+              original_name: "a.nii.gz",
+              size_bytes: 10,
+              sha256: "sha-a",
+              created_at: "2026-06-08T00:00:00Z",
+              source_type: "upload",
+              resource_kind: "file",
+              has_thumbnail: false,
+              metadata: {
+                source_label: "raw",
+                cohort: "NPH",
+                review: { reader: "lab-a", status: "checked" },
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.patchResourceMetadata("file_a", {
+      cohort: "NPH",
+      review: { status: "checked" },
+    });
+
+    expect(response.resource.metadata).toMatchObject({
+      source_label: "raw",
+      cohort: "NPH",
+      review: { reader: "lab-a", status: "checked" },
+    });
+  });
+
+  it("manages resource share grants through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/file_a/shares?limit=25&status=active") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            resource_id: "file_a",
+            count: 1,
+            grants: [
+              {
+                grant_id: "resource_grant_bob",
+                resource_id: "file_a",
+                owner_user_id: "alice",
+                grantee_user_id: "bob",
+                grantee_org_id: "org-b",
+                role: "read",
+                status: "active",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resources/file_a/shares") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          grantee_user_id: "bob",
+          grantee_org_id: "org-b",
+          role: "read",
+          metadata: { reason: "collaborative review" },
+        });
+        return new Response(
+          JSON.stringify({
+            grant: {
+              grant_id: "resource_grant_bob",
+              resource_id: "file_a",
+              owner_user_id: "alice",
+              grantee_user_id: "bob",
+              grantee_org_id: "org-b",
+              role: "read",
+              status: "active",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resources/file_a/shares/resource_grant_bob") {
+        expect(init?.method).toBe("DELETE");
+        return new Response(
+          JSON.stringify({
+            grant: {
+              grant_id: "resource_grant_bob",
+              resource_id: "file_a",
+              owner_user_id: "alice",
+              grantee_user_id: "bob",
+              grantee_org_id: "org-b",
+              role: "read",
+              status: "revoked",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:01:00Z",
+              revoked_at: "2026-06-08T00:01:00Z",
+              metadata: {},
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resources/shares/bulk") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_ids: ["file_a", "file_b"],
+          grantee_user_id: "charlie",
+          grantee_org_id: "org-c",
+          role: "read",
+          metadata: { reason: "bulk review" },
+        });
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            grants: [
+              {
+                grant_id: "resource_grant_charlie_a",
+                resource_id: "file_a",
+                owner_user_id: "alice",
+                grantee_user_id: "charlie",
+                grantee_org_id: "org-c",
+                role: "read",
+                status: "active",
+                created_at: "2026-06-08T00:02:00Z",
+                updated_at: "2026-06-08T00:02:00Z",
+                metadata: {},
+              },
+              {
+                grant_id: "resource_grant_charlie_b",
+                resource_id: "file_b",
+                owner_user_id: "alice",
+                grantee_user_id: "charlie",
+                grantee_org_id: "org-c",
+                role: "read",
+                status: "active",
+                created_at: "2026-06-08T00:02:00Z",
+                updated_at: "2026-06-08T00:02:00Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_nph/shares") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          grantee_user_id: "dana",
+          grantee_org_id: "org-d",
+          role: "read",
+          metadata: { reason: "folder review" },
+        });
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            collection: {
+              collection_id: "collection_nph",
+              owner_user_id: "alice",
+              owner_org_id: "org-a",
+              name: "NPH folder",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 2,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:02:00Z",
+              metadata: {},
+            },
+            grants: [
+              {
+                grant_id: "resource_grant_dana_a",
+                resource_id: "file_a",
+                owner_user_id: "alice",
+                grantee_user_id: "dana",
+                grantee_org_id: "org-d",
+                role: "read",
+                status: "active",
+                created_at: "2026-06-08T00:03:00Z",
+                updated_at: "2026-06-08T00:03:00Z",
+                metadata: {},
+              },
+              {
+                grant_id: "resource_grant_dana_b",
+                resource_id: "file_b",
+                owner_user_id: "alice",
+                grantee_user_id: "dana",
+                grantee_org_id: "org-d",
+                role: "read",
+                status: "active",
+                created_at: "2026-06-08T00:03:00Z",
+                updated_at: "2026-06-08T00:03:00Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const listed = await client.listResourceShareGrants("file_a", { limit: 25, status: "active" });
+    const created = await client.createResourceShareGrant("file_a", {
+      grantee_user_id: "bob",
+      grantee_org_id: "org-b",
+      role: "read",
+      metadata: { reason: "collaborative review" },
+    });
+    const revoked = await client.revokeResourceShareGrant("file_a", "resource_grant_bob");
+    const bulkCreated = await client.createResourceShareGrants({
+      resource_ids: ["file_a", "file_b"],
+      grantee_user_id: "charlie",
+      grantee_org_id: "org-c",
+      role: "read",
+      metadata: { reason: "bulk review" },
+    });
+    const folderCreated = await client.createResourceCollectionShareGrants("collection_nph", {
+      grantee_user_id: "dana",
+      grantee_org_id: "org-d",
+      role: "read",
+      metadata: { reason: "folder review" },
+    });
+
+    expect(listed.grants[0].grant_id).toBe("resource_grant_bob");
+    expect(created.grant.status).toBe("active");
+    expect(revoked.grant.status).toBe("revoked");
+    expect(bulkCreated.count).toBe(2);
+    expect(bulkCreated.grants.map((grant) => grant.resource_id)).toEqual(["file_a", "file_b"]);
+    expect(folderCreated.collection.collection_id).toBe("collection_nph");
+    expect(folderCreated.grants.map((grant) => grant.resource_id)).toEqual(["file_a", "file_b"]);
+  });
+
+  it("bulk deletes resources through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/delete/bulk") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_ids: ["file_a", "file_b"],
+        });
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            resources: [
+              { file_id: "file_a", status: "deleted", original_name: "a.nii" },
+              { file_id: "file_b", status: "deleted", original_name: "b.nii" },
+            ],
+            events: [
+              { event_id: "event_a", resource_id: "file_a", event_type: "resource.deleted" },
+              { event_id: "event_b", resource_id: "file_b", event_type: "resource.deleted" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const deleted = await client.deleteResources({ resource_ids: ["file_a", "file_b"] });
+
+    expect(deleted.count).toBe(2);
+    expect(deleted.events.map((event) => event.resource_id)).toEqual(["file_a", "file_b"]);
+  });
+
+  it("bulk restores resources through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/restore/bulk") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_ids: ["file_a", "file_b"],
+        });
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            resources: [
+              { file_id: "file_a", status: "active", original_name: "a.nii" },
+              { file_id: "file_b", status: "active", original_name: "b.nii" },
+            ],
+            events: [
+              { event_id: "event_a", resource_id: "file_a", event_type: "resource.restored" },
+              { event_id: "event_b", resource_id: "file_b", event_type: "resource.restored" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const restored = await client.restoreResources({ resource_ids: ["file_a", "file_b"] });
+
+    expect(restored.count).toBe(2);
+    expect(restored.resources.map((resource) => resource.status)).toEqual(["active", "active"]);
+    expect(restored.events.map((event) => event.event_type)).toEqual([
+      "resource.restored",
+      "resource.restored",
+    ]);
+  });
+
+  it("restores a soft-deleted resource through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/file_a/restore") {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            resource: {
+              file_id: "file_a",
+              original_name: "a.nii",
+              status: "active",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const restored = await client.restoreResource("file_a");
+
+    expect(restored.resource.file_id).toBe("file_a");
+    expect(restored.resource.status).toBe("active");
+  });
+
+  it("renames resources and removes folder memberships through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resources/file_a") {
+        expect(init?.method).toBe("PATCH");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          original_name: "nph-a-reviewed.nii.gz",
+        });
+        return new Response(
+          JSON.stringify({
+            resource: {
+              file_id: "file_a",
+              original_name: "nph-a-reviewed.nii.gz",
+              status: "active",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_nph") {
+        expect(init?.method).toBe("PATCH");
+        expect(JSON.parse(String(init?.body))).toEqual({ name: "NPH reviewed" });
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_nph",
+              owner_user_id: "nph-user",
+              name: "NPH reviewed",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 2,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:05:00Z",
+              metadata: {},
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        url ===
+        "https://ultra.example.org/v2/resource-collections/collection_nph/resources/file_a"
+      ) {
+        expect(init?.method).toBe("DELETE");
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_nph",
+              owner_user_id: "nph-user",
+              name: "NPH reviewed",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 1,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:06:00Z",
+              metadata: {},
+            },
+            removed_count: 1,
+            memberships: [
+              {
+                collection_id: "collection_nph",
+                resource_id: "file_a",
+                position: 0,
+                added_at: "2026-06-08T00:00:01Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const renamedResource = await client.renameResource(" file_a ", " nph-a-reviewed.nii.gz ");
+    const renamedCollection = await client.patchResourceCollection(" collection_nph ", {
+      name: " NPH reviewed ",
+    });
+    const removed = await client.removeResourceFromCollection(" collection_nph ", " file_a ");
+
+    expect(renamedResource.resource.original_name).toBe("nph-a-reviewed.nii.gz");
+    expect(renamedCollection.collection.name).toBe("NPH reviewed");
+    expect(removed.removed_count).toBe(1);
+    expect(removed.collection.resource_count).toBe(1);
+  });
+
+  it("manages resource collections through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/resource-collections") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          name: "NPH NIfTI cohort",
+          collection_type: "folder",
+          project_id: "nph-study",
+        });
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              name: "NPH NIfTI cohort",
+              description: "NIfTI files labeled NPH",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 0,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: { label: "NPH" },
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_nph/resources") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({ resource_ids: ["file_a", "file_b"] });
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              name: "NPH NIfTI cohort",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 2,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:01Z",
+              metadata: {},
+            },
+            added_count: 2,
+            memberships: [
+              {
+                collection_id: "collection_nph",
+                resource_id: "file_a",
+                position: 0,
+                added_at: "2026-06-08T00:00:01Z",
+                metadata: {},
+              },
+              {
+                collection_id: "collection_nph",
+                resource_id: "file_b",
+                position: 1,
+                added_at: "2026-06-08T00:00:01Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_nph/resources?limit=25&offset=0&q=nph&kind=image&source=upload") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            resources: [
+              {
+                file_id: "file_a",
+                original_name: "nph-a.nii.gz",
+                content_type: "application/gzip",
+                size_bytes: 128,
+                sha256: "sha-a",
+                created_at: "2026-06-08T00:00:00Z",
+                source_type: "upload",
+                resource_kind: "image",
+                has_thumbnail: false,
+              },
+              {
+                file_id: "file_b",
+                original_name: "nph-b.nii.gz",
+                content_type: "application/gzip",
+                size_bytes: 256,
+                sha256: "sha-b",
+                created_at: "2026-06-08T00:00:00Z",
+                source_type: "upload",
+                resource_kind: "image",
+                has_thumbnail: false,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections?limit=10&offset=0&collection_type=folder&project_id=nph-study") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            collections: [
+              {
+                collection_id: "collection_nph",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                project_id: "nph-study",
+                name: "NPH NIfTI cohort",
+                collection_type: "folder",
+                status: "active",
+                resource_count: 2,
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:01Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const created = await client.createResourceCollection({
+      name: "NPH NIfTI cohort",
+      description: "NIfTI files labeled NPH",
+      collection_type: "folder",
+      project_id: "nph-study",
+      metadata: { label: "NPH" },
+    });
+    const added = await client.addResourcesToCollection(created.collection.collection_id, [
+      "file_a",
+      "file_b",
+    ]);
+    const resources = await client.listResourceCollectionResources(created.collection.collection_id, {
+      limit: 25,
+      query: "nph",
+      kind: "image",
+      source: "upload",
+    });
+    const collections = await client.listResourceCollections({
+      limit: 10,
+      collectionType: "folder",
+      projectId: "nph-study",
+    });
+
+    expect(created.collection.collection_id).toBe("collection_nph");
+    expect(added.added_count).toBe(2);
+    expect(resources.resources.map((resource) => resource.file_id)).toEqual(["file_a", "file_b"]);
+    expect(collections.collections[0].resource_count).toBe(2);
+  });
+
+  it("lists deleted resource collections and restores a folder through V2", async () => {
+    const seenRequests: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      seenRequests.push(`${init?.method ?? "GET"} ${url}`);
+      if (url === "https://ultra.example.org/v2/resource-collections?limit=25&offset=0&collection_type=folder&status=deleted") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            collections: [
+              {
+                collection_id: "collection_deleted_nph",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                name: "Deleted NPH review folder",
+                collection_type: "folder",
+                status: "deleted",
+                resource_count: 2,
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:05:00Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_deleted_nph/restore") {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_deleted_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              name: "Deleted NPH review folder",
+              collection_type: "folder",
+              status: "active",
+              resource_count: 2,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:06:00Z",
+              metadata: {},
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/resource-collections/collection_deleted_nph") {
+        expect(init?.method).toBe("DELETE");
+        return new Response(
+          JSON.stringify({
+            collection: {
+              collection_id: "collection_deleted_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              name: "Deleted NPH review folder",
+              collection_type: "folder",
+              status: "deleted",
+              resource_count: 2,
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:05:00Z",
+              metadata: {},
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const deleted = await client.listResourceCollections({
+      limit: 25,
+      collectionType: "folder",
+      status: "deleted",
+    });
+    const restored = await client.restoreResourceCollection("collection_deleted_nph");
+    const deletedAgain = await client.deleteResourceCollection("collection_deleted_nph");
+
+    expect(deleted.collections[0].status).toBe("deleted");
+    expect(restored.collection.status).toBe("active");
+    expect(deletedAgain.collection.status).toBe("deleted");
+    expect(seenRequests).toEqual([
+      "GET https://ultra.example.org/v2/resource-collections?limit=25&offset=0&collection_type=folder&status=deleted",
+      "POST https://ultra.example.org/v2/resource-collections/collection_deleted_nph/restore",
+      "DELETE https://ultra.example.org/v2/resource-collections/collection_deleted_nph",
+    ]);
+  });
+
+  it("creates and loads immutable dataset snapshots through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/dataset-snapshots") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          name: "NPH training cohort v1",
+          source_collection_id: "collection_nph",
+        });
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              snapshot_id: "dataset_snapshot_nph_v1",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              source_collection_id: "collection_nph",
+              name: "NPH training cohort v1",
+              description: "Frozen folder manifest for training",
+              status: "active",
+              resource_count: 2,
+              total_bytes: 384,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              metadata: { label: "NPH" },
+            },
+            resources: [
+              {
+                snapshot_id: "dataset_snapshot_nph_v1",
+                resource_id: "file_a",
+                position: 0,
+                original_name: "nph-a.nii.gz",
+                resource_kind: "file",
+                source_type: "upload",
+                size_bytes: 128,
+                sha256: "sha-a",
+              },
+              {
+                snapshot_id: "dataset_snapshot_nph_v1",
+                resource_id: "file_b",
+                position: 1,
+                original_name: "nph-b.nii.gz",
+                resource_kind: "file",
+                source_type: "upload",
+                size_bytes: 256,
+                sha256: "sha-b",
+              },
+            ],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots?limit=10&offset=0&q=training&project_id=nph-study&source_collection_id=collection_nph"
+      ) {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            snapshots: [
+              {
+                snapshot_id: "dataset_snapshot_nph_v1",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                project_id: "nph-study",
+                source_collection_id: "collection_nph",
+                name: "NPH training cohort v1",
+                status: "active",
+                resource_count: 2,
+                total_bytes: 384,
+                created_by_user_id: "nph-user",
+                created_at: "2026-06-08T00:00:00Z",
+                metadata: { label: "NPH" },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_nph_v1") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              snapshot_id: "dataset_snapshot_nph_v1",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              source_collection_id: "collection_nph",
+              name: "NPH training cohort v1",
+              status: "active",
+              resource_count: 2,
+              total_bytes: 384,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              metadata: { label: "NPH" },
+            },
+            resources: [
+              {
+                snapshot_id: "dataset_snapshot_nph_v1",
+                resource_id: "file_a",
+                position: 0,
+                original_name: "nph-a.nii.gz",
+                resource_kind: "file",
+                source_type: "upload",
+                size_bytes: 128,
+                sha256: "sha-a",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const created = await client.createDatasetSnapshot({
+      name: "NPH training cohort v1",
+      description: "Frozen folder manifest for training",
+      source_collection_id: "collection_nph",
+      metadata: { label: "NPH" },
+    });
+    const listed = await client.listDatasetSnapshots({
+      limit: 10,
+      query: "training",
+      projectId: "nph-study",
+      sourceCollectionId: "collection_nph",
+    });
+    const loaded = await client.getDatasetSnapshot(created.snapshot.snapshot_id);
+
+    expect(created.snapshot.resource_count).toBe(2);
+    expect(created.resources.map((resource) => resource.sha256)).toEqual(["sha-a", "sha-b"]);
+    expect(listed.snapshots.map((snapshot) => snapshot.snapshot_id)).toEqual([
+      "dataset_snapshot_nph_v1",
+    ]);
+    expect(loaded.snapshot.snapshot_id).toBe("dataset_snapshot_nph_v1");
+    expect(loaded.resources[0].resource_id).toBe("file_a");
+  });
+
+  it("lists deleted dataset snapshots and restores them through V2", async () => {
+    const seenRequests: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      seenRequests.push(`${init?.method ?? "GET"} ${url}`);
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots?limit=25&offset=0&project_id=nph-study&status=deleted"
+      ) {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            snapshots: [
+              {
+                snapshot_id: "dataset_snapshot_deleted_nph",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                project_id: "nph-study",
+                source_collection_id: "collection_nph",
+                name: "Deleted NPH training cohort",
+                status: "deleted",
+                resource_count: 2,
+                total_bytes: 384,
+                created_by_user_id: "nph-user",
+                created_at: "2026-06-08T00:00:00Z",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_deleted_nph/restore"
+      ) {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              snapshot_id: "dataset_snapshot_deleted_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              source_collection_id: "collection_nph",
+              name: "Deleted NPH training cohort",
+              status: "active",
+              resource_count: 2,
+              total_bytes: 384,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            resources: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_deleted_nph") {
+        expect(init?.method).toBe("DELETE");
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              snapshot_id: "dataset_snapshot_deleted_nph",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              source_collection_id: "collection_nph",
+              name: "Deleted NPH training cohort",
+              status: "deleted",
+              resource_count: 2,
+              total_bytes: 384,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              metadata: {},
+            },
+            resources: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const deleted = await client.listDatasetSnapshots({
+      limit: 25,
+      projectId: "nph-study",
+      status: "deleted",
+    });
+    const restored = await client.restoreDatasetSnapshot("dataset_snapshot_deleted_nph");
+    const deletedAgain = await client.deleteDatasetSnapshot("dataset_snapshot_deleted_nph");
+
+    expect(deleted.snapshots[0].status).toBe("deleted");
+    expect(restored.snapshot.status).toBe("active");
+    expect(deletedAgain.snapshot.status).toBe("deleted");
+    expect(seenRequests).toEqual([
+      "GET https://ultra.example.org/v2/dataset-snapshots?limit=25&offset=0&project_id=nph-study&status=deleted",
+      "POST https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_deleted_nph/restore",
+      "DELETE https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_deleted_nph",
+    ]);
+  });
+
+  it("creates immutable dataset snapshots from resource query filters through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/dataset-snapshots") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          name: "NPH under 70 query cohort",
+          resource_query: {
+            q: "NPH",
+            kind: "file",
+            source: "upload",
+            sharing: "private",
+            tags: ["Under 70"],
+          },
+          metadata: {
+            source: "resources_query_toolbar",
+            query_result_count: 2,
+          },
+        });
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              snapshot_id: "dataset_snapshot_query_under70",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              name: "NPH under 70 query cohort",
+              status: "active",
+              resource_count: 2,
+              total_bytes: 384,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              metadata: { source: "resources_query_toolbar" },
+            },
+            resources: [
+              {
+                snapshot_id: "dataset_snapshot_query_under70",
+                resource_id: "file_query_dataset_b",
+                position: 0,
+                original_name: "subject-b-nph-under70.nii.gz",
+                resource_kind: "file",
+                source_type: "upload",
+                size_bytes: 256,
+                sha256: "sha-query-b",
+              },
+              {
+                snapshot_id: "dataset_snapshot_query_under70",
+                resource_id: "file_query_dataset_a",
+                position: 1,
+                original_name: "subject-a-nph-under70.nii.gz",
+                resource_kind: "file",
+                source_type: "upload",
+                size_bytes: 128,
+                sha256: "sha-query-a",
+              },
+            ],
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const created = await client.createDatasetSnapshot({
+      name: "NPH under 70 query cohort",
+      resource_query: {
+        q: "NPH",
+        kind: "file",
+        source: "upload",
+        sharing: "private",
+        tags: ["Under 70"],
+      },
+      metadata: {
+        source: "resources_query_toolbar",
+        query_result_count: 2,
+      },
+    });
+
+    expect(created.snapshot.snapshot_id).toBe("dataset_snapshot_query_under70");
+    expect(created.resources.map((resource) => resource.resource_id)).toEqual([
+      "file_query_dataset_b",
+      "file_query_dataset_a",
+    ]);
+  });
+
+  it("manages dataset snapshot share grants through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_nph_v1/shares?limit=25&status=active"
+      ) {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            grants: [
+              {
+                grant_id: "dataset_snapshot_grant_bob",
+                snapshot_id: "dataset_snapshot_nph_v1",
+                owner_user_id: "alice",
+                owner_org_id: "org-a",
+                grantee_user_id: "bob",
+                grantee_org_id: "org-b",
+                role: "read",
+                status: "active",
+                created_by_user_id: "alice",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+                metadata: { reason: "review cohort" },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        url === "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_nph_v1/shares" &&
+        init?.method === "POST"
+      ) {
+        expect(JSON.parse(String(init.body))).toEqual({
+          grantee_user_id: "bob",
+          grantee_org_id: "org-b",
+          role: "read",
+          metadata: { source: "resources_dataset_share_panel" },
+        });
+        return new Response(
+          JSON.stringify({
+            grant: {
+              grant_id: "dataset_snapshot_grant_bob",
+              snapshot_id: "dataset_snapshot_nph_v1",
+              owner_user_id: "alice",
+              owner_org_id: "org-a",
+              grantee_user_id: "bob",
+              grantee_org_id: "org-b",
+              role: "read",
+              status: "active",
+              created_by_user_id: "alice",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              metadata: { source: "resources_dataset_share_panel" },
+            },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_nph_v1/shares/dataset_snapshot_grant_bob"
+      ) {
+        expect(init?.method).toBe("DELETE");
+        return new Response(
+          JSON.stringify({
+            grant: {
+              grant_id: "dataset_snapshot_grant_bob",
+              snapshot_id: "dataset_snapshot_nph_v1",
+              owner_user_id: "alice",
+              owner_org_id: "org-a",
+              grantee_user_id: "bob",
+              grantee_org_id: "org-b",
+              role: "read",
+              status: "revoked",
+              created_by_user_id: "alice",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:01:00Z",
+              revoked_at: "2026-06-08T00:01:00Z",
+              metadata: { source: "resources_dataset_share_panel" },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const listed = await client.listDatasetSnapshotShareGrants("dataset_snapshot_nph_v1", {
+      limit: 25,
+      status: "active",
+    });
+    const created = await client.createDatasetSnapshotShareGrant("dataset_snapshot_nph_v1", {
+      grantee_user_id: "bob",
+      grantee_org_id: "org-b",
+      role: "read",
+      metadata: { source: "resources_dataset_share_panel" },
+    });
+    const revoked = await client.revokeDatasetSnapshotShareGrant(
+      "dataset_snapshot_nph_v1",
+      created.grant.grant_id
+    );
+
+    expect(listed.grants).toHaveLength(1);
+    expect(created.grant.grantee_user_id).toBe("bob");
+    expect(revoked.grant.status).toBe("revoked");
+  });
+
+  it("lists dataset snapshot audit events through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url ===
+        "https://ultra.example.org/v2/dataset-snapshots/dataset_snapshot_nph_v1/events?limit=25&offset=0&event_type=dataset_snapshot.shared&actor_user_id=alice"
+      ) {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            snapshot_id: "dataset_snapshot_nph_v1",
+            count: 1,
+            total_count: 1,
+            limit: 25,
+            offset: 0,
+            events: [
+              {
+                event_id: "dataset_snapshot_event_shared",
+                snapshot_id: "dataset_snapshot_nph_v1",
+                actor_user_id: "alice",
+                actor_org_id: "org-a",
+                event_type: "dataset_snapshot.shared",
+                ts: "2026-06-08T00:01:00Z",
+                metadata: { grant_id: "dataset_snapshot_grant_bob" },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const listed = await client.listDatasetSnapshotEvents("dataset_snapshot_nph_v1", {
+      limit: 25,
+      offset: 0,
+      eventType: "dataset_snapshot.shared",
+      actorUserId: "alice",
+    });
+
+    expect(listed.snapshot_id).toBe("dataset_snapshot_nph_v1");
+    expect(listed.events).toHaveLength(1);
+    expect(listed.events[0].event_type).toBe("dataset_snapshot.shared");
+    expect(listed.events[0].metadata?.grant_id).toBe("dataset_snapshot_grant_bob");
+  });
+
+  it("creates lists and loads durable data agent jobs through V2", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/data-agent/jobs") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          job_type: "caption_resources",
+          resource_ids: ["file_a", "file_b"],
+          input_selector: { mode: "short_caption", label: "NPH" },
+        });
+        return new Response(
+          JSON.stringify({
+            job: {
+              job_id: "data_agent_job_nph_caption",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              job_type: "caption_resources",
+              status: "queued",
+              resource_count: 2,
+              progress_completed: 0,
+              progress_total: 2,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              input_selector: { mode: "short_caption", label: "NPH" },
+              output_summary: {},
+              metadata: { requested_from: "resources_page" },
+            },
+            events: [
+              {
+                event_id: "data_agent_job_event_created",
+                job_id: "data_agent_job_nph_caption",
+                sequence: 1,
+                event_type: "data_agent.job.created",
+                actor_user_id: "nph-user",
+                actor_org_id: "nph-org",
+                ts: "2026-06-08T00:00:00Z",
+                message: "Data Agent job queued.",
+                metadata: { resource_count: 2 },
+              },
+            ],
+          }),
+          { status: 202, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/data-agent/jobs?limit=10&offset=0&status=queued&job_type=caption_resources") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            jobs: [
+              {
+                job_id: "data_agent_job_nph_caption",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                project_id: "nph-study",
+                job_type: "caption_resources",
+                status: "queued",
+                resource_count: 2,
+                progress_completed: 0,
+                progress_total: 2,
+                created_by_user_id: "nph-user",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:00:00Z",
+                input_selector: { mode: "short_caption", label: "NPH" },
+                output_summary: {},
+                metadata: { requested_from: "resources_page" },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/data-agent/jobs/data_agent_job_nph_caption") {
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            job: {
+              job_id: "data_agent_job_nph_caption",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              job_type: "caption_resources",
+              status: "queued",
+              resource_count: 2,
+              progress_completed: 0,
+              progress_total: 2,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:00:00Z",
+              input_selector: { mode: "short_caption", label: "NPH" },
+              output_summary: {},
+              metadata: { requested_from: "resources_page" },
+            },
+            events: [
+              {
+                event_id: "data_agent_job_event_created",
+                job_id: "data_agent_job_nph_caption",
+                sequence: 1,
+                event_type: "data_agent.job.created",
+                actor_user_id: "nph-user",
+                actor_org_id: "nph-org",
+                ts: "2026-06-08T00:00:00Z",
+                message: "Data Agent job queued.",
+                metadata: { resource_count: 2 },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/data-agent/jobs/data_agent_job_nph_caption/status") {
+        expect(init?.method).toBe("PATCH");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          status: "running",
+          progress_completed: 1,
+          progress_total: 2,
+          message: "Captioned first resource",
+        });
+        return new Response(
+          JSON.stringify({
+            job: {
+              job_id: "data_agent_job_nph_caption",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              job_type: "caption_resources",
+              status: "running",
+              resource_count: 2,
+              progress_completed: 1,
+              progress_total: 2,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:01:00Z",
+              started_at: "2026-06-08T00:01:00Z",
+              input_selector: { mode: "short_caption", label: "NPH" },
+              output_summary: {},
+              metadata: { requested_from: "resources_page" },
+            },
+            events: [
+              {
+                event_id: "data_agent_job_event_created",
+                job_id: "data_agent_job_nph_caption",
+                sequence: 1,
+                event_type: "data_agent.job.created",
+                ts: "2026-06-08T00:00:00Z",
+                metadata: { resource_count: 2 },
+              },
+              {
+                event_id: "data_agent_job_event_progressed",
+                job_id: "data_agent_job_nph_caption",
+                sequence: 2,
+                event_type: "data_agent.job.progressed",
+                ts: "2026-06-08T00:01:00Z",
+                message: "Captioned first resource",
+                metadata: { resource_id: "file_a" },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/data-agent/jobs/data_agent_job_nph_caption/control") {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body));
+        if (body.action === "cancel") {
+          return new Response(
+            JSON.stringify({
+              job: {
+                job_id: "data_agent_job_nph_caption",
+                owner_user_id: "nph-user",
+                owner_org_id: "nph-org",
+                project_id: "nph-study",
+                job_type: "caption_resources",
+                status: "canceled",
+                resource_count: 2,
+                progress_completed: 1,
+                progress_total: 2,
+                error: "User paused the field upload.",
+                created_by_user_id: "nph-user",
+                created_at: "2026-06-08T00:00:00Z",
+                updated_at: "2026-06-08T00:02:00Z",
+                started_at: "2026-06-08T00:01:00Z",
+                completed_at: "2026-06-08T00:02:00Z",
+                input_selector: { mode: "short_caption", label: "NPH" },
+                output_summary: {},
+                metadata: { requested_from: "resources_page" },
+              },
+              events: [
+                {
+                  event_id: "data_agent_job_event_canceled",
+                  job_id: "data_agent_job_nph_caption",
+                  sequence: 3,
+                  event_type: "data_agent.job.canceled",
+                  ts: "2026-06-08T00:02:00Z",
+                  message: "User paused the field upload.",
+                  metadata: {},
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        expect(body).toMatchObject({ action: "retry", reason: "Connectivity recovered." });
+        return new Response(
+          JSON.stringify({
+            job: {
+              job_id: "data_agent_job_nph_caption",
+              owner_user_id: "nph-user",
+              owner_org_id: "nph-org",
+              project_id: "nph-study",
+              job_type: "caption_resources",
+              status: "queued",
+              resource_count: 2,
+              progress_completed: 0,
+              progress_total: 2,
+              created_by_user_id: "nph-user",
+              created_at: "2026-06-08T00:00:00Z",
+              updated_at: "2026-06-08T00:03:00Z",
+              input_selector: { mode: "short_caption", label: "NPH" },
+              output_summary: {},
+              metadata: { requested_from: "resources_page" },
+            },
+            events: [
+              {
+                event_id: "data_agent_job_event_retried",
+                job_id: "data_agent_job_nph_caption",
+                sequence: 4,
+                event_type: "data_agent.job.retried",
+                ts: "2026-06-08T00:03:00Z",
+                message: "Connectivity recovered.",
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const created = await client.createDataAgentJob({
+      job_type: "caption_resources",
+      resource_ids: ["file_a", "file_b"],
+      project_id: "nph-study",
+      input_selector: { mode: "short_caption", label: "NPH" },
+      metadata: { requested_from: "resources_page" },
+    });
+    const listed = await client.listDataAgentJobs({
+      limit: 10,
+      status: "queued",
+      jobType: "caption_resources",
+    });
+    const loaded = await client.getDataAgentJob(created.job.job_id);
+    const progressed = await client.updateDataAgentJobStatus(created.job.job_id, {
+      status: "running",
+      progress_completed: 1,
+      progress_total: 2,
+      message: "Captioned first resource",
+      event_metadata: { resource_id: "file_a" },
+    });
+    const canceled = await client.controlDataAgentJob(created.job.job_id, {
+      action: "cancel",
+      reason: "User paused the field upload.",
+    });
+    const retried = await client.controlDataAgentJob(created.job.job_id, {
+      action: "retry",
+      reason: "Connectivity recovered.",
+    });
+
+    expect(created.job.status).toBe("queued");
+    expect(created.events[0].event_type).toBe("data_agent.job.created");
+    expect(listed.jobs[0].job_id).toBe("data_agent_job_nph_caption");
+    expect(loaded.job.resource_count).toBe(2);
+    expect(progressed.job.status).toBe("running");
+    expect(progressed.events[1].event_type).toBe("data_agent.job.progressed");
+    expect(canceled.job.status).toBe("canceled");
+    expect(retried.job.status).toBe("queued");
   });
 
   it("promotes selected resource and dataset URIs into the V2 run envelope", async () => {

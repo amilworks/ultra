@@ -46,6 +46,117 @@ type ControlBisqueCredential struct {
 	Metadata           []byte             `json:"metadata"`
 }
 
+type ControlDataAgentJob struct {
+	JobID             string             `json:"job_id"`
+	OwnerUserID       string             `json:"owner_user_id"`
+	OwnerOrgID        pgtype.Text        `json:"owner_org_id"`
+	OwnerRole         pgtype.Text        `json:"owner_role"`
+	ProjectID         pgtype.Text        `json:"project_id"`
+	JobType           string             `json:"job_type"`
+	Status            string             `json:"status"`
+	ResourceCount     int64              `json:"resource_count"`
+	ProgressCompleted int64              `json:"progress_completed"`
+	ProgressTotal     int64              `json:"progress_total"`
+	Error             pgtype.Text        `json:"error"`
+	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	StartedAt         pgtype.Timestamptz `json:"started_at"`
+	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
+	InputSelector     []byte             `json:"input_selector"`
+	OutputSummary     []byte             `json:"output_summary"`
+	Metadata          []byte             `json:"metadata"`
+}
+
+type ControlDataAgentJobEvent struct {
+	EventID     string             `json:"event_id"`
+	JobID       string             `json:"job_id"`
+	Sequence    int64              `json:"sequence"`
+	EventType   string             `json:"event_type"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Message     pgtype.Text        `json:"message"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlDataAgentJobLease struct {
+	JobID          string             `json:"job_id"`
+	WorkerID       string             `json:"worker_id"`
+	LeaseToken     string             `json:"lease_token"`
+	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlDataAgentJobResource struct {
+	JobID      string `json:"job_id"`
+	ResourceID string `json:"resource_id"`
+	Position   int64  `json:"position"`
+	Metadata   []byte `json:"metadata"`
+}
+
+type ControlDatasetSnapshot struct {
+	SnapshotID         string             `json:"snapshot_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	SourceCollectionID pgtype.Text        `json:"source_collection_id"`
+	Name               string             `json:"name"`
+	Description        pgtype.Text        `json:"description"`
+	Status             string             `json:"status"`
+	ResourceCount      int64              `json:"resource_count"`
+	TotalBytes         int64              `json:"total_bytes"`
+	CreatedByUserID    pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+type ControlDatasetSnapshotEvent struct {
+	EventID     string             `json:"event_id"`
+	SnapshotID  string             `json:"snapshot_id"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	EventType   string             `json:"event_type"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlDatasetSnapshotResource struct {
+	SnapshotID        string             `json:"snapshot_id"`
+	ResourceID        string             `json:"resource_id"`
+	Position          int64              `json:"position"`
+	OriginalName      string             `json:"original_name"`
+	ContentType       pgtype.Text        `json:"content_type"`
+	SizeBytes         int64              `json:"size_bytes"`
+	Sha256            pgtype.Text        `json:"sha256"`
+	SourceType        string             `json:"source_type"`
+	ResourceKind      string             `json:"resource_kind"`
+	StorageUri        pgtype.Text        `json:"storage_uri"`
+	SourceUri         pgtype.Text        `json:"source_uri"`
+	ProjectID         pgtype.Text        `json:"project_id"`
+	ResourceCreatedAt pgtype.Timestamptz `json:"resource_created_at"`
+	Metadata          []byte             `json:"metadata"`
+}
+
+type ControlDatasetSnapshotShareGrant struct {
+	GrantID         string             `json:"grant_id"`
+	SnapshotID      string             `json:"snapshot_id"`
+	OwnerUserID     string             `json:"owner_user_id"`
+	OwnerOrgID      pgtype.Text        `json:"owner_org_id"`
+	OwnerRole       pgtype.Text        `json:"owner_role"`
+	GranteeUserID   pgtype.Text        `json:"grantee_user_id"`
+	GranteeOrgID    pgtype.Text        `json:"grantee_org_id"`
+	Role            string             `json:"role"`
+	Status          string             `json:"status"`
+	CreatedByUserID pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	Metadata        []byte             `json:"metadata"`
+}
+
 type ControlOrganization struct {
 	OrgID     string             `json:"org_id"`
 	Name      string             `json:"name"`
@@ -78,6 +189,48 @@ type ControlResource struct {
 	Metadata           []byte             `json:"metadata"`
 }
 
+type ControlResourceCollection struct {
+	CollectionID       string             `json:"collection_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	ParentCollectionID pgtype.Text        `json:"parent_collection_id"`
+	Name               string             `json:"name"`
+	Description        pgtype.Text        `json:"description"`
+	CollectionType     string             `json:"collection_type"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+type ControlResourceCollectionMember struct {
+	CollectionID  string             `json:"collection_id"`
+	ResourceID    string             `json:"resource_id"`
+	Position      int64              `json:"position"`
+	AddedByUserID pgtype.Text        `json:"added_by_user_id"`
+	AddedAt       pgtype.Timestamptz `json:"added_at"`
+	Metadata      []byte             `json:"metadata"`
+}
+
+type ControlResourceCollectionShareGrant struct {
+	GrantID         string             `json:"grant_id"`
+	CollectionID    string             `json:"collection_id"`
+	OwnerUserID     string             `json:"owner_user_id"`
+	OwnerOrgID      pgtype.Text        `json:"owner_org_id"`
+	OwnerRole       pgtype.Text        `json:"owner_role"`
+	GranteeUserID   pgtype.Text        `json:"grantee_user_id"`
+	GranteeOrgID    pgtype.Text        `json:"grantee_org_id"`
+	Role            string             `json:"role"`
+	Status          string             `json:"status"`
+	CreatedByUserID pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	Metadata        []byte             `json:"metadata"`
+}
+
 type ControlResourceEvent struct {
 	EventID     string             `json:"event_id"`
 	ResourceID  string             `json:"resource_id"`
@@ -86,6 +239,34 @@ type ControlResourceEvent struct {
 	EventType   string             `json:"event_type"`
 	Ts          pgtype.Timestamptz `json:"ts"`
 	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlResourceSearchDocument struct {
+	ResourceID   string             `json:"resource_id"`
+	OwnerUserID  string             `json:"owner_user_id"`
+	OwnerOrgID   pgtype.Text        `json:"owner_org_id"`
+	ProjectID    pgtype.Text        `json:"project_id"`
+	Status       string             `json:"status"`
+	SearchText   string             `json:"search_text"`
+	SearchVector interface{}        `json:"search_vector"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlResourceShareGrant struct {
+	GrantID         string             `json:"grant_id"`
+	ResourceID      string             `json:"resource_id"`
+	OwnerUserID     string             `json:"owner_user_id"`
+	OwnerOrgID      pgtype.Text        `json:"owner_org_id"`
+	OwnerRole       pgtype.Text        `json:"owner_role"`
+	GranteeUserID   pgtype.Text        `json:"grantee_user_id"`
+	GranteeOrgID    pgtype.Text        `json:"grantee_org_id"`
+	Role            string             `json:"role"`
+	Status          string             `json:"status"`
+	CreatedByUserID pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	Metadata        []byte             `json:"metadata"`
 }
 
 type ControlRun struct {
@@ -161,6 +342,70 @@ type ControlThreadMessage struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	Metadata  []byte             `json:"metadata"`
 	RunID     pgtype.Text        `json:"run_id"`
+}
+
+type ControlUploadChunk struct {
+	SessionID  string             `json:"session_id"`
+	FileToken  string             `json:"file_token"`
+	ChunkIndex int32              `json:"chunk_index"`
+	ByteOffset int64              `json:"byte_offset"`
+	SizeBytes  int64              `json:"size_bytes"`
+	Sha256     string             `json:"sha256"`
+	Status     string             `json:"status"`
+	StorageUri pgtype.Text        `json:"storage_uri"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+	VerifiedAt pgtype.Timestamptz `json:"verified_at"`
+	Error      pgtype.Text        `json:"error"`
+	Metadata   []byte             `json:"metadata"`
+}
+
+type ControlUploadSession struct {
+	SessionID          string             `json:"session_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	SourceType         string             `json:"source_type"`
+	Status             string             `json:"status"`
+	TotalBytes         int64              `json:"total_bytes"`
+	BytesReceived      int64              `json:"bytes_received"`
+	BytesVerified      int64              `json:"bytes_verified"`
+	BytesCommitted     int64              `json:"bytes_committed"`
+	IdempotencyKey     pgtype.Text        `json:"idempotency_key"`
+	BrowserFingerprint pgtype.Text        `json:"browser_fingerprint"`
+	Error              pgtype.Text        `json:"error"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+type ControlUploadSessionEvent struct {
+	EventID     string             `json:"event_id"`
+	SessionID   string             `json:"session_id"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	EventType   string             `json:"event_type"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlUploadSessionFile struct {
+	SessionID      string             `json:"session_id"`
+	FileToken      string             `json:"file_token"`
+	ResourceID     pgtype.Text        `json:"resource_id"`
+	OriginalName   string             `json:"original_name"`
+	RelativePath   pgtype.Text        `json:"relative_path"`
+	ContentType    pgtype.Text        `json:"content_type"`
+	SizeBytes      int64              `json:"size_bytes"`
+	DeclaredSha256 pgtype.Text        `json:"declared_sha256"`
+	ComputedSha256 pgtype.Text        `json:"computed_sha256"`
+	Status         string             `json:"status"`
+	Error          pgtype.Text        `json:"error"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	Metadata       []byte             `json:"metadata"`
 }
 
 type ControlUser struct {

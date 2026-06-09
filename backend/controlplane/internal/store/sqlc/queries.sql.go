@@ -77,34 +77,340 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 	return i, err
 }
 
+const appendUploadSessionEvent = `-- name: AppendUploadSessionEvent :one
+INSERT INTO control_upload_session_events (
+  event_id, session_id, actor_user_id, actor_org_id, event_type, ts, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING event_id, session_id, actor_user_id, actor_org_id, event_type, ts, metadata
+`
+
+type AppendUploadSessionEventParams struct {
+	EventID     string             `json:"event_id"`
+	SessionID   string             `json:"session_id"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	EventType   string             `json:"event_type"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+func (q *Queries) AppendUploadSessionEvent(ctx context.Context, arg AppendUploadSessionEventParams) (ControlUploadSessionEvent, error) {
+	row := q.db.QueryRow(ctx, appendUploadSessionEvent,
+		arg.EventID,
+		arg.SessionID,
+		arg.ActorUserID,
+		arg.ActorOrgID,
+		arg.EventType,
+		arg.Ts,
+		arg.Metadata,
+	)
+	var i ControlUploadSessionEvent
+	err := row.Scan(
+		&i.EventID,
+		&i.SessionID,
+		&i.ActorUserID,
+		&i.ActorOrgID,
+		&i.EventType,
+		&i.Ts,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const countResourceEventsForUser = `-- name: CountResourceEventsForUser :one
+SELECT COUNT(*)::bigint
+FROM control_resource_events e
+JOIN control_resources r ON r.resource_id = e.resource_id
+WHERE (
+    (
+      r.owner_user_id = $1
+      AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+    )
+    OR (
+      r.status = 'active'
+      AND EXISTS (
+        SELECT 1
+        FROM control_resource_share_grants g
+        WHERE g.resource_id = r.resource_id
+          AND g.status = 'active'
+          AND (
+            (
+              COALESCE(g.grantee_user_id, '') <> ''
+              AND g.grantee_user_id = $1
+              AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+            )
+            OR (
+              COALESCE(g.grantee_user_id, '') = ''
+              AND COALESCE(g.grantee_org_id, '') <> ''
+              AND g.grantee_org_id = $2
+            )
+          )
+      )
+    )
+  )
+  AND ($3::text = '' OR e.resource_id = $3)
+  AND ($4::text = '' OR e.event_type = $4)
+  AND ($5::text = '' OR e.actor_user_id = $5)
+`
+
+type CountResourceEventsForUserParams struct {
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+	Column3     string      `json:"column_3"`
+	Column4     string      `json:"column_4"`
+	Column5     string      `json:"column_5"`
+}
+
+func (q *Queries) CountResourceEventsForUser(ctx context.Context, arg CountResourceEventsForUserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countResourceEventsForUser,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Column3,
+		arg.Column4,
+		arg.Column5,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countResourcesForUser = `-- name: CountResourcesForUser :one
+WITH visible_resources AS (
+  SELECT r.resource_id, r.original_name, r.content_type, r.sha256, r.source_uri, r.project_id,
+         r.source_type, r.resource_kind, r.status AS resource_status, r.metadata,
+         (
+           r.owner_user_id = $1
+           AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+         ) AS is_owner,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+         ) AS active_owner_grant_count,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND COALESCE(g.grantee_user_id, '') = '__public__'
+         ) AS active_public_grant_count,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND (
+               (
+                 COALESCE(g.grantee_user_id, '') <> ''
+                 AND g.grantee_user_id = $1
+                 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+               )
+               OR (
+                 COALESCE(g.grantee_user_id, '') = ''
+                 AND COALESCE(g.grantee_org_id, '') <> ''
+                 AND g.grantee_org_id = $2
+               )
+             )
+         ) AS active_matching_grant_count
+  FROM control_resources r
+  LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+  WHERE (
+      (
+        r.owner_user_id = $1
+        AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+      )
+      OR (
+        r.status = 'active'
+        AND EXISTS (
+          SELECT 1
+          FROM control_resource_share_grants g
+          WHERE g.resource_id = r.resource_id
+            AND g.status = 'active'
+            AND (
+              COALESCE(g.grantee_user_id, '') = '__public__'
+              OR
+              (
+                COALESCE(g.grantee_user_id, '') <> ''
+                AND g.grantee_user_id = $1
+                AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+              )
+              OR (
+                COALESCE(g.grantee_user_id, '') = ''
+                AND COALESCE(g.grantee_org_id, '') <> ''
+                AND g.grantee_org_id = $2
+              )
+            )
+        )
+      )
+    )
+    AND r.status = $3
+    AND ($4::text = '' OR r.resource_kind = $4)
+    AND ($5::text = '' OR r.source_type = $5)
+    AND ($6::text = '' OR r.project_id = $6)
+    AND (
+      $7::text = ''
+      OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
+      OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
+    )
+    AND (
+      cardinality($8::text[]) = 0
+      OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
+    )
+    AND (
+      cardinality($9::text[]) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest($9::text[]) AS metadata_filters(filter)
+        CROSS JOIN LATERAL (
+          SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+                 split_part(metadata_filters.filter, ':', 2) AS operator,
+                 substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+        ) mf
+        CROSS JOIN LATERAL (
+          SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+                 r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+        ) mv
+        WHERE NOT (
+          (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+          OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+          OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+          OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+        )
+      )
+    )
+    AND ($10::timestamptz IS NULL OR r.created_at >= $10)
+    AND ($11::timestamptz IS NULL OR r.created_at <= $11)
+    AND (
+      $12::text = ''
+      OR $12::text = 'all'
+      OR ($12::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'data_agent_ready' AND (
+        lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+      ))
+      OR ($12::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+      OR ($12::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+      OR ($12::text = 'data_agent_failed' AND (
+        lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+      ))
+    )
+    AND (
+      cardinality($14::text[]) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest($14::text[]) AS descriptor_filters(filter)
+        WHERE NOT (
+          COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ? lower(descriptor_filters.filter)
+          OR lower(COALESCE(r.metadata->>'label', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'scientific_descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'diagnosis', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'modality', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'organism', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'species', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,label}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,scientific_descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'labels') = 'array' THEN r.metadata->'labels' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'descriptors') = 'array' THEN r.metadata->'descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'scientific_descriptors') = 'array' THEN r.metadata->'scientific_descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'diagnoses') = 'array' THEN r.metadata->'diagnoses' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,labels}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,labels}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+        )
+      )
+    )
+),
+summarized_resources AS (
+  SELECT resource_id, original_name, content_type, sha256, source_uri, project_id, source_type,
+         resource_kind, resource_status, metadata,
+         CASE
+           WHEN active_public_grant_count > 0 THEN 'public'
+           WHEN is_owner AND active_owner_grant_count > 0 THEN 'shared_by_me'
+           WHEN NOT is_owner AND active_matching_grant_count > 0 THEN 'shared_with_me'
+           ELSE 'private'
+         END::text AS share_status
+  FROM visible_resources
+)
 SELECT count(*)::bigint
-FROM control_resources
-WHERE owner_user_id = $1
-  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
-  AND status = $3
-  AND ($4::text = '' OR resource_kind = $4)
-  AND ($5::text = '' OR source_type = $5)
-  AND ($6::text = '' OR project_id = $6)
-  AND (
-    $7::text = ''
-    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
-    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+FROM summarized_resources
+WHERE (
+    $13::text = ''
+    OR $13::text = 'all'
+    OR share_status = $13
+    OR ($13::text = 'shared' AND share_status IN ('shared_by_me', 'shared_with_me', 'public'))
   )
 `
 
 type CountResourcesForUserParams struct {
-	OwnerUserID string      `json:"owner_user_id"`
-	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
-	Status      string      `json:"status"`
-	Column4     string      `json:"column_4"`
-	Column5     string      `json:"column_5"`
-	Column6     string      `json:"column_6"`
-	Column7     string      `json:"column_7"`
+	OwnerUserID string             `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text        `json:"owner_org_id"`
+	Status      string             `json:"status"`
+	Column4     string             `json:"column_4"`
+	Column5     string             `json:"column_5"`
+	Column6     string             `json:"column_6"`
+	Column7     string             `json:"column_7"`
+	Column8     []string           `json:"column_8"`
+	Column9     []string           `json:"column_9"`
+	Column10    pgtype.Timestamptz `json:"column_10"`
+	Column11    pgtype.Timestamptz `json:"column_11"`
+	Column12    string             `json:"column_12"`
+	Column13    string             `json:"column_13"`
+	Column14    []string           `json:"column_14"`
 }
 
 func (q *Queries) CountResourcesForUser(ctx context.Context, arg CountResourcesForUserParams) (int64, error) {
@@ -116,6 +422,13 @@ func (q *Queries) CountResourcesForUser(ctx context.Context, arg CountResourcesF
 		arg.Column5,
 		arg.Column6,
 		arg.Column7,
+		arg.Column8,
+		arg.Column9,
+		arg.Column10,
+		arg.Column11,
+		arg.Column12,
+		arg.Column13,
+		arg.Column14,
 	)
 	var column_1 int64
 	err := row.Scan(&column_1)
@@ -377,6 +690,138 @@ func (q *Queries) CreateThread(ctx context.Context, arg CreateThreadParams) (Con
 	return i, err
 }
 
+const createUploadSession = `-- name: CreateUploadSession :one
+INSERT INTO control_upload_sessions (
+  session_id, owner_user_id, owner_org_id, owner_role, project_id, source_type, status,
+  total_bytes, bytes_received, bytes_verified, bytes_committed,
+  idempotency_key, browser_fingerprint, error, created_at, updated_at, completed_at, metadata
+)
+VALUES (
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11,
+  $12, $13, $14, $15, $16, $17, $18
+)
+RETURNING session_id, owner_user_id, owner_org_id, owner_role, project_id, source_type, status, total_bytes, bytes_received, bytes_verified, bytes_committed, idempotency_key, browser_fingerprint, error, created_at, updated_at, completed_at, metadata
+`
+
+type CreateUploadSessionParams struct {
+	SessionID          string             `json:"session_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	SourceType         string             `json:"source_type"`
+	Status             string             `json:"status"`
+	TotalBytes         int64              `json:"total_bytes"`
+	BytesReceived      int64              `json:"bytes_received"`
+	BytesVerified      int64              `json:"bytes_verified"`
+	BytesCommitted     int64              `json:"bytes_committed"`
+	IdempotencyKey     pgtype.Text        `json:"idempotency_key"`
+	BrowserFingerprint pgtype.Text        `json:"browser_fingerprint"`
+	Error              pgtype.Text        `json:"error"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	Metadata           []byte             `json:"metadata"`
+}
+
+func (q *Queries) CreateUploadSession(ctx context.Context, arg CreateUploadSessionParams) (ControlUploadSession, error) {
+	row := q.db.QueryRow(ctx, createUploadSession,
+		arg.SessionID,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.OwnerRole,
+		arg.ProjectID,
+		arg.SourceType,
+		arg.Status,
+		arg.TotalBytes,
+		arg.BytesReceived,
+		arg.BytesVerified,
+		arg.BytesCommitted,
+		arg.IdempotencyKey,
+		arg.BrowserFingerprint,
+		arg.Error,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.CompletedAt,
+		arg.Metadata,
+	)
+	var i ControlUploadSession
+	err := row.Scan(
+		&i.SessionID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.ProjectID,
+		&i.SourceType,
+		&i.Status,
+		&i.TotalBytes,
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+		&i.IdempotencyKey,
+		&i.BrowserFingerprint,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const findActiveResourceByShaForUser = `-- name: FindActiveResourceByShaForUser :one
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE owner_user_id = $1
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
+  AND sha256 = $3
+  AND size_bytes = $4
+  AND status = 'active'
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindActiveResourceByShaForUserParams struct {
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+	Sha256      pgtype.Text `json:"sha256"`
+	SizeBytes   int64       `json:"size_bytes"`
+}
+
+func (q *Queries) FindActiveResourceByShaForUser(ctx context.Context, arg FindActiveResourceByShaForUserParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, findActiveResourceByShaForUser,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Sha256,
+		arg.SizeBytes,
+	)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const getArtifact = `-- name: GetArtifact :one
 SELECT artifact_id, run_id, thread_id, kind, path, source_path, preview_path, title, result_group_id, mime_type, size_bytes, sha256, storage_uri, tool_name, category, created_at, updated_at, metadata FROM control_artifacts WHERE artifact_id = $1
 `
@@ -446,13 +891,77 @@ func (q *Queries) GetArtifactForUser(ctx context.Context, arg GetArtifactForUser
 	return i, err
 }
 
-const getResourceForUser = `-- name: GetResourceForUser :one
+const getResourceForOwner = `-- name: GetResourceForOwner :one
 SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 FROM control_resources
 WHERE resource_id = $1
   AND owner_user_id = $2
   AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
-  AND status = 'active'
+`
+
+type GetResourceForOwnerParams struct {
+	ResourceID  string      `json:"resource_id"`
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+}
+
+func (q *Queries) GetResourceForOwner(ctx context.Context, arg GetResourceForOwnerParams) (ControlResource, error) {
+	row := q.db.QueryRow(ctx, getResourceForOwner, arg.ResourceID, arg.OwnerUserID, arg.OwnerOrgID)
+	var i ControlResource
+	err := row.Scan(
+		&i.ResourceID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.OriginalName,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.StorageUri,
+		&i.StoragePath,
+		&i.SourceType,
+		&i.ResourceKind,
+		&i.SourceUri,
+		&i.ProjectID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.RetentionExpiresAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getResourceForUser = `-- name: GetResourceForUser :one
+SELECT r.resource_id, r.owner_user_id, r.owner_org_id, r.owner_role, r.original_name, r.content_type, r.size_bytes, r.sha256, r.storage_uri, r.storage_path, r.source_type, r.resource_kind, r.source_uri, r.project_id, r.status, r.created_at, r.updated_at, r.deleted_at, r.retention_expires_at, r.metadata
+FROM control_resources r
+WHERE r.resource_id = $1
+  AND (
+    (
+      r.owner_user_id = $2
+      AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $3)
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM control_resource_share_grants g
+      WHERE g.resource_id = r.resource_id
+        AND g.status = 'active'
+        AND (
+          (
+            COALESCE(g.grantee_user_id, '') <> ''
+            AND g.grantee_user_id = $2
+            AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $3)
+          )
+          OR (
+            COALESCE(g.grantee_user_id, '') = ''
+            AND COALESCE(g.grantee_org_id, '') <> ''
+            AND g.grantee_org_id = $3
+          )
+        )
+    )
+  )
+  AND r.status = 'active'
 `
 
 type GetResourceForUserParams struct {
@@ -638,6 +1147,166 @@ func (q *Queries) GetThreadForUser(ctx context.Context, arg GetThreadForUserPara
 	return i, err
 }
 
+const getUploadSessionByIdempotencyKey = `-- name: GetUploadSessionByIdempotencyKey :one
+SELECT session_id, owner_user_id, owner_org_id, owner_role, project_id, source_type, status, total_bytes, bytes_received, bytes_verified, bytes_committed, idempotency_key, browser_fingerprint, error, created_at, updated_at, completed_at, metadata
+FROM control_upload_sessions
+WHERE owner_user_id = $1
+  AND COALESCE(owner_org_id, '') = COALESCE($2::text, '')
+  AND idempotency_key = $3
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetUploadSessionByIdempotencyKeyParams struct {
+	OwnerUserID    string      `json:"owner_user_id"`
+	Column2        string      `json:"column_2"`
+	IdempotencyKey pgtype.Text `json:"idempotency_key"`
+}
+
+func (q *Queries) GetUploadSessionByIdempotencyKey(ctx context.Context, arg GetUploadSessionByIdempotencyKeyParams) (ControlUploadSession, error) {
+	row := q.db.QueryRow(ctx, getUploadSessionByIdempotencyKey, arg.OwnerUserID, arg.Column2, arg.IdempotencyKey)
+	var i ControlUploadSession
+	err := row.Scan(
+		&i.SessionID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.ProjectID,
+		&i.SourceType,
+		&i.Status,
+		&i.TotalBytes,
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+		&i.IdempotencyKey,
+		&i.BrowserFingerprint,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getUploadSessionFile = `-- name: GetUploadSessionFile :one
+SELECT session_id, file_token, resource_id, original_name, relative_path, content_type, size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at, completed_at, metadata
+FROM control_upload_session_files
+WHERE session_id = $1
+  AND file_token = $2
+`
+
+type GetUploadSessionFileParams struct {
+	SessionID string `json:"session_id"`
+	FileToken string `json:"file_token"`
+}
+
+func (q *Queries) GetUploadSessionFile(ctx context.Context, arg GetUploadSessionFileParams) (ControlUploadSessionFile, error) {
+	row := q.db.QueryRow(ctx, getUploadSessionFile, arg.SessionID, arg.FileToken)
+	var i ControlUploadSessionFile
+	err := row.Scan(
+		&i.SessionID,
+		&i.FileToken,
+		&i.ResourceID,
+		&i.OriginalName,
+		&i.RelativePath,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.DeclaredSha256,
+		&i.ComputedSha256,
+		&i.Status,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getUploadSessionForUser = `-- name: GetUploadSessionForUser :one
+SELECT session_id, owner_user_id, owner_org_id, owner_role, project_id, source_type, status, total_bytes, bytes_received, bytes_verified, bytes_committed, idempotency_key, browser_fingerprint, error, created_at, updated_at, completed_at, metadata
+FROM control_upload_sessions
+WHERE session_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+`
+
+type GetUploadSessionForUserParams struct {
+	SessionID   string      `json:"session_id"`
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+}
+
+func (q *Queries) GetUploadSessionForUser(ctx context.Context, arg GetUploadSessionForUserParams) (ControlUploadSession, error) {
+	row := q.db.QueryRow(ctx, getUploadSessionForUser, arg.SessionID, arg.OwnerUserID, arg.OwnerOrgID)
+	var i ControlUploadSession
+	err := row.Scan(
+		&i.SessionID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.ProjectID,
+		&i.SourceType,
+		&i.Status,
+		&i.TotalBytes,
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+		&i.IdempotencyKey,
+		&i.BrowserFingerprint,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getUploadSessionTotals = `-- name: GetUploadSessionTotals :one
+SELECT
+  bytes_received,
+  bytes_verified,
+  bytes_committed,
+  (
+    (total_bytes > 0 AND bytes_committed >= total_bytes)
+    OR (
+      total_bytes = 0
+      AND EXISTS (
+        SELECT 1 FROM control_upload_session_files
+        WHERE control_upload_session_files.session_id = s.session_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM control_upload_session_files
+        WHERE control_upload_session_files.session_id = s.session_id
+          AND control_upload_session_files.status <> 'completed'
+      )
+    )
+  ) AS all_complete
+FROM control_upload_sessions AS s
+WHERE s.session_id = $1
+`
+
+type GetUploadSessionTotalsRow struct {
+	BytesReceived  int64       `json:"bytes_received"`
+	BytesVerified  int64       `json:"bytes_verified"`
+	BytesCommitted int64       `json:"bytes_committed"`
+	AllComplete    pgtype.Bool `json:"all_complete"`
+}
+
+func (q *Queries) GetUploadSessionTotals(ctx context.Context, sessionID string) (GetUploadSessionTotalsRow, error) {
+	row := q.db.QueryRow(ctx, getUploadSessionTotals, sessionID)
+	var i GetUploadSessionTotalsRow
+	err := row.Scan(
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+		&i.AllComplete,
+	)
+	return i, err
+}
+
 const insertThreadMessage = `-- name: InsertThreadMessage :one
 INSERT INTO control_thread_messages (message_id, thread_id, role, content, created_at, metadata, run_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -718,6 +1387,90 @@ func (q *Queries) ListResourceEvents(ctx context.Context, arg ListResourceEvents
 	return items, nil
 }
 
+const listResourceEventsForUser = `-- name: ListResourceEventsForUser :many
+SELECT e.event_id, e.resource_id, e.actor_user_id, e.actor_org_id, e.event_type, e.ts, e.metadata
+FROM control_resource_events e
+JOIN control_resources r ON r.resource_id = e.resource_id
+WHERE (
+    (
+      r.owner_user_id = $1
+      AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+    )
+    OR (
+      r.status = 'active'
+      AND EXISTS (
+        SELECT 1
+        FROM control_resource_share_grants g
+        WHERE g.resource_id = r.resource_id
+          AND g.status = 'active'
+          AND (
+            (
+              COALESCE(g.grantee_user_id, '') <> ''
+              AND g.grantee_user_id = $1
+              AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+            )
+            OR (
+              COALESCE(g.grantee_user_id, '') = ''
+              AND COALESCE(g.grantee_org_id, '') <> ''
+              AND g.grantee_org_id = $2
+            )
+          )
+      )
+    )
+  )
+  AND ($3::text = '' OR e.resource_id = $3)
+  AND ($4::text = '' OR e.event_type = $4)
+  AND ($5::text = '' OR e.actor_user_id = $5)
+ORDER BY e.ts DESC, e.event_id ASC
+LIMIT $6 OFFSET $7
+`
+
+type ListResourceEventsForUserParams struct {
+	OwnerUserID string      `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
+	Column3     string      `json:"column_3"`
+	Column4     string      `json:"column_4"`
+	Column5     string      `json:"column_5"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+func (q *Queries) ListResourceEventsForUser(ctx context.Context, arg ListResourceEventsForUserParams) ([]ControlResourceEvent, error) {
+	rows, err := q.db.Query(ctx, listResourceEventsForUser,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Column3,
+		arg.Column4,
+		arg.Column5,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlResourceEvent
+	for rows.Next() {
+		var i ControlResourceEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.ResourceID,
+			&i.ActorUserID,
+			&i.ActorOrgID,
+			&i.EventType,
+			&i.Ts,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listResources = `-- name: ListResources :many
 SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 FROM control_resources
@@ -772,40 +1525,289 @@ func (q *Queries) ListResources(ctx context.Context, arg ListResourcesParams) ([
 }
 
 const listResourcesForUser = `-- name: ListResourcesForUser :many
-SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
-FROM control_resources
-WHERE owner_user_id = $1
-  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $2)
-  AND status = $3
-  AND ($4::text = '' OR resource_kind = $4)
-  AND ($5::text = '' OR source_type = $5)
-  AND ($6::text = '' OR project_id = $6)
-  AND (
-    $7::text = ''
-    OR lower(resource_id) LIKE '%' || lower($7::text) || '%'
-    OR lower(original_name) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(source_uri, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(content_type, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(sha256, '')) LIKE '%' || lower($7::text) || '%'
-    OR lower(COALESCE(project_id, '')) LIKE '%' || lower($7::text) || '%'
+WITH visible_resources AS (
+  SELECT r.resource_id, r.owner_user_id, r.owner_org_id, r.owner_role, r.original_name,
+         r.content_type, r.size_bytes, r.sha256, r.storage_uri, r.storage_path,
+         r.source_type, r.resource_kind, r.source_uri, r.project_id, r.status AS resource_status,
+         r.created_at, r.updated_at, r.deleted_at, r.retention_expires_at, r.metadata,
+         (
+           r.owner_user_id = $1
+           AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+         ) AS is_owner,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+         ) AS active_owner_grant_count,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND COALESCE(g.grantee_user_id, '') = '__public__'
+         ) AS active_public_grant_count,
+         (
+           SELECT count(*)::bigint
+           FROM control_resource_share_grants g
+           WHERE g.resource_id = r.resource_id
+             AND g.status = 'active'
+             AND (
+               (
+                 COALESCE(g.grantee_user_id, '') <> ''
+                 AND g.grantee_user_id = $1
+                 AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+               )
+               OR (
+                 COALESCE(g.grantee_user_id, '') = ''
+                 AND COALESCE(g.grantee_org_id, '') <> ''
+                 AND g.grantee_org_id = $2
+               )
+             )
+         ) AS active_matching_grant_count
+  FROM control_resources r
+  LEFT JOIN control_resource_search_documents sd ON sd.resource_id = r.resource_id
+  WHERE (
+      (
+        r.owner_user_id = $1
+        AND (COALESCE(r.owner_org_id, '') = '' OR r.owner_org_id = $2)
+      )
+      OR (
+        r.status = 'active'
+        AND EXISTS (
+          SELECT 1
+          FROM control_resource_share_grants g
+          WHERE g.resource_id = r.resource_id
+            AND g.status = 'active'
+            AND (
+              COALESCE(g.grantee_user_id, '') = '__public__'
+              OR
+              (
+                COALESCE(g.grantee_user_id, '') <> ''
+                AND g.grantee_user_id = $1
+                AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $2)
+              )
+              OR (
+                COALESCE(g.grantee_user_id, '') = ''
+                AND COALESCE(g.grantee_org_id, '') <> ''
+                AND g.grantee_org_id = $2
+              )
+            )
+        )
+      )
+    )
+    AND r.status = $3
+    AND ($4::text = '' OR r.resource_kind = $4)
+    AND ($5::text = '' OR r.source_type = $5)
+    AND ($6::text = '' OR r.project_id = $6)
+    AND (
+      $7::text = ''
+      OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
+      OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
+    )
+    AND (
+      cardinality($8::text[]) = 0
+      OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
+    )
+    AND (
+      cardinality($9::text[]) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest($9::text[]) AS metadata_filters(filter)
+        CROSS JOIN LATERAL (
+          SELECT split_part(metadata_filters.filter, ':', 1) AS path,
+                 split_part(metadata_filters.filter, ':', 2) AS operator,
+                 substring(metadata_filters.filter from '^[^:]*:[^:]*:(.*)$') AS expected
+        ) mf
+        CROSS JOIN LATERAL (
+          SELECT r.metadata #> regexp_split_to_array(mf.path, E'\\.') AS actual_json,
+                 r.metadata #>> regexp_split_to_array(mf.path, E'\\.') AS actual_text
+        ) mv
+        WHERE NOT (
+          (mf.operator = 'exists' AND mv.actual_json IS NOT NULL)
+          OR (mf.operator = 'eq' AND lower(COALESCE(mv.actual_text, '')) = lower(mf.expected))
+          OR (mf.operator = 'contains' AND lower(COALESCE(mv.actual_text, mv.actual_json::text, '')) LIKE '%' || lower(mf.expected) || '%')
+          OR (mf.operator = 'lt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric < mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'lte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric <= mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'gt' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric > mf.expected::numeric ELSE false END)
+          OR (mf.operator = 'gte' AND CASE WHEN mv.actual_text ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' AND mf.expected ~ '^[+-]?[0-9]+(\\.[0-9]+)?$' THEN mv.actual_text::numeric >= mf.expected::numeric ELSE false END)
+        )
+      )
+    )
+    AND ($10::timestamptz IS NULL OR r.created_at >= $10)
+    AND ($11::timestamptz IS NULL OR r.created_at <= $11)
+    AND (
+      $12::text = ''
+      OR $12::text = 'all'
+      OR ($12::text = 'caption_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'metadata_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'tags_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'qc_complete' AND lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'dedupe_checked' AND lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'organization_ready' AND lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed'))
+      OR ($12::text = 'data_agent_ready' AND (
+        lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('succeeded', 'completed')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('succeeded', 'completed')
+      ))
+      OR ($12::text = 'needs_caption' AND lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) NOT IN ('succeeded', 'completed'))
+      OR ($12::text = 'needs_metadata' AND lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) NOT IN ('succeeded', 'completed'))
+      OR ($12::text = 'data_agent_failed' AND (
+        lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,batch_tag_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,deduplicate_resources,status}', '')) IN ('failed', 'error')
+        OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,status}', '')) IN ('failed', 'error')
+      ))
+    )
+    AND (
+      cardinality($14::text[]) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest($14::text[]) AS descriptor_filters(filter)
+        WHERE NOT (
+          COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ? lower(descriptor_filters.filter)
+          OR lower(COALESCE(r.metadata->>'label', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'scientific_descriptor', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'diagnosis', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'modality', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'organism', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata->>'species', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,caption_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,caption}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,label}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,extract_metadata,scientific_descriptor}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,quality_check_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR lower(COALESCE(r.metadata #>> '{data_agent,organize_resources,summary}', '')) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'labels') = 'array' THEN r.metadata->'labels' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'descriptors') = 'array' THEN r.metadata->'descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'scientific_descriptors') = 'array' THEN r.metadata->'scientific_descriptors' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata->'diagnoses') = 'array' THEN r.metadata->'diagnoses' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,labels}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,labels}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}') = 'array' THEN r.metadata #> '{data_agent,extract_metadata,scientific_descriptors}' ELSE '[]'::jsonb END) AS descriptor_values(value)
+            WHERE lower(descriptor_values.value) LIKE '%' || lower(descriptor_filters.filter) || '%'
+          )
+        )
+      )
+    )
+),
+summarized_resources AS (
+  SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type,
+         size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri,
+         project_id, resource_status, created_at, updated_at, deleted_at, retention_expires_at,
+         metadata,
+         CASE
+           WHEN active_public_grant_count > 0 THEN 'public'
+           WHEN is_owner AND active_owner_grant_count > 0 THEN 'shared_by_me'
+           WHEN NOT is_owner AND active_matching_grant_count > 0 THEN 'shared_with_me'
+           ELSE 'private'
+         END::text AS share_status,
+         CASE
+           WHEN active_public_grant_count > 0 THEN active_public_grant_count
+           WHEN is_owner THEN active_owner_grant_count
+           ELSE active_matching_grant_count
+         END::bigint AS active_grant_count,
+         (active_public_grant_count = 0 AND is_owner AND active_owner_grant_count > 0)::bool AS shared_by_me,
+         (NOT is_owner AND active_matching_grant_count > 0)::bool AS shared_with_me
+  FROM visible_resources
+)
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type,
+       size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri,
+       project_id, resource_status AS status, created_at, updated_at, deleted_at, retention_expires_at, metadata,
+       share_status, active_grant_count, shared_by_me, shared_with_me
+FROM summarized_resources
+WHERE (
+    $13::text = ''
+    OR $13::text = 'all'
+    OR share_status = $13
+    OR ($13::text = 'shared' AND share_status IN ('shared_by_me', 'shared_with_me', 'public'))
   )
 ORDER BY created_at DESC, resource_id ASC
-LIMIT $8 OFFSET $9
+LIMIT $15 OFFSET $16
 `
 
 type ListResourcesForUserParams struct {
-	OwnerUserID string      `json:"owner_user_id"`
-	OwnerOrgID  pgtype.Text `json:"owner_org_id"`
-	Status      string      `json:"status"`
-	Column4     string      `json:"column_4"`
-	Column5     string      `json:"column_5"`
-	Column6     string      `json:"column_6"`
-	Column7     string      `json:"column_7"`
-	Limit       int32       `json:"limit"`
-	Offset      int32       `json:"offset"`
+	OwnerUserID string             `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text        `json:"owner_org_id"`
+	Status      string             `json:"status"`
+	Column4     string             `json:"column_4"`
+	Column5     string             `json:"column_5"`
+	Column6     string             `json:"column_6"`
+	Column7     string             `json:"column_7"`
+	Column8     []string           `json:"column_8"`
+	Column9     []string           `json:"column_9"`
+	Column10    pgtype.Timestamptz `json:"column_10"`
+	Column11    pgtype.Timestamptz `json:"column_11"`
+	Column12    string             `json:"column_12"`
+	Column13    string             `json:"column_13"`
+	Column14    []string           `json:"column_14"`
+	Limit       int32              `json:"limit"`
+	Offset      int32              `json:"offset"`
 }
 
-func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesForUserParams) ([]ControlResource, error) {
+type ListResourcesForUserRow struct {
+	ResourceID         string             `json:"resource_id"`
+	OwnerUserID        string             `json:"owner_user_id"`
+	OwnerOrgID         pgtype.Text        `json:"owner_org_id"`
+	OwnerRole          pgtype.Text        `json:"owner_role"`
+	OriginalName       string             `json:"original_name"`
+	ContentType        pgtype.Text        `json:"content_type"`
+	SizeBytes          int64              `json:"size_bytes"`
+	Sha256             pgtype.Text        `json:"sha256"`
+	StorageUri         pgtype.Text        `json:"storage_uri"`
+	StoragePath        pgtype.Text        `json:"storage_path"`
+	SourceType         string             `json:"source_type"`
+	ResourceKind       string             `json:"resource_kind"`
+	SourceUri          pgtype.Text        `json:"source_uri"`
+	ProjectID          pgtype.Text        `json:"project_id"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
+	RetentionExpiresAt pgtype.Timestamptz `json:"retention_expires_at"`
+	Metadata           []byte             `json:"metadata"`
+	ShareStatus        string             `json:"share_status"`
+	ActiveGrantCount   int64              `json:"active_grant_count"`
+	SharedByMe         bool               `json:"shared_by_me"`
+	SharedWithMe       bool               `json:"shared_with_me"`
+}
+
+func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesForUserParams) ([]ListResourcesForUserRow, error) {
 	rows, err := q.db.Query(ctx, listResourcesForUser,
 		arg.OwnerUserID,
 		arg.OwnerOrgID,
@@ -814,6 +1816,13 @@ func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesFor
 		arg.Column5,
 		arg.Column6,
 		arg.Column7,
+		arg.Column8,
+		arg.Column9,
+		arg.Column10,
+		arg.Column11,
+		arg.Column12,
+		arg.Column13,
+		arg.Column14,
 		arg.Limit,
 		arg.Offset,
 	)
@@ -821,9 +1830,9 @@ func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesFor
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ControlResource
+	var items []ListResourcesForUserRow
 	for rows.Next() {
-		var i ControlResource
+		var i ListResourcesForUserRow
 		if err := rows.Scan(
 			&i.ResourceID,
 			&i.OwnerUserID,
@@ -845,6 +1854,10 @@ func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesFor
 			&i.DeletedAt,
 			&i.RetentionExpiresAt,
 			&i.Metadata,
+			&i.ShareStatus,
+			&i.ActiveGrantCount,
+			&i.SharedByMe,
+			&i.SharedWithMe,
 		); err != nil {
 			return nil, err
 		}
@@ -1471,6 +2484,176 @@ func (q *Queries) ListThreadsForUser(ctx context.Context, arg ListThreadsForUser
 	return items, nil
 }
 
+const listUploadChunks = `-- name: ListUploadChunks :many
+SELECT session_id, file_token, chunk_index, byte_offset, size_bytes, sha256, status, storage_uri, received_at, verified_at, error, metadata
+FROM control_upload_chunks
+WHERE session_id = $1
+  AND file_token = $2
+ORDER BY chunk_index ASC
+`
+
+type ListUploadChunksParams struct {
+	SessionID string `json:"session_id"`
+	FileToken string `json:"file_token"`
+}
+
+func (q *Queries) ListUploadChunks(ctx context.Context, arg ListUploadChunksParams) ([]ControlUploadChunk, error) {
+	rows, err := q.db.Query(ctx, listUploadChunks, arg.SessionID, arg.FileToken)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlUploadChunk
+	for rows.Next() {
+		var i ControlUploadChunk
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.FileToken,
+			&i.ChunkIndex,
+			&i.ByteOffset,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.Status,
+			&i.StorageUri,
+			&i.ReceivedAt,
+			&i.VerifiedAt,
+			&i.Error,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUploadSessionChunks = `-- name: ListUploadSessionChunks :many
+SELECT session_id, file_token, chunk_index, byte_offset, size_bytes, sha256, status, storage_uri, received_at, verified_at, error, metadata
+FROM control_upload_chunks
+WHERE session_id = $1
+ORDER BY file_token ASC, chunk_index ASC
+`
+
+func (q *Queries) ListUploadSessionChunks(ctx context.Context, sessionID string) ([]ControlUploadChunk, error) {
+	rows, err := q.db.Query(ctx, listUploadSessionChunks, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlUploadChunk
+	for rows.Next() {
+		var i ControlUploadChunk
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.FileToken,
+			&i.ChunkIndex,
+			&i.ByteOffset,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.Status,
+			&i.StorageUri,
+			&i.ReceivedAt,
+			&i.VerifiedAt,
+			&i.Error,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUploadSessionEvents = `-- name: ListUploadSessionEvents :many
+SELECT event_id, session_id, actor_user_id, actor_org_id, event_type, ts, metadata
+FROM control_upload_session_events
+WHERE session_id = $1
+ORDER BY ts DESC, event_id ASC
+LIMIT $2
+`
+
+type ListUploadSessionEventsParams struct {
+	SessionID string `json:"session_id"`
+	Limit     int32  `json:"limit"`
+}
+
+func (q *Queries) ListUploadSessionEvents(ctx context.Context, arg ListUploadSessionEventsParams) ([]ControlUploadSessionEvent, error) {
+	rows, err := q.db.Query(ctx, listUploadSessionEvents, arg.SessionID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlUploadSessionEvent
+	for rows.Next() {
+		var i ControlUploadSessionEvent
+		if err := rows.Scan(
+			&i.EventID,
+			&i.SessionID,
+			&i.ActorUserID,
+			&i.ActorOrgID,
+			&i.EventType,
+			&i.Ts,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUploadSessionFiles = `-- name: ListUploadSessionFiles :many
+SELECT session_id, file_token, resource_id, original_name, relative_path, content_type, size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at, completed_at, metadata
+FROM control_upload_session_files
+WHERE session_id = $1
+ORDER BY file_token ASC
+`
+
+func (q *Queries) ListUploadSessionFiles(ctx context.Context, sessionID string) ([]ControlUploadSessionFile, error) {
+	rows, err := q.db.Query(ctx, listUploadSessionFiles, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlUploadSessionFile
+	for rows.Next() {
+		var i ControlUploadSessionFile
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.FileToken,
+			&i.ResourceID,
+			&i.OriginalName,
+			&i.RelativePath,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.DeclaredSha256,
+			&i.ComputedSha256,
+			&i.Status,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextRunEventSequence = `-- name: NextRunEventSequence :one
 SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence FROM control_run_events WHERE run_id = $1
 `
@@ -1679,6 +2862,125 @@ func (q *Queries) UpdateRunStatus(ctx context.Context, arg UpdateRunStatusParams
 	return i, err
 }
 
+const updateUploadSession = `-- name: UpdateUploadSession :one
+UPDATE control_upload_sessions
+SET status = $4,
+    bytes_received = $5,
+    bytes_verified = $6,
+    bytes_committed = $7,
+    error = $8,
+    updated_at = $9,
+    completed_at = $10,
+    metadata = $11
+WHERE session_id = $1
+  AND owner_user_id = $2
+  AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+RETURNING session_id, owner_user_id, owner_org_id, owner_role, project_id, source_type, status, total_bytes, bytes_received, bytes_verified, bytes_committed, idempotency_key, browser_fingerprint, error, created_at, updated_at, completed_at, metadata
+`
+
+type UpdateUploadSessionParams struct {
+	SessionID      string             `json:"session_id"`
+	OwnerUserID    string             `json:"owner_user_id"`
+	OwnerOrgID     pgtype.Text        `json:"owner_org_id"`
+	Status         string             `json:"status"`
+	BytesReceived  int64              `json:"bytes_received"`
+	BytesVerified  int64              `json:"bytes_verified"`
+	BytesCommitted int64              `json:"bytes_committed"`
+	Error          pgtype.Text        `json:"error"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	Metadata       []byte             `json:"metadata"`
+}
+
+func (q *Queries) UpdateUploadSession(ctx context.Context, arg UpdateUploadSessionParams) (ControlUploadSession, error) {
+	row := q.db.QueryRow(ctx, updateUploadSession,
+		arg.SessionID,
+		arg.OwnerUserID,
+		arg.OwnerOrgID,
+		arg.Status,
+		arg.BytesReceived,
+		arg.BytesVerified,
+		arg.BytesCommitted,
+		arg.Error,
+		arg.UpdatedAt,
+		arg.CompletedAt,
+		arg.Metadata,
+	)
+	var i ControlUploadSession
+	err := row.Scan(
+		&i.SessionID,
+		&i.OwnerUserID,
+		&i.OwnerOrgID,
+		&i.OwnerRole,
+		&i.ProjectID,
+		&i.SourceType,
+		&i.Status,
+		&i.TotalBytes,
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+		&i.IdempotencyKey,
+		&i.BrowserFingerprint,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const uploadSessionOperationalMetrics = `-- name: UploadSessionOperationalMetrics :one
+SELECT
+  COUNT(*)::bigint AS total,
+  COUNT(*) FILTER (WHERE status = 'active')::bigint AS active,
+  COUNT(*) FILTER (WHERE status = 'paused')::bigint AS paused,
+  COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed,
+  COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed,
+  COUNT(*) FILTER (WHERE status IN ('canceled', 'cancelled'))::bigint AS canceled,
+  COUNT(*) FILTER (
+    WHERE status NOT IN ('active', 'paused', 'completed', 'failed', 'canceled', 'cancelled')
+  )::bigint AS other,
+  COALESCE(SUM(total_bytes), 0)::bigint AS bytes_total,
+  COALESCE(SUM(bytes_received), 0)::bigint AS bytes_received,
+  COALESCE(SUM(bytes_verified), 0)::bigint AS bytes_verified,
+  COALESCE(SUM(bytes_committed), 0)::bigint AS bytes_committed
+FROM control_upload_sessions
+`
+
+type UploadSessionOperationalMetricsRow struct {
+	Total          int64 `json:"total"`
+	Active         int64 `json:"active"`
+	Paused         int64 `json:"paused"`
+	Completed      int64 `json:"completed"`
+	Failed         int64 `json:"failed"`
+	Canceled       int64 `json:"canceled"`
+	Other          int64 `json:"other"`
+	BytesTotal     int64 `json:"bytes_total"`
+	BytesReceived  int64 `json:"bytes_received"`
+	BytesVerified  int64 `json:"bytes_verified"`
+	BytesCommitted int64 `json:"bytes_committed"`
+}
+
+func (q *Queries) UploadSessionOperationalMetrics(ctx context.Context) (UploadSessionOperationalMetricsRow, error) {
+	row := q.db.QueryRow(ctx, uploadSessionOperationalMetrics)
+	var i UploadSessionOperationalMetricsRow
+	err := row.Scan(
+		&i.Total,
+		&i.Active,
+		&i.Paused,
+		&i.Completed,
+		&i.Failed,
+		&i.Canceled,
+		&i.Other,
+		&i.BytesTotal,
+		&i.BytesReceived,
+		&i.BytesVerified,
+		&i.BytesCommitted,
+	)
+	return i, err
+}
+
 const upsertResource = `-- name: UpsertResource :one
 INSERT INTO control_resources (
   resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type,
@@ -1779,6 +3081,158 @@ func (q *Queries) UpsertResource(ctx context.Context, arg UpsertResourceParams) 
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.RetentionExpiresAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const upsertUploadChunk = `-- name: UpsertUploadChunk :one
+INSERT INTO control_upload_chunks (
+  session_id, file_token, chunk_index, byte_offset, size_bytes, sha256, status,
+  storage_uri, received_at, verified_at, error, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (session_id, file_token, chunk_index) DO UPDATE SET
+  byte_offset = EXCLUDED.byte_offset,
+  size_bytes = EXCLUDED.size_bytes,
+  sha256 = EXCLUDED.sha256,
+  status = EXCLUDED.status,
+  storage_uri = EXCLUDED.storage_uri,
+  received_at = EXCLUDED.received_at,
+  verified_at = EXCLUDED.verified_at,
+  error = EXCLUDED.error,
+  metadata = EXCLUDED.metadata
+WHERE control_upload_chunks.status <> 'verified'
+   OR (
+    control_upload_chunks.byte_offset = EXCLUDED.byte_offset
+    AND control_upload_chunks.size_bytes = EXCLUDED.size_bytes
+    AND lower(control_upload_chunks.sha256) = lower(EXCLUDED.sha256)
+  )
+RETURNING session_id, file_token, chunk_index, byte_offset, size_bytes, sha256, status, storage_uri, received_at, verified_at, error, metadata
+`
+
+type UpsertUploadChunkParams struct {
+	SessionID  string             `json:"session_id"`
+	FileToken  string             `json:"file_token"`
+	ChunkIndex int32              `json:"chunk_index"`
+	ByteOffset int64              `json:"byte_offset"`
+	SizeBytes  int64              `json:"size_bytes"`
+	Sha256     string             `json:"sha256"`
+	Status     string             `json:"status"`
+	StorageUri pgtype.Text        `json:"storage_uri"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+	VerifiedAt pgtype.Timestamptz `json:"verified_at"`
+	Error      pgtype.Text        `json:"error"`
+	Metadata   []byte             `json:"metadata"`
+}
+
+func (q *Queries) UpsertUploadChunk(ctx context.Context, arg UpsertUploadChunkParams) (ControlUploadChunk, error) {
+	row := q.db.QueryRow(ctx, upsertUploadChunk,
+		arg.SessionID,
+		arg.FileToken,
+		arg.ChunkIndex,
+		arg.ByteOffset,
+		arg.SizeBytes,
+		arg.Sha256,
+		arg.Status,
+		arg.StorageUri,
+		arg.ReceivedAt,
+		arg.VerifiedAt,
+		arg.Error,
+		arg.Metadata,
+	)
+	var i ControlUploadChunk
+	err := row.Scan(
+		&i.SessionID,
+		&i.FileToken,
+		&i.ChunkIndex,
+		&i.ByteOffset,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.Status,
+		&i.StorageUri,
+		&i.ReceivedAt,
+		&i.VerifiedAt,
+		&i.Error,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const upsertUploadSessionFile = `-- name: UpsertUploadSessionFile :one
+INSERT INTO control_upload_session_files (
+  session_id, file_token, resource_id, original_name, relative_path, content_type,
+  size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at, completed_at, metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+ON CONFLICT (session_id, file_token) DO UPDATE SET
+  resource_id = EXCLUDED.resource_id,
+  original_name = EXCLUDED.original_name,
+  relative_path = EXCLUDED.relative_path,
+  content_type = EXCLUDED.content_type,
+  size_bytes = EXCLUDED.size_bytes,
+  declared_sha256 = EXCLUDED.declared_sha256,
+  computed_sha256 = EXCLUDED.computed_sha256,
+  status = EXCLUDED.status,
+  error = EXCLUDED.error,
+  updated_at = EXCLUDED.updated_at,
+  completed_at = EXCLUDED.completed_at,
+  metadata = EXCLUDED.metadata
+RETURNING session_id, file_token, resource_id, original_name, relative_path, content_type, size_bytes, declared_sha256, computed_sha256, status, error, created_at, updated_at, completed_at, metadata
+`
+
+type UpsertUploadSessionFileParams struct {
+	SessionID      string             `json:"session_id"`
+	FileToken      string             `json:"file_token"`
+	ResourceID     pgtype.Text        `json:"resource_id"`
+	OriginalName   string             `json:"original_name"`
+	RelativePath   pgtype.Text        `json:"relative_path"`
+	ContentType    pgtype.Text        `json:"content_type"`
+	SizeBytes      int64              `json:"size_bytes"`
+	DeclaredSha256 pgtype.Text        `json:"declared_sha256"`
+	ComputedSha256 pgtype.Text        `json:"computed_sha256"`
+	Status         string             `json:"status"`
+	Error          pgtype.Text        `json:"error"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	Metadata       []byte             `json:"metadata"`
+}
+
+func (q *Queries) UpsertUploadSessionFile(ctx context.Context, arg UpsertUploadSessionFileParams) (ControlUploadSessionFile, error) {
+	row := q.db.QueryRow(ctx, upsertUploadSessionFile,
+		arg.SessionID,
+		arg.FileToken,
+		arg.ResourceID,
+		arg.OriginalName,
+		arg.RelativePath,
+		arg.ContentType,
+		arg.SizeBytes,
+		arg.DeclaredSha256,
+		arg.ComputedSha256,
+		arg.Status,
+		arg.Error,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.CompletedAt,
+		arg.Metadata,
+	)
+	var i ControlUploadSessionFile
+	err := row.Scan(
+		&i.SessionID,
+		&i.FileToken,
+		&i.ResourceID,
+		&i.OriginalName,
+		&i.RelativePath,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.DeclaredSha256,
+		&i.ComputedSha256,
+		&i.Status,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
 		&i.Metadata,
 	)
 	return i, err

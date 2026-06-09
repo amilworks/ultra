@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -328,6 +329,2375 @@ func TestMemoryStoreResourceCatalogFiltersSoftDeletesAndRestores(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreListResourceEventsForUserScopesAndFilters(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	base := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inputs := []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_alice_active",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "alice-active.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    base,
+		},
+		{
+			ResourceID:   "file_alice_deleted",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "alice-deleted.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "deleted",
+			CreatedAt:    base.Add(time.Minute),
+			DeletedAt:    base.Add(5 * time.Minute),
+		},
+		{
+			ResourceID:   "file_bob_private",
+			OwnerUserID:  "bob",
+			OwnerOrgID:   "org-b",
+			OriginalName: "bob-private.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    base.Add(2 * time.Minute),
+		},
+	}
+	for _, input := range inputs {
+		if _, err := store.UpsertResource(ctx, input); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", input.ResourceID, err)
+		}
+	}
+	if _, err := store.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		ResourceID:      "file_alice_active",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		Status:          "active",
+		CreatedByUserID: "alice",
+		CreatedAt:       base.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	events := []domain.AppendResourceEventInput{
+		{ResourceID: "file_alice_active", ActorUserID: "alice", ActorOrgID: "org-a", EventType: "resource.tagged", TS: base.Add(4 * time.Minute), Metadata: domain.JSONMap{"tag": "NPH"}},
+		{ResourceID: "file_alice_deleted", ActorUserID: "alice", ActorOrgID: "org-a", EventType: "resource.deleted", TS: base.Add(5 * time.Minute)},
+		{ResourceID: "file_bob_private", ActorUserID: "bob", ActorOrgID: "org-b", EventType: "resource.tagged", TS: base.Add(6 * time.Minute), Metadata: domain.JSONMap{"tag": "private"}},
+	}
+	for _, event := range events {
+		if _, err := store.CreateResourceEvent(ctx, event); err != nil {
+			t.Fatalf("CreateResourceEvent(%s): %v", event.ResourceID, err)
+		}
+	}
+
+	aliceEvents, err := store.ListResourceEventsForUser(ctx, domain.ResourceEventListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser alice: %v", err)
+	}
+	if aliceEvents.TotalCount != 2 || len(aliceEvents.Events) != 2 {
+		t.Fatalf("alice events = %+v, want active and deleted owned events", aliceEvents)
+	}
+	if aliceEvents.Events[0].EventType != "resource.deleted" || aliceEvents.Events[1].EventType != "resource.tagged" {
+		t.Fatalf("alice event order/types = %+v, want deleted then tagged", aliceEvents.Events)
+	}
+
+	deletedEvents, err := store.ListResourceEventsForUser(ctx, domain.ResourceEventListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		EventType: "resource.deleted",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser deleted: %v", err)
+	}
+	if deletedEvents.TotalCount != 1 || len(deletedEvents.Events) != 1 || deletedEvents.Events[0].ResourceID != "file_alice_deleted" {
+		t.Fatalf("deleted events = %+v, want only alice deleted resource event", deletedEvents)
+	}
+
+	bobEvents, err := store.ListResourceEventsForUser(ctx, domain.ResourceEventListInput{
+		UserID:     "bob",
+		OrgID:      "org-b",
+		ResourceID: "file_alice_active",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser bob shared resource: %v", err)
+	}
+	if bobEvents.TotalCount != 1 || len(bobEvents.Events) != 1 || bobEvents.Events[0].ResourceID != "file_alice_active" {
+		t.Fatalf("bob shared events = %+v, want only shared active resource event", bobEvents)
+	}
+
+	foreignEvents, err := store.ListResourceEventsForUser(ctx, domain.ResourceEventListInput{
+		UserID: "charlie",
+		OrgID:  "org-c",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser charlie: %v", err)
+	}
+	if foreignEvents.TotalCount != 0 || len(foreignEvents.Events) != 0 {
+		t.Fatalf("charlie events = %+v, want no leaked audit events", foreignEvents)
+	}
+}
+
+func TestMemoryStoreListResourceIDsForOwner(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	for _, input := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_owner_org",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "owner-org.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+		},
+		{
+			ResourceID:   "file_owner_no_org",
+			OwnerUserID:  "alice",
+			OriginalName: "owner-no-org.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+		},
+		{
+			ResourceID:   "file_other_owner",
+			OwnerUserID:  "bob",
+			OwnerOrgID:   "org-a",
+			OriginalName: "other-owner.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, input); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", input.ResourceID, err)
+		}
+	}
+
+	existing, err := store.ListResourceIDsForOwner(ctx, " alice ", " org-a ", []string{
+		" file_owner_org ",
+		"file_owner_org",
+		"file_owner_no_org",
+		"file_other_owner",
+		"file_missing",
+		"",
+	})
+	if err != nil {
+		t.Fatalf("ListResourceIDsForOwner: %v", err)
+	}
+	if !existing["file_owner_org"] || !existing["file_owner_no_org"] {
+		t.Fatalf("existing = %+v, want owned org and no-org resources", existing)
+	}
+	if existing["file_other_owner"] || existing["file_missing"] || len(existing) != 2 {
+		t.Fatalf("existing = %+v, want only resources visible to owner", existing)
+	}
+}
+
+func TestMemoryStoreResourceCatalogSearchesDataAgentMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_captioned",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "image-001.png",
+			ContentType:  "image/png",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata: domain.JSONMap{
+				"label": "NPH",
+				"data_agent": domain.JSONMap{
+					"caption_resources": domain.JSONMap{
+						"status":  "succeeded",
+						"caption": "Prairie microscopy image with deterministic metadata caption.",
+					},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_other",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "control-image.png",
+			ContentType:  "image/png",
+			SizeBytes:    64,
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+			Metadata:     domain.JSONMap{"label": "Control"},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	captionMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Query:  "deterministic metadata caption",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser caption query: %v", err)
+	}
+	if captionMatches.TotalCount != 1 || len(captionMatches.Resources) != 1 || captionMatches.Resources[0].ResourceID != "file_captioned" {
+		t.Fatalf("caption search resources = %+v, want captioned resource only", captionMatches)
+	}
+
+	labelMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Query:  "nph",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser metadata label query: %v", err)
+	}
+	if labelMatches.TotalCount != 1 || len(labelMatches.Resources) != 1 || labelMatches.Resources[0].ResourceID != "file_captioned" {
+		t.Fatalf("metadata label search resources = %+v, want NPH resource only", labelMatches)
+	}
+
+	internalKeyMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Query:  "caption_resources",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser internal metadata key query: %v", err)
+	}
+	if internalKeyMatches.TotalCount != 0 || len(internalKeyMatches.Resources) != 0 {
+		t.Fatalf("internal metadata key search resources = %+v, want no resources", internalKeyMatches)
+	}
+}
+
+func TestMemoryStoreResourceCatalogFiltersByTags(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_nph_a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "patient-a.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now,
+			Tags:         []string{"NPH", "Under 70", "MRI"},
+		},
+		{
+			ResourceID:   "file_control",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "control.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    256,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			Tags:         []string{"control", "MRI"},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	matches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Tags:   []string{"nph", "under 70"},
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser tag filter: %v", err)
+	}
+	if matches.TotalCount != 1 || len(matches.Resources) != 1 || matches.Resources[0].ResourceID != "file_nph_a" {
+		t.Fatalf("tag-filtered resources = %+v, want only NPH under-70 resource", matches)
+	}
+	if got := matches.Resources[0].Tags; !reflect.DeepEqual(got, []string{"NPH", "Under 70", "MRI"}) {
+		t.Fatalf("resource tags = %#v, want normalized persisted display tags", got)
+	}
+
+	queryMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Query:  "under 70",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser tag query: %v", err)
+	}
+	if queryMatches.TotalCount != 1 || len(queryMatches.Resources) != 1 || queryMatches.Resources[0].ResourceID != "file_nph_a" {
+		t.Fatalf("tag query resources = %+v, want tag-matched NPH resource", queryMatches)
+	}
+}
+
+func TestMemoryStoreResourceCatalogFiltersScientificMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_nph_under_70",
+			OwnerUserID:  "metadata-user",
+			OwnerOrgID:   "metadata-org",
+			OriginalName: "sub-001.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now,
+			Metadata: domain.JSONMap{
+				"label":       "NPH",
+				"format":      "nifti",
+				"subject_age": float64(68),
+			},
+		},
+		{
+			ResourceID:   "file_nph_over_70",
+			OwnerUserID:  "metadata-user",
+			OwnerOrgID:   "metadata-org",
+			OriginalName: "sub-002.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"label":       "NPH",
+				"format":      "nifti",
+				"subject_age": float64(74),
+			},
+		},
+		{
+			ResourceID:   "file_control_under_70",
+			OwnerUserID:  "metadata-user",
+			OwnerOrgID:   "metadata-org",
+			OriginalName: "sub-003.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			Metadata: domain.JSONMap{
+				"label":       "control",
+				"format":      "nifti",
+				"subject_age": float64(63),
+			},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	matches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "metadata-user",
+		OrgID:  "metadata-org",
+		MetadataFilters: []domain.ResourceMetadataFilter{
+			{Path: "label", Operator: "eq", Value: "NPH"},
+			{Path: "format", Operator: "eq", Value: "nifti"},
+			{Path: "subject_age", Operator: "lt", Value: "70"},
+		},
+		Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser metadata filters: %v", err)
+	}
+	if matches.TotalCount != 1 || len(matches.Resources) != 1 || matches.Resources[0].ResourceID != "file_nph_under_70" {
+		t.Fatalf("metadata-filtered resources = %+v, want only NPH under-70 NIfTI", matches)
+	}
+}
+
+func TestMemoryStoreResourceCatalogFiltersScientificDescriptors(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 9, 12, 30, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_nph_ventriculomegaly",
+			OwnerUserID:  "descriptor-user",
+			OwnerOrgID:   "descriptor-org",
+			OriginalName: "sub-001.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now,
+			Metadata: domain.JSONMap{
+				"label":                  "NPH",
+				"scientific_descriptors": []any{"ventriculomegaly", "MRI cohort"},
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{
+						"status":      "succeeded",
+						"descriptors": []any{"Evans index high", "lateral ventricle enlargement"},
+					},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_control",
+			OwnerUserID:  "descriptor-user",
+			OwnerOrgID:   "descriptor-org",
+			OriginalName: "sub-002.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"label":                  "control",
+				"scientific_descriptors": []any{"normal ventricles", "MRI cohort"},
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{
+						"status":      "succeeded",
+						"descriptors": []any{"Evans index normal"},
+					},
+				},
+			},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	matches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:      "descriptor-user",
+		OrgID:       "descriptor-org",
+		Descriptors: []string{"ventriculomegaly", "Evans index high"},
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser descriptor filters: %v", err)
+	}
+	if matches.TotalCount != 1 || len(matches.Resources) != 1 || matches.Resources[0].ResourceID != "file_nph_ventriculomegaly" {
+		t.Fatalf("descriptor-filtered resources = %+v, want only NPH ventriculomegaly resource", matches)
+	}
+}
+
+func TestMemoryStoreResourceCatalogFiltersProcessingStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_caption_ready",
+			OwnerUserID:  "processing-user",
+			OwnerOrgID:   "processing-org",
+			OriginalName: "caption-ready.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now,
+			Metadata: domain.JSONMap{
+				"data_agent": domain.JSONMap{
+					"caption_resources": domain.JSONMap{"status": "succeeded"},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_metadata_ready",
+			OwnerUserID:  "processing-user",
+			OwnerOrgID:   "processing-org",
+			OriginalName: "metadata-ready.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"data_agent": domain.JSONMap{
+					"extract_metadata": domain.JSONMap{"status": "succeeded"},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_needs_caption",
+			OwnerUserID:  "processing-user",
+			OwnerOrgID:   "processing-org",
+			OriginalName: "needs-caption.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	captionReady, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:           "processing-user",
+		OrgID:            "processing-org",
+		ProcessingStatus: "caption_ready",
+		Limit:            20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser caption_ready: %v", err)
+	}
+	if captionReady.TotalCount != 1 || len(captionReady.Resources) != 1 || captionReady.Resources[0].ResourceID != "file_caption_ready" {
+		t.Fatalf("caption-ready resources = %+v, want only caption-ready resource", captionReady)
+	}
+
+	agentReady, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:           "processing-user",
+		OrgID:            "processing-org",
+		ProcessingStatus: "data_agent_ready",
+		Limit:            20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser data_agent_ready: %v", err)
+	}
+	if agentReady.TotalCount != 2 {
+		t.Fatalf("data-agent-ready resources = %+v, want caption or metadata ready resources", agentReady)
+	}
+
+	needsCaption, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:           "processing-user",
+		OrgID:            "processing-org",
+		ProcessingStatus: "needs_caption",
+		Limit:            20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser needs_caption: %v", err)
+	}
+	if needsCaption.TotalCount != 2 {
+		t.Fatalf("needs-caption resources = %+v, want resources without a successful caption job", needsCaption)
+	}
+}
+
+func TestMemoryStoreResourceCatalogFiltersCreatedDate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	base := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_before_window",
+			OwnerUserID:  "date-user",
+			OwnerOrgID:   "date-org",
+			OriginalName: "before-window.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    base,
+		},
+		{
+			ResourceID:   "file_inside_window",
+			OwnerUserID:  "date-user",
+			OwnerOrgID:   "date-org",
+			OriginalName: "inside-window.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    base.Add(48 * time.Hour),
+		},
+		{
+			ResourceID:   "file_after_window",
+			OwnerUserID:  "date-user",
+			OwnerOrgID:   "date-org",
+			OriginalName: "after-window.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    base.Add(96 * time.Hour),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	matches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID:        "date-user",
+		OrgID:         "date-org",
+		CreatedAfter:  base.Add(24 * time.Hour),
+		CreatedBefore: base.Add(72 * time.Hour),
+		Limit:         20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser date filters: %v", err)
+	}
+	if matches.TotalCount != 1 || len(matches.Resources) != 1 || matches.Resources[0].ResourceID != "file_inside_window" {
+		t.Fatalf("date-filtered resources = %+v, want only inside-window resource", matches)
+	}
+}
+
+func TestMemoryStoreBulkTagResourcesForUserAuditsEachResource(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_batch_a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "batch-a.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			Tags:         []string{"raw"},
+		},
+		{
+			ResourceID:   "file_batch_b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			OriginalName: "batch-b.nii.gz",
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	result, err := store.BulkTagResourcesForUser(ctx, domain.BulkTagResourcesInput{
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		ActorUserID: "alice",
+		ActorOrgID:  "org-a",
+		ResourceIDs: []string{"file_batch_a", "file_batch_b"},
+		Tags:        []string{"NPH", "MRI", "nph"},
+	})
+	if err != nil {
+		t.Fatalf("BulkTagResourcesForUser: %v", err)
+	}
+	if result.UpdatedCount != 2 || len(result.Resources) != 2 || len(result.Events) != 2 {
+		t.Fatalf("bulk tag result = %+v, want two resources and two audit events", result)
+	}
+	expectedTags := map[string][]string{
+		"file_batch_a": []string{"raw", "NPH", "MRI"},
+		"file_batch_b": []string{"NPH", "MRI"},
+	}
+	for _, resource := range result.Resources {
+		if !reflect.DeepEqual(resource.Tags, expectedTags[resource.ResourceID]) {
+			t.Fatalf("resource %s tags = %#v, want %#v", resource.ResourceID, resource.Tags, expectedTags[resource.ResourceID])
+		}
+		events, err := store.ListResourceEvents(ctx, resource.ResourceID, 10)
+		if err != nil {
+			t.Fatalf("ListResourceEvents(%s): %v", resource.ResourceID, err)
+		}
+		if len(events) != 1 || events[0].EventType != "resource.tagged" || events[0].Metadata["tags_added"] == nil {
+			t.Fatalf("events for %s = %+v, want resource.tagged audit event", resource.ResourceID, events)
+		}
+	}
+}
+
+func TestMemoryStoreResourceReadGrantMakesResourceVisibleToGrantee(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_shared_read",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		OriginalName: "shared-nph-study.nii.gz",
+		ContentType:  "application/gzip",
+		SizeBytes:    512,
+		SHA256:       "sha-shared-read",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+
+	before, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser before grant: %v", err)
+	}
+	if before.TotalCount != 0 || len(before.Resources) != 0 {
+		t.Fatalf("bob resources before grant = %+v, want none", before)
+	}
+	if _, err := store.GetResourceForUser(ctx, "file_shared_read", "bob", "org-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetResourceForUser before grant err = %v, want ErrNotFound", err)
+	}
+
+	grant, err := store.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		GrantID:         "resource_grant_shared_read",
+		ResourceID:      "file_shared_read",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+		Metadata:        domain.JSONMap{"reason": "collaborative review"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	if grant.Status != "active" || grant.ResourceID != "file_shared_read" || grant.GranteeUserID != "bob" || grant.Role != "read" {
+		t.Fatalf("grant = %+v, want active bob read grant", grant)
+	}
+
+	after, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Query:  "shared-nph",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser after grant: %v", err)
+	}
+	if after.TotalCount != 1 || len(after.Resources) != 1 || after.Resources[0].ResourceID != "file_shared_read" {
+		t.Fatalf("bob resources after grant = %+v, want shared resource", after)
+	}
+	if after.Resources[0].OwnerUserID != "alice" {
+		t.Fatalf("shared resource owner = %q, want alice", after.Resources[0].OwnerUserID)
+	}
+	loaded, err := store.GetResourceForUser(ctx, "file_shared_read", "bob", "org-b")
+	if err != nil {
+		t.Fatalf("GetResourceForUser after grant: %v", err)
+	}
+	if loaded.ResourceID != "file_shared_read" || loaded.OwnerUserID != "alice" {
+		t.Fatalf("loaded shared resource = %+v, want Alice-owned file", loaded)
+	}
+}
+
+func TestMemoryStoreResourceShareGrantRevocationRemovesCollaboratorAccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 17, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_revoked_share",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		OriginalName: "revoked-nph-study.nii.gz",
+		ContentType:  "application/gzip",
+		SizeBytes:    512,
+		SHA256:       "sha-revoked-share",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	grant, err := store.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		GrantID:         "resource_grant_revoked_share",
+		ResourceID:      "file_revoked_share",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	if _, err := store.GetResourceForUser(ctx, "file_revoked_share", "bob", "org-b"); err != nil {
+		t.Fatalf("GetResourceForUser before revoke: %v", err)
+	}
+	grants, err := store.ListResourceShareGrantsForResource(ctx, domain.ListResourceShareGrantsInput{
+		ResourceID:  "file_revoked_share",
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceShareGrantsForResource: %v", err)
+	}
+	if len(grants) != 1 || grants[0].GrantID != grant.GrantID || grants[0].Status != "active" {
+		t.Fatalf("grants before revoke = %+v, want active grant", grants)
+	}
+
+	revokedAt := now.Add(2 * time.Second)
+	revoked, err := store.RevokeResourceShareGrant(ctx, domain.RevokeResourceShareGrantInput{
+		ResourceID:  "file_revoked_share",
+		GrantID:     grant.GrantID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		RevokedAt:   revokedAt,
+	})
+	if err != nil {
+		t.Fatalf("RevokeResourceShareGrant: %v", err)
+	}
+	if revoked.Status != "revoked" || !revoked.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("revoked grant = %+v, want revoked at %s", revoked, revokedAt)
+	}
+	if _, err := store.GetResourceForUser(ctx, "file_revoked_share", "bob", "org-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetResourceForUser after revoke err = %v, want ErrNotFound", err)
+	}
+	after, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Query:  "revoked-nph",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser after revoke: %v", err)
+	}
+	if after.TotalCount != 0 || len(after.Resources) != 0 {
+		t.Fatalf("bob resources after revoke = %+v, want none", after)
+	}
+	allGrants, err := store.ListResourceShareGrantsForResource(ctx, domain.ListResourceShareGrantsInput{
+		ResourceID:  "file_revoked_share",
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceShareGrantsForResource after revoke: %v", err)
+	}
+	if len(allGrants) != 1 || allGrants[0].Status != "revoked" {
+		t.Fatalf("grants after revoke = %+v, want revoked grant retained for audit", allGrants)
+	}
+}
+
+func TestMemoryStoreUploadSessionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := domain.Now()
+
+	session, err := store.CreateUploadSession(ctx, domain.CreateUploadSessionInput{
+		SessionID:          "upload_session_test",
+		OwnerUserID:        "alice",
+		OwnerOrgID:         "org-a",
+		ProjectID:          "project-a",
+		Status:             "active",
+		TotalBytes:         12,
+		IdempotencyKey:     "idem-1",
+		BrowserFingerprint: "folder-a",
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	})
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if session.SessionID != "upload_session_test" || session.Status != "active" {
+		t.Fatalf("session = %+v, want active upload_session_test", session)
+	}
+
+	file, err := store.UpsertUploadSessionFile(ctx, domain.UpsertUploadSessionFileInput{
+		SessionID:      session.SessionID,
+		FileToken:      "file_token_a",
+		OriginalName:   "cells.ome.tiff",
+		RelativePath:   "batch-a/cells.ome.tiff",
+		ContentType:    "image/tiff",
+		SizeBytes:      12,
+		Status:         "active",
+		DeclaredSHA256: "declared",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("UpsertUploadSessionFile: %v", err)
+	}
+	if file.RelativePath != "batch-a/cells.ome.tiff" {
+		t.Fatalf("file relative path = %q", file.RelativePath)
+	}
+
+	chunk, err := store.UpsertUploadChunk(ctx, domain.UpsertUploadChunkInput{
+		SessionID:  session.SessionID,
+		FileToken:  file.FileToken,
+		ChunkIndex: 0,
+		Offset:     0,
+		SizeBytes:  12,
+		SHA256:     "chunk-sha",
+		Status:     "verified",
+		StorageURI: "file://chunk",
+		ReceivedAt: now,
+		VerifiedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("UpsertUploadChunk: %v", err)
+	}
+	if chunk.Status != "verified" {
+		t.Fatalf("chunk status = %q, want verified", chunk.Status)
+	}
+
+	loaded, err := store.GetUploadSessionForUser(ctx, session.SessionID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetUploadSessionForUser: %v", err)
+	}
+	if loaded.TotalBytes != 12 {
+		t.Fatalf("loaded total bytes = %d, want 12", loaded.TotalBytes)
+	}
+
+	chunks, err := store.ListUploadSessionChunks(ctx, session.SessionID)
+	if err != nil {
+		t.Fatalf("ListUploadSessionChunks: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].FileToken != file.FileToken || chunks[0].ChunkIndex != 0 {
+		t.Fatalf("session chunks = %+v, want uploaded chunk ordered by file token/index", chunks)
+	}
+	totals, err := store.GetUploadSessionTotals(ctx, session.SessionID)
+	if err != nil {
+		t.Fatalf("GetUploadSessionTotals: %v", err)
+	}
+	if totals.BytesReceived != 12 || totals.BytesVerified != 12 || totals.BytesCommitted != 0 || totals.AllComplete {
+		t.Fatalf("session totals = %+v, want received/verified bytes without committed completion", totals)
+	}
+}
+
+func TestMemoryStoreUploadChunkDoesNotReplaceVerifiedBytes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := domain.Now()
+
+	if _, err := store.CreateUploadSession(ctx, domain.CreateUploadSessionInput{
+		SessionID:   "upload_session_verified_conflict",
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Status:      "active",
+		TotalBytes:  6,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if _, err := store.UpsertUploadSessionFile(ctx, domain.UpsertUploadSessionFileInput{
+		SessionID:    "upload_session_verified_conflict",
+		FileToken:    "file-a",
+		OriginalName: "cells.ome.tiff",
+		SizeBytes:    6,
+		Status:       "uploading",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertUploadSessionFile: %v", err)
+	}
+
+	verified, err := store.UpsertUploadChunk(ctx, domain.UpsertUploadChunkInput{
+		SessionID:  "upload_session_verified_conflict",
+		FileToken:  "file-a",
+		ChunkIndex: 0,
+		Offset:     0,
+		SizeBytes:  6,
+		SHA256:     "abcdef",
+		Status:     "verified",
+		ReceivedAt: now,
+		VerifiedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("UpsertUploadChunk verified: %v", err)
+	}
+	replayed, err := store.UpsertUploadChunk(ctx, domain.UpsertUploadChunkInput{
+		SessionID:  "upload_session_verified_conflict",
+		FileToken:  "file-a",
+		ChunkIndex: 0,
+		Offset:     0,
+		SizeBytes:  6,
+		SHA256:     "ABCDEF",
+		Status:     "verified",
+		ReceivedAt: now,
+		VerifiedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("idempotent UpsertUploadChunk replay: %v", err)
+	}
+	if replayed.SHA256 != "ABCDEF" {
+		t.Fatalf("idempotent replay chunk = %+v, want replay accepted with same digest", replayed)
+	}
+
+	if _, err := store.UpsertUploadChunk(ctx, domain.UpsertUploadChunkInput{
+		SessionID:  "upload_session_verified_conflict",
+		FileToken:  "file-a",
+		ChunkIndex: 0,
+		Offset:     0,
+		SizeBytes:  6,
+		SHA256:     "different",
+		Status:     "verified",
+		ReceivedAt: now,
+		VerifiedAt: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting verified UpsertUploadChunk err = %v, want ErrConflict", err)
+	}
+	chunks, err := store.ListUploadChunks(ctx, "upload_session_verified_conflict", "file-a")
+	if err != nil {
+		t.Fatalf("ListUploadChunks: %v", err)
+	}
+	if len(chunks) != 1 || !sameVerifiedUploadChunk(chunks[0], verified) {
+		t.Fatalf("chunks after conflict = %+v, want original verified manifest", chunks)
+	}
+}
+
+func TestMemoryStoreResourceCollectionBulkMembership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_alice_a",
+			OriginalName: "alice-a.nii.gz",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_alice_b",
+			OriginalName: "alice-b.nii.gz",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "file_bob_foreign",
+			OriginalName: "bob-private.nii.gz",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    20,
+			OwnerUserID:  "bob",
+			OwnerOrgID:   "org-b",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	collection, err := store.CreateResourceCollection(ctx, domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_alice_nph",
+		OwnerUserID:    "alice",
+		OwnerOrgID:     "org-a",
+		ProjectID:      "nph-study",
+		Name:           "NPH NIfTI Files",
+		Description:    "Curated NPH brain imaging resources",
+		CollectionType: "folder",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Metadata:       domain.JSONMap{"label": "NPH"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if collection.CollectionID != "collection_alice_nph" || collection.CollectionType != "folder" || collection.ResourceCount != 0 {
+		t.Fatalf("collection = %+v, want empty folder collection", collection)
+	}
+
+	added, err := store.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_alice_a", "file_alice_b"},
+		AddedByUserID: "alice",
+		AddedAt:       now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+	if added.AddedCount != 2 || len(added.Memberships) != 2 {
+		t.Fatalf("added = %+v, want two collection memberships", added)
+	}
+
+	page, err := store.ListResourceCollectionsForUser(ctx, domain.ResourceCollectionListInput{
+		UserID: "alice",
+		OrgID:  "org-a",
+		Type:   "folder",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceCollectionsForUser: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Collections) != 1 || page.Collections[0].ResourceCount != 2 {
+		t.Fatalf("collection page = %+v, want one folder with two resources", page)
+	}
+
+	memberPage, err := store.ListResourcesForCollectionForUser(ctx, domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       "alice",
+		OrgID:        "org-a",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForCollectionForUser: %v", err)
+	}
+	if memberPage.TotalCount != 2 || len(memberPage.Resources) != 2 {
+		t.Fatalf("member resources = %+v, want two resources", memberPage)
+	}
+	if got := []string{memberPage.Resources[0].ResourceID, memberPage.Resources[1].ResourceID}; got[0] != "file_alice_a" || got[1] != "file_alice_b" {
+		t.Fatalf("member resource order = %+v, want insertion order", got)
+	}
+
+	if _, err := store.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_bob_foreign"},
+		AddedByUserID: "alice",
+		AddedAt:       now.Add(3 * time.Second),
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AddResourcesToCollection foreign resource error = %v, want ErrNotFound", err)
+	}
+
+	if _, err := store.ListResourcesForCollectionForUser(ctx, domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       "bob",
+		OrgID:        "org-b",
+		Limit:        10,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign collection list error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryStoreResourceCollectionShareGrantAppliesToFutureMembers(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 20, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_folder_acl_initial",
+			OriginalName: "initial-folder-acl.nii.gz",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_folder_acl_future",
+			OriginalName: "future-folder-acl.nii.gz",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	collection, err := store.CreateResourceCollection(ctx, domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_folder_acl",
+		OwnerUserID:    "alice",
+		OwnerOrgID:     "org-a",
+		Name:           "Inherited ACL folder",
+		CollectionType: "folder",
+		Status:         "active",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := store.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_folder_acl_initial"},
+		AddedByUserID: "alice",
+		AddedAt:       now,
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection initial: %v", err)
+	}
+
+	shareResult, err := store.CreateResourceCollectionShareGrant(ctx, domain.CreateResourceCollectionShareGrantInput{
+		GrantID:         "collection_grant_folder_acl",
+		CollectionID:    collection.CollectionID,
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"reason": "folder review"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollectionShareGrant: %v", err)
+	}
+	if shareResult.Grant.CollectionID != collection.CollectionID || len(shareResult.ResourceGrants) != 1 {
+		t.Fatalf("shareResult = %+v, want collection grant and initial resource grant", shareResult)
+	}
+	if shareResult.ResourceGrants[0].ResourceID != "file_folder_acl_initial" {
+		t.Fatalf("initial resource grant = %+v, want initial folder member", shareResult.ResourceGrants[0])
+	}
+
+	added, err := store.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_folder_acl_future"},
+		AddedByUserID: "alice",
+		AddedAt:       now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("AddResourcesToCollection future: %v", err)
+	}
+	if len(added.InheritedShareGrants) != 1 {
+		t.Fatalf("future inherited grants = %+v, want one inherited resource grant", added.InheritedShareGrants)
+	}
+	futureGrant := added.InheritedShareGrants[0]
+	if futureGrant.ResourceID != "file_folder_acl_future" || futureGrant.GranteeUserID != "bob" || futureGrant.GranteeOrgID != "org-b" || futureGrant.Role != "read" || futureGrant.Status != "active" {
+		t.Fatalf("future inherited grant = %+v, want active Bob read grant", futureGrant)
+	}
+	if futureGrant.Metadata["collection_share_grant_id"] != "collection_grant_folder_acl" || futureGrant.Metadata["source"] != "resource_collection_share_inherited" {
+		t.Fatalf("future inherited grant metadata = %+v, want collection-share provenance", futureGrant.Metadata)
+	}
+
+	bobCollections, err := store.ListResourceCollectionsForUser(ctx, domain.ResourceCollectionListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Query:  "Inherited ACL",
+		Type:   "folder",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceCollectionsForUser as bob: %v", err)
+	}
+	if bobCollections.TotalCount != 1 || len(bobCollections.Collections) != 1 || bobCollections.Collections[0].CollectionID != collection.CollectionID {
+		t.Fatalf("bob collections = %+v, want shared folder", bobCollections)
+	}
+	bobCollection, err := store.GetResourceCollectionForUser(ctx, collection.CollectionID, "bob", "org-b")
+	if err != nil {
+		t.Fatalf("GetResourceCollectionForUser as bob: %v", err)
+	}
+	if bobCollection.ResourceCount != 2 {
+		t.Fatalf("bob collection = %+v, want two visible members", bobCollection)
+	}
+	bobMembers, err := store.ListResourcesForCollectionForUser(ctx, domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       "bob",
+		OrgID:        "org-b",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForCollectionForUser as bob: %v", err)
+	}
+	if bobMembers.TotalCount != 2 || len(bobMembers.Resources) != 2 {
+		t.Fatalf("bob folder resources = %+v, want shared current and future folder members", bobMembers)
+	}
+	if !bobMembers.Resources[0].ShareSummary.SharedWithMe || !bobMembers.Resources[1].ShareSummary.SharedWithMe {
+		t.Fatalf("bob folder share summaries = %+v, %+v, want shared_with_me", bobMembers.Resources[0].ShareSummary, bobMembers.Resources[1].ShareSummary)
+	}
+
+	bobPage, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Query:  "folder-acl",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser as bob: %v", err)
+	}
+	if bobPage.TotalCount != 2 || len(bobPage.Resources) != 2 {
+		t.Fatalf("bob resources = %+v, want both current and future folder members", bobPage)
+	}
+}
+
+func TestMemoryStoreResourceCollectionResourceFilters(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_nph_under_70",
+			OriginalName: "nph-under-70.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata: domain.JSONMap{
+				"cohort": "NPH",
+				"data_agent": domain.JSONMap{
+					"caption_resources": domain.JSONMap{
+						"caption": "NPH patient under seventy with shunt imaging metadata.",
+						"status":  "succeeded",
+					},
+				},
+			},
+		},
+		{
+			ResourceID:   "file_nph_table",
+			OriginalName: "nph-clinical-table.csv",
+			ResourceKind: "table",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+		{
+			ResourceID:   "file_control_under_70",
+			OriginalName: "control-under-70.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "bisque_import",
+			SizeBytes:    20,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	collection, err := store.CreateResourceCollection(ctx, domain.CreateResourceCollectionInput{
+		CollectionID:   "collection_alice_nph_filters",
+		OwnerUserID:    "alice",
+		OwnerOrgID:     "org-a",
+		Name:           "NPH filter review",
+		CollectionType: "folder",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceCollection: %v", err)
+	}
+	if _, err := store.AddResourcesToCollection(ctx, domain.AddResourcesToCollectionInput{
+		CollectionID:  collection.CollectionID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		ResourceIDs:   []string{"file_nph_under_70", "file_nph_table", "file_control_under_70"},
+		AddedByUserID: "alice",
+		AddedAt:       now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("AddResourcesToCollection: %v", err)
+	}
+
+	page, err := store.ListResourcesForCollectionForUser(ctx, domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       "alice",
+		OrgID:        "org-a",
+		Query:        "nph",
+		Kind:         "file",
+		Source:       "upload",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForCollectionForUser: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Resources) != 1 || page.Resources[0].ResourceID != "file_nph_under_70" {
+		t.Fatalf("filtered collection resources = %+v, want only uploaded NPH file resource", page)
+	}
+
+	metadataPage, err := store.ListResourcesForCollectionForUser(ctx, domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       "alice",
+		OrgID:        "org-a",
+		Query:        "shunt imaging metadata",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForCollectionForUser metadata query: %v", err)
+	}
+	if metadataPage.TotalCount != 1 || len(metadataPage.Resources) != 1 || metadataPage.Resources[0].ResourceID != "file_nph_under_70" {
+		t.Fatalf("metadata-filtered collection resources = %+v, want NPH shunt resource", metadataPage)
+	}
+}
+
+func TestMemoryStoreDatasetSnapshotFreezesResourceManifest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 13, 30, 0, 0, time.UTC)
+
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_snapshot_a",
+			OriginalName: "nph-a.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			SHA256:       "sha-a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_snapshot_b",
+			OriginalName: "nph-b.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			SHA256:       "sha-b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	snapshot, entries, err := store.CreateDatasetSnapshot(ctx, domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_nph_v1",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "project-nph",
+		Name:            "NPH training cohort v1",
+		Description:     "Frozen manifest for NPH model training",
+		ResourceIDs:     []string{"file_snapshot_a", "file_snapshot_b"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"source": "unit_test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot: %v", err)
+	}
+	if snapshot.ResourceCount != 2 || snapshot.TotalBytes != 27 || len(entries) != 2 {
+		t.Fatalf("snapshot = %+v entries=%+v, want frozen two-resource manifest", snapshot, entries)
+	}
+	if entries[0].ResourceID != "file_snapshot_a" || entries[0].SHA256 != "sha-a" || entries[0].SizeBytes != 12 {
+		t.Fatalf("first snapshot entry = %+v, want original file_snapshot_a manifest", entries[0])
+	}
+
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_snapshot_a",
+		OriginalName: "nph-a-renamed.nii.gz",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		SizeBytes:    99,
+		SHA256:       "sha-a-mutated",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("mutate resource: %v", err)
+	}
+
+	loaded, loadedEntries, err := store.GetDatasetSnapshotForUser(ctx, snapshot.SnapshotID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetDatasetSnapshotForUser: %v", err)
+	}
+	if loaded.SnapshotID != snapshot.SnapshotID || len(loadedEntries) != 2 {
+		t.Fatalf("loaded snapshot = %+v entries=%+v, want same frozen manifest", loaded, loadedEntries)
+	}
+	if loadedEntries[0].OriginalName != "nph-a.nii.gz" || loadedEntries[0].SHA256 != "sha-a" || loadedEntries[0].SizeBytes != 12 {
+		t.Fatalf("loaded first entry = %+v, want immutable pre-mutation manifest", loadedEntries[0])
+	}
+
+	page, err := store.ListDatasetSnapshotsForUser(ctx, domain.DatasetSnapshotListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		ProjectID: "project-nph",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotsForUser: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Snapshots) != 1 || page.Snapshots[0].SnapshotID != snapshot.SnapshotID {
+		t.Fatalf("snapshot page = %+v, want the visible dataset snapshot", page)
+	}
+	otherUserPage, err := store.ListDatasetSnapshotsForUser(ctx, domain.DatasetSnapshotListInput{
+		UserID: "bob",
+		OrgID:  "org-a",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotsForUser other user: %v", err)
+	}
+	if otherUserPage.TotalCount != 0 || len(otherUserPage.Snapshots) != 0 {
+		t.Fatalf("other user page = %+v, want owner-isolated snapshots", otherUserPage)
+	}
+}
+
+func TestMemoryStoreDatasetSnapshotShareGrantAllowsCollaboratorRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 14, 0, 0, 0, time.UTC)
+
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_shared_snapshot_a",
+			OriginalName: "shared-nph-a.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    32,
+			SHA256:       "sha-shared-a",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_shared_snapshot_b",
+			OriginalName: "shared-nph-b.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    64,
+			SHA256:       "sha-shared-b",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	snapshot, entries, err := store.CreateDatasetSnapshot(ctx, domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_share_v1",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		Name:            "Shared NPH cohort",
+		ResourceIDs:     []string{"file_shared_snapshot_a", "file_shared_snapshot_b"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"source": "unit_test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("snapshot entries = %+v, want frozen two-resource manifest", entries)
+	}
+
+	if _, _, err := store.GetDatasetSnapshotForUser(ctx, snapshot.SnapshotID, "bob", "org-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetDatasetSnapshotForUser before grant err = %v, want ErrNotFound", err)
+	}
+	beforeGrant, err := store.ListDatasetSnapshotsForUser(ctx, domain.DatasetSnapshotListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotsForUser before grant: %v", err)
+	}
+	if beforeGrant.TotalCount != 0 || len(beforeGrant.Snapshots) != 0 {
+		t.Fatalf("before grant page = %+v, want no visible snapshots", beforeGrant)
+	}
+
+	grant, err := store.CreateDatasetSnapshotShareGrant(ctx, domain.CreateDatasetSnapshotShareGrantInput{
+		GrantID:         "dataset_snapshot_grant_bob",
+		SnapshotID:      snapshot.SnapshotID,
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(3 * time.Second),
+		Metadata:        domain.JSONMap{"reason": "review cohort"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshotShareGrant: %v", err)
+	}
+	if grant.Status != "active" || grant.Role != "read" || grant.SnapshotID != snapshot.SnapshotID {
+		t.Fatalf("grant = %+v, want active read snapshot grant", grant)
+	}
+
+	loaded, loadedEntries, err := store.GetDatasetSnapshotForUser(ctx, snapshot.SnapshotID, "bob", "org-b")
+	if err != nil {
+		t.Fatalf("GetDatasetSnapshotForUser after grant: %v", err)
+	}
+	if loaded.SnapshotID != snapshot.SnapshotID || loaded.OwnerUserID != "alice" {
+		t.Fatalf("loaded shared snapshot = %+v, want original owner-visible snapshot", loaded)
+	}
+	if len(loadedEntries) != 2 || loadedEntries[0].SHA256 != "sha-shared-a" {
+		t.Fatalf("loaded shared entries = %+v, want frozen manifest", loadedEntries)
+	}
+	afterGrant, err := store.ListDatasetSnapshotsForUser(ctx, domain.DatasetSnapshotListInput{
+		UserID: "bob",
+		OrgID:  "org-b",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotsForUser after grant: %v", err)
+	}
+	if afterGrant.TotalCount != 1 || len(afterGrant.Snapshots) != 1 || afterGrant.Snapshots[0].SnapshotID != snapshot.SnapshotID {
+		t.Fatalf("after grant page = %+v, want shared snapshot", afterGrant)
+	}
+
+	grants, err := store.ListDatasetSnapshotShareGrants(ctx, domain.ListDatasetSnapshotShareGrantsInput{
+		SnapshotID:  snapshot.SnapshotID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Status:      "active",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotShareGrants: %v", err)
+	}
+	if len(grants) != 1 || grants[0].GrantID != grant.GrantID {
+		t.Fatalf("grants = %+v, want owner-visible active grant", grants)
+	}
+
+	revoked, err := store.RevokeDatasetSnapshotShareGrant(ctx, domain.RevokeDatasetSnapshotShareGrantInput{
+		SnapshotID:       snapshot.SnapshotID,
+		GrantID:          grant.GrantID,
+		OwnerUserID:      "alice",
+		OwnerOrgID:       "org-a",
+		RevokedByUserID:  "alice",
+		RevokedAt:        now.Add(4 * time.Second),
+		RevocationReason: "cohort review complete",
+	})
+	if err != nil {
+		t.Fatalf("RevokeDatasetSnapshotShareGrant: %v", err)
+	}
+	if revoked.Status != "revoked" || revoked.RevokedAt.IsZero() {
+		t.Fatalf("revoked grant = %+v, want revoked lifecycle state", revoked)
+	}
+	if _, _, err := store.GetDatasetSnapshotForUser(ctx, snapshot.SnapshotID, "bob", "org-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetDatasetSnapshotForUser after revoke err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryStoreDatasetSnapshotEventsAuditCreateShareRevoke(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_event_snapshot_a",
+		OriginalName: "event-nph-a.nii.gz",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		SizeBytes:    48,
+		SHA256:       "sha-event-a",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		ProjectID:    "project-event",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	snapshot, _, err := store.CreateDatasetSnapshot(ctx, domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_events_v1",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "project-event",
+		Name:            "Evented NPH cohort",
+		ResourceIDs:     []string{"file_event_snapshot_a"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+		Metadata:        domain.JSONMap{"source": "unit_test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot: %v", err)
+	}
+
+	ownerEvents, err := store.ListDatasetSnapshotEventsForUser(ctx, domain.DatasetSnapshotEventListInput{
+		SnapshotID: snapshot.SnapshotID,
+		UserID:     "alice",
+		OrgID:      "org-a",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotEventsForUser owner after create: %v", err)
+	}
+	if ownerEvents.TotalCount != 1 || len(ownerEvents.Events) != 1 || ownerEvents.Events[0].EventType != "dataset_snapshot.created" {
+		t.Fatalf("owner events after create = %+v, want dataset_snapshot.created", ownerEvents)
+	}
+	if ownerEvents.Events[0].ActorUserID != "alice" || ownerEvents.Events[0].Metadata["snapshot_name"] != "Evented NPH cohort" {
+		t.Fatalf("created event = %+v, want actor and snapshot metadata", ownerEvents.Events[0])
+	}
+	if _, err := store.ListDatasetSnapshotEventsForUser(ctx, domain.DatasetSnapshotEventListInput{
+		SnapshotID: snapshot.SnapshotID,
+		UserID:     "bob",
+		OrgID:      "org-b",
+		Limit:      10,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bob events before grant err = %v, want ErrNotFound", err)
+	}
+
+	grant, err := store.CreateDatasetSnapshotShareGrant(ctx, domain.CreateDatasetSnapshotShareGrantInput{
+		GrantID:         "dataset_snapshot_event_grant_bob",
+		SnapshotID:      snapshot.SnapshotID,
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		GranteeUserID:   "bob",
+		GranteeOrgID:    "org-b",
+		Role:            "read",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshotShareGrant: %v", err)
+	}
+	bobEvents, err := store.ListDatasetSnapshotEventsForUser(ctx, domain.DatasetSnapshotEventListInput{
+		SnapshotID: snapshot.SnapshotID,
+		UserID:     "bob",
+		OrgID:      "org-b",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotEventsForUser bob after grant: %v", err)
+	}
+	if bobEvents.TotalCount != 2 || len(bobEvents.Events) != 2 || bobEvents.Events[0].EventType != "dataset_snapshot.shared" || bobEvents.Events[0].Metadata["grant_id"] != grant.GrantID {
+		t.Fatalf("bob events after grant = %+v, want shared then created events", bobEvents)
+	}
+
+	if _, err := store.RevokeDatasetSnapshotShareGrant(ctx, domain.RevokeDatasetSnapshotShareGrantInput{
+		SnapshotID:      snapshot.SnapshotID,
+		GrantID:         grant.GrantID,
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		RevokedByUserID: "alice",
+		RevokedAt:       now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("RevokeDatasetSnapshotShareGrant: %v", err)
+	}
+	ownerEvents, err = store.ListDatasetSnapshotEventsForUser(ctx, domain.DatasetSnapshotEventListInput{
+		SnapshotID: snapshot.SnapshotID,
+		UserID:     "alice",
+		OrgID:      "org-a",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListDatasetSnapshotEventsForUser owner after revoke: %v", err)
+	}
+	if ownerEvents.TotalCount != 3 || len(ownerEvents.Events) != 3 || ownerEvents.Events[0].EventType != "dataset_snapshot.share_revoked" {
+		t.Fatalf("owner events after revoke = %+v, want revoke/share/create audit trail", ownerEvents)
+	}
+	if _, err := store.ListDatasetSnapshotEventsForUser(ctx, domain.DatasetSnapshotEventListInput{
+		SnapshotID: snapshot.SnapshotID,
+		UserID:     "bob",
+		OrgID:      "org-b",
+		Limit:      10,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bob events after revoke err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryStoreDatasetSnapshotFromResourceQueryFreezesMatches(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := domain.Now()
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_query_old_nph",
+			OriginalName: "NPH_shunt_001_69yo.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    21,
+			SHA256:       "sha-query-old",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "project-nph",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata:     domain.JSONMap{"age": 69, "diagnosis": "NPH"},
+		},
+		{
+			ResourceID:   "file_query_young_nph",
+			OriginalName: "NPH_shunt_002_62yo.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    34,
+			SHA256:       "sha-query-young",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "project-nph",
+			Status:       "active",
+			Tags:         []string{"NPH", "Under 70"},
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+			Metadata:     domain.JSONMap{"age": 62, "diagnosis": "NPH"},
+		},
+		{
+			ResourceID:   "file_query_older_nph",
+			OriginalName: "NPH_shunt_003_74yo.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    55,
+			SHA256:       "sha-query-older",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "project-nph",
+			Status:       "active",
+			Tags:         []string{"NPH", "Over 70"},
+			CreatedAt:    now.Add(2 * time.Second),
+			UpdatedAt:    now.Add(2 * time.Second),
+			Metadata:     domain.JSONMap{"age": 74, "diagnosis": "NPH"},
+		},
+		{
+			ResourceID:   "file_query_control_under70",
+			OriginalName: "control_004_66yo.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    89,
+			SHA256:       "sha-query-control",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			ProjectID:    "project-nph",
+			Status:       "active",
+			Tags:         []string{"Under 70"},
+			CreatedAt:    now.Add(3 * time.Second),
+			UpdatedAt:    now.Add(3 * time.Second),
+			Metadata:     domain.JSONMap{"age": 66, "diagnosis": "control"},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	snapshot, entries, err := store.CreateDatasetSnapshot(ctx, domain.CreateDatasetSnapshotInput{
+		SnapshotID:      "dataset_snapshot_query_under70",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		Name:            "NPH under 70 query cohort",
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(3 * time.Second),
+		ResourceQuery: &domain.DatasetSnapshotResourceQuery{
+			Query:     "NPH",
+			ProjectID: "project-nph",
+			Kind:      "file",
+			Source:    "upload",
+			Tags:      []string{"Under 70"},
+			MetadataFilters: []domain.ResourceMetadataFilter{
+				{Path: "diagnosis", Operator: "eq", Value: "NPH"},
+				{Path: "age", Operator: "lt", Value: "70"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDatasetSnapshot query: %v", err)
+	}
+	if snapshot.ResourceCount != 2 || snapshot.TotalBytes != 55 || len(entries) != 2 {
+		t.Fatalf("query snapshot = %+v entries=%+v, want two matching under-70 files", snapshot, entries)
+	}
+	got := []string{entries[0].ResourceID, entries[1].ResourceID}
+	if got[0] != "file_query_young_nph" || got[1] != "file_query_old_nph" {
+		t.Fatalf("query snapshot order = %v, want newest matching resources first", got)
+	}
+}
+
+func TestMemoryStoreDataAgentJobLifecycleRecordsEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 14, 30, 0, 0, time.UTC)
+
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_agent_a",
+			OriginalName: "nph-a.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_agent_b",
+			OriginalName: "nph-b.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			UpdatedAt:    now.Add(time.Second),
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	job, err := store.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_nph_caption",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		JobType:         "caption_resources",
+		ResourceIDs:     []string{"file_agent_a", "file_agent_b"},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{"file_agent_a", "file_agent_b"}, "label": "NPH"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+		Metadata:        domain.JSONMap{"requested_from": "unit_test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+	if job.JobID != "data_agent_job_nph_caption" || job.Status != "queued" || job.ResourceCount != 2 || job.ProgressTotal != 2 {
+		t.Fatalf("job = %+v, want queued two-resource data-agent job", job)
+	}
+	if got := job.InputSelector["label"]; got != "NPH" {
+		t.Fatalf("job input selector label = %#v, want NPH", got)
+	}
+
+	createdEvents, err := store.ListDataAgentJobEvents(ctx, job.JobID, "alice", "org-a", 10)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents after create: %v", err)
+	}
+	if len(createdEvents) != 1 || createdEvents[0].EventType != "data_agent.job.created" || createdEvents[0].Sequence != 1 {
+		t.Fatalf("created job events = %+v, want one created event at sequence 1", createdEvents)
+	}
+
+	progressEvent, err := store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		ActorUserID: "alice",
+		ActorOrgID:  "org-a",
+		EventType:   "data_agent.job.progressed",
+		Message:     "Captioned file_agent_a",
+		TS:          now.Add(3 * time.Second),
+		Metadata:    domain.JSONMap{"completed": float64(1)},
+	})
+	if err != nil {
+		t.Fatalf("AppendDataAgentJobEvent: %v", err)
+	}
+	if progressEvent.Sequence != 2 {
+		t.Fatalf("progress event sequence = %d, want 2", progressEvent.Sequence)
+	}
+
+	running, runningEvent, err := store.UpdateDataAgentJob(ctx, domain.UpdateDataAgentJobInput{
+		JobID:             job.JobID,
+		OwnerUserID:       "alice",
+		OwnerOrgID:        "org-a",
+		Status:            "running",
+		ProgressCompleted: 1,
+		ProgressTotal:     2,
+		ActorUserID:       "alice",
+		ActorOrgID:        "org-a",
+		Message:           "Captioned first resource",
+		EventMetadata:     domain.JSONMap{"resource_id": "file_agent_a"},
+		UpdatedAt:         now.Add(4 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("UpdateDataAgentJob running: %v", err)
+	}
+	if running.Status != "running" || running.ProgressCompleted != 1 || running.StartedAt.IsZero() {
+		t.Fatalf("running job = %+v, want running progress with start time", running)
+	}
+	if runningEvent.Sequence != 3 || runningEvent.EventType != "data_agent.job.progressed" {
+		t.Fatalf("running event = %+v, want progressed event at sequence 3", runningEvent)
+	}
+
+	canceled, canceledEvent, err := store.ControlDataAgentJob(ctx, domain.ControlDataAgentJobInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Action:      "cancel",
+		Reason:      "User paused this batch before field upload resumed.",
+		ActorUserID: "alice",
+		ActorOrgID:  "org-a",
+		TS:          now.Add(5 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("ControlDataAgentJob cancel: %v", err)
+	}
+	if canceled.Status != "canceled" || canceled.Error == "" || canceled.CompletedAt.IsZero() {
+		t.Fatalf("canceled job = %+v, want canceled terminal job with reason", canceled)
+	}
+	if canceledEvent.Sequence != 4 || canceledEvent.EventType != "data_agent.job.canceled" {
+		t.Fatalf("canceled event = %+v, want canceled event at sequence 4", canceledEvent)
+	}
+
+	retried, retriedEvent, err := store.ControlDataAgentJob(ctx, domain.ControlDataAgentJobInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Action:      "retry",
+		Reason:      "Network recovered.",
+		ActorUserID: "alice",
+		ActorOrgID:  "org-a",
+		TS:          now.Add(6 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("ControlDataAgentJob retry: %v", err)
+	}
+	if retried.Status != "queued" || retried.ProgressCompleted != 0 || retried.Error != "" || !retried.CompletedAt.IsZero() {
+		t.Fatalf("retried job = %+v, want reset queued job", retried)
+	}
+	if retriedEvent.Sequence != 5 || retriedEvent.EventType != "data_agent.job.retried" {
+		t.Fatalf("retried event = %+v, want retried event at sequence 5", retriedEvent)
+	}
+
+	loaded, err := store.GetDataAgentJobForUser(ctx, job.JobID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetDataAgentJobForUser: %v", err)
+	}
+	if loaded.JobID != job.JobID || loaded.ProjectID != "nph-study" {
+		t.Fatalf("loaded job = %+v, want created job", loaded)
+	}
+
+	page, err := store.ListDataAgentJobsForUser(ctx, domain.DataAgentJobListInput{
+		UserID:  "alice",
+		OrgID:   "org-a",
+		Status:  "queued",
+		JobType: "caption_resources",
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("ListDataAgentJobsForUser: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Jobs) != 1 || page.Jobs[0].JobID != job.JobID {
+		t.Fatalf("job page = %+v, want created queued caption job", page)
+	}
+
+	lifecycleEvents, err := store.ListDataAgentJobEvents(ctx, job.JobID, "alice", "org-a", 10)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents after lifecycle: %v", err)
+	}
+	if len(lifecycleEvents) != 5 || lifecycleEvents[4].EventType != "data_agent.job.retried" {
+		t.Fatalf("lifecycle events = %+v, want five ordered lifecycle events", lifecycleEvents)
+	}
+
+	if _, err := store.GetDataAgentJobForUser(ctx, job.JobID, "bob", "org-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign GetDataAgentJobForUser error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryStoreDataAgentJobLeaseLifecycle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 15, 30, 0, 0, time.UTC)
+
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_agent_lease_a",
+		OriginalName: "lease-a.nii.gz",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		SizeBytes:    12,
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := store.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_lease",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_agent_lease_a"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+
+	lease, leasedJob, event, err := store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-a",
+		TTL:         time.Minute,
+		Now:         now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("AcquireDataAgentJobLease: %v", err)
+	}
+	if lease.JobID != job.JobID || lease.WorkerID != "data-agent-worker-a" || lease.LeaseToken == "" {
+		t.Fatalf("lease = %+v, want worker-a lease token", lease)
+	}
+	if !lease.LeaseExpiresAt.Equal(now.Add(62 * time.Second)) {
+		t.Fatalf("lease expiry = %s, want now+ttl", lease.LeaseExpiresAt)
+	}
+	if leasedJob.Status != "running" || leasedJob.StartedAt.IsZero() {
+		t.Fatalf("leased job = %+v, want running with started_at", leasedJob)
+	}
+	if event.Sequence != 2 || event.EventType != "data_agent.job.leased" || event.Metadata["worker_id"] != "data-agent-worker-a" {
+		t.Fatalf("lease event = %+v, want leased event at sequence 2", event)
+	}
+
+	if _, _, _, err := store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-b",
+		TTL:         time.Minute,
+		Now:         now.Add(3 * time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("competing AcquireDataAgentJobLease err = %v, want ErrConflict", err)
+	}
+
+	if _, err := store.RenewDataAgentJobLease(ctx, domain.RenewDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		LeaseToken:  "wrong-token",
+		TTL:         2 * time.Minute,
+		Now:         now.Add(4 * time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("RenewDataAgentJobLease wrong token err = %v, want ErrConflict", err)
+	}
+	renewed, err := store.RenewDataAgentJobLease(ctx, domain.RenewDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		LeaseToken:  lease.LeaseToken,
+		TTL:         2 * time.Minute,
+		Now:         now.Add(4 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("RenewDataAgentJobLease: %v", err)
+	}
+	if !renewed.LeaseExpiresAt.Equal(now.Add(124 * time.Second)) {
+		t.Fatalf("renewed lease expiry = %s, want renewed now+ttl", renewed.LeaseExpiresAt)
+	}
+
+	if err := store.ReleaseDataAgentJobLease(ctx, domain.ReleaseDataAgentJobLeaseInput{JobID: job.JobID, OwnerUserID: "alice", OwnerOrgID: "org-a", LeaseToken: "wrong-token"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ReleaseDataAgentJobLease wrong token err = %v, want ErrConflict", err)
+	}
+	if err := store.ReleaseDataAgentJobLease(ctx, domain.ReleaseDataAgentJobLeaseInput{JobID: job.JobID, OwnerUserID: "alice", OwnerOrgID: "org-a", LeaseToken: lease.LeaseToken}); err != nil {
+		t.Fatalf("ReleaseDataAgentJobLease: %v", err)
+	}
+	replacement, _, replacementEvent, err := store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-b",
+		TTL:         time.Minute,
+		Now:         now.Add(5 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("AcquireDataAgentJobLease replacement: %v", err)
+	}
+	if replacement.WorkerID != "data-agent-worker-b" || replacement.LeaseToken == lease.LeaseToken {
+		t.Fatalf("replacement lease = %+v, want fresh worker-b lease", replacement)
+	}
+	if replacementEvent.Sequence != 3 {
+		t.Fatalf("replacement lease event = %+v, want sequence 3", replacementEvent)
+	}
+}
+
+func TestMemoryStoreRecoversExpiredDataAgentJobLeases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 8, 18, 0, 0, 0, time.UTC)
+
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_agent_recover_expired",
+			OriginalName: "expired.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    12,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		{
+			ResourceID:   "file_agent_recover_active",
+			OriginalName: "active.nii.gz",
+			ResourceKind: "file",
+			SourceType:   "upload",
+			SizeBytes:    15,
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+	expiredJob, err := store.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_recover_expired",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_agent_recover_expired"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob expired: %v", err)
+	}
+	activeJob, err := store.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_recover_active",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_agent_recover_active"},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob active: %v", err)
+	}
+	expiredLease, _, _, err := store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       expiredJob.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-expired",
+		TTL:         time.Minute,
+		Now:         now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Acquire expired lease: %v", err)
+	}
+	activeLease, _, _, err := store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       activeJob.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-active",
+		TTL:         10 * time.Minute,
+		Now:         now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Acquire active lease: %v", err)
+	}
+
+	result, err := store.RecoverExpiredDataAgentJobLeases(ctx, domain.RecoverExpiredDataAgentJobLeasesInput{
+		Now:    now.Add(5 * time.Minute),
+		Reason: "automatic expired data-agent lease recovery",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredDataAgentJobLeases: %v", err)
+	}
+	if result.Checked != 2 || len(result.RequeuedJobs) != 1 || result.RequeuedJobs[0].JobID != expiredJob.JobID {
+		t.Fatalf("recovery result = %+v, want one expired job requeued after checking two jobs", result)
+	}
+	recovered, err := store.GetDataAgentJobForUser(ctx, expiredJob.JobID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetDataAgentJobForUser recovered: %v", err)
+	}
+	if recovered.Status != "queued" || recovered.Error != "" || recovered.ProgressCompleted != 0 || !recovered.CompletedAt.IsZero() {
+		t.Fatalf("recovered job = %+v, want reset queued job", recovered)
+	}
+	if _, err := store.RenewDataAgentJobLease(ctx, domain.RenewDataAgentJobLeaseInput{
+		JobID:       expiredJob.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		LeaseToken:  expiredLease.LeaseToken,
+		TTL:         time.Minute,
+		Now:         now.Add(5*time.Minute + time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Renew expired recovered lease err = %v, want ErrConflict after lease clear", err)
+	}
+	if _, err := store.RenewDataAgentJobLease(ctx, domain.RenewDataAgentJobLeaseInput{
+		JobID:       activeJob.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		LeaseToken:  activeLease.LeaseToken,
+		TTL:         time.Minute,
+		Now:         now.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Renew active lease after recovery: %v", err)
+	}
+	events, err := store.ListDataAgentJobEvents(ctx, expiredJob.JobID, "alice", "org-a", 10)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.EventType != "data_agent.job.requeued" || last.Metadata["recovery"] != "expired_data_agent_job_lease" || last.Metadata["lease_worker_id"] != "data-agent-worker-expired" {
+		t.Fatalf("last recovery event = %+v, want expired lease requeue audit event", last)
+	}
+}
+
 func TestMemoryStoreCreateAndListUserAccounts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -435,6 +2805,16 @@ func TestMemoryStoreCreateAndListOrganizations(t *testing.T) {
 	}
 	if orgs[0].Metadata["source"] != "admin_console" {
 		t.Fatalf("metadata = %#v, want source", orgs[0].Metadata)
+	}
+	fetched, found, err := store.GetOrganization(ctx, " allen-institute ")
+	if err != nil {
+		t.Fatalf("GetOrganization: %v", err)
+	}
+	if !found || fetched.OrgID != org.OrgID || fetched.Metadata["source"] != "admin_console" {
+		t.Fatalf("GetOrganization = %+v found=%t, want created organization", fetched, found)
+	}
+	if _, found, err := store.GetOrganization(ctx, "missing-org"); err != nil || found {
+		t.Fatalf("GetOrganization missing found=%t err=%v, want not found without error", found, err)
 	}
 }
 

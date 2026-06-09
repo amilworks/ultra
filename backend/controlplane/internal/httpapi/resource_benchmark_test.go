@@ -57,6 +57,28 @@ func BenchmarkResourceListingDataPlane(b *testing.B) {
 			}
 		})
 
+		b.Run(fmt.Sprintf("catalog-metadata-query/%d-rows-page-200", count), func(b *testing.B) {
+			root, records := benchmarkUploadRoot(b, count, 4096)
+			mem := benchmarkCatalogStoreWithCaptions(b, root, records)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				page, err := mem.ListResourcesForUser(context.Background(), domain.ResourceListInput{
+					UserID: "bench-user",
+					OrgID:  "bench-org",
+					Status: "active",
+					Query:  "deterministic metadata caption 000",
+					Limit:  200,
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(page.Resources) == 0 {
+					b.Fatalf("metadata query returned no resources")
+				}
+			}
+		})
+
 		b.Run(fmt.Sprintf("catalog-page-shaping-stat/%d-rows-page-200", count), func(b *testing.B) {
 			root, records := benchmarkUploadRoot(b, count, 4096)
 			mem := benchmarkCatalogStore(b, root, records)
@@ -238,6 +260,44 @@ func benchmarkCatalogStore(b *testing.B, root string, records []resourceRecord) 
 		})
 		if err != nil {
 			b.Fatalf("upsert benchmark catalog resource: %v", err)
+		}
+	}
+	return mem
+}
+
+func benchmarkCatalogStoreWithCaptions(b *testing.B, root string, records []resourceRecord) *store.MemoryStore {
+	b.Helper()
+	mem := store.NewMemoryStore()
+	ctx := context.Background()
+	for index, record := range records {
+		path := filepath.Join(root, record.FileID+"__"+record.OriginalName)
+		_, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID:   record.FileID,
+			OriginalName: record.OriginalName,
+			ContentType:  record.ContentType,
+			SizeBytes:    record.SizeBytes,
+			SHA256:       record.SHA256,
+			StorageURI:   fileStorageURI(path),
+			StoragePath:  filepath.Base(path),
+			SourceType:   record.SourceType,
+			ResourceKind: record.ResourceKind,
+			OwnerUserID:  "bench-user",
+			OwnerOrgID:   "bench-org",
+			OwnerRole:    "researcher",
+			Status:       "active",
+			CreatedAt:    parseResourceCreatedAt(record.CreatedAt),
+			UpdatedAt:    domain.Now(),
+			Metadata: domain.JSONMap{
+				"data_agent": domain.JSONMap{
+					"caption_resources": domain.JSONMap{
+						"status":  "succeeded",
+						"caption": fmt.Sprintf("Deterministic metadata caption %03d for resource discovery.", index%10),
+					},
+				},
+			},
+		})
+		if err != nil {
+			b.Fatalf("upsert benchmark captioned catalog resource: %v", err)
 		}
 	}
 	return mem

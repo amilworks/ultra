@@ -47,22 +47,205 @@ func (e AuthSessionResponseMode) Valid() bool {
 
 // Defines values for V2AdminUpdateUserStatusRequestStatus.
 const (
-	Active   V2AdminUpdateUserStatusRequestStatus = "active"
-	Disabled V2AdminUpdateUserStatusRequestStatus = "disabled"
-	Pending  V2AdminUpdateUserStatusRequestStatus = "pending"
-	Rejected V2AdminUpdateUserStatusRequestStatus = "rejected"
+	V2AdminUpdateUserStatusRequestStatusActive   V2AdminUpdateUserStatusRequestStatus = "active"
+	V2AdminUpdateUserStatusRequestStatusDisabled V2AdminUpdateUserStatusRequestStatus = "disabled"
+	V2AdminUpdateUserStatusRequestStatusPending  V2AdminUpdateUserStatusRequestStatus = "pending"
+	V2AdminUpdateUserStatusRequestStatusRejected V2AdminUpdateUserStatusRequestStatus = "rejected"
 )
 
 // Valid indicates whether the value is a known member of the V2AdminUpdateUserStatusRequestStatus enum.
 func (e V2AdminUpdateUserStatusRequestStatus) Valid() bool {
 	switch e {
-	case Active:
+	case V2AdminUpdateUserStatusRequestStatusActive:
 		return true
-	case Disabled:
+	case V2AdminUpdateUserStatusRequestStatusDisabled:
 		return true
-	case Pending:
+	case V2AdminUpdateUserStatusRequestStatusPending:
 		return true
-	case Rejected:
+	case V2AdminUpdateUserStatusRequestStatusRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DataAgentJobControlRequestAction.
+const (
+	Cancel V2DataAgentJobControlRequestAction = "cancel"
+	Retry  V2DataAgentJobControlRequestAction = "retry"
+)
+
+// Valid indicates whether the value is a known member of the V2DataAgentJobControlRequestAction enum.
+func (e V2DataAgentJobControlRequestAction) Valid() bool {
+	switch e {
+	case Cancel:
+		return true
+	case Retry:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DataAgentJobCreateRequestJobType.
+const (
+	V2DataAgentJobCreateRequestJobTypeBatchTagResources     V2DataAgentJobCreateRequestJobType = "batch_tag_resources"
+	V2DataAgentJobCreateRequestJobTypeCaptionResources      V2DataAgentJobCreateRequestJobType = "caption_resources"
+	V2DataAgentJobCreateRequestJobTypeCreateDatasetSnapshot V2DataAgentJobCreateRequestJobType = "create_dataset_snapshot"
+	V2DataAgentJobCreateRequestJobTypeDeduplicateResources  V2DataAgentJobCreateRequestJobType = "deduplicate_resources"
+	V2DataAgentJobCreateRequestJobTypeExtractMetadata       V2DataAgentJobCreateRequestJobType = "extract_metadata"
+	V2DataAgentJobCreateRequestJobTypeOrganizeResources     V2DataAgentJobCreateRequestJobType = "organize_resources"
+	V2DataAgentJobCreateRequestJobTypeQualityCheckResources V2DataAgentJobCreateRequestJobType = "quality_check_resources"
+)
+
+// Valid indicates whether the value is a known member of the V2DataAgentJobCreateRequestJobType enum.
+func (e V2DataAgentJobCreateRequestJobType) Valid() bool {
+	switch e {
+	case V2DataAgentJobCreateRequestJobTypeBatchTagResources:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeCaptionResources:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeCreateDatasetSnapshot:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeDeduplicateResources:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeExtractMetadata:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeOrganizeResources:
+		return true
+	case V2DataAgentJobCreateRequestJobTypeQualityCheckResources:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DataAgentJobRecordJobType.
+const (
+	V2DataAgentJobRecordJobTypeBatchTagResources     V2DataAgentJobRecordJobType = "batch_tag_resources"
+	V2DataAgentJobRecordJobTypeCaptionResources      V2DataAgentJobRecordJobType = "caption_resources"
+	V2DataAgentJobRecordJobTypeCreateDatasetSnapshot V2DataAgentJobRecordJobType = "create_dataset_snapshot"
+	V2DataAgentJobRecordJobTypeDeduplicateResources  V2DataAgentJobRecordJobType = "deduplicate_resources"
+	V2DataAgentJobRecordJobTypeExtractMetadata       V2DataAgentJobRecordJobType = "extract_metadata"
+	V2DataAgentJobRecordJobTypeOrganizeResources     V2DataAgentJobRecordJobType = "organize_resources"
+	V2DataAgentJobRecordJobTypeQualityCheckResources V2DataAgentJobRecordJobType = "quality_check_resources"
+)
+
+// Valid indicates whether the value is a known member of the V2DataAgentJobRecordJobType enum.
+func (e V2DataAgentJobRecordJobType) Valid() bool {
+	switch e {
+	case V2DataAgentJobRecordJobTypeBatchTagResources:
+		return true
+	case V2DataAgentJobRecordJobTypeCaptionResources:
+		return true
+	case V2DataAgentJobRecordJobTypeCreateDatasetSnapshot:
+		return true
+	case V2DataAgentJobRecordJobTypeDeduplicateResources:
+		return true
+	case V2DataAgentJobRecordJobTypeExtractMetadata:
+		return true
+	case V2DataAgentJobRecordJobTypeOrganizeResources:
+		return true
+	case V2DataAgentJobRecordJobTypeQualityCheckResources:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DataAgentJobRecordStatus.
+const (
+	V2DataAgentJobRecordStatusCanceled  V2DataAgentJobRecordStatus = "canceled"
+	V2DataAgentJobRecordStatusFailed    V2DataAgentJobRecordStatus = "failed"
+	V2DataAgentJobRecordStatusQueued    V2DataAgentJobRecordStatus = "queued"
+	V2DataAgentJobRecordStatusRunning   V2DataAgentJobRecordStatus = "running"
+	V2DataAgentJobRecordStatusSucceeded V2DataAgentJobRecordStatus = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the V2DataAgentJobRecordStatus enum.
+func (e V2DataAgentJobRecordStatus) Valid() bool {
+	switch e {
+	case V2DataAgentJobRecordStatusCanceled:
+		return true
+	case V2DataAgentJobRecordStatusFailed:
+		return true
+	case V2DataAgentJobRecordStatusQueued:
+		return true
+	case V2DataAgentJobRecordStatusRunning:
+		return true
+	case V2DataAgentJobRecordStatusSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DataAgentJobStatusUpdateRequestStatus.
+const (
+	V2DataAgentJobStatusUpdateRequestStatusCanceled  V2DataAgentJobStatusUpdateRequestStatus = "canceled"
+	V2DataAgentJobStatusUpdateRequestStatusFailed    V2DataAgentJobStatusUpdateRequestStatus = "failed"
+	V2DataAgentJobStatusUpdateRequestStatusQueued    V2DataAgentJobStatusUpdateRequestStatus = "queued"
+	V2DataAgentJobStatusUpdateRequestStatusRunning   V2DataAgentJobStatusUpdateRequestStatus = "running"
+	V2DataAgentJobStatusUpdateRequestStatusSucceeded V2DataAgentJobStatusUpdateRequestStatus = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the V2DataAgentJobStatusUpdateRequestStatus enum.
+func (e V2DataAgentJobStatusUpdateRequestStatus) Valid() bool {
+	switch e {
+	case V2DataAgentJobStatusUpdateRequestStatusCanceled:
+		return true
+	case V2DataAgentJobStatusUpdateRequestStatusFailed:
+		return true
+	case V2DataAgentJobStatusUpdateRequestStatusQueued:
+		return true
+	case V2DataAgentJobStatusUpdateRequestStatusRunning:
+		return true
+	case V2DataAgentJobStatusUpdateRequestStatusSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2DatasetSnapshotResourceQueryProcessingStatus.
+const (
+	V2DatasetSnapshotResourceQueryProcessingStatusAll               V2DatasetSnapshotResourceQueryProcessingStatus = "all"
+	V2DatasetSnapshotResourceQueryProcessingStatusCaptionReady      V2DatasetSnapshotResourceQueryProcessingStatus = "caption_ready"
+	V2DatasetSnapshotResourceQueryProcessingStatusDataAgentFailed   V2DatasetSnapshotResourceQueryProcessingStatus = "data_agent_failed"
+	V2DatasetSnapshotResourceQueryProcessingStatusDataAgentReady    V2DatasetSnapshotResourceQueryProcessingStatus = "data_agent_ready"
+	V2DatasetSnapshotResourceQueryProcessingStatusDedupeChecked     V2DatasetSnapshotResourceQueryProcessingStatus = "dedupe_checked"
+	V2DatasetSnapshotResourceQueryProcessingStatusMetadataReady     V2DatasetSnapshotResourceQueryProcessingStatus = "metadata_ready"
+	V2DatasetSnapshotResourceQueryProcessingStatusNeedsCaption      V2DatasetSnapshotResourceQueryProcessingStatus = "needs_caption"
+	V2DatasetSnapshotResourceQueryProcessingStatusNeedsMetadata     V2DatasetSnapshotResourceQueryProcessingStatus = "needs_metadata"
+	V2DatasetSnapshotResourceQueryProcessingStatusOrganizationReady V2DatasetSnapshotResourceQueryProcessingStatus = "organization_ready"
+	V2DatasetSnapshotResourceQueryProcessingStatusQcComplete        V2DatasetSnapshotResourceQueryProcessingStatus = "qc_complete"
+	V2DatasetSnapshotResourceQueryProcessingStatusTagsReady         V2DatasetSnapshotResourceQueryProcessingStatus = "tags_ready"
+)
+
+// Valid indicates whether the value is a known member of the V2DatasetSnapshotResourceQueryProcessingStatus enum.
+func (e V2DatasetSnapshotResourceQueryProcessingStatus) Valid() bool {
+	switch e {
+	case V2DatasetSnapshotResourceQueryProcessingStatusAll:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusCaptionReady:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusDataAgentFailed:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusDataAgentReady:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusDedupeChecked:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusMetadataReady:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusNeedsCaption:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusNeedsMetadata:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusOrganizationReady:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusQcComplete:
+		return true
+	case V2DatasetSnapshotResourceQueryProcessingStatusTagsReady:
 		return true
 	default:
 		return false
@@ -84,6 +267,81 @@ func (e V2NotConfiguredResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for V2ResourceCollectionCreateRequestCollectionType.
+const (
+	V2ResourceCollectionCreateRequestCollectionTypeCollection V2ResourceCollectionCreateRequestCollectionType = "collection"
+	V2ResourceCollectionCreateRequestCollectionTypeDataset    V2ResourceCollectionCreateRequestCollectionType = "dataset"
+	V2ResourceCollectionCreateRequestCollectionTypeFolder     V2ResourceCollectionCreateRequestCollectionType = "folder"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceCollectionCreateRequestCollectionType enum.
+func (e V2ResourceCollectionCreateRequestCollectionType) Valid() bool {
+	switch e {
+	case V2ResourceCollectionCreateRequestCollectionTypeCollection:
+		return true
+	case V2ResourceCollectionCreateRequestCollectionTypeDataset:
+		return true
+	case V2ResourceCollectionCreateRequestCollectionTypeFolder:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceCollectionRecordCollectionType.
+const (
+	V2ResourceCollectionRecordCollectionTypeCollection V2ResourceCollectionRecordCollectionType = "collection"
+	V2ResourceCollectionRecordCollectionTypeDataset    V2ResourceCollectionRecordCollectionType = "dataset"
+	V2ResourceCollectionRecordCollectionTypeFolder     V2ResourceCollectionRecordCollectionType = "folder"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceCollectionRecordCollectionType enum.
+func (e V2ResourceCollectionRecordCollectionType) Valid() bool {
+	switch e {
+	case V2ResourceCollectionRecordCollectionTypeCollection:
+		return true
+	case V2ResourceCollectionRecordCollectionTypeDataset:
+		return true
+	case V2ResourceCollectionRecordCollectionTypeFolder:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceMetadataFilterOperator.
+const (
+	Contains V2ResourceMetadataFilterOperator = "contains"
+	Eq       V2ResourceMetadataFilterOperator = "eq"
+	Exists   V2ResourceMetadataFilterOperator = "exists"
+	Gt       V2ResourceMetadataFilterOperator = "gt"
+	Gte      V2ResourceMetadataFilterOperator = "gte"
+	Lt       V2ResourceMetadataFilterOperator = "lt"
+	Lte      V2ResourceMetadataFilterOperator = "lte"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceMetadataFilterOperator enum.
+func (e V2ResourceMetadataFilterOperator) Valid() bool {
+	switch e {
+	case Contains:
+		return true
+	case Eq:
+		return true
+	case Exists:
+		return true
+	case Gt:
+		return true
+	case Gte:
+		return true
+	case Lt:
+		return true
+	case Lte:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for V2ResourceReconcileIssueSeverity.
 const (
 	Error   V2ResourceReconcileIssueSeverity = "error"
@@ -99,6 +357,354 @@ func (e V2ResourceReconcileIssueSeverity) Valid() bool {
 	case Info:
 		return true
 	case Warning:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceShareGrantCreateRequestRole.
+const (
+	V2ResourceShareGrantCreateRequestRoleRead V2ResourceShareGrantCreateRequestRole = "read"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceShareGrantCreateRequestRole enum.
+func (e V2ResourceShareGrantCreateRequestRole) Valid() bool {
+	switch e {
+	case V2ResourceShareGrantCreateRequestRoleRead:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceShareGrantRecordRole.
+const (
+	V2ResourceShareGrantRecordRoleRead V2ResourceShareGrantRecordRole = "read"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceShareGrantRecordRole enum.
+func (e V2ResourceShareGrantRecordRole) Valid() bool {
+	switch e {
+	case V2ResourceShareGrantRecordRoleRead:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceShareGrantsCreateRequestRole.
+const (
+	Read V2ResourceShareGrantsCreateRequestRole = "read"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceShareGrantsCreateRequestRole enum.
+func (e V2ResourceShareGrantsCreateRequestRole) Valid() bool {
+	switch e {
+	case Read:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2ResourceShareSummaryShareStatus.
+const (
+	V2ResourceShareSummaryShareStatusPrivate      V2ResourceShareSummaryShareStatus = "private"
+	V2ResourceShareSummaryShareStatusPublic       V2ResourceShareSummaryShareStatus = "public"
+	V2ResourceShareSummaryShareStatusSharedByMe   V2ResourceShareSummaryShareStatus = "shared_by_me"
+	V2ResourceShareSummaryShareStatusSharedWithMe V2ResourceShareSummaryShareStatus = "shared_with_me"
+)
+
+// Valid indicates whether the value is a known member of the V2ResourceShareSummaryShareStatus enum.
+func (e V2ResourceShareSummaryShareStatus) Valid() bool {
+	switch e {
+	case V2ResourceShareSummaryShareStatusPrivate:
+		return true
+	case V2ResourceShareSummaryShareStatusPublic:
+		return true
+	case V2ResourceShareSummaryShareStatusSharedByMe:
+		return true
+	case V2ResourceShareSummaryShareStatusSharedWithMe:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2UploadChunkRecordStatus.
+const (
+	V2UploadChunkRecordStatusFailed   V2UploadChunkRecordStatus = "failed"
+	V2UploadChunkRecordStatusReceived V2UploadChunkRecordStatus = "received"
+	V2UploadChunkRecordStatusVerified V2UploadChunkRecordStatus = "verified"
+)
+
+// Valid indicates whether the value is a known member of the V2UploadChunkRecordStatus enum.
+func (e V2UploadChunkRecordStatus) Valid() bool {
+	switch e {
+	case V2UploadChunkRecordStatusFailed:
+		return true
+	case V2UploadChunkRecordStatusReceived:
+		return true
+	case V2UploadChunkRecordStatusVerified:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2UploadSessionFileRecordStatus.
+const (
+	V2UploadSessionFileRecordStatusActive    V2UploadSessionFileRecordStatus = "active"
+	V2UploadSessionFileRecordStatusCanceled  V2UploadSessionFileRecordStatus = "canceled"
+	V2UploadSessionFileRecordStatusCompleted V2UploadSessionFileRecordStatus = "completed"
+	V2UploadSessionFileRecordStatusFailed    V2UploadSessionFileRecordStatus = "failed"
+	V2UploadSessionFileRecordStatusPaused    V2UploadSessionFileRecordStatus = "paused"
+)
+
+// Valid indicates whether the value is a known member of the V2UploadSessionFileRecordStatus enum.
+func (e V2UploadSessionFileRecordStatus) Valid() bool {
+	switch e {
+	case V2UploadSessionFileRecordStatusActive:
+		return true
+	case V2UploadSessionFileRecordStatusCanceled:
+		return true
+	case V2UploadSessionFileRecordStatusCompleted:
+		return true
+	case V2UploadSessionFileRecordStatusFailed:
+		return true
+	case V2UploadSessionFileRecordStatusPaused:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for V2UploadSessionRecordStatus.
+const (
+	V2UploadSessionRecordStatusActive    V2UploadSessionRecordStatus = "active"
+	V2UploadSessionRecordStatusCanceled  V2UploadSessionRecordStatus = "canceled"
+	V2UploadSessionRecordStatusCompleted V2UploadSessionRecordStatus = "completed"
+	V2UploadSessionRecordStatusFailed    V2UploadSessionRecordStatus = "failed"
+	V2UploadSessionRecordStatusPaused    V2UploadSessionRecordStatus = "paused"
+)
+
+// Valid indicates whether the value is a known member of the V2UploadSessionRecordStatus enum.
+func (e V2UploadSessionRecordStatus) Valid() bool {
+	switch e {
+	case V2UploadSessionRecordStatusActive:
+		return true
+	case V2UploadSessionRecordStatusCanceled:
+		return true
+	case V2UploadSessionRecordStatusCompleted:
+		return true
+	case V2UploadSessionRecordStatusFailed:
+		return true
+	case V2UploadSessionRecordStatusPaused:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListV2DatasetSnapshotsParamsStatus.
+const (
+	ListV2DatasetSnapshotsParamsStatusActive  ListV2DatasetSnapshotsParamsStatus = "active"
+	ListV2DatasetSnapshotsParamsStatusDeleted ListV2DatasetSnapshotsParamsStatus = "deleted"
+)
+
+// Valid indicates whether the value is a known member of the ListV2DatasetSnapshotsParamsStatus enum.
+func (e ListV2DatasetSnapshotsParamsStatus) Valid() bool {
+	switch e {
+	case ListV2DatasetSnapshotsParamsStatusActive:
+		return true
+	case ListV2DatasetSnapshotsParamsStatusDeleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListV2ResourceCollectionsParamsStatus.
+const (
+	ListV2ResourceCollectionsParamsStatusActive  ListV2ResourceCollectionsParamsStatus = "active"
+	ListV2ResourceCollectionsParamsStatusDeleted ListV2ResourceCollectionsParamsStatus = "deleted"
+)
+
+// Valid indicates whether the value is a known member of the ListV2ResourceCollectionsParamsStatus enum.
+func (e ListV2ResourceCollectionsParamsStatus) Valid() bool {
+	switch e {
+	case ListV2ResourceCollectionsParamsStatusActive:
+		return true
+	case ListV2ResourceCollectionsParamsStatusDeleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListV2ResourceCollectionResourcesParamsProcessingStatus.
+const (
+	ListV2ResourceCollectionResourcesParamsProcessingStatusAll               ListV2ResourceCollectionResourcesParamsProcessingStatus = "all"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusCaptionReady      ListV2ResourceCollectionResourcesParamsProcessingStatus = "caption_ready"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusDataAgentFailed   ListV2ResourceCollectionResourcesParamsProcessingStatus = "data_agent_failed"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusDataAgentReady    ListV2ResourceCollectionResourcesParamsProcessingStatus = "data_agent_ready"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusDedupeChecked     ListV2ResourceCollectionResourcesParamsProcessingStatus = "dedupe_checked"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusMetadataReady     ListV2ResourceCollectionResourcesParamsProcessingStatus = "metadata_ready"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusNeedsCaption      ListV2ResourceCollectionResourcesParamsProcessingStatus = "needs_caption"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusNeedsMetadata     ListV2ResourceCollectionResourcesParamsProcessingStatus = "needs_metadata"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusOrganizationReady ListV2ResourceCollectionResourcesParamsProcessingStatus = "organization_ready"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusQcComplete        ListV2ResourceCollectionResourcesParamsProcessingStatus = "qc_complete"
+	ListV2ResourceCollectionResourcesParamsProcessingStatusTagsReady         ListV2ResourceCollectionResourcesParamsProcessingStatus = "tags_ready"
+)
+
+// Valid indicates whether the value is a known member of the ListV2ResourceCollectionResourcesParamsProcessingStatus enum.
+func (e ListV2ResourceCollectionResourcesParamsProcessingStatus) Valid() bool {
+	switch e {
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusAll:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusCaptionReady:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusDataAgentFailed:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusDataAgentReady:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusDedupeChecked:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusMetadataReady:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusNeedsCaption:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusNeedsMetadata:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusOrganizationReady:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusQcComplete:
+		return true
+	case ListV2ResourceCollectionResourcesParamsProcessingStatusTagsReady:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListV2ResourceCollectionResourcesParamsSharing.
+const (
+	ListV2ResourceCollectionResourcesParamsSharingAll          ListV2ResourceCollectionResourcesParamsSharing = "all"
+	ListV2ResourceCollectionResourcesParamsSharingPrivate      ListV2ResourceCollectionResourcesParamsSharing = "private"
+	ListV2ResourceCollectionResourcesParamsSharingPublic       ListV2ResourceCollectionResourcesParamsSharing = "public"
+	ListV2ResourceCollectionResourcesParamsSharingShared       ListV2ResourceCollectionResourcesParamsSharing = "shared"
+	ListV2ResourceCollectionResourcesParamsSharingSharedByMe   ListV2ResourceCollectionResourcesParamsSharing = "shared_by_me"
+	ListV2ResourceCollectionResourcesParamsSharingSharedWithMe ListV2ResourceCollectionResourcesParamsSharing = "shared_with_me"
+)
+
+// Valid indicates whether the value is a known member of the ListV2ResourceCollectionResourcesParamsSharing enum.
+func (e ListV2ResourceCollectionResourcesParamsSharing) Valid() bool {
+	switch e {
+	case ListV2ResourceCollectionResourcesParamsSharingAll:
+		return true
+	case ListV2ResourceCollectionResourcesParamsSharingPrivate:
+		return true
+	case ListV2ResourceCollectionResourcesParamsSharingPublic:
+		return true
+	case ListV2ResourceCollectionResourcesParamsSharingShared:
+		return true
+	case ListV2ResourceCollectionResourcesParamsSharingSharedByMe:
+		return true
+	case ListV2ResourceCollectionResourcesParamsSharingSharedWithMe:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListResourcesParamsProcessingStatus.
+const (
+	ListResourcesParamsProcessingStatusAll               ListResourcesParamsProcessingStatus = "all"
+	ListResourcesParamsProcessingStatusCaptionReady      ListResourcesParamsProcessingStatus = "caption_ready"
+	ListResourcesParamsProcessingStatusDataAgentFailed   ListResourcesParamsProcessingStatus = "data_agent_failed"
+	ListResourcesParamsProcessingStatusDataAgentReady    ListResourcesParamsProcessingStatus = "data_agent_ready"
+	ListResourcesParamsProcessingStatusDedupeChecked     ListResourcesParamsProcessingStatus = "dedupe_checked"
+	ListResourcesParamsProcessingStatusMetadataReady     ListResourcesParamsProcessingStatus = "metadata_ready"
+	ListResourcesParamsProcessingStatusNeedsCaption      ListResourcesParamsProcessingStatus = "needs_caption"
+	ListResourcesParamsProcessingStatusNeedsMetadata     ListResourcesParamsProcessingStatus = "needs_metadata"
+	ListResourcesParamsProcessingStatusOrganizationReady ListResourcesParamsProcessingStatus = "organization_ready"
+	ListResourcesParamsProcessingStatusQcComplete        ListResourcesParamsProcessingStatus = "qc_complete"
+	ListResourcesParamsProcessingStatusTagsReady         ListResourcesParamsProcessingStatus = "tags_ready"
+)
+
+// Valid indicates whether the value is a known member of the ListResourcesParamsProcessingStatus enum.
+func (e ListResourcesParamsProcessingStatus) Valid() bool {
+	switch e {
+	case ListResourcesParamsProcessingStatusAll:
+		return true
+	case ListResourcesParamsProcessingStatusCaptionReady:
+		return true
+	case ListResourcesParamsProcessingStatusDataAgentFailed:
+		return true
+	case ListResourcesParamsProcessingStatusDataAgentReady:
+		return true
+	case ListResourcesParamsProcessingStatusDedupeChecked:
+		return true
+	case ListResourcesParamsProcessingStatusMetadataReady:
+		return true
+	case ListResourcesParamsProcessingStatusNeedsCaption:
+		return true
+	case ListResourcesParamsProcessingStatusNeedsMetadata:
+		return true
+	case ListResourcesParamsProcessingStatusOrganizationReady:
+		return true
+	case ListResourcesParamsProcessingStatusQcComplete:
+		return true
+	case ListResourcesParamsProcessingStatusTagsReady:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListResourcesParamsSharing.
+const (
+	ListResourcesParamsSharingAll          ListResourcesParamsSharing = "all"
+	ListResourcesParamsSharingPrivate      ListResourcesParamsSharing = "private"
+	ListResourcesParamsSharingPublic       ListResourcesParamsSharing = "public"
+	ListResourcesParamsSharingShared       ListResourcesParamsSharing = "shared"
+	ListResourcesParamsSharingSharedByMe   ListResourcesParamsSharing = "shared_by_me"
+	ListResourcesParamsSharingSharedWithMe ListResourcesParamsSharing = "shared_with_me"
+)
+
+// Valid indicates whether the value is a known member of the ListResourcesParamsSharing enum.
+func (e ListResourcesParamsSharing) Valid() bool {
+	switch e {
+	case ListResourcesParamsSharingAll:
+		return true
+	case ListResourcesParamsSharingPrivate:
+		return true
+	case ListResourcesParamsSharingPublic:
+		return true
+	case ListResourcesParamsSharingShared:
+		return true
+	case ListResourcesParamsSharingSharedByMe:
+		return true
+	case ListResourcesParamsSharingSharedWithMe:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListResourcesParamsStatus.
+const (
+	Active  ListResourcesParamsStatus = "active"
+	Deleted ListResourcesParamsStatus = "deleted"
+)
+
+// Valid indicates whether the value is a known member of the ListResourcesParamsStatus enum.
+func (e ListResourcesParamsStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case Deleted:
 		return true
 	default:
 		return false
@@ -265,6 +871,7 @@ type V2AdminOverviewResponse struct {
 	Runtime          V2AdminRuntimeSummary         `json:"runtime"`
 	ToolUsage7d      []V2AdminToolUsageRecord      `json:"tool_usage_7d"`
 	TopUsers         []V2AdminUserSummary          `json:"top_users"`
+	UploadSessions   V2AdminUploadSessionMetrics   `json:"upload_sessions"`
 	UsageLast24h     []V2AdminUsageBucket          `json:"usage_last_24h"`
 	Workers          []V2AdminWorkerRecord         `json:"workers"`
 }
@@ -425,6 +1032,21 @@ type V2AdminUpdateUserStatusRequest struct {
 // V2AdminUpdateUserStatusRequestStatus defines model for V2AdminUpdateUserStatusRequest.Status.
 type V2AdminUpdateUserStatusRequestStatus string
 
+// V2AdminUploadSessionMetrics defines model for V2AdminUploadSessionMetrics.
+type V2AdminUploadSessionMetrics struct {
+	Active         int   `json:"active"`
+	BytesCommitted int64 `json:"bytes_committed"`
+	BytesReceived  int64 `json:"bytes_received"`
+	BytesTotal     int64 `json:"bytes_total"`
+	BytesVerified  int64 `json:"bytes_verified"`
+	Canceled       int   `json:"canceled"`
+	Completed      int   `json:"completed"`
+	Failed         int   `json:"failed"`
+	Other          int   `json:"other"`
+	Paused         int   `json:"paused"`
+	Total          int   `json:"total"`
+}
+
 // V2AdminUsageBucket defines model for V2AdminUsageBucket.
 type V2AdminUsageBucket struct {
 	BucketStart          *string                `json:"bucket_start,omitempty"`
@@ -577,6 +1199,244 @@ type V2BisqueUploadResponse struct {
 	Uploads []V2BisqueUploadRecord `json:"uploads"`
 }
 
+// V2DataAgentJobControlRequest defines model for V2DataAgentJobControlRequest.
+type V2DataAgentJobControlRequest struct {
+	Action   V2DataAgentJobControlRequestAction `json:"action"`
+	Metadata *map[string]interface{}            `json:"metadata,omitempty"`
+	Reason   *string                            `json:"reason,omitempty"`
+}
+
+// V2DataAgentJobControlRequestAction defines model for V2DataAgentJobControlRequest.Action.
+type V2DataAgentJobControlRequestAction string
+
+// V2DataAgentJobCreateRequest defines model for V2DataAgentJobCreateRequest.
+type V2DataAgentJobCreateRequest struct {
+	InputSelector      *map[string]interface{}            `json:"input_selector,omitempty"`
+	JobType            V2DataAgentJobCreateRequestJobType `json:"job_type"`
+	Metadata           *map[string]interface{}            `json:"metadata,omitempty"`
+	ProjectId          *string                            `json:"project_id,omitempty"`
+	ResourceIds        *[]string                          `json:"resource_ids,omitempty"`
+	ResourceQuery      *V2DatasetSnapshotResourceQuery    `json:"resource_query,omitempty"`
+	SourceCollectionId *string                            `json:"source_collection_id,omitempty"`
+}
+
+// V2DataAgentJobCreateRequestJobType defines model for V2DataAgentJobCreateRequest.JobType.
+type V2DataAgentJobCreateRequestJobType string
+
+// V2DataAgentJobEventRecord defines model for V2DataAgentJobEventRecord.
+type V2DataAgentJobEventRecord struct {
+	ActorOrgId  *string                `json:"actor_org_id,omitempty"`
+	ActorUserId *string                `json:"actor_user_id,omitempty"`
+	EventId     string                 `json:"event_id"`
+	EventType   string                 `json:"event_type"`
+	JobId       string                 `json:"job_id"`
+	Message     *string                `json:"message,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	Sequence    int64                  `json:"sequence"`
+	Ts          string                 `json:"ts"`
+}
+
+// V2DataAgentJobLeaseRecord defines model for V2DataAgentJobLeaseRecord.
+type V2DataAgentJobLeaseRecord struct {
+	CreatedAt      string `json:"created_at"`
+	JobId          string `json:"job_id"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+	LeaseToken     string `json:"lease_token"`
+	UpdatedAt      string `json:"updated_at"`
+	WorkerId       string `json:"worker_id"`
+}
+
+// V2DataAgentJobRecord defines model for V2DataAgentJobRecord.
+type V2DataAgentJobRecord struct {
+	CompletedAt       *string                     `json:"completed_at,omitempty"`
+	CreatedAt         string                      `json:"created_at"`
+	CreatedByUserId   *string                     `json:"created_by_user_id,omitempty"`
+	Error             *string                     `json:"error,omitempty"`
+	InputSelector     map[string]interface{}      `json:"input_selector"`
+	JobId             string                      `json:"job_id"`
+	JobType           V2DataAgentJobRecordJobType `json:"job_type"`
+	Metadata          map[string]interface{}      `json:"metadata"`
+	OutputSummary     map[string]interface{}      `json:"output_summary"`
+	OwnerOrgId        *string                     `json:"owner_org_id,omitempty"`
+	OwnerRole         *string                     `json:"owner_role,omitempty"`
+	OwnerUserId       string                      `json:"owner_user_id"`
+	ProgressCompleted int                         `json:"progress_completed"`
+	ProgressTotal     int                         `json:"progress_total"`
+	ProjectId         *string                     `json:"project_id,omitempty"`
+	ResourceCount     int                         `json:"resource_count"`
+	StartedAt         *string                     `json:"started_at,omitempty"`
+	Status            V2DataAgentJobRecordStatus  `json:"status"`
+	UpdatedAt         string                      `json:"updated_at"`
+}
+
+// V2DataAgentJobRecordJobType defines model for V2DataAgentJobRecord.JobType.
+type V2DataAgentJobRecordJobType string
+
+// V2DataAgentJobRecordStatus defines model for V2DataAgentJobRecord.Status.
+type V2DataAgentJobRecordStatus string
+
+// V2DataAgentJobResponse defines model for V2DataAgentJobResponse.
+type V2DataAgentJobResponse struct {
+	Events []V2DataAgentJobEventRecord `json:"events"`
+	Job    V2DataAgentJobRecord        `json:"job"`
+}
+
+// V2DataAgentJobStatusUpdateRequest defines model for V2DataAgentJobStatusUpdateRequest.
+type V2DataAgentJobStatusUpdateRequest struct {
+	Error             *string                                 `json:"error,omitempty"`
+	EventMetadata     *map[string]interface{}                 `json:"event_metadata,omitempty"`
+	Message           *string                                 `json:"message,omitempty"`
+	Metadata          *map[string]interface{}                 `json:"metadata,omitempty"`
+	OutputSummary     *map[string]interface{}                 `json:"output_summary,omitempty"`
+	ProgressCompleted *int                                    `json:"progress_completed,omitempty"`
+	ProgressTotal     *int                                    `json:"progress_total,omitempty"`
+	Status            V2DataAgentJobStatusUpdateRequestStatus `json:"status"`
+}
+
+// V2DataAgentJobStatusUpdateRequestStatus defines model for V2DataAgentJobStatusUpdateRequest.Status.
+type V2DataAgentJobStatusUpdateRequestStatus string
+
+// V2DataAgentJobsResponse defines model for V2DataAgentJobsResponse.
+type V2DataAgentJobsResponse struct {
+	Count int                    `json:"count"`
+	Jobs  []V2DataAgentJobRecord `json:"jobs"`
+}
+
+// V2DatasetSnapshotCreateRequest defines model for V2DatasetSnapshotCreateRequest.
+type V2DatasetSnapshotCreateRequest struct {
+	Description        *string                         `json:"description,omitempty"`
+	Metadata           *map[string]interface{}         `json:"metadata,omitempty"`
+	Name               string                          `json:"name"`
+	ProjectId          *string                         `json:"project_id,omitempty"`
+	ResourceIds        *[]string                       `json:"resource_ids,omitempty"`
+	ResourceQuery      *V2DatasetSnapshotResourceQuery `json:"resource_query,omitempty"`
+	SourceCollectionId *string                         `json:"source_collection_id,omitempty"`
+}
+
+// V2DatasetSnapshotEventRecord defines model for V2DatasetSnapshotEventRecord.
+type V2DatasetSnapshotEventRecord struct {
+	ActorOrgId  *string                `json:"actor_org_id,omitempty"`
+	ActorUserId *string                `json:"actor_user_id,omitempty"`
+	EventId     string                 `json:"event_id"`
+	EventType   string                 `json:"event_type"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	SnapshotId  string                 `json:"snapshot_id"`
+	Ts          string                 `json:"ts"`
+}
+
+// V2DatasetSnapshotEventsResponse defines model for V2DatasetSnapshotEventsResponse.
+type V2DatasetSnapshotEventsResponse struct {
+	Count      int                            `json:"count"`
+	Events     []V2DatasetSnapshotEventRecord `json:"events"`
+	Limit      int                            `json:"limit"`
+	Offset     int                            `json:"offset"`
+	SnapshotId string                         `json:"snapshot_id"`
+	TotalCount int                            `json:"total_count"`
+}
+
+// V2DatasetSnapshotRecord defines model for V2DatasetSnapshotRecord.
+type V2DatasetSnapshotRecord struct {
+	CreatedAt          string                 `json:"created_at"`
+	CreatedByUserId    *string                `json:"created_by_user_id,omitempty"`
+	Description        *string                `json:"description,omitempty"`
+	Metadata           map[string]interface{} `json:"metadata"`
+	Name               string                 `json:"name"`
+	OwnerOrgId         *string                `json:"owner_org_id,omitempty"`
+	OwnerRole          *string                `json:"owner_role,omitempty"`
+	OwnerUserId        string                 `json:"owner_user_id"`
+	ProjectId          *string                `json:"project_id,omitempty"`
+	ResourceCount      int                    `json:"resource_count"`
+	SnapshotId         string                 `json:"snapshot_id"`
+	SourceCollectionId *string                `json:"source_collection_id,omitempty"`
+	Status             string                 `json:"status"`
+	TotalBytes         int64                  `json:"total_bytes"`
+}
+
+// V2DatasetSnapshotResourceQuery defines model for V2DatasetSnapshotResourceQuery.
+type V2DatasetSnapshotResourceQuery struct {
+	CreatedAfter     *string                                         `json:"created_after,omitempty"`
+	CreatedBefore    *string                                         `json:"created_before,omitempty"`
+	Descriptors      *[]string                                       `json:"descriptors,omitempty"`
+	Kind             *string                                         `json:"kind,omitempty"`
+	MetadataFilters  *[]V2ResourceMetadataFilter                     `json:"metadata_filters,omitempty"`
+	ProcessingStatus *V2DatasetSnapshotResourceQueryProcessingStatus `json:"processing_status,omitempty"`
+	ProjectId        *string                                         `json:"project_id,omitempty"`
+	Q                *string                                         `json:"q,omitempty"`
+	Sharing          *string                                         `json:"sharing,omitempty"`
+	Source           *string                                         `json:"source,omitempty"`
+	Tags             *[]string                                       `json:"tags,omitempty"`
+}
+
+// V2DatasetSnapshotResourceQueryProcessingStatus defines model for V2DatasetSnapshotResourceQuery.ProcessingStatus.
+type V2DatasetSnapshotResourceQueryProcessingStatus string
+
+// V2DatasetSnapshotResourceRecord defines model for V2DatasetSnapshotResourceRecord.
+type V2DatasetSnapshotResourceRecord struct {
+	ContentType       *string                `json:"content_type,omitempty"`
+	Metadata          map[string]interface{} `json:"metadata"`
+	OriginalName      string                 `json:"original_name"`
+	Position          int64                  `json:"position"`
+	ProjectId         *string                `json:"project_id,omitempty"`
+	ResourceCreatedAt *string                `json:"resource_created_at,omitempty"`
+	ResourceId        string                 `json:"resource_id"`
+	ResourceKind      string                 `json:"resource_kind"`
+	Sha256            *string                `json:"sha256,omitempty"`
+	SizeBytes         int64                  `json:"size_bytes"`
+	SnapshotId        string                 `json:"snapshot_id"`
+	SourceType        string                 `json:"source_type"`
+	SourceUri         *string                `json:"source_uri,omitempty"`
+	StorageUri        *string                `json:"storage_uri,omitempty"`
+}
+
+// V2DatasetSnapshotResponse defines model for V2DatasetSnapshotResponse.
+type V2DatasetSnapshotResponse struct {
+	Resources []V2DatasetSnapshotResourceRecord `json:"resources"`
+	Snapshot  V2DatasetSnapshotRecord           `json:"snapshot"`
+}
+
+// V2DatasetSnapshotShareGrantCreateRequest defines model for V2DatasetSnapshotShareGrantCreateRequest.
+type V2DatasetSnapshotShareGrantCreateRequest struct {
+	GranteeOrgId  *string                 `json:"grantee_org_id,omitempty"`
+	GranteeUserId *string                 `json:"grantee_user_id,omitempty"`
+	Metadata      *map[string]interface{} `json:"metadata,omitempty"`
+	Role          *string                 `json:"role,omitempty"`
+}
+
+// V2DatasetSnapshotShareGrantRecord defines model for V2DatasetSnapshotShareGrantRecord.
+type V2DatasetSnapshotShareGrantRecord struct {
+	CreatedAt       string                 `json:"created_at"`
+	CreatedByUserId *string                `json:"created_by_user_id,omitempty"`
+	GrantId         string                 `json:"grant_id"`
+	GranteeOrgId    *string                `json:"grantee_org_id,omitempty"`
+	GranteeUserId   *string                `json:"grantee_user_id,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata"`
+	OwnerOrgId      *string                `json:"owner_org_id,omitempty"`
+	OwnerRole       *string                `json:"owner_role,omitempty"`
+	OwnerUserId     string                 `json:"owner_user_id"`
+	RevokedAt       *string                `json:"revoked_at,omitempty"`
+	Role            string                 `json:"role"`
+	SnapshotId      string                 `json:"snapshot_id"`
+	Status          string                 `json:"status"`
+	UpdatedAt       string                 `json:"updated_at"`
+}
+
+// V2DatasetSnapshotShareGrantResponse defines model for V2DatasetSnapshotShareGrantResponse.
+type V2DatasetSnapshotShareGrantResponse struct {
+	Grant V2DatasetSnapshotShareGrantRecord `json:"grant"`
+}
+
+// V2DatasetSnapshotShareGrantsResponse defines model for V2DatasetSnapshotShareGrantsResponse.
+type V2DatasetSnapshotShareGrantsResponse struct {
+	Count  int                                 `json:"count"`
+	Grants []V2DatasetSnapshotShareGrantRecord `json:"grants"`
+}
+
+// V2DatasetSnapshotsResponse defines model for V2DatasetSnapshotsResponse.
+type V2DatasetSnapshotsResponse struct {
+	Count     int                       `json:"count"`
+	Snapshots []V2DatasetSnapshotRecord `json:"snapshots"`
+}
+
 // V2GraphEventRecord defines model for V2GraphEventRecord.
 type V2GraphEventRecord struct {
 	AgentRole    *string    `json:"agent_role,omitempty"`
@@ -659,6 +1519,128 @@ type V2PromoteArtifactResourceRequest struct {
 	ProjectId *string `json:"project_id,omitempty"`
 }
 
+// V2ResourceBulkLifecycleRequest defines model for V2ResourceBulkLifecycleRequest.
+type V2ResourceBulkLifecycleRequest struct {
+	ResourceIds []string `json:"resource_ids"`
+}
+
+// V2ResourceBulkLifecycleResponse defines model for V2ResourceBulkLifecycleResponse.
+type V2ResourceBulkLifecycleResponse struct {
+	Count     int                     `json:"count"`
+	Events    []V2ResourceEventRecord `json:"events"`
+	Resources []V2ResourceRecord      `json:"resources"`
+}
+
+// V2ResourceBulkTagRequest defines model for V2ResourceBulkTagRequest.
+type V2ResourceBulkTagRequest struct {
+	Metadata    *map[string]interface{} `json:"metadata,omitempty"`
+	ResourceIds []string                `json:"resource_ids"`
+	Tags        []string                `json:"tags"`
+}
+
+// V2ResourceBulkTagResponse defines model for V2ResourceBulkTagResponse.
+type V2ResourceBulkTagResponse struct {
+	Count     int                     `json:"count"`
+	Events    []V2ResourceEventRecord `json:"events"`
+	Resources []V2ResourceRecord      `json:"resources"`
+}
+
+// V2ResourceCollectionAddResourcesRequest defines model for V2ResourceCollectionAddResourcesRequest.
+type V2ResourceCollectionAddResourcesRequest struct {
+	Metadata    *map[string]interface{} `json:"metadata,omitempty"`
+	ResourceIds []string                `json:"resource_ids"`
+}
+
+// V2ResourceCollectionAddResourcesResponse defines model for V2ResourceCollectionAddResourcesResponse.
+type V2ResourceCollectionAddResourcesResponse struct {
+	AddedCount  int                                    `json:"added_count"`
+	Collection  V2ResourceCollectionRecord             `json:"collection"`
+	Memberships []V2ResourceCollectionMembershipRecord `json:"memberships"`
+}
+
+// V2ResourceCollectionCreateRequest defines model for V2ResourceCollectionCreateRequest.
+type V2ResourceCollectionCreateRequest struct {
+	CollectionType     *V2ResourceCollectionCreateRequestCollectionType `json:"collection_type,omitempty"`
+	Description        *string                                          `json:"description,omitempty"`
+	Metadata           *map[string]interface{}                          `json:"metadata,omitempty"`
+	Name               string                                           `json:"name"`
+	ParentCollectionId *string                                          `json:"parent_collection_id,omitempty"`
+	ProjectId          *string                                          `json:"project_id,omitempty"`
+}
+
+// V2ResourceCollectionCreateRequestCollectionType defines model for V2ResourceCollectionCreateRequest.CollectionType.
+type V2ResourceCollectionCreateRequestCollectionType string
+
+// V2ResourceCollectionMembershipRecord defines model for V2ResourceCollectionMembershipRecord.
+type V2ResourceCollectionMembershipRecord struct {
+	AddedAt       string                 `json:"added_at"`
+	AddedByUserId *string                `json:"added_by_user_id,omitempty"`
+	CollectionId  string                 `json:"collection_id"`
+	Metadata      map[string]interface{} `json:"metadata"`
+	Position      int64                  `json:"position"`
+	ResourceId    string                 `json:"resource_id"`
+}
+
+// V2ResourceCollectionPatchRequest defines model for V2ResourceCollectionPatchRequest.
+type V2ResourceCollectionPatchRequest struct {
+	Name string `json:"name"`
+}
+
+// V2ResourceCollectionRecord defines model for V2ResourceCollectionRecord.
+type V2ResourceCollectionRecord struct {
+	CollectionId       string                                   `json:"collection_id"`
+	CollectionType     V2ResourceCollectionRecordCollectionType `json:"collection_type"`
+	CreatedAt          string                                   `json:"created_at"`
+	Description        *string                                  `json:"description,omitempty"`
+	Metadata           map[string]interface{}                   `json:"metadata"`
+	Name               string                                   `json:"name"`
+	OwnerOrgId         *string                                  `json:"owner_org_id,omitempty"`
+	OwnerRole          *string                                  `json:"owner_role,omitempty"`
+	OwnerUserId        string                                   `json:"owner_user_id"`
+	ParentCollectionId *string                                  `json:"parent_collection_id,omitempty"`
+	ProjectId          *string                                  `json:"project_id,omitempty"`
+	ResourceCount      int                                      `json:"resource_count"`
+	Status             string                                   `json:"status"`
+	UpdatedAt          string                                   `json:"updated_at"`
+}
+
+// V2ResourceCollectionRecordCollectionType defines model for V2ResourceCollectionRecord.CollectionType.
+type V2ResourceCollectionRecordCollectionType string
+
+// V2ResourceCollectionRemoveResourcesResponse defines model for V2ResourceCollectionRemoveResourcesResponse.
+type V2ResourceCollectionRemoveResourcesResponse struct {
+	Collection   V2ResourceCollectionRecord             `json:"collection"`
+	Memberships  []V2ResourceCollectionMembershipRecord `json:"memberships"`
+	RemovedCount int                                    `json:"removed_count"`
+}
+
+// V2ResourceCollectionResponse defines model for V2ResourceCollectionResponse.
+type V2ResourceCollectionResponse struct {
+	Collection V2ResourceCollectionRecord `json:"collection"`
+}
+
+// V2ResourceCollectionShareGrantsCreateResponse defines model for V2ResourceCollectionShareGrantsCreateResponse.
+type V2ResourceCollectionShareGrantsCreateResponse struct {
+	Collection V2ResourceCollectionRecord   `json:"collection"`
+	Count      int                          `json:"count"`
+	Grants     []V2ResourceShareGrantRecord `json:"grants"`
+}
+
+// V2ResourceCollectionsResponse defines model for V2ResourceCollectionsResponse.
+type V2ResourceCollectionsResponse struct {
+	Collections []V2ResourceCollectionRecord `json:"collections"`
+	Count       int                          `json:"count"`
+}
+
+// V2ResourceEventListResponse defines model for V2ResourceEventListResponse.
+type V2ResourceEventListResponse struct {
+	Count      int                     `json:"count"`
+	Events     []V2ResourceEventRecord `json:"events"`
+	Limit      int                     `json:"limit"`
+	Offset     int                     `json:"offset"`
+	TotalCount int                     `json:"total_count"`
+}
+
 // V2ResourceEventRecord defines model for V2ResourceEventRecord.
 type V2ResourceEventRecord struct {
 	ActorOrgId  *string                `json:"actor_org_id,omitempty"`
@@ -681,6 +1663,28 @@ type V2ResourceEventsResponse struct {
 type V2ResourceListResponse struct {
 	Count     int                `json:"count"`
 	Resources []V2ResourceRecord `json:"resources"`
+}
+
+// V2ResourceMetadataFilter defines model for V2ResourceMetadataFilter.
+type V2ResourceMetadataFilter struct {
+	Operator V2ResourceMetadataFilterOperator `json:"operator"`
+
+	// Path Dot-delimited resource metadata path, for example subject.age or label.
+	Path string `json:"path"`
+
+	// Value Comparison value. Optional for the exists operator.
+	Value *string `json:"value,omitempty"`
+}
+
+// V2ResourceMetadataFilterOperator defines model for V2ResourceMetadataFilter.Operator.
+type V2ResourceMetadataFilterOperator string
+
+// V2ResourcePatchRequest defines model for V2ResourcePatchRequest.
+type V2ResourcePatchRequest struct {
+	Metadata *map[string]interface{} `json:"metadata,omitempty"`
+
+	// OriginalName User-facing resource name shown in the Resources file manager.
+	OriginalName *string `json:"original_name,omitempty"`
 }
 
 // V2ResourceReconcileIssue defines model for V2ResourceReconcileIssue.
@@ -707,28 +1711,112 @@ type V2ResourceReconcileResponse struct {
 
 // V2ResourceRecord defines model for V2ResourceRecord.
 type V2ResourceRecord struct {
-	CacheReady    *bool              `json:"cache_ready,omitempty"`
-	ContentType   *string            `json:"content_type,omitempty"`
-	CreatedAt     string             `json:"created_at"`
-	FileId        string             `json:"file_id"`
-	HasThumbnail  bool               `json:"has_thumbnail"`
-	OriginalName  string             `json:"original_name"`
-	PreviewUrl    *string            `json:"preview_url,omitempty"`
-	Principal     *V2PrincipalRecord `json:"principal,omitempty"`
-	ProjectId     *string            `json:"project_id,omitempty"`
-	ResourceKind  string             `json:"resource_kind"`
-	Sha256        string             `json:"sha256"`
-	SizeBytes     int64              `json:"size_bytes"`
-	SourceType    string             `json:"source_type"`
-	SourceUri     *string            `json:"source_uri,omitempty"`
-	StagedLocally *bool              `json:"staged_locally,omitempty"`
-	ThumbnailUrl  *string            `json:"thumbnail_url,omitempty"`
+	CacheReady    *bool                   `json:"cache_ready,omitempty"`
+	ContentType   *string                 `json:"content_type,omitempty"`
+	CreatedAt     string                  `json:"created_at"`
+	FileId        string                  `json:"file_id"`
+	HasThumbnail  bool                    `json:"has_thumbnail"`
+	Metadata      *map[string]interface{} `json:"metadata,omitempty"`
+	OriginalName  string                  `json:"original_name"`
+	PreviewUrl    *string                 `json:"preview_url,omitempty"`
+	Principal     *V2PrincipalRecord      `json:"principal,omitempty"`
+	ProjectId     *string                 `json:"project_id,omitempty"`
+	ResourceKind  string                  `json:"resource_kind"`
+	Sha256        string                  `json:"sha256"`
+	ShareSummary  *V2ResourceShareSummary `json:"share_summary,omitempty"`
+	SizeBytes     int64                   `json:"size_bytes"`
+	SourceType    string                  `json:"source_type"`
+	SourceUri     *string                 `json:"source_uri,omitempty"`
+	StagedLocally *bool                   `json:"staged_locally,omitempty"`
+	Status        string                  `json:"status"`
+	Tags          *[]string               `json:"tags,omitempty"`
+	ThumbnailUrl  *string                 `json:"thumbnail_url,omitempty"`
 }
 
 // V2ResourceResponse defines model for V2ResourceResponse.
 type V2ResourceResponse struct {
 	Resource V2ResourceRecord `json:"resource"`
 }
+
+// V2ResourceShareGrantCreateRequest defines model for V2ResourceShareGrantCreateRequest.
+type V2ResourceShareGrantCreateRequest struct {
+	GranteeOrgId  *string                 `json:"grantee_org_id,omitempty"`
+	GranteeUserId *string                 `json:"grantee_user_id,omitempty"`
+	Metadata      *map[string]interface{} `json:"metadata,omitempty"`
+
+	// Public Publish the resource with a read grant visible to any authenticated principal.
+	Public *bool                                  `json:"public,omitempty"`
+	Role   *V2ResourceShareGrantCreateRequestRole `json:"role,omitempty"`
+}
+
+// V2ResourceShareGrantCreateRequestRole defines model for V2ResourceShareGrantCreateRequest.Role.
+type V2ResourceShareGrantCreateRequestRole string
+
+// V2ResourceShareGrantRecord defines model for V2ResourceShareGrantRecord.
+type V2ResourceShareGrantRecord struct {
+	CreatedAt       string                         `json:"created_at"`
+	CreatedByUserId *string                        `json:"created_by_user_id,omitempty"`
+	GrantId         string                         `json:"grant_id"`
+	GranteeOrgId    *string                        `json:"grantee_org_id,omitempty"`
+	GranteeUserId   *string                        `json:"grantee_user_id,omitempty"`
+	Metadata        map[string]interface{}         `json:"metadata"`
+	OwnerOrgId      *string                        `json:"owner_org_id,omitempty"`
+	OwnerRole       *string                        `json:"owner_role,omitempty"`
+	OwnerUserId     string                         `json:"owner_user_id"`
+	ResourceId      string                         `json:"resource_id"`
+	RevokedAt       *string                        `json:"revoked_at,omitempty"`
+	Role            V2ResourceShareGrantRecordRole `json:"role"`
+	Status          string                         `json:"status"`
+	UpdatedAt       string                         `json:"updated_at"`
+}
+
+// V2ResourceShareGrantRecordRole defines model for V2ResourceShareGrantRecord.Role.
+type V2ResourceShareGrantRecordRole string
+
+// V2ResourceShareGrantResponse defines model for V2ResourceShareGrantResponse.
+type V2ResourceShareGrantResponse struct {
+	Grant V2ResourceShareGrantRecord `json:"grant"`
+}
+
+// V2ResourceShareGrantsCreateRequest defines model for V2ResourceShareGrantsCreateRequest.
+type V2ResourceShareGrantsCreateRequest struct {
+	GranteeOrgId  *string                 `json:"grantee_org_id,omitempty"`
+	GranteeUserId *string                 `json:"grantee_user_id,omitempty"`
+	Metadata      *map[string]interface{} `json:"metadata,omitempty"`
+
+	// Public Publish the resource with a read grant visible to any authenticated principal.
+	Public      *bool                                   `json:"public,omitempty"`
+	ResourceIds []string                                `json:"resource_ids"`
+	Role        *V2ResourceShareGrantsCreateRequestRole `json:"role,omitempty"`
+}
+
+// V2ResourceShareGrantsCreateRequestRole defines model for V2ResourceShareGrantsCreateRequest.Role.
+type V2ResourceShareGrantsCreateRequestRole string
+
+// V2ResourceShareGrantsCreateResponse defines model for V2ResourceShareGrantsCreateResponse.
+type V2ResourceShareGrantsCreateResponse struct {
+	Count  int                          `json:"count"`
+	Grants []V2ResourceShareGrantRecord `json:"grants"`
+}
+
+// V2ResourceShareGrantsResponse defines model for V2ResourceShareGrantsResponse.
+type V2ResourceShareGrantsResponse struct {
+	Count      int                          `json:"count"`
+	Grants     []V2ResourceShareGrantRecord `json:"grants"`
+	ResourceId string                       `json:"resource_id"`
+}
+
+// V2ResourceShareSummary defines model for V2ResourceShareSummary.
+type V2ResourceShareSummary struct {
+	ActiveGrantCount int                               `json:"active_grant_count"`
+	Public           *bool                             `json:"public,omitempty"`
+	ShareStatus      V2ResourceShareSummaryShareStatus `json:"share_status"`
+	SharedByMe       *bool                             `json:"shared_by_me,omitempty"`
+	SharedWithMe     *bool                             `json:"shared_with_me,omitempty"`
+}
+
+// V2ResourceShareSummaryShareStatus defines model for V2ResourceShareSummary.ShareStatus.
+type V2ResourceShareSummaryShareStatus string
 
 // V2RunBudget defines model for V2RunBudget.
 type V2RunBudget struct {
@@ -947,10 +2035,140 @@ type V2TrainingUpdateProposalListResponse struct {
 	Proposals []JsonObject `json:"proposals"`
 }
 
+// V2UploadChunkRecord defines model for V2UploadChunkRecord.
+type V2UploadChunkRecord struct {
+	ChunkIndex int                       `json:"chunk_index"`
+	Error      *string                   `json:"error,omitempty"`
+	FileToken  string                    `json:"file_token"`
+	Metadata   map[string]interface{}    `json:"metadata"`
+	Offset     int64                     `json:"offset"`
+	ReceivedAt *string                   `json:"received_at,omitempty"`
+	SessionId  string                    `json:"session_id"`
+	Sha256     string                    `json:"sha256"`
+	SizeBytes  int64                     `json:"size_bytes"`
+	Status     V2UploadChunkRecordStatus `json:"status"`
+	StorageUri *string                   `json:"storage_uri,omitempty"`
+	VerifiedAt *string                   `json:"verified_at,omitempty"`
+}
+
+// V2UploadChunkRecordStatus defines model for V2UploadChunkRecord.Status.
+type V2UploadChunkRecordStatus string
+
+// V2UploadChunkResponse defines model for V2UploadChunkResponse.
+type V2UploadChunkResponse struct {
+	BytesReceived int64               `json:"bytes_received"`
+	BytesVerified int64               `json:"bytes_verified"`
+	Chunk         V2UploadChunkRecord `json:"chunk"`
+	FileToken     string              `json:"file_token"`
+	SessionId     string              `json:"session_id"`
+	Status        string              `json:"status"`
+}
+
 // V2UploadFilesResponse defines model for V2UploadFilesResponse.
 type V2UploadFilesResponse struct {
 	FileCount int                    `json:"file_count"`
 	Uploaded  []V2UploadedFileRecord `json:"uploaded"`
+}
+
+// V2UploadSessionCreateRequest defines model for V2UploadSessionCreateRequest.
+type V2UploadSessionCreateRequest struct {
+	BrowserFingerprint *string                   `json:"browser_fingerprint,omitempty"`
+	Files              []V2UploadSessionFileInit `json:"files"`
+	IdempotencyKey     *string                   `json:"idempotency_key,omitempty"`
+	ProjectId          *string                   `json:"project_id,omitempty"`
+	TotalBytes         int64                     `json:"total_bytes"`
+}
+
+// V2UploadSessionEventRecord defines model for V2UploadSessionEventRecord.
+type V2UploadSessionEventRecord struct {
+	ActorOrgId  *string                `json:"actor_org_id,omitempty"`
+	ActorUserId *string                `json:"actor_user_id,omitempty"`
+	EventId     string                 `json:"event_id"`
+	EventType   string                 `json:"event_type"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	SessionId   string                 `json:"session_id"`
+	Ts          string                 `json:"ts"`
+}
+
+// V2UploadSessionFileCompleteResponse defines model for V2UploadSessionFileCompleteResponse.
+type V2UploadSessionFileCompleteResponse struct {
+	Duplicate bool                 `json:"duplicate"`
+	FileToken string               `json:"file_token"`
+	SessionId string               `json:"session_id"`
+	Uploaded  V2UploadedFileRecord `json:"uploaded"`
+}
+
+// V2UploadSessionFileInit defines model for V2UploadSessionFileInit.
+type V2UploadSessionFileInit struct {
+	ContentType    *string `json:"content_type,omitempty"`
+	DeclaredSha256 *string `json:"declared_sha256,omitempty"`
+	FileToken      string  `json:"file_token"`
+	OriginalName   string  `json:"original_name"`
+	RelativePath   *string `json:"relative_path,omitempty"`
+	SizeBytes      int64   `json:"size_bytes"`
+}
+
+// V2UploadSessionFileRecord defines model for V2UploadSessionFileRecord.
+type V2UploadSessionFileRecord struct {
+	CompletedAt    *string                         `json:"completed_at,omitempty"`
+	ComputedSha256 *string                         `json:"computed_sha256,omitempty"`
+	ContentType    *string                         `json:"content_type,omitempty"`
+	CreatedAt      string                          `json:"created_at"`
+	DeclaredSha256 *string                         `json:"declared_sha256,omitempty"`
+	Error          *string                         `json:"error,omitempty"`
+	FileToken      string                          `json:"file_token"`
+	Metadata       map[string]interface{}          `json:"metadata"`
+	OriginalName   string                          `json:"original_name"`
+	RelativePath   *string                         `json:"relative_path,omitempty"`
+	ResourceId     *string                         `json:"resource_id,omitempty"`
+	SessionId      string                          `json:"session_id"`
+	SizeBytes      int64                           `json:"size_bytes"`
+	Status         V2UploadSessionFileRecordStatus `json:"status"`
+	UpdatedAt      string                          `json:"updated_at"`
+}
+
+// V2UploadSessionFileRecordStatus defines model for V2UploadSessionFileRecord.Status.
+type V2UploadSessionFileRecordStatus string
+
+// V2UploadSessionLimits defines model for V2UploadSessionLimits.
+type V2UploadSessionLimits struct {
+	MaxFilesPerSession int `json:"max_files_per_session"`
+	MaxParallelChunks  int `json:"max_parallel_chunks"`
+	MaxParallelFiles   int `json:"max_parallel_files"`
+}
+
+// V2UploadSessionRecord defines model for V2UploadSessionRecord.
+type V2UploadSessionRecord struct {
+	BrowserFingerprint *string                     `json:"browser_fingerprint,omitempty"`
+	BytesCommitted     int64                       `json:"bytes_committed"`
+	BytesReceived      int64                       `json:"bytes_received"`
+	BytesVerified      int64                       `json:"bytes_verified"`
+	CompletedAt        *string                     `json:"completed_at,omitempty"`
+	CreatedAt          string                      `json:"created_at"`
+	Error              *string                     `json:"error,omitempty"`
+	IdempotencyKey     *string                     `json:"idempotency_key,omitempty"`
+	Metadata           map[string]interface{}      `json:"metadata"`
+	OwnerOrgId         *string                     `json:"owner_org_id,omitempty"`
+	OwnerRole          *string                     `json:"owner_role,omitempty"`
+	OwnerUserId        string                      `json:"owner_user_id"`
+	ProjectId          *string                     `json:"project_id,omitempty"`
+	SessionId          string                      `json:"session_id"`
+	SourceType         string                      `json:"source_type"`
+	Status             V2UploadSessionRecordStatus `json:"status"`
+	TotalBytes         int64                       `json:"total_bytes"`
+	UpdatedAt          string                      `json:"updated_at"`
+}
+
+// V2UploadSessionRecordStatus defines model for V2UploadSessionRecord.Status.
+type V2UploadSessionRecordStatus string
+
+// V2UploadSessionResponse defines model for V2UploadSessionResponse.
+type V2UploadSessionResponse struct {
+	Chunks  *[]V2UploadChunkRecord       `json:"chunks,omitempty"`
+	Events  []V2UploadSessionEventRecord `json:"events"`
+	Files   []V2UploadSessionFileRecord  `json:"files"`
+	Limits  V2UploadSessionLimits        `json:"limits"`
+	Session V2UploadSessionRecord        `json:"session"`
 }
 
 // V2UploadedFileRecord defines model for V2UploadedFileRecord.
@@ -1002,6 +2220,12 @@ type RunID = string
 
 // ThreadID defines model for ThreadID.
 type ThreadID = string
+
+// UploadFileToken defines model for UploadFileToken.
+type UploadFileToken = string
+
+// UploadSessionID defines model for UploadSessionID.
+type UploadSessionID = string
 
 // ContinueAsGuestJSONBody defines parameters for ContinueAsGuest.
 type ContinueAsGuestJSONBody struct {
@@ -1112,17 +2336,163 @@ type UploadBisqueOutputsJSONBody struct {
 	FileIds     *[]string `json:"file_ids,omitempty"`
 }
 
+// ListV2DataAgentJobsParams defines parameters for ListV2DataAgentJobs.
+type ListV2DataAgentJobsParams struct {
+	Limit     *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset    *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Status    *string `form:"status,omitempty" json:"status,omitempty"`
+	JobType   *string `form:"job_type,omitempty" json:"job_type,omitempty"`
+	ProjectId *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+}
+
+// ListV2DatasetSnapshotsParams defines parameters for ListV2DatasetSnapshots.
+type ListV2DatasetSnapshotsParams struct {
+	Limit              *int                                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset             *int                                `form:"offset,omitempty" json:"offset,omitempty"`
+	Q                  *string                             `form:"q,omitempty" json:"q,omitempty"`
+	ProjectId          *string                             `form:"project_id,omitempty" json:"project_id,omitempty"`
+	SourceCollectionId *string                             `form:"source_collection_id,omitempty" json:"source_collection_id,omitempty"`
+	Status             *ListV2DatasetSnapshotsParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+}
+
+// ListV2DatasetSnapshotsParamsStatus defines parameters for ListV2DatasetSnapshots.
+type ListV2DatasetSnapshotsParamsStatus string
+
+// ListV2DatasetSnapshotEventsParams defines parameters for ListV2DatasetSnapshotEvents.
+type ListV2DatasetSnapshotEventsParams struct {
+	Limit       *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset      *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	EventType   *string `form:"event_type,omitempty" json:"event_type,omitempty"`
+	ActorUserId *string `form:"actor_user_id,omitempty" json:"actor_user_id,omitempty"`
+}
+
+// ListV2DatasetSnapshotShareGrantsParams defines parameters for ListV2DatasetSnapshotShareGrants.
+type ListV2DatasetSnapshotShareGrantsParams struct {
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+}
+
+// ListV2ResourceCollectionsParams defines parameters for ListV2ResourceCollections.
+type ListV2ResourceCollectionsParams struct {
+	CollectionType *string `form:"collection_type,omitempty" json:"collection_type,omitempty"`
+	ProjectId      *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+	Q              *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Status Collection lifecycle state to browse. Deleted collections are owner-only.
+	Status *ListV2ResourceCollectionsParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Limit  *int                                   `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int                                   `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// ListV2ResourceCollectionsParamsStatus defines parameters for ListV2ResourceCollections.
+type ListV2ResourceCollectionsParamsStatus string
+
+// ListV2ResourceCollectionResourcesParams defines parameters for ListV2ResourceCollectionResources.
+type ListV2ResourceCollectionResourcesParams struct {
+	Limit     *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset    *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Q         *string `form:"q,omitempty" json:"q,omitempty"`
+	Kind      *string `form:"kind,omitempty" json:"kind,omitempty"`
+	Source    *string `form:"source,omitempty" json:"source,omitempty"`
+	ProjectId *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// Tag Repeated tag filters. All supplied tags must match the resource.
+	Tag *[]string `form:"tag,omitempty" json:"tag,omitempty"`
+
+	// Tags Comma-separated tag filters. All supplied tags must match the resource.
+	Tags *string `form:"tags,omitempty" json:"tags,omitempty"`
+
+	// Descriptor Repeated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+	Descriptor *[]string `form:"descriptor,omitempty" json:"descriptor,omitempty"`
+
+	// Descriptors Comma-separated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+	Descriptors *string `form:"descriptors,omitempty" json:"descriptors,omitempty"`
+
+	// MetadataFilter Repeated structured metadata filters in path:operator:value form. Supported operators are eq, contains, exists, lt, lte, gt, and gte.
+	MetadataFilter *[]string `form:"metadata_filter,omitempty" json:"metadata_filter,omitempty"`
+
+	// CreatedAfter Return resources created at or after this RFC3339 timestamp or YYYY-MM-DD date.
+	CreatedAfter *string `form:"created_after,omitempty" json:"created_after,omitempty"`
+
+	// CreatedBefore Return resources created at or before this RFC3339 timestamp or YYYY-MM-DD date.
+	CreatedBefore *string `form:"created_before,omitempty" json:"created_before,omitempty"`
+
+	// ProcessingStatus Filter resources by persisted Data Agent processing readiness.
+	ProcessingStatus *ListV2ResourceCollectionResourcesParamsProcessingStatus `form:"processing_status,omitempty" json:"processing_status,omitempty"`
+	Sharing          *ListV2ResourceCollectionResourcesParamsSharing          `form:"sharing,omitempty" json:"sharing,omitempty"`
+}
+
+// ListV2ResourceCollectionResourcesParamsProcessingStatus defines parameters for ListV2ResourceCollectionResources.
+type ListV2ResourceCollectionResourcesParamsProcessingStatus string
+
+// ListV2ResourceCollectionResourcesParamsSharing defines parameters for ListV2ResourceCollectionResources.
+type ListV2ResourceCollectionResourcesParamsSharing string
+
+// ListResourceEventLogParams defines parameters for ListResourceEventLog.
+type ListResourceEventLogParams struct {
+	ResourceId  *string `form:"resource_id,omitempty" json:"resource_id,omitempty"`
+	EventType   *string `form:"event_type,omitempty" json:"event_type,omitempty"`
+	ActorUserId *string `form:"actor_user_id,omitempty" json:"actor_user_id,omitempty"`
+	Limit       *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset      *int    `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
 // ListResourcesParams defines parameters for ListResources.
 type ListResourcesParams struct {
-	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
-	Q      *string `form:"q,omitempty" json:"q,omitempty"`
-	Kind   *string `form:"kind,omitempty" json:"kind,omitempty"`
+	Limit     *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset    *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Q         *string `form:"q,omitempty" json:"q,omitempty"`
+	Kind      *string `form:"kind,omitempty" json:"kind,omitempty"`
+	Source    *string `form:"source,omitempty" json:"source,omitempty"`
+	ProjectId *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// Tag Repeated tag filters. All supplied tags must match the resource.
+	Tag *[]string `form:"tag,omitempty" json:"tag,omitempty"`
+
+	// Tags Comma-separated tag filters. All supplied tags must match the resource.
+	Tags *string `form:"tags,omitempty" json:"tags,omitempty"`
+
+	// Descriptor Repeated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+	Descriptor *[]string `form:"descriptor,omitempty" json:"descriptor,omitempty"`
+
+	// Descriptors Comma-separated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+	Descriptors *string `form:"descriptors,omitempty" json:"descriptors,omitempty"`
+
+	// MetadataFilter Repeated structured metadata filters in path:operator:value form. Supported operators are eq, contains, exists, lt, lte, gt, and gte.
+	MetadataFilter *[]string `form:"metadata_filter,omitempty" json:"metadata_filter,omitempty"`
+
+	// CreatedAfter Return resources created at or after this RFC3339 timestamp or YYYY-MM-DD date.
+	CreatedAfter *string `form:"created_after,omitempty" json:"created_after,omitempty"`
+
+	// CreatedBefore Return resources created at or before this RFC3339 timestamp or YYYY-MM-DD date.
+	CreatedBefore *string `form:"created_before,omitempty" json:"created_before,omitempty"`
+
+	// ProcessingStatus Filter resources by persisted Data Agent processing readiness.
+	ProcessingStatus *ListResourcesParamsProcessingStatus `form:"processing_status,omitempty" json:"processing_status,omitempty"`
+	Sharing          *ListResourcesParamsSharing          `form:"sharing,omitempty" json:"sharing,omitempty"`
+
+	// Status Resource lifecycle state to browse. Deleted resources are owner-only.
+	Status *ListResourcesParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 }
+
+// ListResourcesParamsProcessingStatus defines parameters for ListResources.
+type ListResourcesParamsProcessingStatus string
+
+// ListResourcesParamsSharing defines parameters for ListResources.
+type ListResourcesParamsSharing string
+
+// ListResourcesParamsStatus defines parameters for ListResources.
+type ListResourcesParamsStatus string
 
 // ListResourceEventsParams defines parameters for ListResourceEvents.
 type ListResourceEventsParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListResourceShareGrantsParams defines parameters for ListResourceShareGrants.
+type ListResourceShareGrantsParams struct {
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListRunsParams defines parameters for ListRuns.
@@ -1200,6 +2570,12 @@ type ListV2TrainingUpdateProposalsParams struct {
 	LineageId *string `form:"lineage_id,omitempty" json:"lineage_id,omitempty"`
 	Status    *string `form:"status,omitempty" json:"status,omitempty"`
 	Limit     *int    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// UploadV2UploadSessionChunkParams defines parameters for UploadV2UploadSessionChunk.
+type UploadV2UploadSessionChunkParams struct {
+	Offset int64  `form:"offset" json:"offset"`
+	Sha256 string `form:"sha256" json:"sha256"`
 }
 
 // UploadFilesMultipartBody defines parameters for UploadFiles.
@@ -1329,6 +2705,60 @@ type SearchBisqueResourcesJSONRequestBody SearchBisqueResourcesJSONBody
 // UploadBisqueOutputsJSONRequestBody defines body for UploadBisqueOutputs for application/json ContentType.
 type UploadBisqueOutputsJSONRequestBody UploadBisqueOutputsJSONBody
 
+// CreateV2DataAgentJobJSONRequestBody defines body for CreateV2DataAgentJob for application/json ContentType.
+type CreateV2DataAgentJobJSONRequestBody = V2DataAgentJobCreateRequest
+
+// ControlV2DataAgentJobJSONRequestBody defines body for ControlV2DataAgentJob for application/json ContentType.
+type ControlV2DataAgentJobJSONRequestBody = V2DataAgentJobControlRequest
+
+// ReleaseV2DataAgentJobLeaseJSONRequestBody defines body for ReleaseV2DataAgentJobLease for application/json ContentType.
+type ReleaseV2DataAgentJobLeaseJSONRequestBody = V2RunLeaseRequest
+
+// RenewV2DataAgentJobLeaseJSONRequestBody defines body for RenewV2DataAgentJobLease for application/json ContentType.
+type RenewV2DataAgentJobLeaseJSONRequestBody = V2RunLeaseRequest
+
+// AcquireV2DataAgentJobLeaseJSONRequestBody defines body for AcquireV2DataAgentJobLease for application/json ContentType.
+type AcquireV2DataAgentJobLeaseJSONRequestBody = V2RunLeaseRequest
+
+// UpdateV2DataAgentJobStatusJSONRequestBody defines body for UpdateV2DataAgentJobStatus for application/json ContentType.
+type UpdateV2DataAgentJobStatusJSONRequestBody = V2DataAgentJobStatusUpdateRequest
+
+// CreateV2DatasetSnapshotJSONRequestBody defines body for CreateV2DatasetSnapshot for application/json ContentType.
+type CreateV2DatasetSnapshotJSONRequestBody = V2DatasetSnapshotCreateRequest
+
+// CreateV2DatasetSnapshotShareGrantJSONRequestBody defines body for CreateV2DatasetSnapshotShareGrant for application/json ContentType.
+type CreateV2DatasetSnapshotShareGrantJSONRequestBody = V2DatasetSnapshotShareGrantCreateRequest
+
+// CreateV2ResourceCollectionJSONRequestBody defines body for CreateV2ResourceCollection for application/json ContentType.
+type CreateV2ResourceCollectionJSONRequestBody = V2ResourceCollectionCreateRequest
+
+// PatchV2ResourceCollectionJSONRequestBody defines body for PatchV2ResourceCollection for application/json ContentType.
+type PatchV2ResourceCollectionJSONRequestBody = V2ResourceCollectionPatchRequest
+
+// AddV2ResourceCollectionResourcesJSONRequestBody defines body for AddV2ResourceCollectionResources for application/json ContentType.
+type AddV2ResourceCollectionResourcesJSONRequestBody = V2ResourceCollectionAddResourcesRequest
+
+// CreateV2ResourceCollectionShareGrantsJSONRequestBody defines body for CreateV2ResourceCollectionShareGrants for application/json ContentType.
+type CreateV2ResourceCollectionShareGrantsJSONRequestBody = V2ResourceShareGrantCreateRequest
+
+// BulkDeleteResourcesJSONRequestBody defines body for BulkDeleteResources for application/json ContentType.
+type BulkDeleteResourcesJSONRequestBody = V2ResourceBulkLifecycleRequest
+
+// BulkRestoreResourcesJSONRequestBody defines body for BulkRestoreResources for application/json ContentType.
+type BulkRestoreResourcesJSONRequestBody = V2ResourceBulkLifecycleRequest
+
+// CreateResourceShareGrantsJSONRequestBody defines body for CreateResourceShareGrants for application/json ContentType.
+type CreateResourceShareGrantsJSONRequestBody = V2ResourceShareGrantsCreateRequest
+
+// BulkTagResourcesJSONRequestBody defines body for BulkTagResources for application/json ContentType.
+type BulkTagResourcesJSONRequestBody = V2ResourceBulkTagRequest
+
+// PatchResourceJSONRequestBody defines body for PatchResource for application/json ContentType.
+type PatchResourceJSONRequestBody = V2ResourcePatchRequest
+
+// CreateResourceShareGrantJSONRequestBody defines body for CreateResourceShareGrant for application/json ContentType.
+type CreateResourceShareGrantJSONRequestBody = V2ResourceShareGrantCreateRequest
+
 // CancelRunJSONRequestBody defines body for CancelRun for application/json ContentType.
 type CancelRunJSONRequestBody = V2RunCancelRequest
 
@@ -1355,6 +2785,9 @@ type UpsertThreadJSONRequestBody = V2ThreadUpsertRequest
 
 // CreateRunJSONRequestBody defines body for CreateRun for application/json ContentType.
 type CreateRunJSONRequestBody = V2RunCreateRequest
+
+// CreateV2UploadSessionJSONRequestBody defines body for CreateV2UploadSession for application/json ContentType.
+type CreateV2UploadSessionJSONRequestBody = V2UploadSessionCreateRequest
 
 // UploadFilesMultipartRequestBody defines body for UploadFiles for multipart/form-data ContentType.
 type UploadFilesMultipartRequestBody UploadFilesMultipartBody
@@ -4696,6 +6129,57 @@ type ServerInterface interface {
 	// (GET /v2/config/public)
 	GetV2PublicConfig(w http.ResponseWriter, r *http.Request)
 
+	// (GET /v2/data-agent/jobs)
+	ListV2DataAgentJobs(w http.ResponseWriter, r *http.Request, params ListV2DataAgentJobsParams)
+
+	// (POST /v2/data-agent/jobs)
+	CreateV2DataAgentJob(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/data-agent/jobs/{job_id})
+	GetV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (POST /v2/data-agent/jobs/{job_id}/control)
+	ControlV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (DELETE /v2/data-agent/jobs/{job_id}/lease)
+	ReleaseV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (PATCH /v2/data-agent/jobs/{job_id}/lease)
+	RenewV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (POST /v2/data-agent/jobs/{job_id}/lease)
+	AcquireV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (PATCH /v2/data-agent/jobs/{job_id}/status)
+	UpdateV2DataAgentJobStatus(w http.ResponseWriter, r *http.Request, jobId string)
+
+	// (GET /v2/dataset-snapshots)
+	ListV2DatasetSnapshots(w http.ResponseWriter, r *http.Request, params ListV2DatasetSnapshotsParams)
+
+	// (POST /v2/dataset-snapshots)
+	CreateV2DatasetSnapshot(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /v2/dataset-snapshots/{snapshot_id})
+	DeleteV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id})
+	GetV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id}/events)
+	ListV2DatasetSnapshotEvents(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotEventsParams)
+
+	// (POST /v2/dataset-snapshots/{snapshot_id}/restore)
+	RestoreV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id}/shares)
+	ListV2DatasetSnapshotShareGrants(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotShareGrantsParams)
+
+	// (POST /v2/dataset-snapshots/{snapshot_id}/shares)
+	CreateV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string)
+
+	// (DELETE /v2/dataset-snapshots/{snapshot_id}/shares/{grant_id})
+	RevokeV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string, grantId string)
+
 	// (GET /v2/health)
 	GetV2Health(w http.ResponseWriter, r *http.Request)
 
@@ -4708,8 +6192,50 @@ type ServerInterface interface {
 	// (GET /v2/model-health)
 	GetV2ModelHealth(w http.ResponseWriter, r *http.Request)
 
+	// (GET /v2/resource-collections)
+	ListV2ResourceCollections(w http.ResponseWriter, r *http.Request, params ListV2ResourceCollectionsParams)
+
+	// (POST /v2/resource-collections)
+	CreateV2ResourceCollection(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /v2/resource-collections/{collection_id})
+	DeleteV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string)
+
+	// (PATCH /v2/resource-collections/{collection_id})
+	PatchV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string)
+
+	// (GET /v2/resource-collections/{collection_id}/resources)
+	ListV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string, params ListV2ResourceCollectionResourcesParams)
+
+	// (POST /v2/resource-collections/{collection_id}/resources)
+	AddV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string)
+
+	// (DELETE /v2/resource-collections/{collection_id}/resources/{file_id})
+	RemoveV2ResourceCollectionResource(w http.ResponseWriter, r *http.Request, collectionId string, fileId FileID)
+
+	// (POST /v2/resource-collections/{collection_id}/restore)
+	RestoreV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string)
+
+	// (POST /v2/resource-collections/{collection_id}/shares)
+	CreateV2ResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request, collectionId string)
+
+	// (GET /v2/resource-events)
+	ListResourceEventLog(w http.ResponseWriter, r *http.Request, params ListResourceEventLogParams)
+
 	// (GET /v2/resources)
 	ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams)
+
+	// (POST /v2/resources/delete/bulk)
+	BulkDeleteResources(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/resources/restore/bulk)
+	BulkRestoreResources(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/resources/shares/bulk)
+	CreateResourceShareGrants(w http.ResponseWriter, r *http.Request)
+
+	// (POST /v2/resources/tags/bulk)
+	BulkTagResources(w http.ResponseWriter, r *http.Request)
 
 	// (DELETE /v2/resources/{file_id})
 	DeleteResource(w http.ResponseWriter, r *http.Request, fileId FileID)
@@ -4717,11 +6243,26 @@ type ServerInterface interface {
 	// (GET /v2/resources/{file_id})
 	GetResource(w http.ResponseWriter, r *http.Request, fileId FileID)
 
+	// (PATCH /v2/resources/{file_id})
+	PatchResource(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/resources/{file_id}/download)
+	DownloadResource(w http.ResponseWriter, r *http.Request, fileId FileID)
+
 	// (GET /v2/resources/{file_id}/events)
 	ListResourceEvents(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceEventsParams)
 
 	// (POST /v2/resources/{file_id}/restore)
 	RestoreResource(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (GET /v2/resources/{file_id}/shares)
+	ListResourceShareGrants(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceShareGrantsParams)
+
+	// (POST /v2/resources/{file_id}/shares)
+	CreateResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID)
+
+	// (DELETE /v2/resources/{file_id}/shares/{grant_id})
+	RevokeResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID, grantId string)
 
 	// (GET /v2/resources/{file_id}/thumbnail)
 	GetResourceThumbnail(w http.ResponseWriter, r *http.Request, fileId FileID)
@@ -4866,6 +6407,27 @@ type ServerInterface interface {
 
 	// (POST /v2/training/update-proposals/{proposal_id}/reject)
 	RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string)
+
+	// (POST /v2/upload-sessions)
+	CreateV2UploadSession(w http.ResponseWriter, r *http.Request)
+
+	// (GET /v2/upload-sessions/{session_id})
+	GetV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID)
+
+	// (POST /v2/upload-sessions/{session_id}/cancel)
+	CancelV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID)
+
+	// (PUT /v2/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index})
+	UploadV2UploadSessionChunk(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken, chunkIndex int, params UploadV2UploadSessionChunkParams)
+
+	// (POST /v2/upload-sessions/{session_id}/files/{file_token}/complete)
+	CompleteV2UploadSessionFile(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken)
+
+	// (POST /v2/upload-sessions/{session_id}/pause)
+	PauseV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID)
+
+	// (POST /v2/upload-sessions/{session_id}/resume)
+	ResumeV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID)
 
 	// (POST /v2/uploads)
 	UploadFiles(w http.ResponseWriter, r *http.Request)
@@ -5073,6 +6635,91 @@ func (_ Unimplemented) GetV2PublicConfig(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /v2/data-agent/jobs)
+func (_ Unimplemented) ListV2DataAgentJobs(w http.ResponseWriter, r *http.Request, params ListV2DataAgentJobsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/data-agent/jobs)
+func (_ Unimplemented) CreateV2DataAgentJob(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/data-agent/jobs/{job_id})
+func (_ Unimplemented) GetV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/data-agent/jobs/{job_id}/control)
+func (_ Unimplemented) ControlV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/data-agent/jobs/{job_id}/lease)
+func (_ Unimplemented) ReleaseV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PATCH /v2/data-agent/jobs/{job_id}/lease)
+func (_ Unimplemented) RenewV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/data-agent/jobs/{job_id}/lease)
+func (_ Unimplemented) AcquireV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PATCH /v2/data-agent/jobs/{job_id}/status)
+func (_ Unimplemented) UpdateV2DataAgentJobStatus(w http.ResponseWriter, r *http.Request, jobId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/dataset-snapshots)
+func (_ Unimplemented) ListV2DatasetSnapshots(w http.ResponseWriter, r *http.Request, params ListV2DatasetSnapshotsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/dataset-snapshots)
+func (_ Unimplemented) CreateV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/dataset-snapshots/{snapshot_id})
+func (_ Unimplemented) DeleteV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/dataset-snapshots/{snapshot_id})
+func (_ Unimplemented) GetV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/dataset-snapshots/{snapshot_id}/events)
+func (_ Unimplemented) ListV2DatasetSnapshotEvents(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotEventsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/dataset-snapshots/{snapshot_id}/restore)
+func (_ Unimplemented) RestoreV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/dataset-snapshots/{snapshot_id}/shares)
+func (_ Unimplemented) ListV2DatasetSnapshotShareGrants(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotShareGrantsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/dataset-snapshots/{snapshot_id}/shares)
+func (_ Unimplemented) CreateV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/dataset-snapshots/{snapshot_id}/shares/{grant_id})
+func (_ Unimplemented) RevokeV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string, grantId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/health)
 func (_ Unimplemented) GetV2Health(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -5093,8 +6740,78 @@ func (_ Unimplemented) GetV2ModelHealth(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /v2/resource-collections)
+func (_ Unimplemented) ListV2ResourceCollections(w http.ResponseWriter, r *http.Request, params ListV2ResourceCollectionsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resource-collections)
+func (_ Unimplemented) CreateV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/resource-collections/{collection_id})
+func (_ Unimplemented) DeleteV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PATCH /v2/resource-collections/{collection_id})
+func (_ Unimplemented) PatchV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resource-collections/{collection_id}/resources)
+func (_ Unimplemented) ListV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string, params ListV2ResourceCollectionResourcesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resource-collections/{collection_id}/resources)
+func (_ Unimplemented) AddV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/resource-collections/{collection_id}/resources/{file_id})
+func (_ Unimplemented) RemoveV2ResourceCollectionResource(w http.ResponseWriter, r *http.Request, collectionId string, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resource-collections/{collection_id}/restore)
+func (_ Unimplemented) RestoreV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resource-collections/{collection_id}/shares)
+func (_ Unimplemented) CreateV2ResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request, collectionId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resource-events)
+func (_ Unimplemented) ListResourceEventLog(w http.ResponseWriter, r *http.Request, params ListResourceEventLogParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/resources)
 func (_ Unimplemented) ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resources/delete/bulk)
+func (_ Unimplemented) BulkDeleteResources(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resources/restore/bulk)
+func (_ Unimplemented) BulkRestoreResources(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resources/shares/bulk)
+func (_ Unimplemented) CreateResourceShareGrants(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resources/tags/bulk)
+func (_ Unimplemented) BulkTagResources(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5108,6 +6825,16 @@ func (_ Unimplemented) GetResource(w http.ResponseWriter, r *http.Request, fileI
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (PATCH /v2/resources/{file_id})
+func (_ Unimplemented) PatchResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resources/{file_id}/download)
+func (_ Unimplemented) DownloadResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /v2/resources/{file_id}/events)
 func (_ Unimplemented) ListResourceEvents(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceEventsParams) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -5115,6 +6842,21 @@ func (_ Unimplemented) ListResourceEvents(w http.ResponseWriter, r *http.Request
 
 // (POST /v2/resources/{file_id}/restore)
 func (_ Unimplemented) RestoreResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/resources/{file_id}/shares)
+func (_ Unimplemented) ListResourceShareGrants(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceShareGrantsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/resources/{file_id}/shares)
+func (_ Unimplemented) CreateResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /v2/resources/{file_id}/shares/{grant_id})
+func (_ Unimplemented) RevokeResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID, grantId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5355,6 +7097,41 @@ func (_ Unimplemented) ApproveV2TrainingUpdateProposal(w http.ResponseWriter, r 
 
 // (POST /v2/training/update-proposals/{proposal_id}/reject)
 func (_ Unimplemented) RejectV2TrainingUpdateProposal(w http.ResponseWriter, r *http.Request, proposalId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/upload-sessions)
+func (_ Unimplemented) CreateV2UploadSession(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (GET /v2/upload-sessions/{session_id})
+func (_ Unimplemented) GetV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/upload-sessions/{session_id}/cancel)
+func (_ Unimplemented) CancelV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PUT /v2/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index})
+func (_ Unimplemented) UploadV2UploadSessionChunk(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken, chunkIndex int, params UploadV2UploadSessionChunkParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/upload-sessions/{session_id}/files/{file_token}/complete)
+func (_ Unimplemented) CompleteV2UploadSessionFile(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/upload-sessions/{session_id}/pause)
+func (_ Unimplemented) PauseV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /v2/upload-sessions/{session_id}/resume)
+func (_ Unimplemented) ResumeV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -6187,6 +7964,648 @@ func (siw *ServerInterfaceWrapper) GetV2PublicConfig(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ListV2DataAgentJobs operation middleware
+func (siw *ServerInterfaceWrapper) ListV2DataAgentJobs(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2DataAgentJobsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "job_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "job_type", r.URL.Query(), &params.JobType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "job_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2DataAgentJobs(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2DataAgentJob operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2DataAgentJob(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2DataAgentJob(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2DataAgentJob operation middleware
+func (siw *ServerInterfaceWrapper) GetV2DataAgentJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2DataAgentJob(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ControlV2DataAgentJob operation middleware
+func (siw *ServerInterfaceWrapper) ControlV2DataAgentJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ControlV2DataAgentJob(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReleaseV2DataAgentJobLease operation middleware
+func (siw *ServerInterfaceWrapper) ReleaseV2DataAgentJobLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReleaseV2DataAgentJobLease(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RenewV2DataAgentJobLease operation middleware
+func (siw *ServerInterfaceWrapper) RenewV2DataAgentJobLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RenewV2DataAgentJobLease(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AcquireV2DataAgentJobLease operation middleware
+func (siw *ServerInterfaceWrapper) AcquireV2DataAgentJobLease(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AcquireV2DataAgentJobLease(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateV2DataAgentJobStatus operation middleware
+func (siw *ServerInterfaceWrapper) UpdateV2DataAgentJobStatus(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateV2DataAgentJobStatus(w, r, jobId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2DatasetSnapshots operation middleware
+func (siw *ServerInterfaceWrapper) ListV2DatasetSnapshots(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2DatasetSnapshotsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "source_collection_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "source_collection_id", r.URL.Query(), &params.SourceCollectionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "source_collection_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "source_collection_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2DatasetSnapshots(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2DatasetSnapshot operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2DatasetSnapshot(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteV2DatasetSnapshot operation middleware
+func (siw *ServerInterfaceWrapper) DeleteV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteV2DatasetSnapshot(w, r, snapshotId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2DatasetSnapshot operation middleware
+func (siw *ServerInterfaceWrapper) GetV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2DatasetSnapshot(w, r, snapshotId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2DatasetSnapshotEvents operation middleware
+func (siw *ServerInterfaceWrapper) ListV2DatasetSnapshotEvents(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2DatasetSnapshotEventsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "event_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "event_type", r.URL.Query(), &params.EventType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "event_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "event_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "actor_user_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "actor_user_id", r.URL.Query(), &params.ActorUserId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "actor_user_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "actor_user_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2DatasetSnapshotEvents(w, r, snapshotId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestoreV2DatasetSnapshot operation middleware
+func (siw *ServerInterfaceWrapper) RestoreV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestoreV2DatasetSnapshot(w, r, snapshotId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2DatasetSnapshotShareGrants operation middleware
+func (siw *ServerInterfaceWrapper) ListV2DatasetSnapshotShareGrants(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2DatasetSnapshotShareGrantsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2DatasetSnapshotShareGrants(w, r, snapshotId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2DatasetSnapshotShareGrant operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2DatasetSnapshotShareGrant(w, r, snapshotId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RevokeV2DatasetSnapshotShareGrant operation middleware
+func (siw *ServerInterfaceWrapper) RevokeV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "snapshot_id" -------------
+	var snapshotId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "snapshot_id", chi.URLParam(r, "snapshot_id"), &snapshotId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "snapshot_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "grant_id" -------------
+	var grantId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "grant_id", chi.URLParam(r, "grant_id"), &grantId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "grant_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeV2DatasetSnapshotShareGrant(w, r, snapshotId, grantId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetV2Health operation middleware
 func (siw *ServerInterfaceWrapper) GetV2Health(w http.ResponseWriter, r *http.Request) {
 
@@ -6246,6 +8665,592 @@ func (siw *ServerInterfaceWrapper) GetV2ModelHealth(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetV2ModelHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2ResourceCollections operation middleware
+func (siw *ServerInterfaceWrapper) ListV2ResourceCollections(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2ResourceCollectionsParams
+
+	// ------------- Optional query parameter "collection_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "collection_type", r.URL.Query(), &params.CollectionType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "collection_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2ResourceCollections(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2ResourceCollection operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2ResourceCollection(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteV2ResourceCollection operation middleware
+func (siw *ServerInterfaceWrapper) DeleteV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteV2ResourceCollection(w, r, collectionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PatchV2ResourceCollection operation middleware
+func (siw *ServerInterfaceWrapper) PatchV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PatchV2ResourceCollection(w, r, collectionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListV2ResourceCollectionResources operation middleware
+func (siw *ServerInterfaceWrapper) ListV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListV2ResourceCollectionResourcesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "kind" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "kind", r.URL.Query(), &params.Kind, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "kind"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "kind", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "source" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "source", r.URL.Query(), &params.Source, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "source"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "source", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "tag" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "tag", r.URL.Query(), &params.Tag, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "tag"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tag", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "tags" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "tags", r.URL.Query(), &params.Tags, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "tags"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tags", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "descriptor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "descriptor", r.URL.Query(), &params.Descriptor, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "descriptor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "descriptor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "descriptors" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "descriptors", r.URL.Query(), &params.Descriptors, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "descriptors"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "descriptors", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "metadata_filter" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "metadata_filter", r.URL.Query(), &params.MetadataFilter, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "metadata_filter"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "metadata_filter", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "created_after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "created_after", r.URL.Query(), &params.CreatedAfter, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "created_after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "created_after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "created_before" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "created_before", r.URL.Query(), &params.CreatedBefore, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "created_before"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "created_before", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "processing_status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "processing_status", r.URL.Query(), &params.ProcessingStatus, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "processing_status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "processing_status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "sharing" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "sharing", r.URL.Query(), &params.Sharing, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "sharing"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "sharing", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListV2ResourceCollectionResources(w, r, collectionId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AddV2ResourceCollectionResources operation middleware
+func (siw *ServerInterfaceWrapper) AddV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AddV2ResourceCollectionResources(w, r, collectionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RemoveV2ResourceCollectionResource operation middleware
+func (siw *ServerInterfaceWrapper) RemoveV2ResourceCollectionResource(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RemoveV2ResourceCollectionResource(w, r, collectionId, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestoreV2ResourceCollection operation middleware
+func (siw *ServerInterfaceWrapper) RestoreV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestoreV2ResourceCollection(w, r, collectionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateV2ResourceCollectionShareGrants operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2ResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "collection_id" -------------
+	var collectionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "collection_id", chi.URLParam(r, "collection_id"), &collectionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "collection_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2ResourceCollectionShareGrants(w, r, collectionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResourceEventLog operation middleware
+func (siw *ServerInterfaceWrapper) ListResourceEventLog(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListResourceEventLogParams
+
+	// ------------- Optional query parameter "resource_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "resource_id", r.URL.Query(), &params.ResourceId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "resource_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "event_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "event_type", r.URL.Query(), &params.EventType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "event_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "event_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "actor_user_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "actor_user_id", r.URL.Query(), &params.ActorUserId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "actor_user_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "actor_user_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResourceEventLog(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6316,8 +9321,220 @@ func (siw *ServerInterfaceWrapper) ListResources(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// ------------- Optional query parameter "source" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "source", r.URL.Query(), &params.Source, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "source"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "source", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "tag" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "tag", r.URL.Query(), &params.Tag, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "tag"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tag", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "tags" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "tags", r.URL.Query(), &params.Tags, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "tags"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "tags", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "descriptor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "descriptor", r.URL.Query(), &params.Descriptor, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "descriptor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "descriptor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "descriptors" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "descriptors", r.URL.Query(), &params.Descriptors, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "descriptors"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "descriptors", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "metadata_filter" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "metadata_filter", r.URL.Query(), &params.MetadataFilter, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "metadata_filter"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "metadata_filter", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "created_after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "created_after", r.URL.Query(), &params.CreatedAfter, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "created_after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "created_after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "created_before" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "created_before", r.URL.Query(), &params.CreatedBefore, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "created_before"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "created_before", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "processing_status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "processing_status", r.URL.Query(), &params.ProcessingStatus, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "processing_status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "processing_status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "sharing" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "sharing", r.URL.Query(), &params.Sharing, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "sharing"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "sharing", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListResources(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// BulkDeleteResources operation middleware
+func (siw *ServerInterfaceWrapper) BulkDeleteResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BulkDeleteResources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// BulkRestoreResources operation middleware
+func (siw *ServerInterfaceWrapper) BulkRestoreResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BulkRestoreResources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateResourceShareGrants operation middleware
+func (siw *ServerInterfaceWrapper) CreateResourceShareGrants(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateResourceShareGrants(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// BulkTagResources operation middleware
+func (siw *ServerInterfaceWrapper) BulkTagResources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BulkTagResources(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6370,6 +9587,58 @@ func (siw *ServerInterfaceWrapper) GetResource(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetResource(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PatchResource operation middleware
+func (siw *ServerInterfaceWrapper) PatchResource(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PatchResource(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DownloadResource operation middleware
+func (siw *ServerInterfaceWrapper) DownloadResource(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DownloadResource(w, r, fileId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6438,6 +9707,122 @@ func (siw *ServerInterfaceWrapper) RestoreResource(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RestoreResource(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResourceShareGrants operation middleware
+func (siw *ServerInterfaceWrapper) ListResourceShareGrants(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListResourceShareGrantsParams
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResourceShareGrants(w, r, fileId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateResourceShareGrant operation middleware
+func (siw *ServerInterfaceWrapper) CreateResourceShareGrant(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateResourceShareGrant(w, r, fileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RevokeResourceShareGrant operation middleware
+func (siw *ServerInterfaceWrapper) RevokeResourceShareGrant(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "file_id" -------------
+	var fileId FileID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_id", chi.URLParam(r, "file_id"), &fileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "grant_id" -------------
+	var grantId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "grant_id", chi.URLParam(r, "grant_id"), &grantId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "grant_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeResourceShareGrant(w, r, fileId, grantId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -7791,6 +11176,232 @@ func (siw *ServerInterfaceWrapper) RejectV2TrainingUpdateProposal(w http.Respons
 	handler.ServeHTTP(w, r)
 }
 
+// CreateV2UploadSession operation middleware
+func (siw *ServerInterfaceWrapper) CreateV2UploadSession(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateV2UploadSession(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetV2UploadSession operation middleware
+func (siw *ServerInterfaceWrapper) GetV2UploadSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetV2UploadSession(w, r, sessionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CancelV2UploadSession operation middleware
+func (siw *ServerInterfaceWrapper) CancelV2UploadSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CancelV2UploadSession(w, r, sessionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UploadV2UploadSessionChunk operation middleware
+func (siw *ServerInterfaceWrapper) UploadV2UploadSessionChunk(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "file_token" -------------
+	var fileToken UploadFileToken
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_token", chi.URLParam(r, "file_token"), &fileToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_token", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "chunk_index" -------------
+	var chunkIndex int
+
+	err = runtime.BindStyledParameterWithOptions("simple", "chunk_index", chi.URLParam(r, "chunk_index"), &chunkIndex, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "chunk_index", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params UploadV2UploadSessionChunkParams
+
+	// ------------- Required query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "sha256" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "sha256", r.URL.Query(), &params.Sha256, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "sha256"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "sha256", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UploadV2UploadSessionChunk(w, r, sessionId, fileToken, chunkIndex, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CompleteV2UploadSessionFile operation middleware
+func (siw *ServerInterfaceWrapper) CompleteV2UploadSessionFile(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "file_token" -------------
+	var fileToken UploadFileToken
+
+	err = runtime.BindStyledParameterWithOptions("simple", "file_token", chi.URLParam(r, "file_token"), &fileToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "file_token", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CompleteV2UploadSessionFile(w, r, sessionId, fileToken)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PauseV2UploadSession operation middleware
+func (siw *ServerInterfaceWrapper) PauseV2UploadSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PauseV2UploadSession(w, r, sessionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ResumeV2UploadSession operation middleware
+func (siw *ServerInterfaceWrapper) ResumeV2UploadSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "session_id" -------------
+	var sessionId UploadSessionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "session_id", chi.URLParam(r, "session_id"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "session_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResumeV2UploadSession(w, r, sessionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // UploadFiles operation middleware
 func (siw *ServerInterfaceWrapper) UploadFiles(w http.ResponseWriter, r *http.Request) {
 
@@ -8669,6 +12280,57 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v2/config/public", wrapper.GetV2PublicConfig)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/data-agent/jobs", wrapper.ListV2DataAgentJobs)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/data-agent/jobs", wrapper.CreateV2DataAgentJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/data-agent/jobs/{job_id}", wrapper.GetV2DataAgentJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/data-agent/jobs/{job_id}/control", wrapper.ControlV2DataAgentJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/data-agent/jobs/{job_id}/lease", wrapper.ReleaseV2DataAgentJobLease)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/data-agent/jobs/{job_id}/lease", wrapper.RenewV2DataAgentJobLease)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/data-agent/jobs/{job_id}/lease", wrapper.AcquireV2DataAgentJobLease)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/data-agent/jobs/{job_id}/status", wrapper.UpdateV2DataAgentJobStatus)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/dataset-snapshots", wrapper.ListV2DatasetSnapshots)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/dataset-snapshots", wrapper.CreateV2DatasetSnapshot)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}", wrapper.DeleteV2DatasetSnapshot)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}", wrapper.GetV2DatasetSnapshot)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}/events", wrapper.ListV2DatasetSnapshotEvents)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}/restore", wrapper.RestoreV2DatasetSnapshot)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}/shares", wrapper.ListV2DatasetSnapshotShareGrants)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}/shares", wrapper.CreateV2DatasetSnapshotShareGrant)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/dataset-snapshots/{snapshot_id}/shares/{grant_id}", wrapper.RevokeV2DatasetSnapshotShareGrant)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/health", wrapper.GetV2Health)
 	})
 	r.Group(func(r chi.Router) {
@@ -8681,7 +12343,49 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v2/model-health", wrapper.GetV2ModelHealth)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resource-collections", wrapper.ListV2ResourceCollections)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resource-collections", wrapper.CreateV2ResourceCollection)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/resource-collections/{collection_id}", wrapper.DeleteV2ResourceCollection)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/resource-collections/{collection_id}", wrapper.PatchV2ResourceCollection)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resource-collections/{collection_id}/resources", wrapper.ListV2ResourceCollectionResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resource-collections/{collection_id}/resources", wrapper.AddV2ResourceCollectionResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/resource-collections/{collection_id}/resources/{file_id}", wrapper.RemoveV2ResourceCollectionResource)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resource-collections/{collection_id}/restore", wrapper.RestoreV2ResourceCollection)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resource-collections/{collection_id}/shares", wrapper.CreateV2ResourceCollectionShareGrants)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resource-events", wrapper.ListResourceEventLog)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/resources", wrapper.ListResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resources/delete/bulk", wrapper.BulkDeleteResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resources/restore/bulk", wrapper.BulkRestoreResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resources/shares/bulk", wrapper.CreateResourceShareGrants)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resources/tags/bulk", wrapper.BulkTagResources)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/v2/resources/{file_id}", wrapper.DeleteResource)
@@ -8690,10 +12394,25 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v2/resources/{file_id}", wrapper.GetResource)
 	})
 	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/v2/resources/{file_id}", wrapper.PatchResource)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resources/{file_id}/download", wrapper.DownloadResource)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/resources/{file_id}/events", wrapper.ListResourceEvents)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/resources/{file_id}/restore", wrapper.RestoreResource)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/resources/{file_id}/shares", wrapper.ListResourceShareGrants)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/resources/{file_id}/shares", wrapper.CreateResourceShareGrant)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/v2/resources/{file_id}/shares/{grant_id}", wrapper.RevokeResourceShareGrant)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v2/resources/{file_id}/thumbnail", wrapper.GetResourceThumbnail)
@@ -8838,6 +12557,27 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/training/update-proposals/{proposal_id}/reject", wrapper.RejectV2TrainingUpdateProposal)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/upload-sessions", wrapper.CreateV2UploadSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v2/upload-sessions/{session_id}", wrapper.GetV2UploadSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/upload-sessions/{session_id}/cancel", wrapper.CancelV2UploadSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/v2/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index}", wrapper.UploadV2UploadSessionChunk)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/upload-sessions/{session_id}/files/{file_token}/complete", wrapper.CompleteV2UploadSessionFile)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/upload-sessions/{session_id}/pause", wrapper.PauseV2UploadSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v2/upload-sessions/{session_id}/resume", wrapper.ResumeV2UploadSession)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v2/uploads", wrapper.UploadFiles)
@@ -9663,6 +13403,415 @@ func (response GetV2PublicConfig200JSONResponse) VisitGetV2PublicConfigResponse(
 	return err
 }
 
+type ListV2DataAgentJobsRequestObject struct {
+	Params ListV2DataAgentJobsParams
+}
+
+type ListV2DataAgentJobsResponseObject interface {
+	VisitListV2DataAgentJobsResponse(w http.ResponseWriter) error
+}
+
+type ListV2DataAgentJobs200JSONResponse V2DataAgentJobsResponse
+
+func (response ListV2DataAgentJobs200JSONResponse) VisitListV2DataAgentJobsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2DataAgentJobRequestObject struct {
+	Body *CreateV2DataAgentJobJSONRequestBody
+}
+
+type CreateV2DataAgentJobResponseObject interface {
+	VisitCreateV2DataAgentJobResponse(w http.ResponseWriter) error
+}
+
+type CreateV2DataAgentJob202JSONResponse V2DataAgentJobResponse
+
+func (response CreateV2DataAgentJob202JSONResponse) VisitCreateV2DataAgentJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2DataAgentJobRequestObject struct {
+	JobId string `json:"job_id"`
+}
+
+type GetV2DataAgentJobResponseObject interface {
+	VisitGetV2DataAgentJobResponse(w http.ResponseWriter) error
+}
+
+type GetV2DataAgentJob200JSONResponse V2DataAgentJobResponse
+
+func (response GetV2DataAgentJob200JSONResponse) VisitGetV2DataAgentJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ControlV2DataAgentJobRequestObject struct {
+	JobId string `json:"job_id"`
+	Body  *ControlV2DataAgentJobJSONRequestBody
+}
+
+type ControlV2DataAgentJobResponseObject interface {
+	VisitControlV2DataAgentJobResponse(w http.ResponseWriter) error
+}
+
+type ControlV2DataAgentJob200JSONResponse V2DataAgentJobResponse
+
+func (response ControlV2DataAgentJob200JSONResponse) VisitControlV2DataAgentJobResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReleaseV2DataAgentJobLeaseRequestObject struct {
+	JobId string `json:"job_id"`
+	Body  *ReleaseV2DataAgentJobLeaseJSONRequestBody
+}
+
+type ReleaseV2DataAgentJobLeaseResponseObject interface {
+	VisitReleaseV2DataAgentJobLeaseResponse(w http.ResponseWriter) error
+}
+
+type ReleaseV2DataAgentJobLease200JSONResponse struct {
+	Released bool `json:"released"`
+}
+
+func (response ReleaseV2DataAgentJobLease200JSONResponse) VisitReleaseV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReleaseV2DataAgentJobLease409Response struct {
+}
+
+func (response ReleaseV2DataAgentJobLease409Response) VisitReleaseV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type RenewV2DataAgentJobLeaseRequestObject struct {
+	JobId string `json:"job_id"`
+	Body  *RenewV2DataAgentJobLeaseJSONRequestBody
+}
+
+type RenewV2DataAgentJobLeaseResponseObject interface {
+	VisitRenewV2DataAgentJobLeaseResponse(w http.ResponseWriter) error
+}
+
+type RenewV2DataAgentJobLease200JSONResponse V2DataAgentJobLeaseRecord
+
+func (response RenewV2DataAgentJobLease200JSONResponse) VisitRenewV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RenewV2DataAgentJobLease409Response struct {
+}
+
+func (response RenewV2DataAgentJobLease409Response) VisitRenewV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type AcquireV2DataAgentJobLeaseRequestObject struct {
+	JobId string `json:"job_id"`
+	Body  *AcquireV2DataAgentJobLeaseJSONRequestBody
+}
+
+type AcquireV2DataAgentJobLeaseResponseObject interface {
+	VisitAcquireV2DataAgentJobLeaseResponse(w http.ResponseWriter) error
+}
+
+type AcquireV2DataAgentJobLease200JSONResponse V2DataAgentJobLeaseRecord
+
+func (response AcquireV2DataAgentJobLease200JSONResponse) VisitAcquireV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AcquireV2DataAgentJobLease409Response struct {
+}
+
+func (response AcquireV2DataAgentJobLease409Response) VisitAcquireV2DataAgentJobLeaseResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type UpdateV2DataAgentJobStatusRequestObject struct {
+	JobId string `json:"job_id"`
+	Body  *UpdateV2DataAgentJobStatusJSONRequestBody
+}
+
+type UpdateV2DataAgentJobStatusResponseObject interface {
+	VisitUpdateV2DataAgentJobStatusResponse(w http.ResponseWriter) error
+}
+
+type UpdateV2DataAgentJobStatus200JSONResponse V2DataAgentJobResponse
+
+func (response UpdateV2DataAgentJobStatus200JSONResponse) VisitUpdateV2DataAgentJobStatusResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2DatasetSnapshotsRequestObject struct {
+	Params ListV2DatasetSnapshotsParams
+}
+
+type ListV2DatasetSnapshotsResponseObject interface {
+	VisitListV2DatasetSnapshotsResponse(w http.ResponseWriter) error
+}
+
+type ListV2DatasetSnapshots200JSONResponse V2DatasetSnapshotsResponse
+
+func (response ListV2DatasetSnapshots200JSONResponse) VisitListV2DatasetSnapshotsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2DatasetSnapshotRequestObject struct {
+	Body *CreateV2DatasetSnapshotJSONRequestBody
+}
+
+type CreateV2DatasetSnapshotResponseObject interface {
+	VisitCreateV2DatasetSnapshotResponse(w http.ResponseWriter) error
+}
+
+type CreateV2DatasetSnapshot201JSONResponse V2DatasetSnapshotResponse
+
+func (response CreateV2DatasetSnapshot201JSONResponse) VisitCreateV2DatasetSnapshotResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteV2DatasetSnapshotRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+}
+
+type DeleteV2DatasetSnapshotResponseObject interface {
+	VisitDeleteV2DatasetSnapshotResponse(w http.ResponseWriter) error
+}
+
+type DeleteV2DatasetSnapshot200JSONResponse V2DatasetSnapshotResponse
+
+func (response DeleteV2DatasetSnapshot200JSONResponse) VisitDeleteV2DatasetSnapshotResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2DatasetSnapshotRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+}
+
+type GetV2DatasetSnapshotResponseObject interface {
+	VisitGetV2DatasetSnapshotResponse(w http.ResponseWriter) error
+}
+
+type GetV2DatasetSnapshot200JSONResponse V2DatasetSnapshotResponse
+
+func (response GetV2DatasetSnapshot200JSONResponse) VisitGetV2DatasetSnapshotResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2DatasetSnapshotEventsRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+	Params     ListV2DatasetSnapshotEventsParams
+}
+
+type ListV2DatasetSnapshotEventsResponseObject interface {
+	VisitListV2DatasetSnapshotEventsResponse(w http.ResponseWriter) error
+}
+
+type ListV2DatasetSnapshotEvents200JSONResponse V2DatasetSnapshotEventsResponse
+
+func (response ListV2DatasetSnapshotEvents200JSONResponse) VisitListV2DatasetSnapshotEventsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreV2DatasetSnapshotRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+}
+
+type RestoreV2DatasetSnapshotResponseObject interface {
+	VisitRestoreV2DatasetSnapshotResponse(w http.ResponseWriter) error
+}
+
+type RestoreV2DatasetSnapshot200JSONResponse V2DatasetSnapshotResponse
+
+func (response RestoreV2DatasetSnapshot200JSONResponse) VisitRestoreV2DatasetSnapshotResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2DatasetSnapshotShareGrantsRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+	Params     ListV2DatasetSnapshotShareGrantsParams
+}
+
+type ListV2DatasetSnapshotShareGrantsResponseObject interface {
+	VisitListV2DatasetSnapshotShareGrantsResponse(w http.ResponseWriter) error
+}
+
+type ListV2DatasetSnapshotShareGrants200JSONResponse V2DatasetSnapshotShareGrantsResponse
+
+func (response ListV2DatasetSnapshotShareGrants200JSONResponse) VisitListV2DatasetSnapshotShareGrantsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2DatasetSnapshotShareGrantRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+	Body       *CreateV2DatasetSnapshotShareGrantJSONRequestBody
+}
+
+type CreateV2DatasetSnapshotShareGrantResponseObject interface {
+	VisitCreateV2DatasetSnapshotShareGrantResponse(w http.ResponseWriter) error
+}
+
+type CreateV2DatasetSnapshotShareGrant201JSONResponse V2DatasetSnapshotShareGrantResponse
+
+func (response CreateV2DatasetSnapshotShareGrant201JSONResponse) VisitCreateV2DatasetSnapshotShareGrantResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RevokeV2DatasetSnapshotShareGrantRequestObject struct {
+	SnapshotId string `json:"snapshot_id"`
+	GrantId    string `json:"grant_id"`
+}
+
+type RevokeV2DatasetSnapshotShareGrantResponseObject interface {
+	VisitRevokeV2DatasetSnapshotShareGrantResponse(w http.ResponseWriter) error
+}
+
+type RevokeV2DatasetSnapshotShareGrant200JSONResponse V2DatasetSnapshotShareGrantResponse
+
+func (response RevokeV2DatasetSnapshotShareGrant200JSONResponse) VisitRevokeV2DatasetSnapshotShareGrantResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetV2HealthRequestObject struct {
 }
 
@@ -9748,6 +13897,231 @@ func (response GetV2ModelHealth200JSONResponse) VisitGetV2ModelHealthResponse(w 
 	return err
 }
 
+type ListV2ResourceCollectionsRequestObject struct {
+	Params ListV2ResourceCollectionsParams
+}
+
+type ListV2ResourceCollectionsResponseObject interface {
+	VisitListV2ResourceCollectionsResponse(w http.ResponseWriter) error
+}
+
+type ListV2ResourceCollections200JSONResponse V2ResourceCollectionsResponse
+
+func (response ListV2ResourceCollections200JSONResponse) VisitListV2ResourceCollectionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2ResourceCollectionRequestObject struct {
+	Body *CreateV2ResourceCollectionJSONRequestBody
+}
+
+type CreateV2ResourceCollectionResponseObject interface {
+	VisitCreateV2ResourceCollectionResponse(w http.ResponseWriter) error
+}
+
+type CreateV2ResourceCollection201JSONResponse V2ResourceCollectionResponse
+
+func (response CreateV2ResourceCollection201JSONResponse) VisitCreateV2ResourceCollectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteV2ResourceCollectionRequestObject struct {
+	CollectionId string `json:"collection_id"`
+}
+
+type DeleteV2ResourceCollectionResponseObject interface {
+	VisitDeleteV2ResourceCollectionResponse(w http.ResponseWriter) error
+}
+
+type DeleteV2ResourceCollection200JSONResponse V2ResourceCollectionResponse
+
+func (response DeleteV2ResourceCollection200JSONResponse) VisitDeleteV2ResourceCollectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PatchV2ResourceCollectionRequestObject struct {
+	CollectionId string `json:"collection_id"`
+	Body         *PatchV2ResourceCollectionJSONRequestBody
+}
+
+type PatchV2ResourceCollectionResponseObject interface {
+	VisitPatchV2ResourceCollectionResponse(w http.ResponseWriter) error
+}
+
+type PatchV2ResourceCollection200JSONResponse V2ResourceCollectionResponse
+
+func (response PatchV2ResourceCollection200JSONResponse) VisitPatchV2ResourceCollectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListV2ResourceCollectionResourcesRequestObject struct {
+	CollectionId string `json:"collection_id"`
+	Params       ListV2ResourceCollectionResourcesParams
+}
+
+type ListV2ResourceCollectionResourcesResponseObject interface {
+	VisitListV2ResourceCollectionResourcesResponse(w http.ResponseWriter) error
+}
+
+type ListV2ResourceCollectionResources200JSONResponse V2ResourceListResponse
+
+func (response ListV2ResourceCollectionResources200JSONResponse) VisitListV2ResourceCollectionResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AddV2ResourceCollectionResourcesRequestObject struct {
+	CollectionId string `json:"collection_id"`
+	Body         *AddV2ResourceCollectionResourcesJSONRequestBody
+}
+
+type AddV2ResourceCollectionResourcesResponseObject interface {
+	VisitAddV2ResourceCollectionResourcesResponse(w http.ResponseWriter) error
+}
+
+type AddV2ResourceCollectionResources200JSONResponse V2ResourceCollectionAddResourcesResponse
+
+func (response AddV2ResourceCollectionResources200JSONResponse) VisitAddV2ResourceCollectionResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RemoveV2ResourceCollectionResourceRequestObject struct {
+	CollectionId string `json:"collection_id"`
+	FileId       FileID `json:"file_id"`
+}
+
+type RemoveV2ResourceCollectionResourceResponseObject interface {
+	VisitRemoveV2ResourceCollectionResourceResponse(w http.ResponseWriter) error
+}
+
+type RemoveV2ResourceCollectionResource200JSONResponse V2ResourceCollectionRemoveResourcesResponse
+
+func (response RemoveV2ResourceCollectionResource200JSONResponse) VisitRemoveV2ResourceCollectionResourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreV2ResourceCollectionRequestObject struct {
+	CollectionId string `json:"collection_id"`
+}
+
+type RestoreV2ResourceCollectionResponseObject interface {
+	VisitRestoreV2ResourceCollectionResponse(w http.ResponseWriter) error
+}
+
+type RestoreV2ResourceCollection200JSONResponse V2ResourceCollectionResponse
+
+func (response RestoreV2ResourceCollection200JSONResponse) VisitRestoreV2ResourceCollectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateV2ResourceCollectionShareGrantsRequestObject struct {
+	CollectionId string `json:"collection_id"`
+	Body         *CreateV2ResourceCollectionShareGrantsJSONRequestBody
+}
+
+type CreateV2ResourceCollectionShareGrantsResponseObject interface {
+	VisitCreateV2ResourceCollectionShareGrantsResponse(w http.ResponseWriter) error
+}
+
+type CreateV2ResourceCollectionShareGrants201JSONResponse V2ResourceCollectionShareGrantsCreateResponse
+
+func (response CreateV2ResourceCollectionShareGrants201JSONResponse) VisitCreateV2ResourceCollectionShareGrantsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListResourceEventLogRequestObject struct {
+	Params ListResourceEventLogParams
+}
+
+type ListResourceEventLogResponseObject interface {
+	VisitListResourceEventLogResponse(w http.ResponseWriter) error
+}
+
+type ListResourceEventLog200JSONResponse V2ResourceEventListResponse
+
+func (response ListResourceEventLog200JSONResponse) VisitListResourceEventLogResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListResourcesRequestObject struct {
 	Params ListResourcesParams
 }
@@ -9759,6 +14133,94 @@ type ListResourcesResponseObject interface {
 type ListResources200JSONResponse V2ResourceListResponse
 
 func (response ListResources200JSONResponse) VisitListResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BulkDeleteResourcesRequestObject struct {
+	Body *BulkDeleteResourcesJSONRequestBody
+}
+
+type BulkDeleteResourcesResponseObject interface {
+	VisitBulkDeleteResourcesResponse(w http.ResponseWriter) error
+}
+
+type BulkDeleteResources200JSONResponse V2ResourceBulkLifecycleResponse
+
+func (response BulkDeleteResources200JSONResponse) VisitBulkDeleteResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BulkRestoreResourcesRequestObject struct {
+	Body *BulkRestoreResourcesJSONRequestBody
+}
+
+type BulkRestoreResourcesResponseObject interface {
+	VisitBulkRestoreResourcesResponse(w http.ResponseWriter) error
+}
+
+type BulkRestoreResources200JSONResponse V2ResourceBulkLifecycleResponse
+
+func (response BulkRestoreResources200JSONResponse) VisitBulkRestoreResourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateResourceShareGrantsRequestObject struct {
+	Body *CreateResourceShareGrantsJSONRequestBody
+}
+
+type CreateResourceShareGrantsResponseObject interface {
+	VisitCreateResourceShareGrantsResponse(w http.ResponseWriter) error
+}
+
+type CreateResourceShareGrants201JSONResponse V2ResourceShareGrantsCreateResponse
+
+func (response CreateResourceShareGrants201JSONResponse) VisitCreateResourceShareGrantsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BulkTagResourcesRequestObject struct {
+	Body *BulkTagResourcesJSONRequestBody
+}
+
+type BulkTagResourcesResponseObject interface {
+	VisitBulkTagResourcesResponse(w http.ResponseWriter) error
+}
+
+type BulkTagResources200JSONResponse V2ResourceBulkTagResponse
+
+func (response BulkTagResources200JSONResponse) VisitBulkTagResourcesResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -9817,6 +14279,65 @@ func (response GetResource200JSONResponse) VisitGetResourceResponse(w http.Respo
 	return err
 }
 
+type PatchResourceRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Body   *PatchResourceJSONRequestBody
+}
+
+type PatchResourceResponseObject interface {
+	VisitPatchResourceResponse(w http.ResponseWriter) error
+}
+
+type PatchResource200JSONResponse V2ResourceResponse
+
+func (response PatchResource200JSONResponse) VisitPatchResourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DownloadResourceRequestObject struct {
+	FileId FileID `json:"file_id"`
+}
+
+type DownloadResourceResponseObject interface {
+	VisitDownloadResourceResponse(w http.ResponseWriter) error
+}
+
+type DownloadResource200ResponseHeaders struct {
+	ContentDisposition *string
+}
+
+type DownloadResource200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	Headers       DownloadResource200ResponseHeaders
+	ContentLength int64
+}
+
+func (response DownloadResource200ApplicationoctetStreamResponse) VisitDownloadResourceResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	if response.Headers.ContentDisposition != nil {
+		w.Header().Set("Content-Disposition", fmt.Sprint(*response.Headers.ContentDisposition))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
 type ListResourceEventsRequestObject struct {
 	FileId FileID `json:"file_id"`
 	Params ListResourceEventsParams
@@ -9851,6 +14372,75 @@ type RestoreResourceResponseObject interface {
 type RestoreResource200JSONResponse V2ResourceResponse
 
 func (response RestoreResource200JSONResponse) VisitRestoreResourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListResourceShareGrantsRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Params ListResourceShareGrantsParams
+}
+
+type ListResourceShareGrantsResponseObject interface {
+	VisitListResourceShareGrantsResponse(w http.ResponseWriter) error
+}
+
+type ListResourceShareGrants200JSONResponse V2ResourceShareGrantsResponse
+
+func (response ListResourceShareGrants200JSONResponse) VisitListResourceShareGrantsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateResourceShareGrantRequestObject struct {
+	FileId FileID `json:"file_id"`
+	Body   *CreateResourceShareGrantJSONRequestBody
+}
+
+type CreateResourceShareGrantResponseObject interface {
+	VisitCreateResourceShareGrantResponse(w http.ResponseWriter) error
+}
+
+type CreateResourceShareGrant201JSONResponse V2ResourceShareGrantResponse
+
+func (response CreateResourceShareGrant201JSONResponse) VisitCreateResourceShareGrantResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RevokeResourceShareGrantRequestObject struct {
+	FileId  FileID `json:"file_id"`
+	GrantId string `json:"grant_id"`
+}
+
+type RevokeResourceShareGrantResponseObject interface {
+	VisitRevokeResourceShareGrantResponse(w http.ResponseWriter) error
+}
+
+type RevokeResourceShareGrant200JSONResponse V2ResourceShareGrantResponse
+
+func (response RevokeResourceShareGrant200JSONResponse) VisitRevokeResourceShareGrantResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -11058,6 +15648,165 @@ func (response RejectV2TrainingUpdateProposal501JSONResponse) VisitRejectV2Train
 	return err
 }
 
+type CreateV2UploadSessionRequestObject struct {
+	Body *CreateV2UploadSessionJSONRequestBody
+}
+
+type CreateV2UploadSessionResponseObject interface {
+	VisitCreateV2UploadSessionResponse(w http.ResponseWriter) error
+}
+
+type CreateV2UploadSession200JSONResponse V2UploadSessionResponse
+
+func (response CreateV2UploadSession200JSONResponse) VisitCreateV2UploadSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetV2UploadSessionRequestObject struct {
+	SessionId UploadSessionID `json:"session_id"`
+}
+
+type GetV2UploadSessionResponseObject interface {
+	VisitGetV2UploadSessionResponse(w http.ResponseWriter) error
+}
+
+type GetV2UploadSession200JSONResponse V2UploadSessionResponse
+
+func (response GetV2UploadSession200JSONResponse) VisitGetV2UploadSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelV2UploadSessionRequestObject struct {
+	SessionId UploadSessionID `json:"session_id"`
+}
+
+type CancelV2UploadSessionResponseObject interface {
+	VisitCancelV2UploadSessionResponse(w http.ResponseWriter) error
+}
+
+type CancelV2UploadSession200JSONResponse V2UploadSessionResponse
+
+func (response CancelV2UploadSession200JSONResponse) VisitCancelV2UploadSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UploadV2UploadSessionChunkRequestObject struct {
+	SessionId  UploadSessionID `json:"session_id"`
+	FileToken  UploadFileToken `json:"file_token"`
+	ChunkIndex int             `json:"chunk_index"`
+	Params     UploadV2UploadSessionChunkParams
+	Body       io.Reader
+}
+
+type UploadV2UploadSessionChunkResponseObject interface {
+	VisitUploadV2UploadSessionChunkResponse(w http.ResponseWriter) error
+}
+
+type UploadV2UploadSessionChunk200JSONResponse V2UploadChunkResponse
+
+func (response UploadV2UploadSessionChunk200JSONResponse) VisitUploadV2UploadSessionChunkResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CompleteV2UploadSessionFileRequestObject struct {
+	SessionId UploadSessionID `json:"session_id"`
+	FileToken UploadFileToken `json:"file_token"`
+}
+
+type CompleteV2UploadSessionFileResponseObject interface {
+	VisitCompleteV2UploadSessionFileResponse(w http.ResponseWriter) error
+}
+
+type CompleteV2UploadSessionFile200JSONResponse V2UploadSessionFileCompleteResponse
+
+func (response CompleteV2UploadSessionFile200JSONResponse) VisitCompleteV2UploadSessionFileResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PauseV2UploadSessionRequestObject struct {
+	SessionId UploadSessionID `json:"session_id"`
+}
+
+type PauseV2UploadSessionResponseObject interface {
+	VisitPauseV2UploadSessionResponse(w http.ResponseWriter) error
+}
+
+type PauseV2UploadSession200JSONResponse V2UploadSessionResponse
+
+func (response PauseV2UploadSession200JSONResponse) VisitPauseV2UploadSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ResumeV2UploadSessionRequestObject struct {
+	SessionId UploadSessionID `json:"session_id"`
+}
+
+type ResumeV2UploadSessionResponseObject interface {
+	VisitResumeV2UploadSessionResponse(w http.ResponseWriter) error
+}
+
+type ResumeV2UploadSession200JSONResponse V2UploadSessionResponse
+
+func (response ResumeV2UploadSession200JSONResponse) VisitResumeV2UploadSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type UploadFilesRequestObject struct {
 	Body *multipart.Reader
 }
@@ -11594,6 +16343,57 @@ type StrictServerInterface interface {
 	// (GET /v2/config/public)
 	GetV2PublicConfig(ctx context.Context, request GetV2PublicConfigRequestObject) (GetV2PublicConfigResponseObject, error)
 
+	// (GET /v2/data-agent/jobs)
+	ListV2DataAgentJobs(ctx context.Context, request ListV2DataAgentJobsRequestObject) (ListV2DataAgentJobsResponseObject, error)
+
+	// (POST /v2/data-agent/jobs)
+	CreateV2DataAgentJob(ctx context.Context, request CreateV2DataAgentJobRequestObject) (CreateV2DataAgentJobResponseObject, error)
+
+	// (GET /v2/data-agent/jobs/{job_id})
+	GetV2DataAgentJob(ctx context.Context, request GetV2DataAgentJobRequestObject) (GetV2DataAgentJobResponseObject, error)
+
+	// (POST /v2/data-agent/jobs/{job_id}/control)
+	ControlV2DataAgentJob(ctx context.Context, request ControlV2DataAgentJobRequestObject) (ControlV2DataAgentJobResponseObject, error)
+
+	// (DELETE /v2/data-agent/jobs/{job_id}/lease)
+	ReleaseV2DataAgentJobLease(ctx context.Context, request ReleaseV2DataAgentJobLeaseRequestObject) (ReleaseV2DataAgentJobLeaseResponseObject, error)
+
+	// (PATCH /v2/data-agent/jobs/{job_id}/lease)
+	RenewV2DataAgentJobLease(ctx context.Context, request RenewV2DataAgentJobLeaseRequestObject) (RenewV2DataAgentJobLeaseResponseObject, error)
+
+	// (POST /v2/data-agent/jobs/{job_id}/lease)
+	AcquireV2DataAgentJobLease(ctx context.Context, request AcquireV2DataAgentJobLeaseRequestObject) (AcquireV2DataAgentJobLeaseResponseObject, error)
+
+	// (PATCH /v2/data-agent/jobs/{job_id}/status)
+	UpdateV2DataAgentJobStatus(ctx context.Context, request UpdateV2DataAgentJobStatusRequestObject) (UpdateV2DataAgentJobStatusResponseObject, error)
+
+	// (GET /v2/dataset-snapshots)
+	ListV2DatasetSnapshots(ctx context.Context, request ListV2DatasetSnapshotsRequestObject) (ListV2DatasetSnapshotsResponseObject, error)
+
+	// (POST /v2/dataset-snapshots)
+	CreateV2DatasetSnapshot(ctx context.Context, request CreateV2DatasetSnapshotRequestObject) (CreateV2DatasetSnapshotResponseObject, error)
+
+	// (DELETE /v2/dataset-snapshots/{snapshot_id})
+	DeleteV2DatasetSnapshot(ctx context.Context, request DeleteV2DatasetSnapshotRequestObject) (DeleteV2DatasetSnapshotResponseObject, error)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id})
+	GetV2DatasetSnapshot(ctx context.Context, request GetV2DatasetSnapshotRequestObject) (GetV2DatasetSnapshotResponseObject, error)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id}/events)
+	ListV2DatasetSnapshotEvents(ctx context.Context, request ListV2DatasetSnapshotEventsRequestObject) (ListV2DatasetSnapshotEventsResponseObject, error)
+
+	// (POST /v2/dataset-snapshots/{snapshot_id}/restore)
+	RestoreV2DatasetSnapshot(ctx context.Context, request RestoreV2DatasetSnapshotRequestObject) (RestoreV2DatasetSnapshotResponseObject, error)
+
+	// (GET /v2/dataset-snapshots/{snapshot_id}/shares)
+	ListV2DatasetSnapshotShareGrants(ctx context.Context, request ListV2DatasetSnapshotShareGrantsRequestObject) (ListV2DatasetSnapshotShareGrantsResponseObject, error)
+
+	// (POST /v2/dataset-snapshots/{snapshot_id}/shares)
+	CreateV2DatasetSnapshotShareGrant(ctx context.Context, request CreateV2DatasetSnapshotShareGrantRequestObject) (CreateV2DatasetSnapshotShareGrantResponseObject, error)
+
+	// (DELETE /v2/dataset-snapshots/{snapshot_id}/shares/{grant_id})
+	RevokeV2DatasetSnapshotShareGrant(ctx context.Context, request RevokeV2DatasetSnapshotShareGrantRequestObject) (RevokeV2DatasetSnapshotShareGrantResponseObject, error)
+
 	// (GET /v2/health)
 	GetV2Health(ctx context.Context, request GetV2HealthRequestObject) (GetV2HealthResponseObject, error)
 
@@ -11606,8 +16406,50 @@ type StrictServerInterface interface {
 	// (GET /v2/model-health)
 	GetV2ModelHealth(ctx context.Context, request GetV2ModelHealthRequestObject) (GetV2ModelHealthResponseObject, error)
 
+	// (GET /v2/resource-collections)
+	ListV2ResourceCollections(ctx context.Context, request ListV2ResourceCollectionsRequestObject) (ListV2ResourceCollectionsResponseObject, error)
+
+	// (POST /v2/resource-collections)
+	CreateV2ResourceCollection(ctx context.Context, request CreateV2ResourceCollectionRequestObject) (CreateV2ResourceCollectionResponseObject, error)
+
+	// (DELETE /v2/resource-collections/{collection_id})
+	DeleteV2ResourceCollection(ctx context.Context, request DeleteV2ResourceCollectionRequestObject) (DeleteV2ResourceCollectionResponseObject, error)
+
+	// (PATCH /v2/resource-collections/{collection_id})
+	PatchV2ResourceCollection(ctx context.Context, request PatchV2ResourceCollectionRequestObject) (PatchV2ResourceCollectionResponseObject, error)
+
+	// (GET /v2/resource-collections/{collection_id}/resources)
+	ListV2ResourceCollectionResources(ctx context.Context, request ListV2ResourceCollectionResourcesRequestObject) (ListV2ResourceCollectionResourcesResponseObject, error)
+
+	// (POST /v2/resource-collections/{collection_id}/resources)
+	AddV2ResourceCollectionResources(ctx context.Context, request AddV2ResourceCollectionResourcesRequestObject) (AddV2ResourceCollectionResourcesResponseObject, error)
+
+	// (DELETE /v2/resource-collections/{collection_id}/resources/{file_id})
+	RemoveV2ResourceCollectionResource(ctx context.Context, request RemoveV2ResourceCollectionResourceRequestObject) (RemoveV2ResourceCollectionResourceResponseObject, error)
+
+	// (POST /v2/resource-collections/{collection_id}/restore)
+	RestoreV2ResourceCollection(ctx context.Context, request RestoreV2ResourceCollectionRequestObject) (RestoreV2ResourceCollectionResponseObject, error)
+
+	// (POST /v2/resource-collections/{collection_id}/shares)
+	CreateV2ResourceCollectionShareGrants(ctx context.Context, request CreateV2ResourceCollectionShareGrantsRequestObject) (CreateV2ResourceCollectionShareGrantsResponseObject, error)
+
+	// (GET /v2/resource-events)
+	ListResourceEventLog(ctx context.Context, request ListResourceEventLogRequestObject) (ListResourceEventLogResponseObject, error)
+
 	// (GET /v2/resources)
 	ListResources(ctx context.Context, request ListResourcesRequestObject) (ListResourcesResponseObject, error)
+
+	// (POST /v2/resources/delete/bulk)
+	BulkDeleteResources(ctx context.Context, request BulkDeleteResourcesRequestObject) (BulkDeleteResourcesResponseObject, error)
+
+	// (POST /v2/resources/restore/bulk)
+	BulkRestoreResources(ctx context.Context, request BulkRestoreResourcesRequestObject) (BulkRestoreResourcesResponseObject, error)
+
+	// (POST /v2/resources/shares/bulk)
+	CreateResourceShareGrants(ctx context.Context, request CreateResourceShareGrantsRequestObject) (CreateResourceShareGrantsResponseObject, error)
+
+	// (POST /v2/resources/tags/bulk)
+	BulkTagResources(ctx context.Context, request BulkTagResourcesRequestObject) (BulkTagResourcesResponseObject, error)
 
 	// (DELETE /v2/resources/{file_id})
 	DeleteResource(ctx context.Context, request DeleteResourceRequestObject) (DeleteResourceResponseObject, error)
@@ -11615,11 +16457,26 @@ type StrictServerInterface interface {
 	// (GET /v2/resources/{file_id})
 	GetResource(ctx context.Context, request GetResourceRequestObject) (GetResourceResponseObject, error)
 
+	// (PATCH /v2/resources/{file_id})
+	PatchResource(ctx context.Context, request PatchResourceRequestObject) (PatchResourceResponseObject, error)
+
+	// (GET /v2/resources/{file_id}/download)
+	DownloadResource(ctx context.Context, request DownloadResourceRequestObject) (DownloadResourceResponseObject, error)
+
 	// (GET /v2/resources/{file_id}/events)
 	ListResourceEvents(ctx context.Context, request ListResourceEventsRequestObject) (ListResourceEventsResponseObject, error)
 
 	// (POST /v2/resources/{file_id}/restore)
 	RestoreResource(ctx context.Context, request RestoreResourceRequestObject) (RestoreResourceResponseObject, error)
+
+	// (GET /v2/resources/{file_id}/shares)
+	ListResourceShareGrants(ctx context.Context, request ListResourceShareGrantsRequestObject) (ListResourceShareGrantsResponseObject, error)
+
+	// (POST /v2/resources/{file_id}/shares)
+	CreateResourceShareGrant(ctx context.Context, request CreateResourceShareGrantRequestObject) (CreateResourceShareGrantResponseObject, error)
+
+	// (DELETE /v2/resources/{file_id}/shares/{grant_id})
+	RevokeResourceShareGrant(ctx context.Context, request RevokeResourceShareGrantRequestObject) (RevokeResourceShareGrantResponseObject, error)
 
 	// (GET /v2/resources/{file_id}/thumbnail)
 	GetResourceThumbnail(ctx context.Context, request GetResourceThumbnailRequestObject) (GetResourceThumbnailResponseObject, error)
@@ -11764,6 +16621,27 @@ type StrictServerInterface interface {
 
 	// (POST /v2/training/update-proposals/{proposal_id}/reject)
 	RejectV2TrainingUpdateProposal(ctx context.Context, request RejectV2TrainingUpdateProposalRequestObject) (RejectV2TrainingUpdateProposalResponseObject, error)
+
+	// (POST /v2/upload-sessions)
+	CreateV2UploadSession(ctx context.Context, request CreateV2UploadSessionRequestObject) (CreateV2UploadSessionResponseObject, error)
+
+	// (GET /v2/upload-sessions/{session_id})
+	GetV2UploadSession(ctx context.Context, request GetV2UploadSessionRequestObject) (GetV2UploadSessionResponseObject, error)
+
+	// (POST /v2/upload-sessions/{session_id}/cancel)
+	CancelV2UploadSession(ctx context.Context, request CancelV2UploadSessionRequestObject) (CancelV2UploadSessionResponseObject, error)
+
+	// (PUT /v2/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index})
+	UploadV2UploadSessionChunk(ctx context.Context, request UploadV2UploadSessionChunkRequestObject) (UploadV2UploadSessionChunkResponseObject, error)
+
+	// (POST /v2/upload-sessions/{session_id}/files/{file_token}/complete)
+	CompleteV2UploadSessionFile(ctx context.Context, request CompleteV2UploadSessionFileRequestObject) (CompleteV2UploadSessionFileResponseObject, error)
+
+	// (POST /v2/upload-sessions/{session_id}/pause)
+	PauseV2UploadSession(ctx context.Context, request PauseV2UploadSessionRequestObject) (PauseV2UploadSessionResponseObject, error)
+
+	// (POST /v2/upload-sessions/{session_id}/resume)
+	ResumeV2UploadSession(ctx context.Context, request ResumeV2UploadSessionRequestObject) (ResumeV2UploadSessionResponseObject, error)
 
 	// (POST /v2/uploads)
 	UploadFiles(ctx context.Context, request UploadFilesRequestObject) (UploadFilesResponseObject, error)
@@ -12762,6 +17640,503 @@ func (sh *strictHandler) GetV2PublicConfig(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// ListV2DataAgentJobs operation middleware
+func (sh *strictHandler) ListV2DataAgentJobs(w http.ResponseWriter, r *http.Request, params ListV2DataAgentJobsParams) {
+	var request ListV2DataAgentJobsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2DataAgentJobs(ctx, request.(ListV2DataAgentJobsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2DataAgentJobs")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2DataAgentJobsResponseObject); ok {
+		if err := validResponse.VisitListV2DataAgentJobsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2DataAgentJob operation middleware
+func (sh *strictHandler) CreateV2DataAgentJob(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2DataAgentJobRequestObject
+
+	var body CreateV2DataAgentJobJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2DataAgentJob(ctx, request.(CreateV2DataAgentJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2DataAgentJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2DataAgentJobResponseObject); ok {
+		if err := validResponse.VisitCreateV2DataAgentJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2DataAgentJob operation middleware
+func (sh *strictHandler) GetV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request GetV2DataAgentJobRequestObject
+
+	request.JobId = jobId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2DataAgentJob(ctx, request.(GetV2DataAgentJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2DataAgentJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2DataAgentJobResponseObject); ok {
+		if err := validResponse.VisitGetV2DataAgentJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ControlV2DataAgentJob operation middleware
+func (sh *strictHandler) ControlV2DataAgentJob(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request ControlV2DataAgentJobRequestObject
+
+	request.JobId = jobId
+
+	var body ControlV2DataAgentJobJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ControlV2DataAgentJob(ctx, request.(ControlV2DataAgentJobRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ControlV2DataAgentJob")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ControlV2DataAgentJobResponseObject); ok {
+		if err := validResponse.VisitControlV2DataAgentJobResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ReleaseV2DataAgentJobLease operation middleware
+func (sh *strictHandler) ReleaseV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request ReleaseV2DataAgentJobLeaseRequestObject
+
+	request.JobId = jobId
+
+	var body ReleaseV2DataAgentJobLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ReleaseV2DataAgentJobLease(ctx, request.(ReleaseV2DataAgentJobLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ReleaseV2DataAgentJobLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ReleaseV2DataAgentJobLeaseResponseObject); ok {
+		if err := validResponse.VisitReleaseV2DataAgentJobLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RenewV2DataAgentJobLease operation middleware
+func (sh *strictHandler) RenewV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request RenewV2DataAgentJobLeaseRequestObject
+
+	request.JobId = jobId
+
+	var body RenewV2DataAgentJobLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RenewV2DataAgentJobLease(ctx, request.(RenewV2DataAgentJobLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RenewV2DataAgentJobLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RenewV2DataAgentJobLeaseResponseObject); ok {
+		if err := validResponse.VisitRenewV2DataAgentJobLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AcquireV2DataAgentJobLease operation middleware
+func (sh *strictHandler) AcquireV2DataAgentJobLease(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request AcquireV2DataAgentJobLeaseRequestObject
+
+	request.JobId = jobId
+
+	var body AcquireV2DataAgentJobLeaseJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AcquireV2DataAgentJobLease(ctx, request.(AcquireV2DataAgentJobLeaseRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AcquireV2DataAgentJobLease")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AcquireV2DataAgentJobLeaseResponseObject); ok {
+		if err := validResponse.VisitAcquireV2DataAgentJobLeaseResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateV2DataAgentJobStatus operation middleware
+func (sh *strictHandler) UpdateV2DataAgentJobStatus(w http.ResponseWriter, r *http.Request, jobId string) {
+	var request UpdateV2DataAgentJobStatusRequestObject
+
+	request.JobId = jobId
+
+	var body UpdateV2DataAgentJobStatusJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateV2DataAgentJobStatus(ctx, request.(UpdateV2DataAgentJobStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateV2DataAgentJobStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateV2DataAgentJobStatusResponseObject); ok {
+		if err := validResponse.VisitUpdateV2DataAgentJobStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2DatasetSnapshots operation middleware
+func (sh *strictHandler) ListV2DatasetSnapshots(w http.ResponseWriter, r *http.Request, params ListV2DatasetSnapshotsParams) {
+	var request ListV2DatasetSnapshotsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2DatasetSnapshots(ctx, request.(ListV2DatasetSnapshotsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2DatasetSnapshots")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2DatasetSnapshotsResponseObject); ok {
+		if err := validResponse.VisitListV2DatasetSnapshotsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2DatasetSnapshot operation middleware
+func (sh *strictHandler) CreateV2DatasetSnapshot(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2DatasetSnapshotRequestObject
+
+	var body CreateV2DatasetSnapshotJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2DatasetSnapshot(ctx, request.(CreateV2DatasetSnapshotRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2DatasetSnapshot")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2DatasetSnapshotResponseObject); ok {
+		if err := validResponse.VisitCreateV2DatasetSnapshotResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteV2DatasetSnapshot operation middleware
+func (sh *strictHandler) DeleteV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	var request DeleteV2DatasetSnapshotRequestObject
+
+	request.SnapshotId = snapshotId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteV2DatasetSnapshot(ctx, request.(DeleteV2DatasetSnapshotRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteV2DatasetSnapshot")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteV2DatasetSnapshotResponseObject); ok {
+		if err := validResponse.VisitDeleteV2DatasetSnapshotResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2DatasetSnapshot operation middleware
+func (sh *strictHandler) GetV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	var request GetV2DatasetSnapshotRequestObject
+
+	request.SnapshotId = snapshotId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2DatasetSnapshot(ctx, request.(GetV2DatasetSnapshotRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2DatasetSnapshot")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2DatasetSnapshotResponseObject); ok {
+		if err := validResponse.VisitGetV2DatasetSnapshotResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2DatasetSnapshotEvents operation middleware
+func (sh *strictHandler) ListV2DatasetSnapshotEvents(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotEventsParams) {
+	var request ListV2DatasetSnapshotEventsRequestObject
+
+	request.SnapshotId = snapshotId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2DatasetSnapshotEvents(ctx, request.(ListV2DatasetSnapshotEventsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2DatasetSnapshotEvents")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2DatasetSnapshotEventsResponseObject); ok {
+		if err := validResponse.VisitListV2DatasetSnapshotEventsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RestoreV2DatasetSnapshot operation middleware
+func (sh *strictHandler) RestoreV2DatasetSnapshot(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	var request RestoreV2DatasetSnapshotRequestObject
+
+	request.SnapshotId = snapshotId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RestoreV2DatasetSnapshot(ctx, request.(RestoreV2DatasetSnapshotRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RestoreV2DatasetSnapshot")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RestoreV2DatasetSnapshotResponseObject); ok {
+		if err := validResponse.VisitRestoreV2DatasetSnapshotResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2DatasetSnapshotShareGrants operation middleware
+func (sh *strictHandler) ListV2DatasetSnapshotShareGrants(w http.ResponseWriter, r *http.Request, snapshotId string, params ListV2DatasetSnapshotShareGrantsParams) {
+	var request ListV2DatasetSnapshotShareGrantsRequestObject
+
+	request.SnapshotId = snapshotId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2DatasetSnapshotShareGrants(ctx, request.(ListV2DatasetSnapshotShareGrantsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2DatasetSnapshotShareGrants")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2DatasetSnapshotShareGrantsResponseObject); ok {
+		if err := validResponse.VisitListV2DatasetSnapshotShareGrantsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2DatasetSnapshotShareGrant operation middleware
+func (sh *strictHandler) CreateV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string) {
+	var request CreateV2DatasetSnapshotShareGrantRequestObject
+
+	request.SnapshotId = snapshotId
+
+	var body CreateV2DatasetSnapshotShareGrantJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2DatasetSnapshotShareGrant(ctx, request.(CreateV2DatasetSnapshotShareGrantRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2DatasetSnapshotShareGrant")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2DatasetSnapshotShareGrantResponseObject); ok {
+		if err := validResponse.VisitCreateV2DatasetSnapshotShareGrantResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RevokeV2DatasetSnapshotShareGrant operation middleware
+func (sh *strictHandler) RevokeV2DatasetSnapshotShareGrant(w http.ResponseWriter, r *http.Request, snapshotId string, grantId string) {
+	var request RevokeV2DatasetSnapshotShareGrantRequestObject
+
+	request.SnapshotId = snapshotId
+	request.GrantId = grantId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RevokeV2DatasetSnapshotShareGrant(ctx, request.(RevokeV2DatasetSnapshotShareGrantRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RevokeV2DatasetSnapshotShareGrant")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RevokeV2DatasetSnapshotShareGrantResponseObject); ok {
+		if err := validResponse.VisitRevokeV2DatasetSnapshotShareGrantResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetV2Health operation middleware
 func (sh *strictHandler) GetV2Health(w http.ResponseWriter, r *http.Request) {
 	var request GetV2HealthRequestObject
@@ -12860,6 +18235,294 @@ func (sh *strictHandler) GetV2ModelHealth(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// ListV2ResourceCollections operation middleware
+func (sh *strictHandler) ListV2ResourceCollections(w http.ResponseWriter, r *http.Request, params ListV2ResourceCollectionsParams) {
+	var request ListV2ResourceCollectionsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2ResourceCollections(ctx, request.(ListV2ResourceCollectionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2ResourceCollections")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2ResourceCollectionsResponseObject); ok {
+		if err := validResponse.VisitListV2ResourceCollectionsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2ResourceCollection operation middleware
+func (sh *strictHandler) CreateV2ResourceCollection(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2ResourceCollectionRequestObject
+
+	var body CreateV2ResourceCollectionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2ResourceCollection(ctx, request.(CreateV2ResourceCollectionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2ResourceCollection")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2ResourceCollectionResponseObject); ok {
+		if err := validResponse.VisitCreateV2ResourceCollectionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteV2ResourceCollection operation middleware
+func (sh *strictHandler) DeleteV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	var request DeleteV2ResourceCollectionRequestObject
+
+	request.CollectionId = collectionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteV2ResourceCollection(ctx, request.(DeleteV2ResourceCollectionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteV2ResourceCollection")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteV2ResourceCollectionResponseObject); ok {
+		if err := validResponse.VisitDeleteV2ResourceCollectionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PatchV2ResourceCollection operation middleware
+func (sh *strictHandler) PatchV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	var request PatchV2ResourceCollectionRequestObject
+
+	request.CollectionId = collectionId
+
+	var body PatchV2ResourceCollectionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PatchV2ResourceCollection(ctx, request.(PatchV2ResourceCollectionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PatchV2ResourceCollection")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PatchV2ResourceCollectionResponseObject); ok {
+		if err := validResponse.VisitPatchV2ResourceCollectionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListV2ResourceCollectionResources operation middleware
+func (sh *strictHandler) ListV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string, params ListV2ResourceCollectionResourcesParams) {
+	var request ListV2ResourceCollectionResourcesRequestObject
+
+	request.CollectionId = collectionId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListV2ResourceCollectionResources(ctx, request.(ListV2ResourceCollectionResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListV2ResourceCollectionResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListV2ResourceCollectionResourcesResponseObject); ok {
+		if err := validResponse.VisitListV2ResourceCollectionResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AddV2ResourceCollectionResources operation middleware
+func (sh *strictHandler) AddV2ResourceCollectionResources(w http.ResponseWriter, r *http.Request, collectionId string) {
+	var request AddV2ResourceCollectionResourcesRequestObject
+
+	request.CollectionId = collectionId
+
+	var body AddV2ResourceCollectionResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AddV2ResourceCollectionResources(ctx, request.(AddV2ResourceCollectionResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AddV2ResourceCollectionResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AddV2ResourceCollectionResourcesResponseObject); ok {
+		if err := validResponse.VisitAddV2ResourceCollectionResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RemoveV2ResourceCollectionResource operation middleware
+func (sh *strictHandler) RemoveV2ResourceCollectionResource(w http.ResponseWriter, r *http.Request, collectionId string, fileId FileID) {
+	var request RemoveV2ResourceCollectionResourceRequestObject
+
+	request.CollectionId = collectionId
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RemoveV2ResourceCollectionResource(ctx, request.(RemoveV2ResourceCollectionResourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RemoveV2ResourceCollectionResource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RemoveV2ResourceCollectionResourceResponseObject); ok {
+		if err := validResponse.VisitRemoveV2ResourceCollectionResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RestoreV2ResourceCollection operation middleware
+func (sh *strictHandler) RestoreV2ResourceCollection(w http.ResponseWriter, r *http.Request, collectionId string) {
+	var request RestoreV2ResourceCollectionRequestObject
+
+	request.CollectionId = collectionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RestoreV2ResourceCollection(ctx, request.(RestoreV2ResourceCollectionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RestoreV2ResourceCollection")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RestoreV2ResourceCollectionResponseObject); ok {
+		if err := validResponse.VisitRestoreV2ResourceCollectionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateV2ResourceCollectionShareGrants operation middleware
+func (sh *strictHandler) CreateV2ResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request, collectionId string) {
+	var request CreateV2ResourceCollectionShareGrantsRequestObject
+
+	request.CollectionId = collectionId
+
+	var body CreateV2ResourceCollectionShareGrantsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2ResourceCollectionShareGrants(ctx, request.(CreateV2ResourceCollectionShareGrantsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2ResourceCollectionShareGrants")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2ResourceCollectionShareGrantsResponseObject); ok {
+		if err := validResponse.VisitCreateV2ResourceCollectionShareGrantsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListResourceEventLog operation middleware
+func (sh *strictHandler) ListResourceEventLog(w http.ResponseWriter, r *http.Request, params ListResourceEventLogParams) {
+	var request ListResourceEventLogRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListResourceEventLog(ctx, request.(ListResourceEventLogRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListResourceEventLog")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListResourceEventLogResponseObject); ok {
+		if err := validResponse.VisitListResourceEventLogResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListResources operation middleware
 func (sh *strictHandler) ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams) {
 	var request ListResourcesRequestObject
@@ -12879,6 +18542,130 @@ func (sh *strictHandler) ListResources(w http.ResponseWriter, r *http.Request, p
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListResourcesResponseObject); ok {
 		if err := validResponse.VisitListResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BulkDeleteResources operation middleware
+func (sh *strictHandler) BulkDeleteResources(w http.ResponseWriter, r *http.Request) {
+	var request BulkDeleteResourcesRequestObject
+
+	var body BulkDeleteResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BulkDeleteResources(ctx, request.(BulkDeleteResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BulkDeleteResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BulkDeleteResourcesResponseObject); ok {
+		if err := validResponse.VisitBulkDeleteResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BulkRestoreResources operation middleware
+func (sh *strictHandler) BulkRestoreResources(w http.ResponseWriter, r *http.Request) {
+	var request BulkRestoreResourcesRequestObject
+
+	var body BulkRestoreResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BulkRestoreResources(ctx, request.(BulkRestoreResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BulkRestoreResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BulkRestoreResourcesResponseObject); ok {
+		if err := validResponse.VisitBulkRestoreResourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateResourceShareGrants operation middleware
+func (sh *strictHandler) CreateResourceShareGrants(w http.ResponseWriter, r *http.Request) {
+	var request CreateResourceShareGrantsRequestObject
+
+	var body CreateResourceShareGrantsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateResourceShareGrants(ctx, request.(CreateResourceShareGrantsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateResourceShareGrants")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateResourceShareGrantsResponseObject); ok {
+		if err := validResponse.VisitCreateResourceShareGrantsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BulkTagResources operation middleware
+func (sh *strictHandler) BulkTagResources(w http.ResponseWriter, r *http.Request) {
+	var request BulkTagResourcesRequestObject
+
+	var body BulkTagResourcesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BulkTagResources(ctx, request.(BulkTagResourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BulkTagResources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BulkTagResourcesResponseObject); ok {
+		if err := validResponse.VisitBulkTagResourcesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12938,6 +18725,65 @@ func (sh *strictHandler) GetResource(w http.ResponseWriter, r *http.Request, fil
 	}
 }
 
+// PatchResource operation middleware
+func (sh *strictHandler) PatchResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request PatchResourceRequestObject
+
+	request.FileId = fileId
+
+	var body PatchResourceJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PatchResource(ctx, request.(PatchResourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PatchResource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PatchResourceResponseObject); ok {
+		if err := validResponse.VisitPatchResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DownloadResource operation middleware
+func (sh *strictHandler) DownloadResource(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request DownloadResourceRequestObject
+
+	request.FileId = fileId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DownloadResource(ctx, request.(DownloadResourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DownloadResource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DownloadResourceResponseObject); ok {
+		if err := validResponse.VisitDownloadResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListResourceEvents operation middleware
 func (sh *strictHandler) ListResourceEvents(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceEventsParams) {
 	var request ListResourceEventsRequestObject
@@ -12984,6 +18830,93 @@ func (sh *strictHandler) RestoreResource(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(RestoreResourceResponseObject); ok {
 		if err := validResponse.VisitRestoreResourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListResourceShareGrants operation middleware
+func (sh *strictHandler) ListResourceShareGrants(w http.ResponseWriter, r *http.Request, fileId FileID, params ListResourceShareGrantsParams) {
+	var request ListResourceShareGrantsRequestObject
+
+	request.FileId = fileId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListResourceShareGrants(ctx, request.(ListResourceShareGrantsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListResourceShareGrants")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListResourceShareGrantsResponseObject); ok {
+		if err := validResponse.VisitListResourceShareGrantsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateResourceShareGrant operation middleware
+func (sh *strictHandler) CreateResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID) {
+	var request CreateResourceShareGrantRequestObject
+
+	request.FileId = fileId
+
+	var body CreateResourceShareGrantJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateResourceShareGrant(ctx, request.(CreateResourceShareGrantRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateResourceShareGrant")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateResourceShareGrantResponseObject); ok {
+		if err := validResponse.VisitCreateResourceShareGrantResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RevokeResourceShareGrant operation middleware
+func (sh *strictHandler) RevokeResourceShareGrant(w http.ResponseWriter, r *http.Request, fileId FileID, grantId string) {
+	var request RevokeResourceShareGrantRequestObject
+
+	request.FileId = fileId
+	request.GrantId = grantId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RevokeResourceShareGrant(ctx, request.(RevokeResourceShareGrantRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RevokeResourceShareGrant")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RevokeResourceShareGrantResponseObject); ok {
+		if err := validResponse.VisitRevokeResourceShareGrantResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -14281,6 +20214,199 @@ func (sh *strictHandler) RejectV2TrainingUpdateProposal(w http.ResponseWriter, r
 	}
 }
 
+// CreateV2UploadSession operation middleware
+func (sh *strictHandler) CreateV2UploadSession(w http.ResponseWriter, r *http.Request) {
+	var request CreateV2UploadSessionRequestObject
+
+	var body CreateV2UploadSessionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateV2UploadSession(ctx, request.(CreateV2UploadSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateV2UploadSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateV2UploadSessionResponseObject); ok {
+		if err := validResponse.VisitCreateV2UploadSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetV2UploadSession operation middleware
+func (sh *strictHandler) GetV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	var request GetV2UploadSessionRequestObject
+
+	request.SessionId = sessionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetV2UploadSession(ctx, request.(GetV2UploadSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetV2UploadSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetV2UploadSessionResponseObject); ok {
+		if err := validResponse.VisitGetV2UploadSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CancelV2UploadSession operation middleware
+func (sh *strictHandler) CancelV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	var request CancelV2UploadSessionRequestObject
+
+	request.SessionId = sessionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CancelV2UploadSession(ctx, request.(CancelV2UploadSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CancelV2UploadSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CancelV2UploadSessionResponseObject); ok {
+		if err := validResponse.VisitCancelV2UploadSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UploadV2UploadSessionChunk operation middleware
+func (sh *strictHandler) UploadV2UploadSessionChunk(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken, chunkIndex int, params UploadV2UploadSessionChunkParams) {
+	var request UploadV2UploadSessionChunkRequestObject
+
+	request.SessionId = sessionId
+	request.FileToken = fileToken
+	request.ChunkIndex = chunkIndex
+	request.Params = params
+
+	request.Body = r.Body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UploadV2UploadSessionChunk(ctx, request.(UploadV2UploadSessionChunkRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UploadV2UploadSessionChunk")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UploadV2UploadSessionChunkResponseObject); ok {
+		if err := validResponse.VisitUploadV2UploadSessionChunkResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CompleteV2UploadSessionFile operation middleware
+func (sh *strictHandler) CompleteV2UploadSessionFile(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID, fileToken UploadFileToken) {
+	var request CompleteV2UploadSessionFileRequestObject
+
+	request.SessionId = sessionId
+	request.FileToken = fileToken
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CompleteV2UploadSessionFile(ctx, request.(CompleteV2UploadSessionFileRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CompleteV2UploadSessionFile")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CompleteV2UploadSessionFileResponseObject); ok {
+		if err := validResponse.VisitCompleteV2UploadSessionFileResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PauseV2UploadSession operation middleware
+func (sh *strictHandler) PauseV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	var request PauseV2UploadSessionRequestObject
+
+	request.SessionId = sessionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PauseV2UploadSession(ctx, request.(PauseV2UploadSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PauseV2UploadSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PauseV2UploadSessionResponseObject); ok {
+		if err := validResponse.VisitPauseV2UploadSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ResumeV2UploadSession operation middleware
+func (sh *strictHandler) ResumeV2UploadSession(w http.ResponseWriter, r *http.Request, sessionId UploadSessionID) {
+	var request ResumeV2UploadSessionRequestObject
+
+	request.SessionId = sessionId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ResumeV2UploadSession(ctx, request.(ResumeV2UploadSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ResumeV2UploadSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResumeV2UploadSessionResponseObject); ok {
+		if err := validResponse.VisitResumeV2UploadSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // UploadFiles operation middleware
 func (sh *strictHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
 	var request UploadFilesRequestObject
@@ -14622,157 +20748,231 @@ func (sh *strictHandler) PostV2WorkerHeartbeat(w http.ResponseWriter, r *http.Re
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"DybRlLq7+/8BAAD//w==",
+	"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",
+	"C6l/ZUpfJDe9QUyh6P8bAAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

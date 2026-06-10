@@ -10,7 +10,9 @@ import (
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/config"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 )
 
 func TestNewAppServesHealth(t *testing.T) {
@@ -115,6 +117,179 @@ func TestAppStartRecoversExpiredRunLeases(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("expected recovery job")
+	}
+}
+
+func TestAppStartRecoversExpiredDataAgentJobLeases(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	application, err := New(config.Config{
+		AppVersion:                 "test-version",
+		RunRecoveryEnabled:         true,
+		RunRecoveryInterval:        10 * time.Millisecond,
+		RunRecoveryBatchLimit:      10,
+		NATSJobsSubject:            "ultra.runs.jobs",
+		NATSRareSpotJobsSubject:    "ultra.runs.rarespot.jobs",
+		NATSDataAgentJobsSubject:   "ultra.data_agent.jobs",
+		NATSEventsSubject:          "ultra.runs.events",
+		NATSCancelSubject:          "ultra.runs.cancel",
+		NATSEventConsumer:          "ultra-control-event-ingest",
+		NATSWorkerDurable:          "ultra-deepagents-worker",
+		NATSRareSpotWorkerDurable:  "rarespot-ecology-worker",
+		NATSDataAgentWorkerDurable: "ultra-data-agent-worker",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if application.Start == nil {
+		t.Fatalf("Start hook should be configured when run recovery is enabled")
+	}
+	mem, ok := application.Store.(*store.MemoryStore)
+	if !ok {
+		t.Fatalf("store = %T, want memory store", application.Store)
+	}
+	now := time.Now().UTC()
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_app_data_agent_recover",
+		OriginalName: "recover.nii.gz",
+		ContentType:  "application/x-nifti",
+		SizeBytes:    512,
+		SHA256:       "sha-app-data-agent-recover",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		ProjectID:    "nph-study",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := mem.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_app_recover",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_app_data_agent_recover"},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{"file_app_data_agent_recover"}},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+	if _, _, _, err := mem.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-expired",
+		TTL:         time.Minute,
+		Now:         now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AcquireDataAgentJobLease: %v", err)
+	}
+	if err := application.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	select {
+	case recovered := <-application.DataAgentJobSource:
+		if recovered.JobID != job.JobID || recovered.DispatchID == "" || recovered.OwnerUserID != "alice" || recovered.OwnerOrgID != "org-a" {
+			t.Fatalf("recovered data-agent job = %+v, want fresh dispatch for %s", recovered, job.JobID)
+		}
+		if len(recovered.ResourceIDs) != 1 || recovered.ResourceIDs[0] != "file_app_data_agent_recover" {
+			t.Fatalf("recovered resource ids = %+v, want original selector resource", recovered.ResourceIDs)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected recovered data-agent job dispatch")
+	}
+	loaded, err := mem.GetDataAgentJobForUser(ctx, job.JobID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetDataAgentJobForUser: %v", err)
+	}
+	if loaded.Status != "queued" || loaded.ProgressCompleted != 0 {
+		t.Fatalf("loaded job after recovery = %+v, want queued for worker retry", loaded)
+	}
+}
+
+func TestNewAppWiresLocalDataAgentWorker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	application, err := New(config.Config{AppVersion: "test-version"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if application.DataAgentJobSource == nil {
+		t.Fatalf("DataAgentJobSource = nil, want local memory data-agent job source")
+	}
+	if application.DataAgentWorker == nil {
+		t.Fatalf("DataAgentWorker = nil, want local data-agent worker")
+	}
+	mem, ok := application.Store.(*store.MemoryStore)
+	if !ok {
+		t.Fatalf("store = %T, want memory store", application.Store)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_app_data_agent",
+		OriginalName: "app-nph.nii.gz",
+		ContentType:  "application/x-nifti",
+		SizeBytes:    256,
+		SHA256:       "sha-app-data-agent",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       "active",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := mem.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_app_worker",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_app_data_agent"},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{"file_app_data_agent"}},
+		CreatedByUserID: "alice",
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+	publisher, ok := application.Bus.(eventbus.DataAgentJobPublisher)
+	if !ok {
+		t.Fatalf("bus = %T, want data-agent publisher", application.Bus)
+	}
+	if err := publisher.PublishDataAgentJob(ctx, eventbus.DataAgentJob{
+		JobID:         job.JobID,
+		OwnerUserID:   "alice",
+		OwnerOrgID:    "org-a",
+		JobType:       "extract_metadata",
+		ResourceIDs:   []string{"file_app_data_agent"},
+		ResourceCount: 1,
+	}); err != nil {
+		t.Fatalf("PublishDataAgentJob: %v", err)
+	}
+	var queued eventbus.DataAgentJob
+	select {
+	case queued = <-application.DataAgentJobSource:
+	case <-time.After(time.Second):
+		t.Fatalf("expected local data-agent job")
+	}
+	if err := application.DataAgentWorker.RunJob(ctx, queued); err != nil {
+		t.Fatalf("DataAgentWorker.RunJob: %v", err)
+	}
+	loaded, err := mem.GetDataAgentJobForUser(ctx, job.JobID, "alice", "org-a")
+	if err != nil {
+		t.Fatalf("GetDataAgentJobForUser: %v", err)
+	}
+	if loaded.Status != "succeeded" || loaded.OutputSummary["summary"] == "" {
+		t.Fatalf("loaded data-agent job = %+v, want succeeded metadata summary", loaded)
 	}
 }
 

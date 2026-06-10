@@ -746,6 +746,113 @@ export type UploadFilesResponse = {
   uploaded: UploadedFileRecord[];
 };
 
+export type UploadSessionRecord = {
+  session_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  project_id?: string | null;
+  source_type: string;
+  status: "active" | "paused" | "completed" | "failed" | "canceled" | string;
+  total_bytes: number;
+  bytes_received: number;
+  bytes_verified: number;
+  bytes_committed: number;
+  idempotency_key?: string | null;
+  browser_fingerprint?: string | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type UploadSessionFileInit = {
+  file_token: string;
+  original_name: string;
+  relative_path?: string | null;
+  content_type?: string | null;
+  size_bytes: number;
+  declared_sha256?: string | null;
+};
+
+export type UploadSessionCreateRequest = {
+  idempotency_key?: string | null;
+  browser_fingerprint?: string | null;
+  project_id?: string | null;
+  total_bytes: number;
+  files: UploadSessionFileInit[];
+};
+
+export type UploadSessionFileRecord = {
+  session_id: string;
+  file_token: string;
+  resource_id?: string | null;
+  original_name: string;
+  relative_path?: string | null;
+  content_type?: string | null;
+  size_bytes: number;
+  declared_sha256?: string | null;
+  computed_sha256?: string | null;
+  status: "pending" | "uploading" | "completed" | "failed" | string;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type UploadChunkRecord = {
+  session_id: string;
+  file_token: string;
+  chunk_index: number;
+  offset: number;
+  size_bytes: number;
+  sha256: string;
+  status: "received" | "verified" | "failed" | string;
+  storage_uri?: string | null;
+  received_at?: string | null;
+  verified_at?: string | null;
+  error?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type UploadSessionLimits = {
+  max_parallel_files: number;
+  max_parallel_chunks: number;
+  max_files_per_session: number;
+};
+
+export type UploadSessionEventRecord = {
+  event_id: string;
+  session_id: string;
+  actor_user_id?: string | null;
+  actor_org_id?: string | null;
+  event_type: string;
+  ts: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type UploadSessionResponse = {
+  session: UploadSessionRecord;
+  files: UploadSessionFileRecord[];
+  chunks?: UploadChunkRecord[];
+  events?: UploadSessionEventRecord[];
+  limits?: UploadSessionLimits | null;
+};
+
+export type UploadChunkResponse = {
+  session: UploadSessionRecord;
+  file: UploadSessionFileRecord;
+  chunk: UploadChunkRecord;
+};
+
+export type UploadSessionFileCompleteResponse = {
+  session: UploadSessionRecord;
+  file: UploadSessionFileRecord;
+  resource: UploadedFileRecord;
+};
+
 export type ResourceRecord = {
   file_id: string;
   original_name: string;
@@ -753,6 +860,7 @@ export type ResourceRecord = {
   size_bytes: number;
   sha256: string;
   created_at: string;
+  status?: string | null;
   source_type: "upload" | "bisque_import" | string;
   resource_kind: "image" | "video" | "table" | "file" | string;
   source_uri?: string | null;
@@ -769,11 +877,381 @@ export type ResourceRecord = {
   cache_ready?: boolean;
   staged_locally?: boolean;
   sync_run_id?: string | null;
+  tags?: string[];
+  metadata?: Record<string, unknown> | null;
+  share_summary?: ResourceShareSummary | null;
+};
+
+export type ResourceShareSummary = {
+  share_status: "private" | "shared_by_me" | "shared_with_me" | "public" | string;
+  active_grant_count: number;
+  shared_by_me?: boolean | null;
+  shared_with_me?: boolean | null;
+  public?: boolean | null;
+};
+
+export type ResourceMetadataFilter = {
+  path: string;
+  operator: "eq" | "contains" | "exists" | "lt" | "lte" | "gt" | "gte" | string;
+  value?: string | number | boolean | null;
 };
 
 export type ResourceListResponse = {
   count: number;
   resources: ResourceRecord[];
+};
+
+export type ResourceResponse = {
+  resource: ResourceRecord;
+};
+
+export type ResourceEventRecord = {
+  event_id: string;
+  resource_id: string;
+  actor_user_id?: string | null;
+  actor_org_id?: string | null;
+  event_type: string;
+  ts: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceBulkTagRequest = {
+  resource_ids: string[];
+  tags: string[];
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceBulkTagResponse = {
+  count: number;
+  resources: ResourceRecord[];
+  events: ResourceEventRecord[];
+};
+
+export type ResourceBulkLifecycleRequest = {
+  resource_ids: string[];
+};
+
+export type ResourceBulkLifecycleResponse = {
+  count: number;
+  resources: ResourceRecord[];
+  events: ResourceEventRecord[];
+};
+
+export type ResourceShareGrantRecord = {
+  grant_id: string;
+  resource_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  grantee_user_id?: string | null;
+  grantee_org_id?: string | null;
+  role: "read" | string;
+  status: "active" | "revoked" | string;
+  created_by_user_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceShareGrantCreateRequest = {
+  grantee_user_id?: string | null;
+  grantee_org_id?: string | null;
+  public?: boolean | null;
+  role?: "read" | string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceShareGrantsCreateRequest = ResourceShareGrantCreateRequest & {
+  resource_ids: string[];
+};
+
+export type ResourceShareGrantResponse = {
+  grant: ResourceShareGrantRecord;
+};
+
+export type ResourceShareGrantsCreateResponse = {
+  count: number;
+  grants: ResourceShareGrantRecord[];
+};
+
+export type ResourceCollectionShareGrantsCreateResponse = {
+  count: number;
+  collection: ResourceCollectionRecord;
+  grants: ResourceShareGrantRecord[];
+};
+
+export type ResourceShareGrantListResponse = {
+  resource_id: string;
+  count: number;
+  grants: ResourceShareGrantRecord[];
+};
+
+export type ResourceCollectionRecord = {
+  collection_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  project_id?: string | null;
+  parent_collection_id?: string | null;
+  name: string;
+  description?: string | null;
+  collection_type: "collection" | "folder" | "dataset" | string;
+  status: "active" | "deleted" | string;
+  resource_count: number;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceCollectionCreateRequest = {
+  name: string;
+  description?: string | null;
+  collection_type?: "collection" | "folder" | "dataset" | string | null;
+  project_id?: string | null;
+  parent_collection_id?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceCollectionPatchRequest = {
+  name: string;
+};
+
+export type ResourceCollectionResponse = {
+  collection: ResourceCollectionRecord;
+};
+
+export type ResourceCollectionListResponse = {
+  count: number;
+  collections: ResourceCollectionRecord[];
+};
+
+export type ResourceCollectionMembershipRecord = {
+  collection_id: string;
+  resource_id: string;
+  position: number;
+  added_by_user_id?: string | null;
+  added_at: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type ResourceCollectionAddResourcesResponse = {
+  collection: ResourceCollectionRecord;
+  added_count: number;
+  memberships: ResourceCollectionMembershipRecord[];
+};
+
+export type ResourceCollectionRemoveResourcesResponse = {
+  collection: ResourceCollectionRecord;
+  removed_count: number;
+  memberships: ResourceCollectionMembershipRecord[];
+};
+
+export type DatasetSnapshotRecord = {
+  snapshot_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  project_id?: string | null;
+  source_collection_id?: string | null;
+  name: string;
+  description?: string | null;
+  status: "active" | "deleted" | string;
+  resource_count: number;
+  total_bytes: number;
+  created_by_user_id?: string | null;
+  created_at: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotResourceRecord = {
+  snapshot_id: string;
+  resource_id: string;
+  position: number;
+  original_name: string;
+  content_type?: string | null;
+  size_bytes: number;
+  sha256?: string | null;
+  source_type: "upload" | "bisque_import" | string;
+  resource_kind: "image" | "video" | "table" | "file" | string;
+  storage_uri?: string | null;
+  source_uri?: string | null;
+  project_id?: string | null;
+  resource_created_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotCreateRequest = {
+  name: string;
+  description?: string | null;
+  source_collection_id?: string | null;
+  resource_ids?: string[];
+  resource_query?: DatasetSnapshotResourceQuery | null;
+  project_id?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotResourceQuery = {
+  q?: string;
+  kind?: string;
+  source?: string;
+  project_id?: string | null;
+  sharing?: string;
+  tags?: string[];
+  descriptors?: string[];
+  metadata_filters?: ResourceMetadataFilter[];
+  created_after?: string;
+  created_before?: string;
+  processing_status?: string;
+};
+
+export type DatasetSnapshotResponse = {
+  snapshot: DatasetSnapshotRecord;
+  resources: DatasetSnapshotResourceRecord[];
+};
+
+export type DatasetSnapshotListResponse = {
+  count: number;
+  snapshots: DatasetSnapshotRecord[];
+};
+
+export type DatasetSnapshotEventRecord = {
+  event_id: string;
+  snapshot_id: string;
+  actor_user_id?: string | null;
+  actor_org_id?: string | null;
+  event_type: string;
+  ts: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotEventListResponse = {
+  snapshot_id: string;
+  count: number;
+  total_count: number;
+  limit: number;
+  offset: number;
+  events: DatasetSnapshotEventRecord[];
+};
+
+export type DatasetSnapshotShareGrantRecord = {
+  grant_id: string;
+  snapshot_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  grantee_user_id?: string | null;
+  grantee_org_id?: string | null;
+  role: "read" | string;
+  status: "active" | "revoked" | string;
+  created_by_user_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotShareGrantCreateRequest = {
+  grantee_user_id?: string | null;
+  grantee_org_id?: string | null;
+  role?: "read" | string;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DatasetSnapshotShareGrantResponse = {
+  grant: DatasetSnapshotShareGrantRecord;
+};
+
+export type DatasetSnapshotShareGrantListResponse = {
+  count: number;
+  grants: DatasetSnapshotShareGrantRecord[];
+};
+
+export type DataAgentJobRecord = {
+  job_id: string;
+  owner_user_id: string;
+  owner_org_id?: string | null;
+  owner_role?: string | null;
+  project_id?: string | null;
+  job_type:
+    | "caption_resources"
+    | "extract_metadata"
+    | "organize_resources"
+    | "deduplicate_resources"
+    | "quality_check_resources"
+    | "batch_tag_resources"
+    | "create_dataset_snapshot"
+    | string;
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled" | string;
+  resource_count: number;
+  progress_completed: number;
+  progress_total: number;
+  error?: string | null;
+  created_by_user_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  input_selector?: Record<string, unknown> | null;
+  output_summary?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DataAgentJobEventRecord = {
+  event_id: string;
+  job_id: string;
+  sequence: number;
+  event_type: string;
+  actor_user_id?: string | null;
+  actor_org_id?: string | null;
+  ts: string;
+  message?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DataAgentJobCreateRequest = {
+  job_type:
+    | "caption_resources"
+    | "extract_metadata"
+    | "organize_resources"
+    | "deduplicate_resources"
+    | "quality_check_resources"
+    | "batch_tag_resources"
+    | "create_dataset_snapshot"
+    | string;
+  resource_ids?: string[];
+  source_collection_id?: string | null;
+  project_id?: string | null;
+  resource_query?: DatasetSnapshotResourceQuery | null;
+  input_selector?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DataAgentJobStatusUpdateRequest = {
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled" | string;
+  progress_completed?: number;
+  progress_total?: number;
+  error?: string | null;
+  message?: string | null;
+  output_summary?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+  event_metadata?: Record<string, unknown> | null;
+};
+
+export type DataAgentJobControlRequest = {
+  action: "cancel" | "retry" | string;
+  reason?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DataAgentJobResponse = {
+  job: DataAgentJobRecord;
+  events: DataAgentJobEventRecord[];
+};
+
+export type DataAgentJobListResponse = {
+  count: number;
+  jobs: DataAgentJobRecord[];
 };
 
 export type ResourceComputationLookupRequest = {

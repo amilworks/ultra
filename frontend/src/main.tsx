@@ -7,6 +7,10 @@ import "@fontsource/jetbrains-mono/latin-ext.css";
 import { App } from "./App";
 import "./styles.css";
 
+type RootElement = HTMLElement & {
+  __bisqueUltraRoot?: ReturnType<typeof createRoot>;
+};
+
 type AppErrorBoundaryProps = {
   children: ReactNode;
 };
@@ -88,12 +92,14 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
   }
 }
 
-const root = document.getElementById("root");
+const root = document.getElementById("root") as RootElement | null;
 if (!root) {
   throw new Error("Root element not found.");
 }
 
-createRoot(root).render(
+root.__bisqueUltraRoot ??= createRoot(root);
+
+root.__bisqueUltraRoot.render(
   <StrictMode>
     <AppErrorBoundary>
       <App />

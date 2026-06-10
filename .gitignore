@@ -23,6 +23,7 @@ frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
 frontend/.playwright-cli/
+.playwright-cli/
 
 # Runtime state and generated artifacts
 .tmp/

@@ -184,6 +184,11 @@ function Sidebar({
   collapsible?: "offcanvas" | "icon" | "none"
 }) {
   const { isMobileView, state, openMobile, setOpenMobile } = useSidebar()
+  const closeMobileSidebarAfterClick = React.useCallback(() => {
+    window.setTimeout(() => {
+      setOpenMobile(false)
+    }, 0)
+  }, [setOpenMobile])
   const handleMobileSheetClickCapture = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!(event.target instanceof Element)) {
@@ -193,10 +198,10 @@ function Sidebar({
         return
       }
       if (event.target.closest('[data-sidebar-close-mobile="true"]')) {
-        setOpenMobile(false)
+        closeMobileSidebarAfterClick()
       }
     },
-    [setOpenMobile]
+    [closeMobileSidebarAfterClick]
   )
 
   if (collapsible === "none") {

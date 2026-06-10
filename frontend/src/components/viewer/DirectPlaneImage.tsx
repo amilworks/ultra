@@ -15,6 +15,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { UploadViewerInfo } from "@/types";
 
+import {
+  loadScalarSliceBitmap,
+  loadSliceBitmap,
+  sliceBitmapToTexture,
+  type ScalarSliceSource,
+} from "./sliceImageCache";
+
 type DirectPlaneImageProps = {
   imageUrl: string;
   placeholderUrl?: string | null;
@@ -28,6 +35,11 @@ type DirectPlaneImageProps = {
     left: string;
     right: string;
   };
+  /**
+   * When provided, the slice is rendered from the in-memory volume (instant, no
+   * network). Falls back to {@link imageUrl} when absent.
+   */
+  scalarSlice?: ScalarSliceSource | null;
 };
 
 export type ImageViewportSize = {
@@ -210,6 +222,7 @@ export function DirectPlaneImage({
   className,
   interactive = true,
   orientationLabels,
+  scalarSlice,
 }: DirectPlaneImageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
@@ -325,7 +338,7 @@ export function DirectPlaneImage({
   }, []);
 
   useEffect(() => {
-    if (!primaryImageUrl || !meshRef.current) {
+    if ((!scalarSlice && !primaryImageUrl) || !meshRef.current) {
       return;
     }
 
@@ -334,21 +347,14 @@ export function DirectPlaneImage({
     setLoadState("loading");
     setLoadError(null);
 
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin("anonymous");
-    loader.load(
-      primaryImageUrl,
-      (texture) => {
+    const loadPromise = scalarSlice ? loadScalarSliceBitmap(scalarSlice) : loadSliceBitmap(primaryImageUrl);
+    loadPromise
+      .then((bitmap) => {
         if (loadTokenRef.current !== token || !meshRef.current) {
-          texture.dispose();
           return;
         }
 
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.generateMipmaps = false;
-
+        const texture = sliceBitmapToTexture(bitmap);
         const nextImageSize = getLoadedImageSize(texture, descriptor);
         const previousTexture = textureRef.current;
         textureRef.current = texture;
@@ -360,18 +366,16 @@ export function DirectPlaneImage({
         setIsFitViewport(true);
         setHasTexture(true);
         setLoadState("ready");
-      },
-      undefined,
-      () => {
+      })
+      .catch(() => {
         if (loadTokenRef.current !== token) {
           return;
         }
         const hasPreviousTexture = Boolean(textureRef.current);
         setLoadError(hasPreviousTexture ? "Failed to load the next image frame." : "Failed to load image.");
         setLoadState(hasPreviousTexture ? "ready" : "error");
-      }
-    );
-  }, [descriptor, primaryImageUrl]);
+      });
+  }, [descriptor, primaryImageUrl, scalarSlice]);
 
   useEffect(() => {
     if (!imageSize || !isUsableSize(viewportSize)) {

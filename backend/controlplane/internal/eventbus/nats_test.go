@@ -47,6 +47,46 @@ func TestJobJSONMatchesPythonWorkerEnvelope(t *testing.T) {
 	}
 }
 
+func TestDataAgentJobJSONMatchesQueueEnvelope(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(DataAgentJob{
+		JobID:         "data_agent_job_1",
+		DispatchID:    "dispatch-1",
+		OwnerUserID:   "user-1",
+		OwnerOrgID:    "org-1",
+		ProjectID:     "nph-study",
+		JobType:       "caption_resources",
+		ResourceIDs:   []string{"file-a", "file-b"},
+		ResourceCount: 2,
+		InputSelector: domain.JSONMap{"label": "NPH"},
+		Metadata:      domain.JSONMap{"requested_from": "resources_page"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal DataAgentJob: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("Unmarshal DataAgentJob: %v", err)
+	}
+	for _, key := range []string{
+		"job_id",
+		"dispatch_id",
+		"owner_user_id",
+		"owner_org_id",
+		"project_id",
+		"job_type",
+		"resource_ids",
+		"resource_count",
+		"input_selector",
+		"metadata",
+	} {
+		if _, ok := decoded[key]; !ok {
+			t.Fatalf("data-agent job JSON missing %q in %s", key, payload)
+		}
+	}
+}
+
 func TestRunEventMessageDispositionAcksMalformedPayload(t *testing.T) {
 	t.Parallel()
 	calls := 0
@@ -149,6 +189,26 @@ func TestNATSMessageIDForExplicitRequeueUsesDispatchID(t *testing.T) {
 	}
 }
 
+func TestNATSMessageIDForDataAgentJobUsesJobID(t *testing.T) {
+	t.Parallel()
+
+	got := natsMessageIDForDataAgentJob(DataAgentJob{JobID: "data_agent_job_abc", JobType: "caption_resources"})
+
+	if got != "data-agent-job:data_agent_job_abc" {
+		t.Fatalf("natsMessageIDForDataAgentJob() = %q, want data-agent-job:data_agent_job_abc", got)
+	}
+}
+
+func TestNATSMessageIDForRetriedDataAgentJobUsesDispatchID(t *testing.T) {
+	t.Parallel()
+
+	got := natsMessageIDForDataAgentJob(DataAgentJob{JobID: "data_agent_job_abc", DispatchID: "dispatch-2"})
+
+	if got != "data-agent-job:data_agent_job_abc:dispatch-2" {
+		t.Fatalf("natsMessageIDForDataAgentJob() = %q, want data-agent-job:data_agent_job_abc:dispatch-2", got)
+	}
+}
+
 func TestNATSMessageIDForRunEventUsesEventID(t *testing.T) {
 	t.Parallel()
 
@@ -192,12 +252,14 @@ func TestNATSBusPublishesJobAndRunEvent(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -228,12 +290,14 @@ func TestNATSBusDeduplicatesPublishRetriesByDeterministicMessageID(t *testing.T)
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -284,14 +348,16 @@ func TestNATSRunEventConsumerSurvivesSubscriberShutdown(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-consumer-" + suffix
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -343,14 +409,16 @@ func TestNATSRunEventConsumerReconcilesExistingUnsafeDefaults(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-reconcile-" + suffix
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -404,14 +472,16 @@ func TestNATSRunEventConsumerSupportsMultipleControlPlaneSubscribers(t *testing.
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-multi-" + suffix
 	cfg := NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	}
 	busA, err := NewNATSBus(ctx, cfg)
 	if err != nil {
@@ -542,6 +612,34 @@ func TestMemoryBusPublishJobBuffersThousandJobBurstWhenWorkerIsStarting(t *testi
 		}); err != nil {
 			t.Fatalf("PublishJob %d returned %v; burst submits should survive worker startup lag", i+1, err)
 		}
+	}
+}
+
+func TestMemoryBusPublishesDataAgentJobs(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bus := NewMemoryBus()
+	job := DataAgentJob{
+		JobID:         "data_agent_job_memory",
+		OwnerUserID:   "user-1",
+		OwnerOrgID:    "org-1",
+		JobType:       "extract_metadata",
+		ResourceIDs:   []string{"file-a"},
+		ResourceCount: 1,
+	}
+
+	if err := bus.PublishDataAgentJob(ctx, job); err != nil {
+		t.Fatalf("PublishDataAgentJob: %v", err)
+	}
+
+	select {
+	case got := <-bus.DataAgentJobs():
+		if got.JobID != job.JobID || got.JobType != job.JobType || got.OwnerUserID != job.OwnerUserID {
+			t.Fatalf("data-agent job = %+v, want %+v", got, job)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected published data-agent job")
 	}
 }
 

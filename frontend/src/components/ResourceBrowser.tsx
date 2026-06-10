@@ -1,8 +1,41 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type DragEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type UIEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Sheet,
   SheetContent,
@@ -15,24 +48,82 @@ import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
 import { resourceDisplayName } from "@/features/resources/presentation";
 import {
+  ArrowLeft,
+  ChevronDown,
+  Download,
   Eye,
   File,
+  FolderMinus,
+  FolderOpen,
   Film,
+  FolderPlus,
+  FolderUp,
   ImageIcon,
+  LayoutGrid,
   Loader2,
+  Pause,
+  Pencil,
   RefreshCw,
+  RotateCcw,
+  Share2,
   SlidersHorizontal,
   Table2,
   Trash2,
   Upload,
+  UserPlus,
+  XCircle,
 } from "lucide-react";
-import type { ResourceRecord } from "../types";
+import type {
+  ResourceCollectionRecord,
+  ResourceRecord,
+  ResourceShareGrantRecord,
+} from "../types";
 
 export type ResourceKindFilter = "all" | "image" | "video" | "table" | "file";
 export type ResourceSourceFilter = "all" | "upload" | "bisque_import";
+export type ResourceSharingFilter = "all" | "private" | "shared_by_me" | "shared_with_me" | "public";
+export type ResourceStatusFilter = "active" | "deleted";
+type ResourceViewMode = "cards" | "table";
+
+export type ResourceUploadProgress = {
+  id: string;
+  fingerprint?: string | null;
+  sessionId?: string | null;
+  fileToken?: string | null;
+  fileName: string;
+  relativePath?: string | null;
+  status: "queued" | "creating" | "uploading" | "verifying" | "completed" | "failed" | string;
+  totalBytes: number;
+  bytesVerified: number;
+  error?: string | null;
+};
+
+export type ResourceUploadReselectionContext = {
+  resumeFrom?: ResourceUploadProgress;
+  uploadTargetCollection?: ResourceCollectionRecord;
+};
+
+export type ResourceCollectionSelectionRequest = {
+  collectionType: "folder";
+  name: string;
+  resourceIds: string[];
+};
+
+export type ResourceCollectionAddSelectionRequest = {
+  collectionId: string;
+  resourceIds: string[];
+};
+
+export type ResourceShareGrantRequest = {
+  granteeUserId?: string;
+  granteeOrgId?: string;
+  role: "read" | string;
+};
 
 type ResourceBrowserProps = {
   resources: ResourceRecord[];
+  resourceCollections?: ResourceCollectionRecord[];
+  resourceCollectionsLoading?: boolean;
   totalCount: number;
   loading: boolean;
   loadingMore: boolean;
@@ -41,18 +132,67 @@ type ResourceBrowserProps = {
   query: string;
   kindFilter: ResourceKindFilter;
   sourceFilter: ResourceSourceFilter;
+  sharingFilter?: ResourceSharingFilter;
+  statusFilter?: ResourceStatusFilter;
+  tagFilter?: string;
   deletingFileIds: Record<string, boolean>;
+  restoringFileIds?: Record<string, boolean>;
   onQueryChange: (value: string) => void;
   onKindFilterChange: (value: ResourceKindFilter) => void;
   onSourceFilterChange: (value: ResourceSourceFilter) => void;
+  onSharingFilterChange?: (value: ResourceSharingFilter) => void;
+  onStatusFilterChange?: (value: ResourceStatusFilter) => void;
+  onTagFilterChange?: (value: string) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
-  onUploadFiles?: (files: File[]) => void;
+  onUploadFiles?: (files: File[], context?: ResourceUploadReselectionContext) => void;
   uploading?: boolean;
+  uploadProgress?: ResourceUploadProgress[];
+  onDismissUploadProgress?: (item: ResourceUploadProgress) => void;
+  onPauseUploadProgress?: (item: ResourceUploadProgress) => void;
+  onCancelUploadProgress?: (item: ResourceUploadProgress) => void;
   onOpenResource: (resource: ResourceRecord) => void;
   onUseInChat: (resource: ResourceRecord) => void;
   onDeleteResource: (resource: ResourceRecord) => void;
+  onRenameResource?: (resource: ResourceRecord, name: string) => Promise<void> | void;
+  onRestoreResource?: (resource: ResourceRecord) => void;
+  onRemoveResourceFromCollection?: (resource: ResourceRecord) => Promise<void> | void;
+  onLoadResourceShareGrants?: (
+    resource: ResourceRecord
+  ) => Promise<ResourceShareGrantRecord[]> | ResourceShareGrantRecord[];
+  onCreateResourceShareGrant?: (
+    resource: ResourceRecord,
+    request: ResourceShareGrantRequest
+  ) => Promise<ResourceShareGrantRecord> | ResourceShareGrantRecord;
+  onCreateBulkResourceShareGrants?: (
+    resources: ResourceRecord[],
+    request: ResourceShareGrantRequest
+  ) => Promise<ResourceShareGrantRecord[]> | ResourceShareGrantRecord[];
+  onCreateResourceCollectionShareGrants?: (
+    collection: ResourceCollectionRecord,
+    request: ResourceShareGrantRequest
+  ) => Promise<ResourceShareGrantRecord[]> | ResourceShareGrantRecord[];
+  onDeleteSelectedResources?: (resources: ResourceRecord[]) => Promise<void> | void;
+  onRestoreSelectedResources?: (resources: ResourceRecord[]) => Promise<void> | void;
+  onRevokeResourceShareGrant?: (
+    resource: ResourceRecord,
+    grant: ResourceShareGrantRecord
+  ) => Promise<ResourceShareGrantRecord> | ResourceShareGrantRecord;
+  onCreateCollectionFromSelection?: (
+    request: ResourceCollectionSelectionRequest
+  ) => Promise<void> | void;
+  onAddSelectionToCollection?: (
+    request: ResourceCollectionAddSelectionRequest
+  ) => Promise<void> | void;
+  activeResourceCollection?: ResourceCollectionRecord | null;
+  onOpenCollection?: (collection: ResourceCollectionRecord) => void;
+  onRenameCollection?: (collection: ResourceCollectionRecord, name: string) => Promise<void> | void;
+  onDeleteCollection?: (collection: ResourceCollectionRecord) => Promise<void> | void;
+  onRestoreCollection?: (collection: ResourceCollectionRecord) => Promise<void> | void;
+  restoringCollectionIds?: Record<string, boolean>;
+  onClearActiveCollection?: () => void;
   thumbnailUrlFor: (resource: ResourceRecord) => string;
+  downloadUrlFor?: (resource: ResourceRecord) => string;
 };
 
 const kindFilters: Array<{ value: ResourceKindFilter; label: string }> = [
@@ -69,11 +209,89 @@ const sourceFilters: Array<{ value: ResourceSourceFilter; label: string }> = [
   { value: "bisque_import", label: "BisQue" },
 ];
 
+const sharingFilters: Array<{ value: ResourceSharingFilter; label: string }> = [
+  { value: "all", label: "All sharing" },
+  { value: "private", label: "Private" },
+  { value: "shared_by_me", label: "Shared by me" },
+  { value: "shared_with_me", label: "Shared with me" },
+  { value: "public", label: "Public" },
+];
+
+const statusFilters: Array<{ value: ResourceStatusFilter; label: string }> = [
+  { value: "active", label: "Active" },
+  { value: "deleted", label: "Deleted" },
+];
+
 const RESOURCE_SKELETON_COUNT = 8;
+const RESOURCE_TABLE_VIRTUALIZATION_THRESHOLD = 80;
+const RESOURCE_TABLE_ROW_HEIGHT = 68;
+const RESOURCE_TABLE_OVERSCAN_ROWS = 8;
+const RESOURCE_TABLE_FALLBACK_VIEWPORT_ROWS = 12;
+const RESOURCE_VIEW_MODE_STORAGE_KEY = "bisque.resources.view_mode";
+const RESOURCE_DRAG_ID_MIME = "application/x-bisque-resource-id";
+const RESOURCE_DRAG_IDS_MIME = "application/x-bisque-resource-ids";
+
+const isResourceViewMode = (value: string | null): value is ResourceViewMode =>
+  value === "cards" || value === "table";
+
+const readStoredResourceViewMode = (): ResourceViewMode => {
+  try {
+    const value = globalThis.localStorage?.getItem(RESOURCE_VIEW_MODE_STORAGE_KEY) ?? null;
+    return isResourceViewMode(value) ? value : "cards";
+  } catch {
+    return "cards";
+  }
+};
+
+const persistResourceViewMode = (value: ResourceViewMode): void => {
+  try {
+    globalThis.localStorage?.setItem(RESOURCE_VIEW_MODE_STORAGE_KEY, value);
+  } catch {
+    // Storage access can fail in private browsing or restricted test environments.
+  }
+};
+
+const parseDraggedResourceIds = (value: string): string[] => {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    parsed.forEach((item) => {
+      const id = String(item ?? "").trim();
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    });
+    return ids;
+  } catch {
+    return [];
+  }
+};
 
 const formatResourceDate = (value: string): string => {
   try {
     return new Date(value).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return value;
+  }
+};
+
+const formatResourceAuditDate = (value: string): string => {
+  try {
+    return new Date(value).toLocaleString([], {
+      year: "numeric",
       month: "short",
       day: "numeric",
       hour: "numeric",
@@ -100,6 +318,232 @@ const sourceLabel = (value: string): string => {
     return "Upload";
   }
   return value || "Source";
+};
+
+const uploadProgressStatusLabel = (value: string): string => {
+  switch (String(value || "").toLowerCase()) {
+    case "queued":
+      return "Queued";
+    case "creating":
+      return "Preparing";
+    case "verifying":
+      return "Verifying";
+    case "paused":
+      return "Paused";
+    case "completed":
+      return "Completed";
+    case "needs_file":
+      return "Ready to resume";
+    case "failed":
+      return "Failed";
+    case "uploading":
+    default:
+      return "Uploading";
+  }
+};
+
+const uploadProgressRecoveryLabel = (value: string): string | null => {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "needs_file" || normalized === "paused") {
+    return "Resume";
+  }
+  if (normalized === "failed") {
+    return "Retry";
+  }
+  return null;
+};
+
+const uploadProgressErrorLabel = (value: string | null | undefined): string | null => {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  if (/request failed with status (404|410)/i.test(text)) {
+    return "Upload session expired. Start this upload again.";
+  }
+  return text;
+};
+
+const isExpiredUploadProgress = (item: ResourceUploadProgress): boolean =>
+  String(item.status || "").toLowerCase() === "failed" &&
+  uploadProgressErrorLabel(item.error) === "Upload session expired. Start this upload again.";
+
+const canDismissUploadProgress = (value: string): boolean => {
+  const normalized = String(value || "").toLowerCase();
+  return normalized === "failed" || normalized === "needs_file" || normalized === "canceled";
+};
+
+const canCancelUploadProgress = (item: ResourceUploadProgress): boolean => {
+  const status = String(item.status || "").toLowerCase();
+  return Boolean(item.sessionId) && status !== "completed" && status !== "canceled";
+};
+
+const canPauseUploadProgress = (item: ResourceUploadProgress): boolean => {
+  const status = String(item.status || "").toLowerCase();
+  return Boolean(item.sessionId) && ["queued", "creating", "uploading", "verifying"].includes(status);
+};
+
+const normalizeUploadRelativePath = (value: unknown): string | null => {
+  const path = String(value ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    .join("/");
+  return path.length > 0 ? path : null;
+};
+
+type ParsedUploadFingerprint = {
+  identityName: string;
+  sizeBytes: number;
+  lastModified: number;
+  contentType: string;
+};
+
+const parseUploadFingerprint = (value: unknown): ParsedUploadFingerprint | null => {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const segments = text.split(":");
+  if (/^[a-f0-9]{64}$/i.test(segments[segments.length - 1] ?? "")) {
+    segments.pop();
+  }
+  if (segments.length < 4) {
+    return null;
+  }
+  const contentType = String(segments.pop() ?? "").trim();
+  const lastModified = Number(segments.pop());
+  const sizeBytes = Number(segments.pop());
+  const identityName = segments.join(":").trim();
+  if (!identityName || !contentType || !Number.isFinite(sizeBytes) || !Number.isFinite(lastModified)) {
+    return null;
+  }
+  return {
+    identityName,
+    sizeBytes: Math.max(0, Math.floor(sizeBytes)),
+    lastModified: Math.max(0, Math.floor(lastModified)),
+    contentType,
+  };
+};
+
+const fileMatchesUploadProgress = (file: File, item: ResourceUploadProgress): boolean => {
+  const parsedFingerprint = parseUploadFingerprint(item.fingerprint);
+  if (parsedFingerprint) {
+    const selectedIdentity =
+      normalizeUploadRelativePath((file as File & { webkitRelativePath?: string }).webkitRelativePath) ??
+      (file.name || "upload.bin");
+    if (selectedIdentity !== parsedFingerprint.identityName) {
+      return false;
+    }
+    if (file.size !== parsedFingerprint.sizeBytes) {
+      return false;
+    }
+    if (Math.max(0, Math.floor(Number(file.lastModified) || 0)) !== parsedFingerprint.lastModified) {
+      return false;
+    }
+    if ((file.type || "application/octet-stream") !== parsedFingerprint.contentType) {
+      return false;
+    }
+  }
+  const expectedName = item.fileName.trim();
+  if (expectedName && (file.name || "upload.bin") !== expectedName) {
+    return false;
+  }
+  const expectedBytes = Math.max(0, Math.floor(Number(item.totalBytes) || 0));
+  if (expectedBytes > 0 && file.size !== expectedBytes) {
+    return false;
+  }
+  const expectedPath = normalizeUploadRelativePath(item.relativePath);
+  if (!expectedPath) {
+    return true;
+  }
+  const selectedPath = normalizeUploadRelativePath(
+    (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  );
+  return selectedPath === expectedPath;
+};
+
+const pluralSummary = (count: number, singular: string, plural = `${singular}s`): string =>
+  `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+
+type ResourceShareStatusChip = {
+  key: string;
+  label: string;
+  title: string;
+};
+
+const resourceShareStatusChips = (resource: ResourceRecord): ResourceShareStatusChip[] => {
+  const summary = resource.share_summary;
+  if (!summary) {
+    return [];
+  }
+  const status = String(summary.share_status || "").toLowerCase();
+  const grantCount = Math.max(0, Math.floor(Number(summary.active_grant_count) || 0));
+  if (status === "shared_by_me") {
+    const label =
+      grantCount > 0
+        ? `${grantCount.toLocaleString()} active ${grantCount === 1 ? "grant" : "grants"}`
+        : "Shared by me";
+    return [{ key: "shared_by_me", label, title: "Shared by me" }];
+  }
+  if (status === "shared_with_me") {
+    return [{ key: "shared_with_me", label: "Shared with me", title: "Shared with me" }];
+  }
+  if (status === "public") {
+    return [{ key: "public", label: "Public", title: "Public resource" }];
+  }
+  return [];
+};
+
+const resourceLifecycleStatus = (resource: ResourceRecord): ResourceStatusFilter =>
+  String(resource.status || "").toLowerCase() === "deleted" ? "deleted" : "active";
+
+const isDeletedResource = (resource: ResourceRecord): boolean =>
+  resourceLifecycleStatus(resource) === "deleted";
+
+const normalizeResourceTags = (tags: readonly unknown[] | undefined): string[] => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  tags?.forEach((tag) => {
+    const trimmed = String(tag ?? "").trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    result.push(trimmed);
+  });
+  return result;
+};
+
+const resourceShareGrantStatusLabel = (value: string): string => {
+  switch (String(value || "").toLowerCase()) {
+    case "active":
+      return "Active";
+    case "revoked":
+      return "Revoked";
+    default:
+      return String(value || "Unknown")
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/^\w/, (first) => first.toUpperCase());
+  }
+};
+
+const resourceShareGrantIdentity = (grant: ResourceShareGrantRecord): string => {
+  const userId = String(grant.grantee_user_id ?? "").trim();
+  const orgId = String(grant.grantee_org_id ?? "").trim();
+  return userId || orgId || grant.grant_id;
+};
+
+const resourceShareGrantRoleLabel = (value: string): string => {
+  const role = String(value || "").trim() || "read";
+  return role
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\w/, (first) => first.toUpperCase());
 };
 
 const iconForKind = (kind: string) => {
@@ -129,6 +573,8 @@ const shouldRequestThumbnail = (resource: ResourceRecord, failedThumbnailIds: Re
 
 export function ResourceBrowser({
   resources,
+  resourceCollections = [],
+  resourceCollectionsLoading = false,
   totalCount,
   loading,
   loadingMore,
@@ -137,32 +583,368 @@ export function ResourceBrowser({
   query,
   kindFilter,
   sourceFilter,
+  sharingFilter = "all",
+  statusFilter = "active",
+  tagFilter = "",
   deletingFileIds,
+  restoringFileIds = {},
   onQueryChange,
   onKindFilterChange,
   onSourceFilterChange,
+  onSharingFilterChange,
+  onStatusFilterChange,
+  onTagFilterChange,
   onRefresh,
   onLoadMore,
   onUploadFiles,
   uploading = false,
+  uploadProgress = [],
+  onDismissUploadProgress,
+  onPauseUploadProgress,
+  onCancelUploadProgress,
   onOpenResource,
   onUseInChat,
   onDeleteResource,
+  onRenameResource,
+  onRestoreResource,
+  onRemoveResourceFromCollection,
+  onLoadResourceShareGrants,
+  onCreateResourceShareGrant,
+  onCreateBulkResourceShareGrants,
+  onCreateResourceCollectionShareGrants,
+  onDeleteSelectedResources,
+  onRestoreSelectedResources,
+  onRevokeResourceShareGrant,
+  onCreateCollectionFromSelection,
+  onAddSelectionToCollection,
+  activeResourceCollection = null,
+  onOpenCollection,
+  onRenameCollection,
+  onDeleteCollection,
+  onRestoreCollection,
+  restoringCollectionIds = {},
+  onClearActiveCollection,
   thumbnailUrlFor,
+  downloadUrlFor,
 }: ResourceBrowserProps) {
   const isMobileView = useBreakpoint(721);
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [resourceFiltersOpen, setResourceFiltersOpen] = useState(false);
+  const [expiredUploadDetailsOpen, setExpiredUploadDetailsOpen] = useState(false);
+  const [resourceViewMode, setResourceViewMode] = useState<ResourceViewMode>(
+    readStoredResourceViewMode
+  );
   const [failedThumbnailIds, setFailedThumbnailIds] = useState<Record<string, true>>({});
+  const [selectedResourceIds, setSelectedResourceIds] = useState<Record<string, true>>({});
+  const [selectionAnchorResourceId, setSelectionAnchorResourceId] = useState("");
+  const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newFolderSaving, setNewFolderSaving] = useState(false);
+  const [newFolderError, setNewFolderError] = useState<string | null>(null);
+  const [organizingSelection, setOrganizingSelection] = useState(false);
+  const [shareSheetResourceId, setShareSheetResourceId] = useState("");
+  const [shareGrantsByResourceId, setShareGrantsByResourceId] = useState<
+    Record<string, ResourceShareGrantRecord[]>
+  >({});
+  const [shareGrantsLoading, setShareGrantsLoading] = useState(false);
+  const [shareGrantsError, setShareGrantsError] = useState<string | null>(null);
+  const [shareGranteeUserId, setShareGranteeUserId] = useState("");
+  const [shareGranteeOrgId, setShareGranteeOrgId] = useState("");
+  const [shareSaving, setShareSaving] = useState(false);
+  const [shareRevokingById, setShareRevokingById] = useState<Record<string, true>>({});
+  const [bulkShareOpen, setBulkShareOpen] = useState(false);
+  const [bulkShareGranteeUserId, setBulkShareGranteeUserId] = useState("");
+  const [bulkShareGranteeOrgId, setBulkShareGranteeOrgId] = useState("");
+  const [bulkShareSaving, setBulkShareSaving] = useState(false);
+  const [bulkShareError, setBulkShareError] = useState<string | null>(null);
+  const [collectionShareTarget, setCollectionShareTarget] =
+    useState<ResourceCollectionRecord | null>(null);
+  const [collectionShareGranteeUserId, setCollectionShareGranteeUserId] = useState("");
+  const [collectionShareGranteeOrgId, setCollectionShareGranteeOrgId] = useState("");
+  const [collectionShareSaving, setCollectionShareSaving] = useState(false);
+  const [collectionShareError, setCollectionShareError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<
+    | { kind: "resource"; resource: ResourceRecord }
+    | { kind: "collection"; collection: ResourceCollectionRecord }
+    | null
+  >(null);
+  const [renameInput, setRenameInput] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [removingFromCollectionIds, setRemovingFromCollectionIds] = useState<Record<string, true>>(
+    {}
+  );
+  const [deletingCollectionIds, setDeletingCollectionIds] = useState<Record<string, true>>({});
+  const [deletingSelection, setDeletingSelection] = useState(false);
+  const [restoringSelection, setRestoringSelection] = useState(false);
+  const [draggedResourceId, setDraggedResourceId] = useState("");
+  const [fileDropTargetId, setFileDropTargetId] = useState("");
+  const [tableScrollTop, setTableScrollTop] = useState(0);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const tableShellRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingUploadReselectionRef = useRef<ResourceUploadProgress | null>(null);
+  const [uploadReselectionError, setUploadReselectionError] = useState<string | null>(null);
   const cardResources = useMemo(() => resources, [resources]);
+  const effectiveResourceViewMode: ResourceViewMode =
+    isMobileView && resourceViewMode === "table" ? "cards" : resourceViewMode;
+  const tableVirtualized =
+    effectiveResourceViewMode === "table" &&
+    cardResources.length > RESOURCE_TABLE_VIRTUALIZATION_THRESHOLD;
+  const tableVisibleRowCount = tableVirtualized
+    ? Math.min(
+        cardResources.length,
+        RESOURCE_TABLE_FALLBACK_VIEWPORT_ROWS + RESOURCE_TABLE_OVERSCAN_ROWS * 2
+      )
+    : cardResources.length;
+  const tableStartIndex = tableVirtualized
+    ? Math.min(
+        Math.max(0, cardResources.length - tableVisibleRowCount),
+        Math.max(
+          0,
+          Math.floor(tableScrollTop / RESOURCE_TABLE_ROW_HEIGHT) -
+            RESOURCE_TABLE_OVERSCAN_ROWS
+        )
+      )
+    : 0;
+  const tableEndIndex = tableVirtualized
+    ? Math.min(cardResources.length, tableStartIndex + tableVisibleRowCount)
+    : cardResources.length;
+  const tableResources = tableVirtualized
+    ? cardResources.slice(tableStartIndex, tableEndIndex)
+    : cardResources;
+  const tableTopSpacerHeight = tableVirtualized
+    ? tableStartIndex * RESOURCE_TABLE_ROW_HEIGHT
+    : 0;
+  const tableBottomSpacerHeight = tableVirtualized
+    ? Math.max(0, (cardResources.length - tableEndIndex) * RESOURCE_TABLE_ROW_HEIGHT)
+    : 0;
+  const selectedResourcesInOrder = useMemo(
+    () =>
+      cardResources.filter((resource) => selectedResourceIds[resource.file_id]),
+    [cardResources, selectedResourceIds]
+  );
+  const selectedResourceIdsInOrder = useMemo(
+    () => selectedResourcesInOrder.map((resource) => resource.file_id),
+    [selectedResourcesInOrder]
+  );
+  const availableFolderCollections = useMemo(
+    () =>
+      resourceCollections.filter(
+        (collection) =>
+          String(collection.status || "").toLowerCase() !== "deleted" &&
+          String(collection.collection_type || "").toLowerCase() === "folder"
+      ),
+    [resourceCollections]
+  );
+  const deletedFolderCollections = useMemo(
+    () =>
+      resourceCollections.filter(
+        (collection) =>
+          String(collection.status || "").toLowerCase() === "deleted" &&
+          String(collection.collection_type || "").toLowerCase() === "folder"
+      ),
+    [resourceCollections]
+  );
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
-  const activeFilterCount =
-    Number(kindFilter !== "all") + Number(sourceFilter !== "all");
+  const activeCollectionName = String(activeResourceCollection?.name ?? "").trim();
+  const activeTagFilter = tagFilter.trim();
+  const visibleFilterCount =
+    Number(kindFilter !== "all") +
+    Number(sourceFilter !== "all") +
+    Number(sharingFilter !== "all") +
+    Number(statusFilter !== "active") +
+    Number(activeTagFilter.length > 0);
   const resultSummary = loading
-    ? "Searching resources..."
-    : `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources`;
+    ? activeCollectionName
+      ? `Loading ${activeCollectionName}...`
+      : "Searching resources..."
+    : activeCollectionName
+      ? `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources in ${activeCollectionName}`
+      : `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources`;
+  const visibleUploadProgress = uploadProgress.filter(
+    (item) => item.status !== "completed" && item.status !== "canceled"
+  );
+  const expiredUploadProgress = visibleUploadProgress.filter(isExpiredUploadProgress);
+  const shouldCollapseExpiredUploads = expiredUploadProgress.length > 1;
+  const renderedUploadProgress =
+    shouldCollapseExpiredUploads && !expiredUploadDetailsOpen
+      ? visibleUploadProgress.filter((item) => !isExpiredUploadProgress(item))
+      : visibleUploadProgress;
+  const shareSheetResource =
+    cardResources.find((resource) => resource.file_id === shareSheetResourceId) ?? null;
+  const shareSheetResourceName = shareSheetResource ? resourceDisplayName(shareSheetResource) : "";
+  const renameTargetName =
+    renameTarget?.kind === "resource"
+      ? resourceDisplayName(renameTarget.resource)
+      : renameTarget?.kind === "collection"
+        ? renameTarget.collection.name
+        : "";
+  const trimmedRenameInput = renameInput.trim();
+  const shareSheetGrants = shareSheetResource
+    ? (shareGrantsByResourceId[shareSheetResource.file_id] ?? [])
+    : [];
+  const isDeletedResourceView = statusFilter === "deleted";
+  const canUseSharing = Boolean(
+    onLoadResourceShareGrants && onCreateResourceShareGrant && onRevokeResourceShareGrant
+  );
+  const canUseBulkShare =
+    !isDeletedResourceView && Boolean(onCreateBulkResourceShareGrants || onCreateResourceShareGrant);
+  const canUseBulkFolderMove = !isDeletedResourceView && Boolean(onAddSelectionToCollection);
+  const selectionEnabled = Boolean(
+    isDeletedResourceView
+      ? onRestoreSelectedResources
+      : onAddSelectionToCollection ||
+          onDeleteSelectedResources ||
+          onCreateBulkResourceShareGrants ||
+          onCreateResourceShareGrant
+  );
+  const selectedResourceCount = selectedResourceIdsInOrder.length;
+  const trimmedNewFolderName = newFolderName.trim();
+  const trimmedShareGranteeUserId = shareGranteeUserId.trim();
+  const trimmedShareGranteeOrgId = shareGranteeOrgId.trim();
+  const trimmedBulkShareGranteeUserId = bulkShareGranteeUserId.trim();
+  const trimmedBulkShareGranteeOrgId = bulkShareGranteeOrgId.trim();
+  const trimmedCollectionShareGranteeUserId = collectionShareGranteeUserId.trim();
+  const trimmedCollectionShareGranteeOrgId = collectionShareGranteeOrgId.trim();
+  const canGrantShare =
+    Boolean(onCreateResourceShareGrant) &&
+    Boolean(shareSheetResource) &&
+    (trimmedShareGranteeUserId.length > 0 || trimmedShareGranteeOrgId.length > 0) &&
+    !shareSaving;
+  const canGrantBulkShare =
+    canUseBulkShare &&
+    selectedResourceCount > 0 &&
+    (trimmedBulkShareGranteeUserId.length > 0 || trimmedBulkShareGranteeOrgId.length > 0) &&
+    !bulkShareSaving;
+  const canGrantCollectionShare =
+    Boolean(onCreateResourceCollectionShareGrants) &&
+    Boolean(collectionShareTarget) &&
+    (trimmedCollectionShareGranteeUserId.length > 0 ||
+      trimmedCollectionShareGranteeOrgId.length > 0) &&
+    !collectionShareSaving;
+  const canSaveRename =
+    Boolean(renameTarget) &&
+    trimmedRenameInput.length > 0 &&
+    trimmedRenameInput !== renameTargetName &&
+    !renameSaving;
+  const canDeleteSelectedResources =
+    Boolean(onDeleteSelectedResources) &&
+    !isDeletedResourceView &&
+    selectedResourceCount > 0 &&
+    !deletingSelection &&
+    !organizingSelection;
+  const canRestoreSelectedResources =
+    Boolean(onRestoreSelectedResources) &&
+    isDeletedResourceView &&
+    selectedResourceCount > 0 &&
+    !restoringSelection &&
+    !organizingSelection;
+  const canCreateEmptyFolder =
+    Boolean(onCreateCollectionFromSelection) &&
+    trimmedNewFolderName.length > 0 &&
+    !newFolderSaving;
+  const canShowBulkMoveToFolder =
+    canUseBulkFolderMove && (resourceCollectionsLoading || availableFolderCollections.length > 0);
+  const canMoveSelectionToFolder =
+    canUseBulkFolderMove &&
+    selectedResourceCount > 0 &&
+    availableFolderCollections.length > 0 &&
+    !resourceCollectionsLoading &&
+    !organizingSelection;
+
+  const resetTableScroll = (): void => {
+    setTableScrollTop(0);
+    if (tableShellRef.current) {
+      tableShellRef.current.scrollTop = 0;
+    }
+  };
+
+  const requestUploadReselection = (item: ResourceUploadProgress): void => {
+    pendingUploadReselectionRef.current = item;
+    setUploadReselectionError(null);
+    if (item.relativePath) {
+      folderUploadInputRef.current?.click();
+      return;
+    }
+    uploadInputRef.current?.click();
+  };
+
+  const handleUploadInputSelection = (files: File[]): void => {
+    const resumeFrom = pendingUploadReselectionRef.current;
+    pendingUploadReselectionRef.current = null;
+    if (files.length === 0) {
+      return;
+    }
+    if (!resumeFrom) {
+      setUploadReselectionError(null);
+      onUploadFiles?.(files);
+      return;
+    }
+    const matchingFile = files.find((file) => fileMatchesUploadProgress(file, resumeFrom)) ?? null;
+    if (!matchingFile) {
+      setUploadReselectionError(
+        `Select ${resumeFrom.fileName} to resume this upload. The selected file did not match the interrupted upload.`
+      );
+      return;
+    }
+    setUploadReselectionError(null);
+    onUploadFiles?.(resumeFrom.relativePath ? files : [matchingFile], { resumeFrom });
+  };
+
+  const droppedFilesFromEvent = (event: DragEvent<HTMLElement>): File[] =>
+    Array.from(event.dataTransfer.files ?? []).filter((file) => file.size >= 0);
+
+  const isExternalFileDrag = (event: DragEvent<HTMLElement>): boolean => {
+    if (draggedResourceId) {
+      return false;
+    }
+    const types = Array.from(event.dataTransfer.types ?? []);
+    if (types.includes("Files")) {
+      return true;
+    }
+    return Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file");
+  };
+
+  const uploadDroppedFiles = (
+    event: DragEvent<HTMLElement>,
+    collection?: ResourceCollectionRecord | null
+  ): boolean => {
+    if (!onUploadFiles || !isExternalFileDrag(event)) {
+      return false;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const droppedFiles = droppedFilesFromEvent(event);
+    setFileDropTargetId("");
+    if (droppedFiles.length === 0) {
+      return true;
+    }
+    setUploadReselectionError(null);
+    onUploadFiles(
+      droppedFiles,
+      collection ? { uploadTargetCollection: collection } : undefined
+    );
+    return true;
+  };
+
+  const handleExternalFileDragOver = (
+    event: DragEvent<HTMLElement>,
+    targetId: string
+  ): boolean => {
+    if (!onUploadFiles || !isExternalFileDrag(event)) {
+      return false;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setFileDropTargetId(targetId);
+    return true;
+  };
+
+  useEffect(() => {
+    persistResourceViewMode(resourceViewMode);
+  }, [resourceViewMode]);
 
   useEffect(() => {
     if (!hasMore || loading || loadingMore) {
@@ -184,6 +966,853 @@ export function ResourceBrowser({
     return () => observer.disconnect();
   }, [hasMore, loading, loadingMore, onLoadMore]);
 
+  const handleTableScroll = (event: UIEvent<HTMLDivElement>): void => {
+    const scrollNode = event.currentTarget;
+    const nextScrollTop = Math.max(0, scrollNode.scrollTop);
+    if (tableVirtualized) {
+      setTableScrollTop((current) => (current === nextScrollTop ? current : nextScrollTop));
+    }
+    if (!hasMore || loading || loadingMore) {
+      return;
+    }
+    const remainingScroll =
+      scrollNode.scrollHeight - nextScrollTop - Math.max(1, scrollNode.clientHeight);
+    if (remainingScroll <= RESOURCE_TABLE_ROW_HEIGHT * 6) {
+      onLoadMore();
+    }
+  };
+
+  const toggleResourceSelection = (fileId: string, checked: boolean): void => {
+    if (!selectionEnabled) {
+      return;
+    }
+    setSelectionAnchorResourceId((current) => {
+      if (checked) {
+        return fileId;
+      }
+      return current === fileId ? "" : current;
+    });
+    setSelectedResourceIds((current) => {
+      if (checked) {
+        return { ...current, [fileId]: true };
+      }
+      if (!current[fileId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[fileId];
+      return next;
+    });
+  };
+
+  const selectResourceRange = (
+    current: Record<string, true>,
+    anchorResourceId: string,
+    targetResourceId: string
+  ): Record<string, true> => {
+    const anchorIndex = cardResources.findIndex(
+      (candidate) => candidate.file_id === anchorResourceId
+    );
+    const targetIndex = cardResources.findIndex(
+      (candidate) => candidate.file_id === targetResourceId
+    );
+    if (anchorIndex < 0 || targetIndex < 0) {
+      return { ...current, [targetResourceId]: true };
+    }
+    const startIndex = Math.min(anchorIndex, targetIndex);
+    const endIndex = Math.max(anchorIndex, targetIndex);
+    const next = { ...current };
+    for (const candidate of cardResources.slice(startIndex, endIndex + 1)) {
+      next[candidate.file_id] = true;
+    }
+    return next;
+  };
+
+  const clickStartedOnResourceControl = (
+    target: EventTarget | null,
+    currentTarget: HTMLElement
+  ): boolean => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    const control = target.closest(
+      "button,a,input,label,select,textarea,[role='button'],[role='menuitem']"
+    );
+    return Boolean(control && currentTarget.contains(control));
+  };
+
+  const keyboardStartedInResourceControl = (
+    target: EventTarget | null,
+    currentTarget: HTMLElement
+  ): boolean => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    if (target instanceof HTMLElement && target.isContentEditable) {
+      return true;
+    }
+    const control = target.closest(
+      "button,a,input,label,select,textarea,[role='button'],[role='menuitem'],[contenteditable='true']"
+    );
+    return Boolean(control && currentTarget.contains(control));
+  };
+
+  const selectResourceFromSurfaceClick = (
+    event: MouseEvent<HTMLElement>,
+    resource: ResourceRecord
+  ): void => {
+    if (
+      event.defaultPrevented ||
+      clickStartedOnResourceControl(event.target, event.currentTarget)
+    ) {
+      return;
+    }
+    const fileId = resource.file_id;
+    const isDeleted = isDeletedResource(resource);
+    const isSelectionGesture = event.shiftKey || event.metaKey || event.ctrlKey;
+    if (!selectionEnabled || (!isSelectionGesture && !isDeleted)) {
+      if (!isDeleted) {
+        onOpenResource(resource);
+      }
+      return;
+    }
+    if (event.shiftKey) {
+      const anchorResourceId =
+        selectionAnchorResourceId &&
+        cardResources.some((candidate) => candidate.file_id === selectionAnchorResourceId)
+          ? selectionAnchorResourceId
+          : selectedResourceIdsInOrder[0] ?? fileId;
+      setSelectionAnchorResourceId(anchorResourceId);
+      setSelectedResourceIds((current) =>
+        selectResourceRange(current, anchorResourceId, fileId)
+      );
+      return;
+    }
+    setSelectionAnchorResourceId(fileId);
+    setSelectedResourceIds((current) => {
+      if (event.metaKey || event.ctrlKey) {
+        if (!current[fileId]) {
+          return { ...current, [fileId]: true };
+        }
+        const next = { ...current };
+        delete next[fileId];
+        return next;
+      }
+      if (current[fileId] && Object.keys(current).length === 1) {
+        return current;
+      }
+      return { [fileId]: true };
+    });
+  };
+
+  const clearSelection = (): void => {
+    setSelectedResourceIds({});
+    setSelectionAnchorResourceId("");
+    setBulkShareOpen(false);
+    setBulkShareGranteeUserId("");
+    setBulkShareGranteeOrgId("");
+    setBulkShareError(null);
+  };
+
+  const deleteSelectedResources = async (): Promise<void> => {
+    if (!onDeleteSelectedResources || selectedResourcesInOrder.length === 0 || deletingSelection) {
+      return;
+    }
+    const resourcesToDelete = selectedResourcesInOrder;
+    setDeletingSelection(true);
+    try {
+      await onDeleteSelectedResources(resourcesToDelete);
+      clearSelection();
+    } finally {
+      setDeletingSelection(false);
+    }
+  };
+
+  const restoreSelectedResources = async (): Promise<void> => {
+    if (
+      !onRestoreSelectedResources ||
+      selectedResourcesInOrder.length === 0 ||
+      restoringSelection
+    ) {
+      return;
+    }
+    const resourcesToRestore = selectedResourcesInOrder;
+    setRestoringSelection(true);
+    try {
+      await onRestoreSelectedResources(resourcesToRestore);
+      clearSelection();
+    } finally {
+      setRestoringSelection(false);
+    }
+  };
+
+  const selectAllVisibleResources = (): void => {
+    if (!selectionEnabled || cardResources.length === 0) {
+      return;
+    }
+    setSelectionAnchorResourceId(cardResources[0]?.file_id ?? "");
+    setSelectedResourceIds(
+      Object.fromEntries(cardResources.map((resource) => [resource.file_id, true]))
+    );
+  };
+
+  const handleResourceBrowserKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (keyboardStartedInResourceControl(event.target, event.currentTarget)) {
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+      if (!selectionEnabled || cardResources.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      selectAllVisibleResources();
+      return;
+    }
+    if (event.key === "Escape" && selectedResourceCount > 0) {
+      event.preventDefault();
+      clearSelection();
+      return;
+    }
+    if ((event.key === "Delete" || event.key === "Backspace") && selectedResourceCount > 0) {
+      if (canDeleteSelectedResources) {
+        event.preventDefault();
+        void deleteSelectedResources();
+      }
+    }
+  };
+
+  const handleResourceItemKeyDown = (
+    event: KeyboardEvent<HTMLElement>,
+    resource: ResourceRecord,
+    isDeleted: boolean
+  ): void => {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    if (event.key === "F2" && onRenameResource && !isDeleted) {
+      event.preventDefault();
+      event.stopPropagation();
+      openResourceRenameDialog(resource);
+      return;
+    }
+    if (event.key !== "Enter") {
+      return;
+    }
+    if (isDeleted) {
+      onRestoreResource?.(resource);
+    } else {
+      onOpenResource(resource);
+    }
+  };
+
+  const handleCollectionKeyDown = (
+    event: KeyboardEvent<HTMLElement>,
+    collection: ResourceCollectionRecord
+  ): void => {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    if (event.key === "F2" && onRenameCollection) {
+      event.preventDefault();
+      event.stopPropagation();
+      openCollectionRenameDialog(collection);
+      return;
+    }
+    if (
+      (event.key === "Delete" || event.key === "Backspace") &&
+      onDeleteCollection &&
+      collection.status !== "deleted"
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      void deleteCollection(collection);
+    }
+  };
+
+  const openNewFolderDialog = (): void => {
+    if (!onCreateCollectionFromSelection) {
+      return;
+    }
+    setNewFolderName("");
+    setNewFolderError(null);
+    setNewFolderDialogOpen(true);
+  };
+
+  const closeNewFolderDialog = (): void => {
+    if (newFolderSaving) {
+      return;
+    }
+    setNewFolderDialogOpen(false);
+    setNewFolderName("");
+    setNewFolderError(null);
+  };
+
+  const createEmptyFolder = async (): Promise<void> => {
+    if (!onCreateCollectionFromSelection || !canCreateEmptyFolder) {
+      return;
+    }
+    setNewFolderSaving(true);
+    setNewFolderError(null);
+    try {
+      await onCreateCollectionFromSelection({
+        collectionType: "folder",
+        name: trimmedNewFolderName,
+        resourceIds: [],
+      });
+      setNewFolderDialogOpen(false);
+      setNewFolderName("");
+    } catch (folderError) {
+      setNewFolderError(
+        folderError instanceof Error ? folderError.message : "Unable to create folder."
+      );
+    } finally {
+      setNewFolderSaving(false);
+    }
+  };
+
+  const addSelectionToExistingFolder = async (collectionId: string): Promise<void> => {
+    const targetCollectionId = collectionId.trim();
+    const resourceIds = selectedResourceIdsInOrder;
+    if (
+      !onAddSelectionToCollection ||
+      !canMoveSelectionToFolder ||
+      !targetCollectionId ||
+      resourceIds.length === 0
+    ) {
+      return;
+    }
+    setOrganizingSelection(true);
+    try {
+      await onAddSelectionToCollection({
+        collectionId: targetCollectionId,
+        resourceIds,
+      });
+      clearSelection();
+    } catch {
+      // Parent surfaces the API error in the Resources error region.
+    } finally {
+      setOrganizingSelection(false);
+    }
+  };
+
+  const handleResourceDragStart = (
+    event: DragEvent<HTMLElement>,
+    resource: ResourceRecord
+  ): void => {
+    const canDragResource =
+      Boolean(onAddSelectionToCollection) ||
+      Boolean(activeResourceCollection && onRemoveResourceFromCollection);
+    if (!canDragResource || isDeletedResource(resource)) {
+      event.preventDefault();
+      return;
+    }
+    const selectedDragResourceIds =
+      selectedResourceIds[resource.file_id] && selectedResourceIdsInOrder.length > 0
+        ? selectedResourceIdsInOrder
+        : [resource.file_id];
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(RESOURCE_DRAG_ID_MIME, resource.file_id);
+    event.dataTransfer.setData(RESOURCE_DRAG_IDS_MIME, JSON.stringify(selectedDragResourceIds));
+    event.dataTransfer.setData(
+      "text/plain",
+      selectedDragResourceIds.length === 1
+        ? resourceDisplayName(resource)
+        : pluralSummary(selectedDragResourceIds.length, "resource")
+    );
+    setDraggedResourceId(resource.file_id);
+  };
+
+  const draggedResourceIdsFromEvent = (event: DragEvent<HTMLElement>): string[] => {
+    const resourceIds = parseDraggedResourceIds(event.dataTransfer.getData(RESOURCE_DRAG_IDS_MIME));
+    if (resourceIds.length > 0) {
+      return resourceIds;
+    }
+    const resourceId = event.dataTransfer.getData(RESOURCE_DRAG_ID_MIME) || draggedResourceId;
+    return resourceId ? [resourceId] : [];
+  };
+
+  const handleAllResourcesDrop = async (event: DragEvent<HTMLElement>): Promise<void> => {
+    if (!activeResourceCollection || !onRemoveResourceFromCollection) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const resourceIds = draggedResourceIdsFromEvent(event);
+    const resources = resourceIds
+      .map((resourceId) => cardResources.find((item) => item.file_id === resourceId))
+      .filter((resource): resource is ResourceRecord => Boolean(resource));
+    if (resources.length === 0 || organizingSelection) {
+      setDraggedResourceId("");
+      return;
+    }
+    for (const resource of resources) {
+      await removeResourceFromCurrentFolder(resource);
+    }
+    setDraggedResourceId("");
+  };
+
+  const handleFolderDrop = async (
+    event: DragEvent<HTMLElement>,
+    collection: ResourceCollectionRecord
+  ): Promise<void> => {
+    if (!onAddSelectionToCollection) {
+      return;
+    }
+    event.preventDefault();
+    const resourceIds = draggedResourceIdsFromEvent(event);
+    if (resourceIds.length === 0 || organizingSelection) {
+      setDraggedResourceId("");
+      return;
+    }
+    setOrganizingSelection(true);
+    try {
+      await onAddSelectionToCollection({
+        collectionId: collection.collection_id,
+        resourceIds,
+      });
+      clearSelection();
+    } catch {
+      // Parent surfaces the API error in the Resources error region.
+    } finally {
+      setDraggedResourceId("");
+      setOrganizingSelection(false);
+    }
+  };
+
+  const applyTagFilter = (tag: string): void => {
+    if (!onTagFilterChange) {
+      return;
+    }
+    clearSelection();
+    resetTableScroll();
+    onTagFilterChange(tag);
+  };
+
+  const openResourceRenameDialog = (resource: ResourceRecord): void => {
+    setRenameTarget({ kind: "resource", resource });
+    setRenameInput(resourceDisplayName(resource));
+    setRenameError(null);
+  };
+
+  const openCollectionRenameDialog = (collection: ResourceCollectionRecord): void => {
+    setRenameTarget({ kind: "collection", collection });
+    setRenameInput(collection.name);
+    setRenameError(null);
+  };
+
+  const closeRenameDialog = (): void => {
+    if (renameSaving) {
+      return;
+    }
+    setRenameTarget(null);
+    setRenameInput("");
+    setRenameError(null);
+  };
+
+  const saveRename = async (): Promise<void> => {
+    if (!renameTarget || !canSaveRename) {
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError(null);
+    try {
+      if (renameTarget.kind === "resource") {
+        await onRenameResource?.(renameTarget.resource, trimmedRenameInput);
+      } else {
+        await onRenameCollection?.(renameTarget.collection, trimmedRenameInput);
+      }
+      setRenameTarget(null);
+      setRenameInput("");
+    } catch (renameSaveError) {
+      setRenameError(
+        renameSaveError instanceof Error ? renameSaveError.message : "Unable to rename item."
+      );
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
+  const removeResourceFromCurrentFolder = async (resource: ResourceRecord): Promise<void> => {
+    if (!activeResourceCollection || !onRemoveResourceFromCollection) {
+      return;
+    }
+    const fileId = resource.file_id;
+    setRemovingFromCollectionIds((current) => ({ ...current, [fileId]: true }));
+    try {
+      await onRemoveResourceFromCollection(resource);
+      toggleResourceSelection(fileId, false);
+    } catch {
+      // Parent owns the Resources error region.
+    } finally {
+      setRemovingFromCollectionIds((current) => {
+        const next = { ...current };
+        delete next[fileId];
+        return next;
+      });
+    }
+  };
+
+  const renderResourceContextMenuContent = (
+    resource: ResourceRecord,
+    state: {
+      isDeleted: boolean;
+      isRestoring: boolean;
+      isDeleting: boolean;
+      isRemovingFromCollection: boolean;
+    }
+  ) => {
+    if (state.isDeleted) {
+      return (
+        <ContextMenuItem
+          onSelect={() => onRestoreResource?.(resource)}
+          disabled={state.isRestoring || !onRestoreResource}
+        >
+          {state.isRestoring ? (
+            <Loader2 data-icon="inline-start" className="animate-spin" />
+          ) : (
+            <RotateCcw data-icon="inline-start" />
+          )}
+          Restore
+        </ContextMenuItem>
+      );
+    }
+    return (
+      <>
+        <ContextMenuItem onSelect={() => onOpenResource(resource)}>
+          <Eye data-icon="inline-start" />
+          View
+        </ContextMenuItem>
+        {downloadUrlFor ? (
+          <ContextMenuItem asChild>
+            <a href={downloadUrlFor(resource)} download={resourceDisplayName(resource)}>
+              <Download data-icon="inline-start" />
+              Download
+            </a>
+          </ContextMenuItem>
+        ) : null}
+        <ContextMenuItem onSelect={() => onUseInChat(resource)}>
+          <Upload data-icon="inline-start" />
+          Use in chat
+        </ContextMenuItem>
+        {onRenameResource ? (
+          <ContextMenuItem onSelect={() => openResourceRenameDialog(resource)}>
+            <Pencil data-icon="inline-start" />
+            Rename
+          </ContextMenuItem>
+        ) : null}
+        {canUseSharing ? (
+          <ContextMenuItem onSelect={() => openShareSheet(resource)}>
+            <Share2 data-icon="inline-start" />
+            Share
+          </ContextMenuItem>
+        ) : null}
+        {activeResourceCollection && onRemoveResourceFromCollection ? (
+          <ContextMenuItem
+            onSelect={() => {
+              void removeResourceFromCurrentFolder(resource);
+            }}
+            disabled={state.isRemovingFromCollection}
+          >
+            {state.isRemovingFromCollection ? (
+              <Loader2 data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <FolderMinus data-icon="inline-start" />
+            )}
+            Remove from folder
+          </ContextMenuItem>
+        ) : null}
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          variant="destructive"
+          onSelect={() => onDeleteResource(resource)}
+          disabled={state.isDeleting}
+        >
+          {state.isDeleting ? (
+            <Loader2 data-icon="inline-start" className="animate-spin" />
+          ) : (
+            <Trash2 data-icon="inline-start" />
+          )}
+          Move to trash
+        </ContextMenuItem>
+      </>
+    );
+  };
+
+  const renderCollectionContextMenuContent = (
+    collection: ResourceCollectionRecord,
+    options: { includeOpen: boolean }
+  ) => {
+    const deletingCollection = Boolean(deletingCollectionIds[collection.collection_id]);
+    return (
+      <>
+        {options.includeOpen && onOpenCollection ? (
+          <ContextMenuItem
+            onSelect={() => {
+              clearSelection();
+              onOpenCollection(collection);
+            }}
+          >
+            <FolderOpen data-icon="inline-start" />
+            Open
+          </ContextMenuItem>
+        ) : null}
+        {onRenameCollection ? (
+          <ContextMenuItem onSelect={() => openCollectionRenameDialog(collection)}>
+            <Pencil data-icon="inline-start" />
+            Rename
+          </ContextMenuItem>
+        ) : null}
+        {onCreateResourceCollectionShareGrants ? (
+          <ContextMenuItem onSelect={() => openCollectionShareSheet(collection)}>
+            <Share2 data-icon="inline-start" />
+            Share
+          </ContextMenuItem>
+        ) : null}
+        {onDeleteCollection ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() => {
+                void deleteCollection(collection);
+              }}
+              disabled={deletingCollection}
+            >
+              {deletingCollection ? (
+                <Loader2 data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <Trash2 data-icon="inline-start" />
+              )}
+              Move folder to trash
+            </ContextMenuItem>
+          </>
+        ) : null}
+      </>
+    );
+  };
+
+  const deleteCollection = async (collection: ResourceCollectionRecord): Promise<void> => {
+    if (!onDeleteCollection) {
+      return;
+    }
+    const collectionId = collection.collection_id;
+    setDeletingCollectionIds((current) => ({ ...current, [collectionId]: true }));
+    try {
+      await onDeleteCollection(collection);
+      clearSelection();
+    } catch {
+      // Parent owns the Resources error region.
+    } finally {
+      setDeletingCollectionIds((current) => {
+        const next = { ...current };
+        delete next[collectionId];
+        return next;
+      });
+    }
+  };
+
+  const openBulkShareSheet = (): void => {
+    setBulkShareOpen(true);
+    setBulkShareError(null);
+  };
+
+  const closeBulkShareSheet = (): void => {
+    if (bulkShareSaving) {
+      return;
+    }
+    setBulkShareOpen(false);
+    setBulkShareGranteeUserId("");
+    setBulkShareGranteeOrgId("");
+    setBulkShareError(null);
+  };
+
+  const createBulkShareGrants = async (): Promise<void> => {
+    if ((!onCreateBulkResourceShareGrants && !onCreateResourceShareGrant) || !canGrantBulkShare) {
+      return;
+    }
+    const targetResources = selectedResourcesInOrder;
+    if (targetResources.length === 0) {
+      return;
+    }
+    const request: ResourceShareGrantRequest = {
+      granteeUserId: trimmedBulkShareGranteeUserId || undefined,
+      granteeOrgId: trimmedBulkShareGranteeOrgId || undefined,
+      role: "read",
+    };
+    setBulkShareSaving(true);
+    setBulkShareError(null);
+    try {
+      if (onCreateBulkResourceShareGrants) {
+        await onCreateBulkResourceShareGrants(targetResources, request);
+      } else if (onCreateResourceShareGrant) {
+        for (const resource of targetResources) {
+          await onCreateResourceShareGrant(resource, request);
+        }
+      }
+      clearSelection();
+    } catch (shareError) {
+      setBulkShareError(
+        shareError instanceof Error ? shareError.message : "Unable to share selected resources."
+      );
+    } finally {
+      setBulkShareSaving(false);
+    }
+  };
+
+  const loadShareGrantsForResource = async (resource: ResourceRecord): Promise<void> => {
+    if (!onLoadResourceShareGrants) {
+      return;
+    }
+    setShareGrantsLoading(true);
+    setShareGrantsError(null);
+    try {
+      const grants = await onLoadResourceShareGrants(resource);
+      setShareGrantsByResourceId((current) => ({
+        ...current,
+        [resource.file_id]: grants,
+      }));
+    } catch (shareError) {
+      setShareGrantsError(
+        shareError instanceof Error ? shareError.message : "Unable to load resource shares."
+      );
+    } finally {
+      setShareGrantsLoading(false);
+    }
+  };
+
+  const openShareSheet = (resource: ResourceRecord): void => {
+    setShareSheetResourceId(resource.file_id);
+    setShareGranteeUserId("");
+    setShareGranteeOrgId("");
+    setShareGrantsError(null);
+    void loadShareGrantsForResource(resource);
+  };
+
+  const closeShareSheet = (): void => {
+    setShareSheetResourceId("");
+    setShareGranteeUserId("");
+    setShareGranteeOrgId("");
+    setShareGrantsError(null);
+    setShareSaving(false);
+    setShareRevokingById({});
+  };
+
+  const openCollectionShareSheet = (collection: ResourceCollectionRecord): void => {
+    setCollectionShareTarget(collection);
+    setCollectionShareGranteeUserId("");
+    setCollectionShareGranteeOrgId("");
+    setCollectionShareError(null);
+    setCollectionShareSaving(false);
+  };
+
+  const closeCollectionShareSheet = (): void => {
+    if (collectionShareSaving) {
+      return;
+    }
+    setCollectionShareTarget(null);
+    setCollectionShareGranteeUserId("");
+    setCollectionShareGranteeOrgId("");
+    setCollectionShareError(null);
+  };
+
+  const createCollectionShareGrantsForSheet = async (): Promise<void> => {
+    if (
+      !onCreateResourceCollectionShareGrants ||
+      !collectionShareTarget ||
+      !canGrantCollectionShare
+    ) {
+      return;
+    }
+    setCollectionShareSaving(true);
+    setCollectionShareError(null);
+    try {
+      await onCreateResourceCollectionShareGrants(collectionShareTarget, {
+        granteeUserId: trimmedCollectionShareGranteeUserId || undefined,
+        granteeOrgId: trimmedCollectionShareGranteeOrgId || undefined,
+        role: "read",
+      });
+      setCollectionShareTarget(null);
+      setCollectionShareGranteeUserId("");
+      setCollectionShareGranteeOrgId("");
+    } catch (shareError) {
+      setCollectionShareError(
+        shareError instanceof Error ? shareError.message : "Unable to share this folder."
+      );
+    } finally {
+      setCollectionShareSaving(false);
+    }
+  };
+
+  const createShareGrantForSheet = async (): Promise<void> => {
+    if (!onCreateResourceShareGrant || !shareSheetResource || !canGrantShare) {
+      return;
+    }
+    setShareSaving(true);
+    setShareGrantsError(null);
+    try {
+      const grant = await onCreateResourceShareGrant(shareSheetResource, {
+        granteeUserId: trimmedShareGranteeUserId,
+        granteeOrgId: trimmedShareGranteeOrgId || undefined,
+        role: "read",
+      });
+      setShareGrantsByResourceId((current) => {
+        const existing = current[shareSheetResource.file_id] ?? [];
+        return {
+          ...current,
+          [shareSheetResource.file_id]: [
+            grant,
+            ...existing.filter((item) => item.grant_id !== grant.grant_id),
+          ],
+        };
+      });
+      setShareGranteeUserId("");
+      setShareGranteeOrgId("");
+    } catch (shareError) {
+      setShareGrantsError(
+        shareError instanceof Error ? shareError.message : "Unable to grant resource access."
+      );
+    } finally {
+      setShareSaving(false);
+    }
+  };
+
+  const revokeShareGrantForSheet = async (
+    grant: ResourceShareGrantRecord
+  ): Promise<void> => {
+    if (!onRevokeResourceShareGrant || !shareSheetResource) {
+      return;
+    }
+    setShareGrantsError(null);
+    setShareRevokingById((current) => ({ ...current, [grant.grant_id]: true }));
+    try {
+      const revokedGrant = await onRevokeResourceShareGrant(shareSheetResource, grant);
+      setShareGrantsByResourceId((current) => {
+        const existing = current[shareSheetResource.file_id] ?? [];
+        const updatedExisting = existing.map((item) =>
+          item.grant_id === revokedGrant.grant_id ? revokedGrant : item
+        );
+        return {
+          ...current,
+          [shareSheetResource.file_id]: existing.some(
+            (item) => item.grant_id === revokedGrant.grant_id
+          )
+            ? updatedExisting
+            : [revokedGrant, ...existing],
+        };
+      });
+    } catch (shareError) {
+      setShareGrantsError(
+        shareError instanceof Error ? shareError.message : "Unable to revoke resource access."
+      );
+    } finally {
+      setShareRevokingById((current) => {
+        const next = { ...current };
+        delete next[grant.grant_id];
+        return next;
+      });
+    }
+  };
+
   return (
     <section className="resource-browser mx-auto flex-1 overflow-y-auto px-3 py-6 sm:px-6 sm:py-8">
       <Card className="resource-browser-shell">
@@ -196,105 +1825,580 @@ export function ResourceBrowser({
             <div className="resource-browser-header-actions">
               <input
                 ref={uploadInputRef}
-                aria-label="Upload resource files"
+                aria-hidden="true"
                 className="sr-only"
+                data-testid="resource-upload-files-input"
+                hidden
                 multiple
+                tabIndex={-1}
                 type="file"
                 onChange={(event) => {
                   const files = Array.from(event.currentTarget.files ?? []);
                   event.currentTarget.value = "";
-                  if (files.length > 0) {
-                    onUploadFiles?.(files);
-                  }
+                  handleUploadInputSelection(files);
                 }}
               />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="resource-browser-upload"
-                onClick={() => uploadInputRef.current?.click()}
-                disabled={uploading || loading}
-              >
-                {uploading ? (
-                  <Loader2 data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <Upload data-icon="inline-start" />
-                )}
-                <span className="resource-browser-upload-label">
-                  {uploading ? "Uploading..." : "Upload"}
-                </span>
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="resource-browser-refresh"
-                onClick={onRefresh}
-                disabled={loading || loadingMore}
-              >
-                <RefreshCw data-icon="inline-start" className={cn((loading || loadingMore) && "animate-spin")} />
-                <span className="resource-browser-refresh-label">Refresh</span>
-              </Button>
+              <input
+                ref={folderUploadInputRef}
+                aria-hidden="true"
+                className="sr-only"
+                data-testid="resource-upload-folder-input"
+                hidden
+                multiple
+                tabIndex={-1}
+                type="file"
+                {...{ directory: "", webkitdirectory: "" }}
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                  handleUploadInputSelection(files);
+                }}
+              />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="resource-browser-new-menu"
+                    aria-label="New"
+                    disabled={uploading || loading || newFolderSaving}
+                  >
+                    {uploading ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <FolderPlus data-icon="inline-start" />
+                    )}
+                    <span className="resource-browser-upload-label">
+                      {uploading ? "Uploading..." : "New"}
+                    </span>
+                    <ChevronDown data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="resource-browser-create-menu">
+                  <DropdownMenuGroup>
+                    {onCreateCollectionFromSelection ? (
+                      <DropdownMenuItem onSelect={openNewFolderDialog}>
+                        <FolderPlus data-icon="inline-start" />
+                        New folder
+                      </DropdownMenuItem>
+                    ) : null}
+                    <DropdownMenuItem
+                      disabled={uploading || loading}
+                      onSelect={() => {
+                        pendingUploadReselectionRef.current = null;
+                        setUploadReselectionError(null);
+                        uploadInputRef.current?.click();
+                      }}
+                    >
+                      <Upload data-icon="inline-start" />
+                      Upload files
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={uploading || loading}
+                      onSelect={() => {
+                        pendingUploadReselectionRef.current = null;
+                        setUploadReselectionError(null);
+                        folderUploadInputRef.current?.click();
+                      }}
+                    >
+                      <FolderUp data-icon="inline-start" />
+                      Upload folder
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
           <div className="resource-browser-controls">
             <div className="resource-browser-toolbar">
               <Input
                 value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-                placeholder="Search files, BisQue IDs, or URLs"
+                onChange={(event) => {
+                  clearSelection();
+                  resetTableScroll();
+                  onQueryChange(event.target.value);
+                }}
+                placeholder="Search resources"
                 className="resource-browser-search"
               />
-              {isMobileView ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="resource-browser-filter-trigger"
-                  onClick={() => setMobileFiltersOpen(true)}
-                >
-                  <SlidersHorizontal data-icon="inline-start" />
-                  <span>Filters</span>
-                  {activeFilterCount > 0 ? (
-                    <span className="resource-browser-filter-count">{activeFilterCount}</span>
-                  ) : null}
-                </Button>
-              ) : null}
+              <Button
+                type="button"
+                variant="outline"
+                className="resource-browser-filter-trigger"
+                onClick={() => setResourceFiltersOpen(true)}
+              >
+                <SlidersHorizontal data-icon="inline-start" />
+                <span>More filters</span>
+                {visibleFilterCount > 0 ? (
+                  <span className="resource-browser-filter-count">{visibleFilterCount}</span>
+                ) : null}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="resource-browser-refresh"
+                aria-label="Refresh resources"
+                onClick={() => {
+                  clearSelection();
+                  onRefresh();
+                }}
+                disabled={loading || loadingMore}
+              >
+                <RefreshCw data-icon="icon" className={cn((loading || loadingMore) && "animate-spin")} />
+              </Button>
             </div>
-            {isMobileView ? null : (
-              <div className="resource-browser-filter-groups">
-                <div className="resource-browser-filter-row" aria-label="Resource type filters">
-                  {kindFilters.map((item) => (
-                    <Button
-                      key={item.value}
-                      type="button"
-                      variant={kindFilter === item.value ? "secondary" : "ghost"}
-                      size="sm"
-                      onClick={() => onKindFilterChange(item.value)}
-                    >
-                      {item.label}
-                    </Button>
-                  ))}
-                </div>
-                <div className="resource-browser-filter-row" aria-label="Resource source filters">
-                  {sourceFilters.map((item) => (
-                    <Button
-                      key={item.value}
-                      type="button"
-                      variant={sourceFilter === item.value ? "secondary" : "ghost"}
-                      size="sm"
-                      onClick={() => onSourceFilterChange(item.value)}
-                    >
-                      {item.label}
-                    </Button>
-                  ))}
-                </div>
+            {activeTagFilter && onTagFilterChange ? (
+              <div className="resource-browser-active-filters" aria-label="Active filters">
+                <button
+                  type="button"
+                  className="resource-browser-active-filter-chip"
+                  aria-label={`Clear tag filter ${activeTagFilter}`}
+                  onClick={() => applyTagFilter("")}
+                >
+                  <span>Tag: {activeTagFilter}</span>
+                  <XCircle data-icon="inline-end" />
+                </button>
               </div>
-            )}
+            ) : null}
           </div>
         </CardHeader>
-        <CardContent className="resource-browser-content">
+        <CardContent
+          className="resource-browser-content"
+          data-file-drop-active={fileDropTargetId === "resources" ? "true" : undefined}
+          onDragLeave={(event) => {
+            if (event.currentTarget === event.target && fileDropTargetId === "resources") {
+              setFileDropTargetId("");
+            }
+          }}
+          onDragOver={(event) => {
+            handleExternalFileDragOver(event, "resources");
+          }}
+          onDrop={(event) => {
+            uploadDroppedFiles(event, activeResourceCollection ?? null);
+          }}
+          onKeyDown={handleResourceBrowserKeyDown}
+        >
           {error ? <p className="resource-browser-error">{error}</p> : null}
+          {activeResourceCollection ? (
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <div
+                  className="resource-browser-active-collection"
+                  aria-label="Active folder"
+                  tabIndex={0}
+                  onKeyDown={(event) => handleCollectionKeyDown(event, activeResourceCollection)}
+                >
+                  <div className="resource-browser-active-collection-copy">
+                    <span>Folder</span>
+                    <p>{activeCollectionName || "Untitled folder"}</p>
+                  </div>
+                  <div className="resource-browser-active-collection-actions">
+                    {onClearActiveCollection ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="resource-browser-active-collection-clear"
+                        data-drop-active={draggedResourceId ? "true" : undefined}
+                        onDragOver={(event) => {
+                          if (onRemoveResourceFromCollection && draggedResourceId) {
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                          }
+                        }}
+                        onDrop={(event) => {
+                          void handleAllResourcesDrop(event);
+                        }}
+                        onClick={() => {
+                          clearSelection();
+                          onClearActiveCollection();
+                        }}
+                      >
+                        <ArrowLeft data-icon="inline-start" />
+                        All resources
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </ContextMenuTrigger>
+              <ContextMenuContent className="resource-browser-context-menu">
+                {renderCollectionContextMenuContent(activeResourceCollection, {
+                  includeOpen: false,
+                })}
+              </ContextMenuContent>
+            </ContextMenu>
+          ) : null}
+          {!activeResourceCollection && onOpenCollection && availableFolderCollections.length > 0 ? (
+            <div className="resource-browser-collection-strip" aria-label="Resource folders">
+              {availableFolderCollections.map((collection) => {
+                const resourceCount = Math.max(0, Number(collection.resource_count) || 0);
+                return (
+                  <ContextMenu key={collection.collection_id}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className="resource-browser-collection-item"
+                        data-drop-active={
+                          draggedResourceId || fileDropTargetId === collection.collection_id
+                            ? "true"
+                            : undefined
+                        }
+                        onDragLeave={(event) => {
+                          if (
+                            event.currentTarget === event.target &&
+                            fileDropTargetId === collection.collection_id
+                          ) {
+                            setFileDropTargetId("");
+                          }
+                        }}
+                        onDragOver={(event) => {
+                          if (handleExternalFileDragOver(event, collection.collection_id)) {
+                            return;
+                          }
+                          if (onAddSelectionToCollection && draggedResourceId) {
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                          }
+                        }}
+                        onDrop={(event) => {
+                          if (uploadDroppedFiles(event, collection)) {
+                            return;
+                          }
+                          void handleFolderDrop(event, collection);
+                        }}
+                      >
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="resource-browser-collection-button"
+                          aria-label={`Open folder ${collection.name}`}
+                          onKeyDown={(event) => handleCollectionKeyDown(event, collection)}
+                          onClick={() => {
+                            clearSelection();
+                            onOpenCollection(collection);
+                          }}
+                        >
+                          <FolderOpen data-icon="inline-start" />
+                          <span className="resource-browser-collection-copy">
+                            <span className="resource-browser-collection-name">{collection.name}</span>
+                            <span className="resource-browser-collection-count">
+                              {resourceCount.toLocaleString()}{" "}
+                              {resourceCount === 1 ? "resource" : "resources"}
+                            </span>
+                          </span>
+                        </Button>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="resource-browser-context-menu">
+                      {renderCollectionContextMenuContent(collection, {
+                        includeOpen: true,
+                      })}
+                    </ContextMenuContent>
+                  </ContextMenu>
+                );
+              })}
+            </div>
+          ) : null}
+          {!activeResourceCollection &&
+          statusFilter === "deleted" &&
+          onRestoreCollection &&
+          deletedFolderCollections.length > 0 ? (
+            <div
+              className="resource-browser-collection-strip resource-browser-collection-strip-deleted"
+              aria-label="Deleted resource folders"
+            >
+              {deletedFolderCollections.map((collection) => {
+                const resourceCount = Math.max(0, Number(collection.resource_count) || 0);
+                const restoringCollection = Boolean(restoringCollectionIds[collection.collection_id]);
+                return (
+                  <div key={collection.collection_id} className="resource-browser-collection-button">
+                    <FolderOpen data-icon="inline-start" />
+                    <span className="resource-browser-collection-copy">
+                      <span className="resource-browser-collection-name">{collection.name}</span>
+                      <span className="resource-browser-collection-count">
+                        {resourceCount.toLocaleString()} {resourceCount === 1 ? "resource" : "resources"}
+                      </span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="resource-browser-collection-restore"
+                      aria-label={`Restore folder ${collection.name}`}
+                      disabled={restoringCollection}
+                      onClick={() => {
+                        clearSelection();
+                        void onRestoreCollection(collection);
+                      }}
+                    >
+                      {restoringCollection ? (
+                        <Loader2 data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <RotateCcw data-icon="inline-start" />
+                      )}
+                      Restore
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {visibleUploadProgress.length > 0 ? (
+            <div className="resource-browser-upload-progress" aria-label="Resource upload progress">
+              {uploadReselectionError ? (
+                <p className="resource-browser-upload-progress-error" role="status">
+                  {uploadReselectionError}
+                </p>
+              ) : null}
+              {shouldCollapseExpiredUploads ? (
+                <div className="resource-browser-upload-progress-summary">
+                  <div className="resource-browser-upload-progress-copy">
+                    <p className="resource-browser-upload-progress-name">
+                      {expiredUploadProgress.length.toLocaleString()} uploads need attention
+                    </p>
+                    <p className="resource-browser-upload-progress-detail">
+                      Expired sessions can be restarted when needed.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="resource-browser-upload-progress-action"
+                    aria-label={
+                      expiredUploadDetailsOpen
+                        ? "Hide upload recovery details"
+                        : "Show upload recovery details"
+                    }
+                    onClick={() => setExpiredUploadDetailsOpen((open) => !open)}
+                  >
+                    {expiredUploadDetailsOpen ? "Hide details" : "Show details"}
+                  </Button>
+                </div>
+              ) : null}
+              {renderedUploadProgress.map((item) => {
+                const totalBytes = Math.max(0, Number(item.totalBytes) || 0);
+                const bytesVerified = Math.min(totalBytes, Math.max(0, Number(item.bytesVerified) || 0));
+                const percent = totalBytes > 0 ? Math.round((bytesVerified / totalBytes) * 100) : 0;
+                const statusLabel = uploadProgressStatusLabel(item.status);
+                const recoveryLabel = uploadProgressRecoveryLabel(item.status);
+                const errorLabel = uploadProgressErrorLabel(item.error);
+                const dismissable = Boolean(onDismissUploadProgress) && canDismissUploadProgress(item.status);
+                const pausable = Boolean(onPauseUploadProgress) && canPauseUploadProgress(item);
+                const cancelable = Boolean(onCancelUploadProgress) && canCancelUploadProgress(item);
+                return (
+                  <div key={item.id} className="resource-browser-upload-progress-item">
+                    <div className="resource-browser-upload-progress-copy">
+                      <p className="resource-browser-upload-progress-name" title={item.fileName}>
+                        {item.fileName}
+                      </p>
+                      <p className="resource-browser-upload-progress-detail">
+                        <span>{statusLabel}</span>
+                        <span>{formatBytes(bytesVerified)} verified</span>
+                        {totalBytes > 0 ? <span>{formatBytes(totalBytes)} total</span> : null}
+                      </p>
+                      {errorLabel ? <p className="resource-browser-upload-progress-error">{errorLabel}</p> : null}
+                    </div>
+                    <div className="resource-browser-upload-progress-side">
+                      <div
+                        className="resource-browser-upload-progress-track"
+                        role="progressbar"
+                        aria-label={`${item.fileName} upload progress`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={percent}
+                      >
+                        <span style={{ width: `${percent}%` }} />
+                      </div>
+                      {recoveryLabel || pausable || dismissable || cancelable ? (
+                        <div className="resource-browser-upload-progress-actions">
+                          {recoveryLabel ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="resource-browser-upload-progress-action"
+                              aria-label={`${recoveryLabel} ${item.fileName} upload`}
+                              title={
+                                item.relativePath
+                                  ? "Select the same folder to continue this upload"
+                                  : "Select the same file to continue this upload"
+                              }
+                              onClick={() => requestUploadReselection(item)}
+                            >
+                              <RotateCcw data-icon="inline-start" />
+                              {recoveryLabel}
+                            </Button>
+                          ) : null}
+                          {pausable ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="resource-browser-upload-progress-action"
+                              aria-label={`Pause ${item.fileName} upload`}
+                              onClick={() => onPauseUploadProgress?.(item)}
+                            >
+                              <Pause data-icon="inline-start" />
+                              Pause
+                            </Button>
+                          ) : null}
+                          {cancelable ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="resource-browser-upload-progress-action"
+                              aria-label={`Cancel ${item.fileName} upload`}
+                              onClick={() => onCancelUploadProgress?.(item)}
+                            >
+                              <XCircle data-icon="inline-start" />
+                              Cancel
+                            </Button>
+                          ) : null}
+                          {dismissable ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="resource-browser-upload-progress-action"
+                              aria-label={`Dismiss ${item.fileName} upload`}
+                              onClick={() => onDismissUploadProgress?.(item)}
+                            >
+                              <XCircle data-icon="inline-start" />
+                              Dismiss
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {selectionEnabled && selectedResourceCount > 0 ? (
+            <div className="resource-browser-bulk-toolbar" aria-label="Bulk resource actions">
+              <div className="resource-browser-bulk-summary">
+                <p>{selectedResourceCount.toLocaleString()} selected</p>
+              </div>
+              <div className="resource-browser-bulk-controls">
+                {canUseBulkShare ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="resource-browser-bulk-action resource-browser-bulk-share-action"
+                    onClick={openBulkShareSheet}
+                    disabled={bulkShareSaving}
+                    aria-label="Share"
+                  >
+                    {bulkShareSaving ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <Share2 data-icon="inline-start" />
+                    )}
+                    <span className="resource-browser-bulk-action-label">Share</span>
+                  </Button>
+                ) : null}
+                {onRestoreSelectedResources && statusFilter === "deleted" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="resource-browser-bulk-action resource-browser-bulk-restore-action"
+                    onClick={() => {
+                      void restoreSelectedResources();
+                    }}
+                    disabled={!canRestoreSelectedResources}
+                    aria-label="Restore"
+                  >
+                    {restoringSelection ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <RotateCcw data-icon="inline-start" />
+                    )}
+                    <span className="resource-browser-bulk-action-label">Restore</span>
+                  </Button>
+                ) : null}
+                {canShowBulkMoveToFolder ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="resource-browser-bulk-action resource-browser-bulk-move-action"
+                        disabled={!canMoveSelectionToFolder}
+                        aria-label="Move to"
+                      >
+                        {organizingSelection || resourceCollectionsLoading ? (
+                          <Loader2 data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <FolderPlus data-icon="inline-start" />
+                        )}
+                        <span className="resource-browser-bulk-action-label">Move to</span>
+                        <ChevronDown data-icon="inline-end" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="start"
+                      className="resource-browser-bulk-move-menu"
+                    >
+                      <DropdownMenuGroup>
+                        {availableFolderCollections.map((collection) => (
+                          <DropdownMenuItem
+                            key={collection.collection_id}
+                            onSelect={() => {
+                              void addSelectionToExistingFolder(collection.collection_id);
+                            }}
+                            disabled={!canMoveSelectionToFolder}
+                          >
+                            <FolderOpen data-icon="inline-start" />
+                            {collection.name} ·{" "}
+                            {Math.max(0, Number(collection.resource_count) || 0).toLocaleString()} resources
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
+                {onDeleteSelectedResources && statusFilter !== "deleted" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="resource-browser-bulk-action resource-browser-bulk-delete-action"
+                    onClick={() => {
+                      void deleteSelectedResources();
+                    }}
+                    disabled={!canDeleteSelectedResources}
+                    aria-label="Move to trash"
+                  >
+                    {deletingSelection ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <Trash2 data-icon="inline-start" />
+                    )}
+                    <span className="resource-browser-bulk-action-label">Move to trash</span>
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="resource-browser-bulk-clear"
+                  onClick={clearSelection}
+                  disabled={organizingSelection || deletingSelection || restoringSelection}
+                  aria-label="Clear"
+                >
+                  <XCircle data-icon="inline-start" />
+                  <span className="resource-browser-bulk-action-label">Clear</span>
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {loading ? (
             <div className="resource-browser-grid" aria-label="Loading resources">
               {Array.from({ length: RESOURCE_SKELETON_COUNT }).map((_value, index) => (
@@ -305,10 +2409,6 @@ export function ResourceBrowser({
                     <Skeleton className="resource-browser-skeleton-line" />
                     <Skeleton className="resource-browser-skeleton-line resource-browser-skeleton-line-short" />
                   </div>
-                  <div className="resource-browser-actions">
-                    <Skeleton className="resource-browser-skeleton-action" />
-                    <Skeleton className="resource-browser-skeleton-action" />
-                  </div>
                 </article>
               ))}
             </div>
@@ -316,92 +2416,313 @@ export function ResourceBrowser({
             <p className="resource-browser-empty">No resources match the current filters.</p>
           ) : (
             <>
-              <div className="resource-browser-grid">
-                {cardResources.map((resource) => {
-                  const KindIcon = iconForKind(resource.resource_kind);
-                  const displayName = resourceDisplayName(resource);
-                  const thumbnailReady = shouldRequestThumbnail(resource, failedThumbnailIds);
-                  const isDeleting = Boolean(deletingFileIds[resource.file_id]);
-                  const secondaryLine = [
-                    sourceLabel(resource.source_type),
-                    resourceKindLabel(resource.resource_kind),
-                    formatBytes(resource.size_bytes),
-                  ].join(" · ");
-                  return (
-                    <article key={resource.file_id} className="resource-browser-card group/resource">
-                      <div className="resource-browser-preview">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="resource-browser-delete"
-                          onClick={() => onDeleteResource(resource)}
-                          disabled={isDeleting}
-                          aria-label={isDeleting ? "Deleting resource" : "Delete resource"}
-                        >
-                          {isDeleting ? (
-                            <Loader2 data-icon="icon" className="animate-spin" />
-                          ) : (
-                            <Trash2 data-icon="icon" />
-                          )}
-                        </Button>
-                        {thumbnailReady ? (
-                          <img
-                            src={thumbnailUrlFor(resource)}
-                            alt={displayName}
-                            loading="lazy"
-                            onError={() =>
-                              setFailedThumbnailIds((previous) => ({
-                                ...previous,
-                                [resource.file_id]: true,
-                              }))
+              {effectiveResourceViewMode === "table" ? (
+                <div
+                  ref={tableShellRef}
+                  className="resource-browser-table-shell"
+                  data-virtualized={tableVirtualized ? "true" : undefined}
+                  onScroll={handleTableScroll}
+                >
+                  <table
+                    className="resource-browser-table"
+                    aria-label="Resources table"
+                    aria-rowcount={cardResources.length + 1}
+                  >
+                    <thead>
+                      <tr aria-rowindex={1}>
+                        <th scope="col">Name</th>
+                        <th scope="col">Type</th>
+                        <th scope="col">Source</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">Sharing</th>
+                        <th scope="col">Created</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tableTopSpacerHeight > 0 ? (
+                        <tr className="resource-browser-table-spacer" aria-hidden="true">
+                          <td colSpan={6} style={{ height: tableTopSpacerHeight }} />
+                        </tr>
+                      ) : null}
+                      {tableResources.map((resource, rowOffset) => {
+                        const KindIcon = iconForKind(resource.resource_kind);
+                        const displayName = resourceDisplayName(resource);
+                        const isDeleting = Boolean(deletingFileIds[resource.file_id]);
+                        const isDeleted = isDeletedResource(resource);
+                        const isRestoring = Boolean(restoringFileIds[resource.file_id]);
+                        const isSelected = Boolean(selectedResourceIds[resource.file_id]);
+                        const isRemovingFromCollection = Boolean(
+                          removingFromCollectionIds[resource.file_id]
+                        );
+                        const shareStatusChips = resourceShareStatusChips(resource);
+                        const resourceTags = normalizeResourceTags(resource.tags);
+                        const subtitle = resource.content_type || resource.file_id;
+                        const rowIndex = tableStartIndex + rowOffset + 2;
+                        return (
+                          <ContextMenu key={resource.file_id}>
+                            <ContextMenuTrigger asChild>
+                              <tr
+                                aria-label={`Resource ${displayName}`}
+                                aria-rowindex={rowIndex}
+                                data-selected={isSelected ? "true" : undefined}
+                                draggable={
+                                  !isDeleted &&
+                                  (Boolean(onAddSelectionToCollection) ||
+                                    Boolean(
+                                      activeResourceCollection && onRemoveResourceFromCollection
+                                    ))
+                                }
+                                tabIndex={0}
+                                onClick={(event) => selectResourceFromSurfaceClick(event, resource)}
+                                onDragStart={(event) => handleResourceDragStart(event, resource)}
+                                onDragEnd={() => setDraggedResourceId("")}
+                                onDoubleClick={() => {
+                                  if (isDeleted) {
+                                    onRestoreResource?.(resource);
+                                  }
+                                }}
+                                onKeyDown={(event) =>
+                                  handleResourceItemKeyDown(event, resource, isDeleted)
+                                }
+                              >
+                                <td>
+                                  <div className="resource-browser-table-name-cell">
+                                    {selectionEnabled ? (
+                                      <Checkbox
+                                        aria-label={`Select ${displayName}`}
+                                        checked={isSelected}
+                                        className="resource-browser-table-select"
+                                        onCheckedChange={(checked) =>
+                                          toggleResourceSelection(resource.file_id, checked === true)
+                                        }
+                                      />
+                                    ) : null}
+                                    <span className="resource-browser-table-kind" aria-hidden="true">
+                                      <KindIcon data-icon="icon" />
+                                    </span>
+                                    <span className="resource-browser-table-primary">
+                                      <span className="resource-browser-table-title" title={displayName}>
+                                        {displayName}
+                                      </span>
+                                      <span className="resource-browser-table-subtitle" title={subtitle}>
+                                        {subtitle}
+                                      </span>
+                                      {resourceTags.length > 0 ? (
+                                        <span
+                                          className="resource-browser-resource-tags resource-browser-table-tags"
+                                          aria-label={`Tags for ${displayName}`}
+                                        >
+                                          {resourceTags.slice(0, 4).map((tag) =>
+                                            onTagFilterChange ? (
+                                              <button
+                                                key={tag}
+                                                type="button"
+                                                onClick={() => applyTagFilter(tag)}
+                                                aria-label={`Filter by tag ${tag}`}
+                                              >
+                                                {tag}
+                                              </button>
+                                            ) : (
+                                              <span key={tag}>{tag}</span>
+                                            )
+                                          )}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td>{resourceKindLabel(resource.resource_kind)}</td>
+                                <td>{sourceLabel(resource.source_type)}</td>
+                                <td>{formatBytes(resource.size_bytes)}</td>
+                                <td>
+                                  {isDeleted ? (
+                                    <div
+                                      className="resource-browser-table-status resource-browser-lifecycle-chip"
+                                      aria-label={`Lifecycle status for ${displayName}`}
+                                    >
+                                      <span>Deleted</span>
+                                    </div>
+                                  ) : shareStatusChips.length > 0 ? (
+                                    <div
+                                      className="resource-browser-table-status resource-browser-share-status-chips"
+                                      aria-label={`Sharing status for ${displayName}`}
+                                    >
+                                      {shareStatusChips.map((chip) => (
+                                        <span key={chip.key} title={chip.title}>
+                                          {chip.label}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <span className="resource-browser-table-muted">Private</span>
+                                  )}
+                                </td>
+                                <td>{formatResourceDate(resource.created_at)}</td>
+                              </tr>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent className="resource-browser-context-menu">
+                              {renderResourceContextMenuContent(resource, {
+                                isDeleted,
+                                isRestoring,
+                                isDeleting,
+                                isRemovingFromCollection,
+                              })}
+                            </ContextMenuContent>
+                          </ContextMenu>
+                        );
+                      })}
+                      {tableBottomSpacerHeight > 0 ? (
+                        <tr className="resource-browser-table-spacer" aria-hidden="true">
+                          <td colSpan={6} style={{ height: tableBottomSpacerHeight }} />
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="resource-browser-grid">
+                  {cardResources.map((resource) => {
+                    const KindIcon = iconForKind(resource.resource_kind);
+                    const displayName = resourceDisplayName(resource);
+                    const thumbnailReady = shouldRequestThumbnail(resource, failedThumbnailIds);
+                    const isDeleting = Boolean(deletingFileIds[resource.file_id]);
+                    const isDeleted = isDeletedResource(resource);
+                    const isRestoring = Boolean(restoringFileIds[resource.file_id]);
+                    const isSelected = Boolean(selectedResourceIds[resource.file_id]);
+                    const isRemovingFromCollection = Boolean(
+                      removingFromCollectionIds[resource.file_id]
+                    );
+                    const shareStatusChips = resourceShareStatusChips(resource);
+                    const resourceTags = normalizeResourceTags(resource.tags);
+                    const secondaryLine = [
+                      sourceLabel(resource.source_type),
+                      resourceKindLabel(resource.resource_kind),
+                      formatBytes(resource.size_bytes),
+                    ].join(" · ");
+                    return (
+                      <ContextMenu key={resource.file_id}>
+                        <ContextMenuTrigger asChild>
+                          <article
+                            className="resource-browser-card group/resource"
+                            data-preview={thumbnailReady ? "true" : "false"}
+                            data-selected={isSelected ? "true" : undefined}
+                            draggable={
+                              !isDeleted &&
+                              (Boolean(onAddSelectionToCollection) ||
+                                Boolean(activeResourceCollection && onRemoveResourceFromCollection))
                             }
-                          />
-                        ) : (
-                          <div className="resource-browser-preview-fallback">
-                            <KindIcon className="size-6" aria-hidden="true" />
-                            <span>{resourceKindLabel(resource.resource_kind)}</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="resource-browser-meta">
-                        <p className="resource-browser-name" title={displayName}>
-                          {displayName}
-                        </p>
-                        <p className="resource-browser-details">{secondaryLine}</p>
-                        <p className="resource-browser-date">{formatResourceDate(resource.created_at)}</p>
-                        {resource.sync_error ? (
-                          <p className="resource-browser-sync-error" title={resource.sync_error}>
-                            {resource.sync_error}
+                            tabIndex={0}
+                            aria-label={`Resource ${displayName}`}
+                            onClick={(event) => selectResourceFromSurfaceClick(event, resource)}
+                            onDragStart={(event) => handleResourceDragStart(event, resource)}
+                            onDragEnd={() => setDraggedResourceId("")}
+                            onDoubleClick={() => {
+                              if (isDeleted) {
+                                onRestoreResource?.(resource);
+                              }
+                            }}
+                            onKeyDown={(event) =>
+                              handleResourceItemKeyDown(event, resource, isDeleted)
+                            }
+                          >
+                        <div className="resource-browser-preview">
+                          {selectionEnabled ? (
+                            <Checkbox
+                              aria-label={`Select ${displayName}`}
+                              checked={isSelected}
+                              className="resource-browser-select"
+                              onCheckedChange={(checked) =>
+                                toggleResourceSelection(resource.file_id, checked === true)
+                              }
+                            />
+                          ) : null}
+                          {thumbnailReady ? (
+                            <img
+                              src={thumbnailUrlFor(resource)}
+                              alt={displayName}
+                              loading="lazy"
+                              onError={() =>
+                                setFailedThumbnailIds((previous) => ({
+                                  ...previous,
+                                  [resource.file_id]: true,
+                                }))
+                              }
+                            />
+                          ) : (
+                            <div className="resource-browser-preview-fallback">
+                              <KindIcon className="size-6" aria-hidden="true" />
+                              <span>{resourceKindLabel(resource.resource_kind)}</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="resource-browser-meta">
+                          <p className="resource-browser-name" title={displayName}>
+                            {displayName}
                           </p>
-                        ) : null}
-                      </div>
-                      <CardFooter className="resource-browser-actions">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="resource-browser-action-button"
-                          onClick={() => onOpenResource(resource)}
-                        >
-                          <Eye data-icon="inline-start" />
-                          View
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="resource-browser-action-button"
-                          onClick={() => onUseInChat(resource)}
-                        >
-                          <Upload data-icon="inline-start" />
-                          Use in chat
-                        </Button>
-                      </CardFooter>
-                    </article>
-                  );
-                })}
-              </div>
+                          <p className="resource-browser-details">{secondaryLine}</p>
+                          <p className="resource-browser-date">{formatResourceDate(resource.created_at)}</p>
+                          {isDeleted ? (
+                            <div
+                              className="resource-browser-lifecycle-chip"
+                              aria-label={`Lifecycle status for ${displayName}`}
+                            >
+                              <span>Deleted</span>
+                            </div>
+                          ) : null}
+                          {resourceTags.length > 0 ? (
+                            <div
+                              className="resource-browser-resource-tags"
+                              aria-label={`Tags for ${displayName}`}
+                            >
+                              {resourceTags.slice(0, 6).map((tag) =>
+                                onTagFilterChange ? (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() => applyTagFilter(tag)}
+                                    aria-label={`Filter by tag ${tag}`}
+                                  >
+                                    {tag}
+                                  </button>
+                                ) : (
+                                  <span key={tag}>{tag}</span>
+                                )
+                              )}
+                            </div>
+                          ) : null}
+                          {shareStatusChips.length > 0 ? (
+                            <div
+                              className="resource-browser-share-status-chips"
+                              aria-label={`Sharing status for ${displayName}`}
+                            >
+                              {shareStatusChips.map((chip) => (
+                                <span key={chip.key} title={chip.title}>
+                                  {chip.label}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {resource.sync_error ? (
+                            <p className="resource-browser-sync-error" title={resource.sync_error}>
+                              {resource.sync_error}
+                            </p>
+                          ) : null}
+                        </div>
+                          </article>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className="resource-browser-context-menu">
+                          {renderResourceContextMenuContent(resource, {
+                            isDeleted,
+                            isRestoring,
+                            isDeleting,
+                            isRemovingFromCollection,
+                          })}
+                        </ContextMenuContent>
+                      </ContextMenu>
+                    );
+                  })}
+                </div>
+              )}
               <div ref={loadMoreRef} className="resource-browser-load-more" aria-live="polite">
                 {hasMore ? (
                   <Button
@@ -422,68 +2743,559 @@ export function ResourceBrowser({
           )}
         </CardContent>
       </Card>
-      {isMobileView ? (
-        <Sheet open={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
-          <SheetContent
-            side="bottom"
-            className="resource-browser-filter-sheet rounded-t-[1.75rem] px-4 pb-[calc(1.2rem+env(safe-area-inset-bottom,0px))] pt-3"
-          >
-            <SheetHeader className="gap-2 text-left">
-              <SheetTitle className="text-base">Filter resources</SheetTitle>
-              <SheetDescription className="text-sm leading-6 text-muted-foreground">
-                Narrow by type and source.
-              </SheetDescription>
-            </SheetHeader>
-            <div className="resource-browser-sheet-section">
-              <p className="resource-browser-sheet-label">Type</p>
-              <div className="resource-browser-sheet-options">
-                {kindFilters.map((item) => (
-                  <Button
-                    key={item.value}
-                    type="button"
-                    variant={kindFilter === item.value ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={() => onKindFilterChange(item.value)}
-                  >
-                    {item.label}
-                  </Button>
-                ))}
+      <Dialog
+        open={newFolderDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeNewFolderDialog();
+          } else {
+            openNewFolderDialog();
+          }
+        }}
+      >
+        <DialogContent className="resource-browser-rename-dialog sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>New folder</DialogTitle>
+            <DialogDescription className="sr-only">Create a folder in Resources.</DialogDescription>
+          </DialogHeader>
+          <div className="resource-browser-rename-form">
+            <label htmlFor="resource-browser-new-folder-input">Folder name</label>
+            <Input
+              id="resource-browser-new-folder-input"
+              value={newFolderName}
+              onChange={(event) => setNewFolderName(event.target.value)}
+              disabled={newFolderSaving}
+              autoFocus
+            />
+            {newFolderError ? <p className="resource-browser-share-error">{newFolderError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeNewFolderDialog}
+              disabled={newFolderSaving}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                void createEmptyFolder();
+              }}
+              disabled={!canCreateEmptyFolder}
+            >
+              {newFolderSaving ? (
+                <Loader2 data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <FolderPlus data-icon="inline-start" />
+              )}
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={Boolean(renameTarget)}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeRenameDialog();
+          }
+        }}
+      >
+        <DialogContent className="resource-browser-rename-dialog sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              Rename {renameTarget?.kind === "collection" ? "folder" : "resource"}
+            </DialogTitle>
+            <DialogDescription>{renameTargetName || "Choose a clear name."}</DialogDescription>
+          </DialogHeader>
+          <div className="resource-browser-rename-form">
+            <label htmlFor="resource-browser-rename-input">Name</label>
+            <Input
+              id="resource-browser-rename-input"
+              value={renameInput}
+              onChange={(event) => setRenameInput(event.target.value)}
+              disabled={renameSaving}
+              autoFocus
+            />
+            {renameError ? <p className="resource-browser-share-error">{renameError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeRenameDialog}
+              disabled={renameSaving}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                void saveRename();
+              }}
+              disabled={!canSaveRename}
+            >
+              {renameSaving ? (
+                <Loader2 data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <Pencil data-icon="inline-start" />
+              )}
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Sheet
+        open={bulkShareOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeBulkShareSheet();
+          } else {
+            setBulkShareOpen(true);
+          }
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="resource-browser-share-sheet w-[min(100vw,38rem)] sm:max-w-lg"
+        >
+          <SheetHeader className="resource-browser-share-header">
+            <SheetTitle className="resource-browser-share-title">
+              Share {selectedResourceCount.toLocaleString()} selected{" "}
+              {selectedResourceCount === 1 ? "resource" : "resources"}
+            </SheetTitle>
+            <SheetDescription className="resource-browser-share-description">
+              {pluralSummary(selectedResourceCount, "resource")} selected. Add a person or team
+              that can read these resources.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="resource-browser-share-body">
+            <div className="resource-browser-share-form">
+              <div className="resource-browser-share-grid">
+                <div>
+                  <label htmlFor="resource-bulk-share-user-id">Person or user ID</label>
+                  <Input
+                    id="resource-bulk-share-user-id"
+                    value={bulkShareGranteeUserId}
+                    onChange={(event) => setBulkShareGranteeUserId(event.target.value)}
+                    autoComplete="off"
+                    disabled={bulkShareSaving}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="resource-bulk-share-org-id">Team or organization ID</label>
+                  <Input
+                    id="resource-bulk-share-org-id"
+                    value={bulkShareGranteeOrgId}
+                    onChange={(event) => setBulkShareGranteeOrgId(event.target.value)}
+                    autoComplete="off"
+                    disabled={bulkShareSaving}
+                  />
+                </div>
               </div>
-            </div>
-            <div className="resource-browser-sheet-section">
-              <p className="resource-browser-sheet-label">Source</p>
-              <div className="resource-browser-sheet-options">
-                {sourceFilters.map((item) => (
-                  <Button
-                    key={item.value}
-                    type="button"
-                    variant={sourceFilter === item.value ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={() => onSourceFilterChange(item.value)}
-                  >
-                    {item.label}
-                  </Button>
-                ))}
-              </div>
-            </div>
-            <div className="resource-browser-sheet-actions">
               <Button
                 type="button"
-                variant="outline"
+                variant="default"
+                size="sm"
+                className="resource-browser-share-submit"
                 onClick={() => {
-                  onKindFilterChange("all");
-                  onSourceFilterChange("all");
+                  void createBulkShareGrants();
                 }}
+                disabled={!canGrantBulkShare}
               >
-                Reset
-              </Button>
-              <Button type="button" onClick={() => setMobileFiltersOpen(false)}>
-                Done
+                {bulkShareSaving ? (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                ) : (
+                  <UserPlus data-icon="inline-start" />
+                )}
+                Share selected
               </Button>
             </div>
+            {bulkShareError ? (
+              <p className="resource-browser-share-error">{bulkShareError}</p>
+            ) : null}
+          </div>
+        </SheetContent>
+      </Sheet>
+      <Sheet
+        open={Boolean(collectionShareTarget)}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeCollectionShareSheet();
+          }
+        }}
+      >
+        {collectionShareTarget ? (
+          <SheetContent
+            side="right"
+            className="resource-browser-share-sheet w-[min(100vw,38rem)] sm:max-w-lg"
+          >
+            <SheetHeader className="resource-browser-share-header">
+              <SheetTitle className="resource-browser-share-title">
+                Share {collectionShareTarget.name}
+              </SheetTitle>
+              <SheetDescription className="resource-browser-share-description">
+                Add a person or team that can read every resource in this folder.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="resource-browser-share-body">
+              <div className="resource-browser-share-form">
+                <div className="resource-browser-share-grid">
+                  <div>
+                    <label htmlFor="resource-folder-share-user-id">Person or user ID</label>
+                    <Input
+                      id="resource-folder-share-user-id"
+                      value={collectionShareGranteeUserId}
+                      onChange={(event) => setCollectionShareGranteeUserId(event.target.value)}
+                      autoComplete="off"
+                      disabled={collectionShareSaving}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="resource-folder-share-org-id">
+                      Team or organization ID
+                    </label>
+                    <Input
+                      id="resource-folder-share-org-id"
+                      value={collectionShareGranteeOrgId}
+                      onChange={(event) => setCollectionShareGranteeOrgId(event.target.value)}
+                      autoComplete="off"
+                      disabled={collectionShareSaving}
+                    />
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="default"
+                  size="sm"
+                  className="resource-browser-share-submit"
+                  onClick={() => {
+                    void createCollectionShareGrantsForSheet();
+                  }}
+                  disabled={!canGrantCollectionShare}
+                >
+                  {collectionShareSaving ? (
+                    <Loader2 data-icon="inline-start" className="animate-spin" />
+                  ) : (
+                    <UserPlus data-icon="inline-start" />
+                  )}
+                  Share folder
+                </Button>
+              </div>
+              {collectionShareError ? (
+                <p className="resource-browser-share-error">{collectionShareError}</p>
+              ) : null}
+            </div>
           </SheetContent>
-        </Sheet>
-      ) : null}
+        ) : null}
+      </Sheet>
+      <Sheet
+        open={Boolean(shareSheetResource)}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeShareSheet();
+          }
+        }}
+      >
+        {shareSheetResource ? (
+          <SheetContent
+            side="right"
+            className="resource-browser-share-sheet w-[min(100vw,38rem)] sm:max-w-lg"
+          >
+            <SheetHeader className="resource-browser-share-header">
+              <SheetTitle className="resource-browser-share-title">
+                Share {shareSheetResourceName}
+              </SheetTitle>
+              <SheetDescription className="resource-browser-share-description">
+                Add a person or team that can read this resource.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="resource-browser-share-body">
+              <div className="resource-browser-share-form">
+                <div className="resource-browser-share-grid">
+                  <div>
+                    <label htmlFor="resource-share-user-id">Person or user ID</label>
+                    <Input
+                      id="resource-share-user-id"
+                      value={shareGranteeUserId}
+                      onChange={(event) => setShareGranteeUserId(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="resource-share-org-id">Team or organization ID</label>
+                    <Input
+                      id="resource-share-org-id"
+                      value={shareGranteeOrgId}
+                      onChange={(event) => setShareGranteeOrgId(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="default"
+                  size="sm"
+                  className="resource-browser-share-submit"
+                  onClick={() => {
+                    void createShareGrantForSheet();
+                  }}
+                  disabled={!canGrantShare}
+                >
+                  {shareSaving ? (
+                    <Loader2 data-icon="inline-start" className="animate-spin" />
+                  ) : (
+                    <UserPlus data-icon="inline-start" />
+                  )}
+                  Share
+                </Button>
+              </div>
+
+              {shareGrantsError ? (
+                <p className="resource-browser-share-error">{shareGrantsError}</p>
+              ) : null}
+
+              <section className="resource-browser-share-section" aria-label="People with access">
+                <div className="resource-browser-share-section-header">
+                  <h3>People with access</h3>
+                  {shareGrantsLoading ? (
+                    <span>
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                      Loading
+                    </span>
+                  ) : (
+                    <span>{shareSheetGrants.length.toLocaleString()}</span>
+                  )}
+                </div>
+                {shareGrantsLoading && shareSheetGrants.length === 0 ? (
+                  <div className="resource-browser-share-list" aria-label="Loading share grants">
+                    {Array.from({ length: 3 }).map((_item, index) => (
+                      <div key={`share-skeleton-${index}`} className="resource-browser-share-row">
+                        <Skeleton className="resource-browser-share-skeleton-title" />
+                        <Skeleton className="resource-browser-share-skeleton-line" />
+                      </div>
+                    ))}
+                  </div>
+                ) : shareSheetGrants.length === 0 ? (
+                  <p className="resource-browser-share-empty">No share grants yet.</p>
+                ) : (
+                  <div className="resource-browser-share-list">
+                    {shareSheetGrants.map((grant) => {
+                      const identity = resourceShareGrantIdentity(grant);
+                      const status = String(grant.status || "").toLowerCase();
+                      const isRevoking = Boolean(shareRevokingById[grant.grant_id]);
+                      const canRevoke =
+                        status === "active" && Boolean(onRevokeResourceShareGrant) && !isRevoking;
+                      const grantDetails = [
+                        grant.grantee_user_id && grant.grantee_user_id !== identity
+                          ? grant.grantee_user_id
+                          : "",
+                        grant.grantee_org_id && grant.grantee_org_id !== identity
+                          ? grant.grantee_org_id
+                          : "",
+                        resourceShareGrantRoleLabel(grant.role),
+                      ].filter((detail): detail is string => Boolean(detail));
+                      return (
+                        <article
+                          key={grant.grant_id}
+                          className="resource-browser-share-row"
+                          data-status={status}
+                        >
+                          <div className="resource-browser-share-row-main">
+                            <div className="resource-browser-share-avatar" aria-hidden="true">
+                              {identity.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="resource-browser-share-copy">
+                              <p>{identity}</p>
+                              <div>
+                                {grantDetails.map((detail) => (
+                                  <span key={detail}>{detail}</span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="resource-browser-share-row-side">
+                            <span className="resource-browser-share-status">
+                              {resourceShareGrantStatusLabel(grant.status)}
+                            </span>
+                            <span>{formatResourceAuditDate(grant.updated_at || grant.created_at)}</span>
+                            {status === "active" ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="resource-browser-share-revoke"
+                                onClick={() => {
+                                  void revokeShareGrantForSheet(grant);
+                                }}
+                                disabled={!canRevoke}
+                                aria-label={`Revoke read access for ${identity}`}
+                              >
+                                {isRevoking ? (
+                                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                                ) : null}
+                                Revoke
+                              </Button>
+                            ) : null}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </SheetContent>
+        ) : null}
+      </Sheet>
+      <Sheet open={resourceFiltersOpen} onOpenChange={setResourceFiltersOpen}>
+        <SheetContent
+          side={isMobileView ? "bottom" : "right"}
+          className={cn(
+            "resource-browser-filter-sheet",
+            isMobileView
+              ? "rounded-t-[1.75rem] px-4 pb-[calc(1.2rem+env(safe-area-inset-bottom,0px))] pt-3"
+              : "w-[min(100vw,32rem)] px-5 py-5 sm:max-w-md"
+          )}
+        >
+          <SheetHeader className="gap-2 text-left">
+            <SheetTitle className="text-base">Resource filters and view</SheetTitle>
+            <SheetDescription className="text-sm leading-6 text-muted-foreground">
+              Choose a view, then narrow by type, source, sharing, or lifecycle.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="resource-browser-sheet-section">
+            <p className="resource-browser-sheet-label">View</p>
+            <ToggleGroup
+              type="single"
+              value={effectiveResourceViewMode}
+              onValueChange={(value) => {
+                if (value === "cards" || value === "table") {
+                  resetTableScroll();
+                  setResourceViewMode(value);
+                }
+              }}
+              variant="outline"
+              size="sm"
+              className="resource-browser-sheet-view-toggle"
+              aria-label="Resource view mode"
+            >
+              <ToggleGroupItem value="cards" aria-label="Card view">
+                <LayoutGrid data-icon="inline-start" />
+                <span>Cards</span>
+              </ToggleGroupItem>
+              {!isMobileView ? (
+                <ToggleGroupItem value="table" aria-label="Table view">
+                  <Table2 data-icon="inline-start" />
+                  <span>Table</span>
+                </ToggleGroupItem>
+              ) : null}
+            </ToggleGroup>
+          </div>
+          <div className="resource-browser-sheet-section">
+            <p className="resource-browser-sheet-label">Type</p>
+            <div className="resource-browser-sheet-options">
+              {kindFilters.map((item) => (
+                <Button
+                  key={item.value}
+                  type="button"
+                  variant={kindFilter === item.value ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    clearSelection();
+                    resetTableScroll();
+                    onKindFilterChange(item.value);
+                  }}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="resource-browser-sheet-section">
+            <p className="resource-browser-sheet-label">Source</p>
+            <div className="resource-browser-sheet-options">
+              {sourceFilters.map((item) => (
+                <Button
+                  key={item.value}
+                  type="button"
+                  variant={sourceFilter === item.value ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    clearSelection();
+                    resetTableScroll();
+                    onSourceFilterChange(item.value);
+                  }}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="resource-browser-sheet-section">
+            <p className="resource-browser-sheet-label">Sharing</p>
+            <div className="resource-browser-sheet-options">
+              {sharingFilters.map((item) => (
+                <Button
+                  key={item.value}
+                  type="button"
+                  variant={sharingFilter === item.value ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    clearSelection();
+                    resetTableScroll();
+                    onSharingFilterChange?.(item.value);
+                  }}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="resource-browser-sheet-section">
+            <p className="resource-browser-sheet-label">Lifecycle</p>
+            <div className="resource-browser-sheet-options">
+              {statusFilters.map((item) => (
+                <Button
+                  key={item.value}
+                  type="button"
+                  variant={statusFilter === item.value ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    clearSelection();
+                    resetTableScroll();
+                    onStatusFilterChange?.(item.value);
+                  }}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="resource-browser-sheet-actions">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                clearSelection();
+                resetTableScroll();
+                onKindFilterChange("all");
+                onSourceFilterChange("all");
+                onSharingFilterChange?.("all");
+                onStatusFilterChange?.("active");
+                onTagFilterChange?.("");
+              }}
+            >
+              Reset
+            </Button>
+            <Button type="button" onClick={() => setResourceFiltersOpen(false)}>
+              Done
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
     </section>
   );
 }

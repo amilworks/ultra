@@ -504,7 +504,14 @@ func (deps ServerDeps) handleImportBisqueResources(w http.ResponseWriter, r *htt
 			writeBisqueError(w, err)
 			return
 		}
-		if err := deps.catalogUploadedFile(r.Context(), root, record, "resource.imported"); err != nil {
+		if err := deps.catalogUploadedFileWithEventMetadata(r.Context(), root, record, "resource.imported", domain.JSONMap{
+			"input_url":                imported.InputURL,
+			"import_status":            imported.Status,
+			"bisque_resource_uri":      imported.ResourceURI,
+			"bisque_resource_uniq":     imported.ResourceUniq,
+			"bisque_client_view_url":   imported.ClientViewURL,
+			"bisque_image_service_url": imported.ImageServiceURL,
+		}); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}

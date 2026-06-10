@@ -302,6 +302,733 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2UploadFilesResponse"
+  /v2/upload-sessions:
+    post:
+      operationId: createV2UploadSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2UploadSessionCreateRequest"
+      responses:
+        "200":
+          description: Created or resumed upload session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionResponse"
+  /v2/upload-sessions/{session_id}:
+    get:
+      operationId: getV2UploadSession
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+      responses:
+        "200":
+          description: Upload session status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionResponse"
+  /v2/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index}:
+    put:
+      operationId: uploadV2UploadSessionChunk
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+        - $ref: "#/components/parameters/UploadFileToken"
+        - name: chunk_index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: offset
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: sha256
+          in: query
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Uploaded and verified chunk
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadChunkResponse"
+  /v2/upload-sessions/{session_id}/files/{file_token}/complete:
+    post:
+      operationId: completeV2UploadSessionFile
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+        - $ref: "#/components/parameters/UploadFileToken"
+      responses:
+        "200":
+          description: Completed file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionFileCompleteResponse"
+  /v2/upload-sessions/{session_id}/cancel:
+    post:
+      operationId: cancelV2UploadSession
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+      responses:
+        "200":
+          description: Canceled upload session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionResponse"
+  /v2/upload-sessions/{session_id}/pause:
+    post:
+      operationId: pauseV2UploadSession
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+      responses:
+        "200":
+          description: Paused upload session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionResponse"
+  /v2/upload-sessions/{session_id}/resume:
+    post:
+      operationId: resumeV2UploadSession
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+      responses:
+        "200":
+          description: Resumed upload session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadSessionResponse"
+  /v2/resource-collections:
+    post:
+      operationId: createV2ResourceCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceCollectionCreateRequest"
+      responses:
+        "201":
+          description: Created resource collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionResponse"
+    get:
+      operationId: listV2ResourceCollections
+      parameters:
+        - name: collection_type
+          in: query
+          required: false
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          description: Collection lifecycle state to browse. Deleted collections are owner-only.
+          schema:
+            type: string
+            enum: [active, deleted]
+            default: active
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Resource collections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionsResponse"
+  /v2/resource-collections/{collection_id}:
+    patch:
+      operationId: patchV2ResourceCollection
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceCollectionPatchRequest"
+      responses:
+        "200":
+          description: Updated a resource collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionResponse"
+    delete:
+      operationId: deleteV2ResourceCollection
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Soft-deleted a resource collection while preserving member resources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionResponse"
+  /v2/resource-collections/{collection_id}/restore:
+    post:
+      operationId: restoreV2ResourceCollection
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Restored a soft-deleted resource collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionResponse"
+  /v2/resource-collections/{collection_id}/shares:
+    post:
+      operationId: createV2ResourceCollectionShareGrants
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceShareGrantCreateRequest"
+      responses:
+        "201":
+          description: Created read grants for active resources in a collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionShareGrantsCreateResponse"
+  /v2/resource-collections/{collection_id}/resources:
+    post:
+      operationId: addV2ResourceCollectionResources
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceCollectionAddResourcesRequest"
+      responses:
+        "200":
+          description: Added resources to collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionAddResourcesResponse"
+    get:
+      operationId: listV2ResourceCollectionResources
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source
+          in: query
+          required: false
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: tag
+          in: query
+          required: false
+          description: Repeated tag filters. All supplied tags must match the resource.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: tags
+          in: query
+          required: false
+          description: Comma-separated tag filters. All supplied tags must match the resource.
+          schema: { type: string }
+        - name: descriptor
+          in: query
+          required: false
+          description: Repeated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: descriptors
+          in: query
+          required: false
+          description: Comma-separated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+          schema: { type: string }
+        - name: metadata_filter
+          in: query
+          required: false
+          description: Repeated structured metadata filters in path:operator:value form. Supported operators are eq, contains, exists, lt, lte, gt, and gte.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: created_after
+          in: query
+          required: false
+          description: Return resources created at or after this RFC3339 timestamp or YYYY-MM-DD date.
+          schema: { type: string }
+        - name: created_before
+          in: query
+          required: false
+          description: Return resources created at or before this RFC3339 timestamp or YYYY-MM-DD date.
+          schema: { type: string }
+        - name: processing_status
+          in: query
+          required: false
+          description: Filter resources by persisted Data Agent processing readiness.
+          schema:
+            type: string
+            enum: [all, caption_ready, metadata_ready, tags_ready, qc_complete, dedupe_checked, organization_ready, data_agent_ready, needs_caption, needs_metadata, data_agent_failed]
+        - name: sharing
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, private, shared, shared_by_me, shared_with_me, public]
+      responses:
+        "200":
+          description: Resources in collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceListResponse"
+  /v2/resource-collections/{collection_id}/resources/{file_id}:
+    delete:
+      operationId: removeV2ResourceCollectionResource
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Removed the resource from the collection without deleting the resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCollectionRemoveResourcesResponse"
+  /v2/dataset-snapshots:
+    get:
+      operationId: listV2DatasetSnapshots
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_collection_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, deleted]
+            default: active
+      responses:
+        "200":
+          description: Immutable dataset snapshots visible to the current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotsResponse"
+    post:
+      operationId: createV2DatasetSnapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DatasetSnapshotCreateRequest"
+      responses:
+        "201":
+          description: Created immutable dataset snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotResponse"
+  /v2/dataset-snapshots/{snapshot_id}:
+    get:
+      operationId: getV2DatasetSnapshot
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Immutable dataset snapshot manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotResponse"
+    delete:
+      operationId: deleteV2DatasetSnapshot
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Soft-deleted immutable dataset snapshot manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotResponse"
+  /v2/dataset-snapshots/{snapshot_id}/restore:
+    post:
+      operationId: restoreV2DatasetSnapshot
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Restored immutable dataset snapshot manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotResponse"
+  /v2/dataset-snapshots/{snapshot_id}/events:
+    get:
+      operationId: listV2DatasetSnapshotEvents
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: event_type
+          in: query
+          required: false
+          schema: { type: string }
+        - name: actor_user_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Dataset snapshot audit events visible to the current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotEventsResponse"
+  /v2/dataset-snapshots/{snapshot_id}/shares:
+    get:
+      operationId: listV2DatasetSnapshotShareGrants
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200 }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Dataset snapshot share grants owned by the current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotShareGrantsResponse"
+    post:
+      operationId: createV2DatasetSnapshotShareGrant
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DatasetSnapshotShareGrantCreateRequest"
+      responses:
+        "201":
+          description: Created dataset snapshot share grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotShareGrantResponse"
+  /v2/dataset-snapshots/{snapshot_id}/shares/{grant_id}:
+    delete:
+      operationId: revokeV2DatasetSnapshotShareGrant
+      parameters:
+        - name: snapshot_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: grant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Revoked dataset snapshot share grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DatasetSnapshotShareGrantResponse"
+  /v2/data-agent/jobs:
+    post:
+      operationId: createV2DataAgentJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DataAgentJobCreateRequest"
+      responses:
+        "202":
+          description: Durable Data Agent job queued for background execution
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobResponse"
+    get:
+      operationId: listV2DataAgentJobs
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: job_type
+          in: query
+          schema: { type: string }
+        - name: project_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Principal-scoped durable Data Agent jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobsResponse"
+  /v2/data-agent/jobs/{job_id}:
+    get:
+      operationId: getV2DataAgentJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Durable Data Agent job with append-only event trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobResponse"
+  /v2/data-agent/jobs/{job_id}/status:
+    patch:
+      operationId: updateV2DataAgentJobStatus
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DataAgentJobStatusUpdateRequest"
+      responses:
+        "200":
+          description: Data Agent job status/progress update with event trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobResponse"
+  /v2/data-agent/jobs/{job_id}/control:
+    post:
+      operationId: controlV2DataAgentJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DataAgentJobControlRequest"
+      responses:
+        "200":
+          description: Data Agent job control action result with event trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobResponse"
+  /v2/data-agent/jobs/{job_id}/lease:
+    post:
+      operationId: acquireV2DataAgentJobLease
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Acquired Data Agent job lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobLeaseRecord"
+        "409":
+          description: Data Agent job is already leased or terminal
+    patch:
+      operationId: renewV2DataAgentJobLease
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Renewed Data Agent job lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobLeaseRecord"
+        "409":
+          description: Lease token is invalid, expired, or job is terminal
+    delete:
+      operationId: releaseV2DataAgentJobLease
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunLeaseRequest"
+      responses:
+        "200":
+          description: Released Data Agent job lease
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released: { type: boolean }
+        "409":
+          description: Lease token is invalid
   /v2/uploads/{file_id}/preview:
     get:
       operationId: getUploadPreview
@@ -765,6 +1492,70 @@ paths:
         - name: kind
           in: query
           schema: { type: string }
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: project_id
+          in: query
+          schema: { type: string }
+        - name: tag
+          in: query
+          description: Repeated tag filters. All supplied tags must match the resource.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: tags
+          in: query
+          description: Comma-separated tag filters. All supplied tags must match the resource.
+          schema: { type: string }
+        - name: descriptor
+          in: query
+          description: Repeated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: descriptors
+          in: query
+          description: Comma-separated scientific descriptor filters. All supplied descriptors must match resource labels, tags, extracted descriptors, captions, or summaries.
+          schema: { type: string }
+        - name: metadata_filter
+          in: query
+          description: Repeated structured metadata filters in path:operator:value form. Supported operators are eq, contains, exists, lt, lte, gt, and gte.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: created_after
+          in: query
+          description: Return resources created at or after this RFC3339 timestamp or YYYY-MM-DD date.
+          schema: { type: string }
+        - name: created_before
+          in: query
+          description: Return resources created at or before this RFC3339 timestamp or YYYY-MM-DD date.
+          schema: { type: string }
+        - name: processing_status
+          in: query
+          description: Filter resources by persisted Data Agent processing readiness.
+          schema:
+            type: string
+            enum: [all, caption_ready, metadata_ready, tags_ready, qc_complete, dedupe_checked, organization_ready, data_agent_ready, needs_caption, needs_metadata, data_agent_failed]
+        - name: sharing
+          in: query
+          schema:
+            type: string
+            enum: [all, private, shared, shared_by_me, shared_with_me, public]
+        - name: status
+          in: query
+          description: Resource lifecycle state to browse. Deleted resources are owner-only.
+          schema:
+            type: string
+            enum: [active, deleted]
+            default: active
       responses:
         "200":
           description: Resource list
@@ -772,6 +1563,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceListResponse"
+  /v2/resource-events:
+    get:
+      operationId: listResourceEventLog
+      parameters:
+        - name: resource_id
+          in: query
+          schema: { type: string }
+        - name: event_type
+          in: query
+          schema: { type: string }
+        - name: actor_user_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Principal-scoped resource audit events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceEventListResponse"
+  /v2/resources/tags/bulk:
+    post:
+      operationId: bulkTagResources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceBulkTagRequest"
+      responses:
+        "200":
+          description: Tagged resources and audit events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceBulkTagResponse"
+  /v2/resources/delete/bulk:
+    post:
+      operationId: bulkDeleteResources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceBulkLifecycleRequest"
+      responses:
+        "200":
+          description: Soft-deleted resources and audit events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
+  /v2/resources/restore/bulk:
+    post:
+      operationId: bulkRestoreResources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceBulkLifecycleRequest"
+      responses:
+        "200":
+          description: Restored resources and audit events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
   /v2/resources/{file_id}:
     get:
       operationId: getResource
@@ -780,6 +1645,23 @@ paths:
       responses:
         "200":
           description: Resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceResponse"
+    patch:
+      operationId: patchResource
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourcePatchRequest"
+      responses:
+        "200":
+          description: Updated resource metadata
           content:
             application/json:
               schema:
@@ -799,6 +1681,23 @@ paths:
                 properties:
                   deleted: { type: boolean }
                   file_id: { type: string }
+  /v2/resources/{file_id}/download:
+    get:
+      operationId: downloadResource
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Original committed resource bytes
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: Attachment filename for the downloaded resource
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
   /v2/resources/{file_id}/restore:
     post:
       operationId: restoreResource
@@ -826,6 +1725,73 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceEventsResponse"
+  /v2/resources/shares/bulk:
+    post:
+      operationId: createResourceShareGrants
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceShareGrantsCreateRequest"
+      responses:
+        "201":
+          description: Resource share grants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceShareGrantsCreateResponse"
+  /v2/resources/{file_id}/shares:
+    get:
+      operationId: listResourceShareGrants
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        "200":
+          description: Resource share grants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceShareGrantsResponse"
+    post:
+      operationId: createResourceShareGrant
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ResourceShareGrantCreateRequest"
+      responses:
+        "201":
+          description: Resource share grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceShareGrantResponse"
+  /v2/resources/{file_id}/shares/{grant_id}:
+    delete:
+      operationId: revokeResourceShareGrant
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: grant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Revoked resource share grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceShareGrantResponse"
   /v2/resources/{file_id}/thumbnail:
     get:
       operationId: getResourceThumbnail
@@ -1795,6 +2761,16 @@ components:
       in: path
       required: true
       schema: { type: string }
+    UploadSessionID:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string }
+    UploadFileToken:
+      name: file_token
+      in: path
+      required: true
+      schema: { type: string }
   schemas:
     JsonObject:
       type: object
@@ -2165,7 +3141,7 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2AdminOverviewResponse:
       type: object
-      required: [generated_at, runtime, queue, kpis, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
+      required: [generated_at, runtime, queue, kpis, upload_sessions, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
       properties:
         generated_at: { type: string }
         runtime:
@@ -2174,6 +3150,8 @@ components:
           $ref: "#/components/schemas/V2AdminQueueDiagnostics"
         kpis:
           $ref: "#/components/schemas/V2AdminPlatformKpis"
+        upload_sessions:
+          $ref: "#/components/schemas/V2AdminUploadSessionMetrics"
         activity:
           type: array
           items:
@@ -2202,6 +3180,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminUploadSessionMetrics:
+      type: object
+      required: [total, active, paused, completed, failed, canceled, other, bytes_total, bytes_received, bytes_verified, bytes_committed]
+      properties:
+        total: { type: integer }
+        active: { type: integer }
+        paused: { type: integer }
+        completed: { type: integer }
+        failed: { type: integer }
+        canceled: { type: integer }
+        other: { type: integer }
+        bytes_total: { type: integer, format: int64 }
+        bytes_received: { type: integer, format: int64 }
+        bytes_verified: { type: integer, format: int64 }
+        bytes_committed: { type: integer, format: int64 }
     V2AdminResourceOwnerSummary:
       type: object
       required: [id, uploads, storage_bytes]
@@ -2541,6 +3534,151 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2UploadSessionFileInit:
+      type: object
+      required: [file_token, original_name, size_bytes]
+      properties:
+        file_token: { type: string }
+        original_name: { type: string }
+        relative_path: { type: string, nullable: true }
+        content_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64 }
+        declared_sha256: { type: string, nullable: true }
+    V2UploadSessionCreateRequest:
+      type: object
+      required: [total_bytes, files]
+      properties:
+        idempotency_key: { type: string, nullable: true }
+        browser_fingerprint: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        total_bytes: { type: integer, format: int64 }
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadSessionFileInit"
+    V2UploadSessionRecord:
+      type: object
+      required: [session_id, owner_user_id, source_type, status, total_bytes, bytes_received, bytes_verified, bytes_committed, created_at, updated_at, metadata]
+      properties:
+        session_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        source_type: { type: string }
+        status: { type: string, enum: [active, paused, completed, failed, canceled] }
+        total_bytes: { type: integer, format: int64 }
+        bytes_received: { type: integer, format: int64 }
+        bytes_verified: { type: integer, format: int64 }
+        bytes_committed: { type: integer, format: int64 }
+        idempotency_key: { type: string, nullable: true }
+        browser_fingerprint: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        completed_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2UploadSessionFileRecord:
+      type: object
+      required: [session_id, file_token, original_name, size_bytes, status, created_at, updated_at, metadata]
+      properties:
+        session_id: { type: string }
+        file_token: { type: string }
+        resource_id: { type: string, nullable: true }
+        original_name: { type: string }
+        relative_path: { type: string, nullable: true }
+        content_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64 }
+        declared_sha256: { type: string, nullable: true }
+        computed_sha256: { type: string, nullable: true }
+        status: { type: string, enum: [active, paused, completed, failed, canceled] }
+        error: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        completed_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2UploadChunkRecord:
+      type: object
+      required: [session_id, file_token, chunk_index, offset, size_bytes, sha256, status, metadata]
+      properties:
+        session_id: { type: string }
+        file_token: { type: string }
+        chunk_index: { type: integer }
+        offset: { type: integer, format: int64 }
+        size_bytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        status: { type: string, enum: [received, verified, failed] }
+        storage_uri: { type: string, nullable: true }
+        received_at: { type: string, nullable: true }
+        verified_at: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2UploadSessionLimits:
+      type: object
+      required: [max_parallel_files, max_parallel_chunks, max_files_per_session]
+      properties:
+        max_parallel_files: { type: integer, minimum: 1 }
+        max_parallel_chunks: { type: integer, minimum: 1 }
+        max_files_per_session: { type: integer, minimum: 1 }
+    V2UploadSessionEventRecord:
+      type: object
+      required: [event_id, session_id, event_type, ts, metadata]
+      properties:
+        event_id: { type: string }
+        session_id: { type: string }
+        actor_user_id: { type: string, nullable: true }
+        actor_org_id: { type: string, nullable: true }
+        event_type: { type: string }
+        ts: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2UploadSessionResponse:
+      type: object
+      required: [session, files, events, limits]
+      properties:
+        session:
+          $ref: "#/components/schemas/V2UploadSessionRecord"
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadSessionFileRecord"
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadChunkRecord"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadSessionEventRecord"
+        limits:
+          $ref: "#/components/schemas/V2UploadSessionLimits"
+    V2UploadChunkResponse:
+      type: object
+      required: [session_id, file_token, chunk, bytes_received, bytes_verified, status]
+      properties:
+        session_id: { type: string }
+        file_token: { type: string }
+        chunk:
+          $ref: "#/components/schemas/V2UploadChunkRecord"
+        bytes_received: { type: integer, format: int64 }
+        bytes_verified: { type: integer, format: int64 }
+        status: { type: string }
+    V2UploadSessionFileCompleteResponse:
+      type: object
+      required: [session_id, file_token, uploaded, duplicate]
+      properties:
+        session_id: { type: string }
+        file_token: { type: string }
+        uploaded:
+          $ref: "#/components/schemas/V2UploadedFileRecord"
+        duplicate: { type: boolean }
     V2BisqueResource:
       type: object
       required: [resource_uri]
@@ -2608,7 +3746,7 @@ components:
             $ref: "#/components/schemas/V2BisqueUploadRecord"
     V2ResourceRecord:
       type: object
-      required: [file_id, original_name, size_bytes, sha256, created_at, source_type, resource_kind, has_thumbnail]
+      required: [file_id, original_name, size_bytes, sha256, created_at, status, source_type, resource_kind, has_thumbnail]
       properties:
         file_id: { type: string }
         original_name: { type: string }
@@ -2616,6 +3754,7 @@ components:
         size_bytes: { type: integer, format: int64 }
         sha256: { type: string }
         created_at: { type: string }
+        status: { type: string }
         source_type: { type: string }
         resource_kind: { type: string }
         source_uri: { type: string, nullable: true }
@@ -2625,9 +3764,30 @@ components:
         preview_url: { type: string, nullable: true }
         cache_ready: { type: boolean, nullable: true }
         staged_locally: { type: boolean, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
         principal:
           nullable: true
           $ref: "#/components/schemas/V2PrincipalRecord"
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        share_summary:
+          nullable: true
+          $ref: "#/components/schemas/V2ResourceShareSummary"
+    V2ResourceShareSummary:
+      type: object
+      required: [share_status, active_grant_count]
+      properties:
+        share_status:
+          type: string
+          enum: [private, shared_by_me, shared_with_me, public]
+        active_grant_count: { type: integer }
+        shared_by_me: { type: boolean, nullable: true }
+        shared_with_me: { type: boolean, nullable: true }
+        public: { type: boolean, nullable: true }
     V2PrincipalRecord:
       type: object
       properties:
@@ -2649,6 +3809,16 @@ components:
       properties:
         resource:
           $ref: "#/components/schemas/V2ResourceRecord"
+    V2ResourcePatchRequest:
+      type: object
+      properties:
+        original_name:
+          type: string
+          description: User-facing resource name shown in the Resources file manager.
+        metadata:
+          type: object
+          minProperties: 1
+          additionalProperties: true
     V2ResourceEventRecord:
       type: object
       required: [event_id, resource_id, event_type, ts, metadata]
@@ -2672,6 +3842,559 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2ResourceEventRecord"
+    V2ResourceEventListResponse:
+      type: object
+      required: [count, total_count, limit, offset, events]
+      properties:
+        count: { type: integer }
+        total_count: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceEventRecord"
+    V2ResourceBulkTagRequest:
+      type: object
+      required: [resource_ids, tags]
+      properties:
+        resource_ids:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { type: string }
+        tags:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceBulkTagResponse:
+      type: object
+      required: [count, resources, events]
+      properties:
+        count: { type: integer }
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceRecord"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceEventRecord"
+    V2ResourceBulkLifecycleRequest:
+      type: object
+      required: [resource_ids]
+      properties:
+        resource_ids:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { type: string }
+    V2ResourceBulkLifecycleResponse:
+      type: object
+      required: [count, resources, events]
+      properties:
+        count: { type: integer }
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceRecord"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceEventRecord"
+    V2ResourceShareGrantCreateRequest:
+      type: object
+      properties:
+        grantee_user_id: { type: string, nullable: true }
+        grantee_org_id: { type: string, nullable: true }
+        public:
+          type: boolean
+          default: false
+          description: Publish the resource with a read grant visible to any authenticated principal.
+        role:
+          type: string
+          enum: [read]
+          default: read
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceShareGrantsCreateRequest:
+      allOf:
+        - $ref: "#/components/schemas/V2ResourceShareGrantCreateRequest"
+        - type: object
+          required: [resource_ids]
+          properties:
+            resource_ids:
+              type: array
+              minItems: 1
+              maxItems: 10000
+              items:
+                type: string
+    V2ResourceShareGrantRecord:
+      type: object
+      required: [grant_id, resource_id, owner_user_id, role, status, created_at, updated_at, metadata]
+      properties:
+        grant_id: { type: string }
+        resource_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        grantee_user_id: { type: string, nullable: true }
+        grantee_org_id: { type: string, nullable: true }
+        role: { type: string, enum: [read] }
+        status: { type: string }
+        created_by_user_id: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        revoked_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceShareGrantResponse:
+      type: object
+      required: [grant]
+      properties:
+        grant:
+          $ref: "#/components/schemas/V2ResourceShareGrantRecord"
+    V2ResourceShareGrantsCreateResponse:
+      type: object
+      required: [count, grants]
+      properties:
+        count: { type: integer }
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceShareGrantRecord"
+    V2ResourceCollectionShareGrantsCreateResponse:
+      type: object
+      required: [count, collection, grants]
+      properties:
+        count: { type: integer }
+        collection:
+          $ref: "#/components/schemas/V2ResourceCollectionRecord"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceShareGrantRecord"
+    V2ResourceShareGrantsResponse:
+      type: object
+      required: [resource_id, count, grants]
+      properties:
+        resource_id: { type: string }
+        count: { type: integer }
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceShareGrantRecord"
+    V2ResourceCollectionRecord:
+      type: object
+      required: [collection_id, owner_user_id, name, collection_type, status, resource_count, created_at, updated_at, metadata]
+      properties:
+        collection_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        parent_collection_id: { type: string, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        collection_type: { type: string, enum: [collection, folder, dataset] }
+        status: { type: string }
+        resource_count: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceCollectionCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+        collection_type: { type: string, enum: [collection, folder, dataset], nullable: true }
+        project_id: { type: string, nullable: true }
+        parent_collection_id: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceCollectionPatchRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    V2ResourceCollectionResponse:
+      type: object
+      required: [collection]
+      properties:
+        collection:
+          $ref: "#/components/schemas/V2ResourceCollectionRecord"
+    V2ResourceCollectionsResponse:
+      type: object
+      required: [count, collections]
+      properties:
+        count: { type: integer }
+        collections:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceCollectionRecord"
+    V2ResourceCollectionAddResourcesRequest:
+      type: object
+      required: [resource_ids]
+      properties:
+        resource_ids:
+          type: array
+          items: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceCollectionMembershipRecord:
+      type: object
+      required: [collection_id, resource_id, position, added_at, metadata]
+      properties:
+        collection_id: { type: string }
+        resource_id: { type: string }
+        position: { type: integer, format: int64 }
+        added_by_user_id: { type: string, nullable: true }
+        added_at: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2ResourceCollectionAddResourcesResponse:
+      type: object
+      required: [collection, added_count, memberships]
+      properties:
+        collection:
+          $ref: "#/components/schemas/V2ResourceCollectionRecord"
+        added_count: { type: integer }
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceCollectionMembershipRecord"
+    V2ResourceCollectionRemoveResourcesResponse:
+      type: object
+      required: [collection, removed_count, memberships]
+      properties:
+        collection:
+          $ref: "#/components/schemas/V2ResourceCollectionRecord"
+        removed_count: { type: integer }
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceCollectionMembershipRecord"
+    V2DatasetSnapshotRecord:
+      type: object
+      required: [snapshot_id, owner_user_id, name, status, resource_count, total_bytes, created_at, metadata]
+      properties:
+        snapshot_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        source_collection_id: { type: string, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        status: { type: string }
+        resource_count: { type: integer }
+        total_bytes: { type: integer, format: int64 }
+        created_by_user_id: { type: string, nullable: true }
+        created_at: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotResourceRecord:
+      type: object
+      required: [snapshot_id, resource_id, position, original_name, size_bytes, source_type, resource_kind, metadata]
+      properties:
+        snapshot_id: { type: string }
+        resource_id: { type: string }
+        position: { type: integer, format: int64 }
+        original_name: { type: string }
+        content_type: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64 }
+        sha256: { type: string, nullable: true }
+        source_type: { type: string }
+        resource_kind: { type: string }
+        storage_uri: { type: string, nullable: true }
+        source_uri: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        resource_created_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+        source_collection_id: { type: string, nullable: true }
+        resource_ids:
+          type: array
+          items: { type: string }
+        resource_query:
+          $ref: "#/components/schemas/V2DatasetSnapshotResourceQuery"
+        project_id: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotResourceQuery:
+      type: object
+      properties:
+        q: { type: string }
+        kind: { type: string }
+        source: { type: string }
+        project_id: { type: string }
+        sharing: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        descriptors:
+          type: array
+          items: { type: string }
+        metadata_filters:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ResourceMetadataFilter"
+        created_after: { type: string }
+        created_before: { type: string }
+        processing_status:
+          type: string
+          enum: [all, caption_ready, metadata_ready, tags_ready, qc_complete, dedupe_checked, organization_ready, data_agent_ready, needs_caption, needs_metadata, data_agent_failed]
+    V2ResourceMetadataFilter:
+      type: object
+      required: [path, operator]
+      properties:
+        path:
+          type: string
+          description: Dot-delimited resource metadata path, for example subject.age or label.
+        operator:
+          type: string
+          enum: [eq, contains, exists, lt, lte, gt, gte]
+        value:
+          type: string
+          description: Comparison value. Optional for the exists operator.
+    V2DatasetSnapshotResponse:
+      type: object
+      required: [snapshot, resources]
+      properties:
+        snapshot:
+          $ref: "#/components/schemas/V2DatasetSnapshotRecord"
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DatasetSnapshotResourceRecord"
+    V2DatasetSnapshotsResponse:
+      type: object
+      required: [count, snapshots]
+      properties:
+        count: { type: integer }
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DatasetSnapshotRecord"
+    V2DatasetSnapshotEventRecord:
+      type: object
+      required: [event_id, snapshot_id, event_type, ts, metadata]
+      properties:
+        event_id: { type: string }
+        snapshot_id: { type: string }
+        actor_user_id: { type: string, nullable: true }
+        actor_org_id: { type: string, nullable: true }
+        event_type: { type: string }
+        ts: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotEventsResponse:
+      type: object
+      required: [snapshot_id, count, total_count, limit, offset, events]
+      properties:
+        snapshot_id: { type: string }
+        count: { type: integer }
+        total_count: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DatasetSnapshotEventRecord"
+    V2DatasetSnapshotShareGrantRecord:
+      type: object
+      required: [grant_id, snapshot_id, owner_user_id, role, status, created_at, updated_at, metadata]
+      properties:
+        grant_id: { type: string }
+        snapshot_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        grantee_user_id: { type: string, nullable: true }
+        grantee_org_id: { type: string, nullable: true }
+        role: { type: string }
+        status: { type: string }
+        created_by_user_id: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        revoked_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotShareGrantCreateRequest:
+      type: object
+      properties:
+        grantee_user_id: { type: string, nullable: true }
+        grantee_org_id: { type: string, nullable: true }
+        role: { type: string, default: read }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DatasetSnapshotShareGrantResponse:
+      type: object
+      required: [grant]
+      properties:
+        grant:
+          $ref: "#/components/schemas/V2DatasetSnapshotShareGrantRecord"
+    V2DatasetSnapshotShareGrantsResponse:
+      type: object
+      required: [count, grants]
+      properties:
+        count: { type: integer }
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DatasetSnapshotShareGrantRecord"
+    V2DataAgentJobRecord:
+      type: object
+      required: [job_id, owner_user_id, job_type, status, resource_count, progress_completed, progress_total, created_at, updated_at, input_selector, output_summary, metadata]
+      properties:
+        job_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        owner_role: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        job_type:
+          type: string
+          enum: [caption_resources, extract_metadata, organize_resources, deduplicate_resources, quality_check_resources, batch_tag_resources, create_dataset_snapshot]
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, canceled]
+        resource_count: { type: integer }
+        progress_completed: { type: integer }
+        progress_total: { type: integer }
+        error: { type: string, nullable: true }
+        created_by_user_id: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string }
+        started_at: { type: string, nullable: true }
+        completed_at: { type: string, nullable: true }
+        input_selector:
+          type: object
+          additionalProperties: true
+        output_summary:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DataAgentJobEventRecord:
+      type: object
+      required: [event_id, job_id, sequence, event_type, ts, metadata]
+      properties:
+        event_id: { type: string }
+        job_id: { type: string }
+        sequence: { type: integer, format: int64 }
+        event_type: { type: string }
+        actor_user_id: { type: string, nullable: true }
+        actor_org_id: { type: string, nullable: true }
+        ts: { type: string }
+        message: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DataAgentJobCreateRequest:
+      type: object
+      required: [job_type]
+      properties:
+        job_type:
+          type: string
+          enum: [caption_resources, extract_metadata, organize_resources, deduplicate_resources, quality_check_resources, batch_tag_resources, create_dataset_snapshot]
+        resource_ids:
+          type: array
+          items: { type: string }
+        source_collection_id: { type: string, nullable: true }
+        project_id: { type: string, nullable: true }
+        resource_query:
+          $ref: "#/components/schemas/V2DatasetSnapshotResourceQuery"
+        input_selector:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DataAgentJobStatusUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, canceled]
+        progress_completed: { type: integer }
+        progress_total: { type: integer }
+        error: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+        output_summary:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        event_metadata:
+          type: object
+          additionalProperties: true
+    V2DataAgentJobControlRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [cancel, retry]
+        reason: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+    V2DataAgentJobLeaseRecord:
+      type: object
+      required: [job_id, worker_id, lease_token, lease_expires_at, created_at, updated_at]
+      properties:
+        job_id: { type: string }
+        worker_id: { type: string }
+        lease_token: { type: string }
+        lease_expires_at: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+    V2DataAgentJobResponse:
+      type: object
+      required: [job, events]
+      properties:
+        job:
+          $ref: "#/components/schemas/V2DataAgentJobRecord"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DataAgentJobEventRecord"
+    V2DataAgentJobsResponse:
+      type: object
+      required: [count, jobs]
+      properties:
+        count: { type: integer }
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2DataAgentJobRecord"
     V2PromoteArtifactResourceRequest:
       type: object
       properties:

@@ -71,6 +71,20 @@ func main() {
 			}
 		}()
 	}
+	if application.DataAgentJobSource != nil && application.DataAgentWorker != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job := <-application.DataAgentJobSource:
+					if err := application.DataAgentWorker.RunJob(ctx, job); err != nil && !errors.Is(err, context.Canceled) {
+						logger.Error("data agent worker job failed", "job_id", job.JobID, "error", err)
+					}
+				}
+			}
+		}()
+	}
 	go func() {
 		logger.Info("starting control plane", "addr", cfg.HTTPAddr)
 		errs <- server.ListenAndServe()

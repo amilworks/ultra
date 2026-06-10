@@ -9,6 +9,7 @@ import (
 
 type MemoryBus struct {
 	jobs          chan Job
+	dataAgentJobs chan DataAgentJob
 	cancellations chan CancelSignal
 	events        chan domain.RunEventRecord
 	mu            sync.RWMutex
@@ -24,6 +25,7 @@ type memoryRunEventSubscriber struct {
 const (
 	runEventSubscriberBuffer = 4096
 	jobBufferSize            = 4096
+	dataAgentJobBufferSize   = 4096
 	cancelBufferSize         = 4096
 	legacyEventBufferSize    = 1024
 )
@@ -31,6 +33,7 @@ const (
 func NewMemoryBus() *MemoryBus {
 	return &MemoryBus{
 		jobs:          make(chan Job, jobBufferSize),
+		dataAgentJobs: make(chan DataAgentJob, dataAgentJobBufferSize),
 		cancellations: make(chan CancelSignal, cancelBufferSize),
 		events:        make(chan domain.RunEventRecord, legacyEventBufferSize),
 		subscribers:   map[int64]memoryRunEventSubscriber{},
@@ -40,6 +43,15 @@ func NewMemoryBus() *MemoryBus {
 func (b *MemoryBus) PublishJob(ctx context.Context, job Job) error {
 	select {
 	case b.jobs <- job:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *MemoryBus) PublishDataAgentJob(ctx context.Context, job DataAgentJob) error {
+	select {
+	case b.dataAgentJobs <- job:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -78,6 +90,10 @@ func (b *MemoryBus) PublishRunEvent(ctx context.Context, event domain.RunEventRe
 
 func (b *MemoryBus) Jobs() <-chan Job {
 	return b.jobs
+}
+
+func (b *MemoryBus) DataAgentJobs() <-chan DataAgentJob {
+	return b.dataAgentJobs
 }
 
 func (b *MemoryBus) Cancellations() <-chan CancelSignal {

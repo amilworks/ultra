@@ -21,11 +21,13 @@ type Config struct {
 	NATSStream                 string
 	NATSJobsSubject            string
 	NATSRareSpotJobsSubject    string
+	NATSDataAgentJobsSubject   string
 	NATSEventsSubject          string
 	NATSCancelSubject          string
 	NATSEventConsumer          string
 	NATSWorkerDurable          string
 	NATSRareSpotWorkerDurable  string
+	NATSDataAgentWorkerDurable string
 	ArtifactRoot               string
 	UploadRoot                 string
 	BisqueRootURL              string
@@ -48,6 +50,7 @@ type Config struct {
 	RunRecoveryEnabled         bool
 	RunRecoveryInterval        time.Duration
 	RunRecoveryBatchLimit      int
+	WorkerToken                string
 }
 
 func Load() Config {
@@ -64,11 +67,13 @@ func Load() Config {
 		NATSStream:                 envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
 		NATSJobsSubject:            envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),
 		NATSRareSpotJobsSubject:    envString("ULTRA_CONTROL_NATS_RARESPOT_JOBS_SUBJECT", "ultra.runs.rarespot.jobs"),
+		NATSDataAgentJobsSubject:   envString("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", "ultra.data_agent.jobs"),
 		NATSEventsSubject:          envString("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
 		NATSCancelSubject:          envString("ULTRA_CONTROL_NATS_CANCEL_SUBJECT", "ultra.runs.cancel"),
 		NATSEventConsumer:          envString("ULTRA_CONTROL_NATS_EVENT_CONSUMER", "ultra-control-event-ingest"),
 		NATSWorkerDurable:          envString("ULTRA_CONTROL_NATS_WORKER_DURABLE", "ultra-deepagents-worker"),
 		NATSRareSpotWorkerDurable:  envString("ULTRA_CONTROL_NATS_RARESPOT_WORKER_DURABLE", "rarespot-ecology-worker"),
+		NATSDataAgentWorkerDurable: envString("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),
 		UploadRoot:                 envString("ULTRA_CONTROL_UPLOAD_ROOT", envString("ULTRA_RESOURCE_ROOT", envString("UPLOAD_STORE_ROOT", "data/uploads"))),
 		BisqueRootURL:              envString("ULTRA_CONTROL_BISQUE_ROOT_URL", envString("BISQUE_ROOT", envString("BISQUE_SERVER", ""))),
@@ -91,6 +96,7 @@ func Load() Config {
 		RunRecoveryEnabled:         envBool("ULTRA_CONTROL_RUN_RECOVERY_ENABLED", true),
 		RunRecoveryInterval:        envDurationSeconds("ULTRA_CONTROL_RUN_RECOVERY_INTERVAL_SECONDS", 30),
 		RunRecoveryBatchLimit:      envInt("ULTRA_CONTROL_RUN_RECOVERY_BATCH_LIMIT", 1000),
+		WorkerToken:                envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
 	}
 }
 

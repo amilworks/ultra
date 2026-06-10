@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import { DataUtils } from "three";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -25,6 +26,7 @@ import {
   resolveVolumeOrientationCue,
   scalarVolumePayloadValueAt,
   scalarVolumePayloadToTextureBytes,
+  scalarVolumePayloadToHalfFloat,
 } from "./SliceStackVolumeCanvas";
 
 describe("volume sampling budget", () => {
@@ -563,5 +565,74 @@ describe("scalar volume texture conversion", () => {
 
     expect(scalarVolumePayloadValueAt(payload, { x: 1, y: 0, z: 0 })).toBe(0.5);
     expect(Array.from(scalarVolumePayloadToTextureBytes(payload))).toEqual([0, 128, 255]);
+  });
+});
+
+describe("scalar volume half-float precision", () => {
+  it("maps normalized range endpoints to canonical half-float bit patterns", () => {
+    const source = new Uint16Array([10, 65, 120]);
+    const half = scalarVolumePayloadToHalfFloat({
+      data: source.buffer,
+      width: 3,
+      height: 1,
+      depth: 1,
+      dtype: "uint16",
+      bytesPerVoxel: 2,
+      rawMin: 10,
+      rawMax: 120,
+      channel: 0,
+    });
+
+    // 0.0 -> 0x0000, 0.5 -> 0x3800, 1.0 -> 0x3c00
+    expect(Array.from(half)).toEqual([0x0000, 0x3800, 0x3c00]);
+  });
+
+  it("keeps a sub-window contrast step that 8-bit quantization collapses", () => {
+    // A CT-scale range (air to bone) with two voxels 2 HU apart, the kind of
+    // difference that separates CSF from adjacent tissue.
+    const source = new Int16Array([10, 12]);
+    const payload = {
+      data: source.buffer,
+      width: 2,
+      height: 1,
+      depth: 1,
+      dtype: "int16",
+      bytesPerVoxel: 2,
+      rawMin: 0,
+      rawMax: 4096,
+      channel: 0,
+    };
+
+    const bytes = scalarVolumePayloadToTextureBytes(payload);
+    expect(bytes[0]).toBe(bytes[1]); // 8-bit upload erases the boundary
+
+    const half = scalarVolumePayloadToHalfFloat(payload);
+    expect(half[0]).not.toBe(half[1]); // half-float keeps the two tissues distinct
+    expect(DataUtils.fromHalfFloat(half[0])).toBeCloseTo(10 / 4096, 5);
+    expect(DataUtils.fromHalfFloat(half[1])).toBeCloseTo(12 / 4096, 5);
+  });
+});
+
+describe("scalar volume boundary-emphasis transfer function", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+    "utf-8"
+  );
+
+  it("uploads medical scalar volumes as 16-bit half-float to preserve soft-tissue contrast", () => {
+    expect(source).toContain("scalarVolumePayloadToHalfFloat(payload)");
+    expect(source).toContain("texture.type = THREE.HalfFloatType;");
+  });
+
+  it("modulates opacity by local gradient so tissue interfaces become visible surfaces", () => {
+    expect(source).toContain("vec3 scalarGradient(vec3 location)");
+    expect(source).toContain("float structuredOpacity(float opacityValue, vec3 gradient)");
+    expect(source).toContain("mix(uInteriorOpacity, 1.0, edge)");
+    expect(source).toContain("float opacity = structuredOpacity(opacityValue, gradient);");
+  });
+
+  it("corrects the shading normal for anisotropic voxel spacing", () => {
+    expect(source).toContain("uniform vec3 uVolumeScale;");
+    expect(source).toContain("gradient / max(vec3(0.06), uVolumeScale)");
   });
 });

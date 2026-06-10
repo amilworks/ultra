@@ -13,14 +13,15 @@ import (
 )
 
 type NATSConfig struct {
-	URL                 string
-	Stream              string
-	JobsSubject         string
-	RareSpotJobsSubject string
-	EventsSubject       string
-	CancelSubject       string
-	EventConsumer       string
-	ConsumerTargets     []QueueConsumerTarget
+	URL                  string
+	Stream               string
+	JobsSubject          string
+	RareSpotJobsSubject  string
+	DataAgentJobsSubject string
+	EventsSubject        string
+	CancelSubject        string
+	EventConsumer        string
+	ConsumerTargets      []QueueConsumerTarget
 }
 
 type NATSBus struct {
@@ -46,6 +47,9 @@ func NewNATSBus(ctx context.Context, cfg NATSConfig) (*NATSBus, error) {
 	if cfg.CancelSubject == "" {
 		cfg.CancelSubject = "ultra.runs.cancel"
 	}
+	if cfg.DataAgentJobsSubject == "" {
+		cfg.DataAgentJobsSubject = "ultra.data_agent.jobs"
+	}
 	conn, err := nats.Connect(cfg.URL)
 	if err != nil {
 		return nil, err
@@ -61,6 +65,9 @@ func NewNATSBus(ctx context.Context, cfg NATSConfig) (*NATSBus, error) {
 	}
 	if cfg.RareSpotJobsSubject != "" {
 		subjects = append(subjects, cfg.RareSpotJobsSubject)
+	}
+	if cfg.DataAgentJobsSubject != "" {
+		subjects = append(subjects, cfg.DataAgentJobsSubject)
 	}
 	streamConfig := natsStreamConfig(cfg.Stream, subjects)
 	_, err = js.AddStream(&streamConfig)
@@ -89,6 +96,14 @@ func (b *NATSBus) PublishJob(ctx context.Context, job Job) error {
 		subject = b.cfg.RareSpotJobsSubject
 	}
 	return b.publish(ctx, subject, job, natsMessageIDForJob(job))
+}
+
+func (b *NATSBus) PublishDataAgentJob(ctx context.Context, job DataAgentJob) error {
+	subject := strings.TrimSpace(b.cfg.DataAgentJobsSubject)
+	if subject == "" {
+		subject = "ultra.data_agent.jobs"
+	}
+	return b.publish(ctx, subject, job, natsMessageIDForDataAgentJob(job))
 }
 
 func (b *NATSBus) QueueDiagnostics(ctx context.Context) (QueueDiagnostics, error) {
@@ -123,6 +138,7 @@ func (b *NATSBus) queueConsumerTargets() []QueueConsumerTarget {
 	return []QueueConsumerTarget{
 		{Name: "ultra-deepagents-worker", Role: "deepagents", Subject: b.cfg.JobsSubject},
 		{Name: "rarespot-ecology-worker", Role: "rarespot", Subject: b.cfg.RareSpotJobsSubject},
+		{Name: "ultra-data-agent-worker", Role: "data_agent", Subject: b.cfg.DataAgentJobsSubject},
 		{Name: firstNonEmptyString(b.cfg.EventConsumer, "ultra-control-event-ingest"), Role: "event_ingest", Subject: b.cfg.EventsSubject},
 	}
 }
@@ -330,6 +346,18 @@ func natsMessageIDForJob(job Job) string {
 		return "job:" + runID + ":" + dispatchID
 	}
 	return "job:" + runID
+}
+
+func natsMessageIDForDataAgentJob(job DataAgentJob) string {
+	jobID := strings.TrimSpace(job.JobID)
+	if jobID == "" {
+		return ""
+	}
+	dispatchID := strings.TrimSpace(job.DispatchID)
+	if dispatchID != "" {
+		return "data-agent-job:" + jobID + ":" + dispatchID
+	}
+	return "data-agent-job:" + jobID
 }
 
 func natsMessageIDForRunEvent(event domain.RunEventRecord) string {

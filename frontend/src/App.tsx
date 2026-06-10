@@ -80,7 +80,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
-import { ApiClient, ApiError } from "./lib/api";
+import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
@@ -132,11 +132,38 @@ import {
   fallbackConversationTitleFromText,
   resolveConversationTitle,
 } from "./features/chat/conversation-title";
-import { shouldKeepOptimisticConversationAfterHydration } from "./features/chat/stale-conversation";
 import {
+  prependResolvedConversation,
+  shouldKeepOptimisticConversationAfterHydration,
+} from "./features/chat/stale-conversation";
+import {
+  createBulkResourceShareGrants as createBulkResourceShareGrantsRequest,
+  createResourceCollectionShareGrants as createResourceCollectionShareGrantsRequest,
+  createResourceShareGrant as createResourceShareGrantRequest,
+  deleteBulkResources as deleteBulkResourcesRequest,
+  deleteResourceCollection as deleteResourceCollectionRequest,
   loadComposerResources,
   loadLibraryResources,
+  loadResourceFolders,
+  loadResourceFolderResources,
+  loadResourceShareGrants as loadResourceShareGrantsRequest,
+  removeResourceFromCollection as removeResourceFromCollectionRequest,
+  renameResource as renameResourceRequest,
+  renameResourceCollection as renameResourceCollectionRequest,
+  restoreBulkResources as restoreBulkResourcesRequest,
+  restoreResourceCollection as restoreResourceCollectionRequest,
+  restoreResource as restoreResourceRequest,
+  revokeResourceShareGrant as revokeResourceShareGrantRequest,
 } from "./features/resources/client";
+import {
+  createResourceUploadQueueStore,
+  hydrateResourceUploadProgressFromQueueStore,
+  persistResourceUploadProgressEvent,
+} from "./features/resources/uploadQueueStore";
+import {
+  createResourceUploadProgressFrameBatcher,
+  mergeResourceUploadProgress,
+} from "./features/resources/uploadProgressBatcher";
 import {
   DEFAULT_THINKING_TEXT,
   getPhaseThinkingText,
@@ -160,7 +187,9 @@ import type {
   ConversationRecord,
   ProgressEvent,
   ResourceComputationSuggestion,
+  ResourceCollectionRecord,
   ResourceRecord,
+  ResourceShareGrantRecord,
   RunEvent,
   Sam3InteractiveRequest,
   SantaBarbaraWeatherResponse,
@@ -192,7 +221,14 @@ import type {
   YoloFigureClassCount,
 } from "./components/chat/ToolResultCards";
 import type {
+  ResourceCollectionAddSelectionRequest,
+  ResourceCollectionSelectionRequest,
   ResourceKindFilter,
+  ResourceShareGrantRequest,
+  ResourceSharingFilter,
+  ResourceStatusFilter,
+  ResourceUploadProgress,
+  ResourceUploadReselectionContext,
   ResourceSourceFilter,
 } from "./components/ResourceBrowser";
 import {
@@ -245,6 +281,19 @@ type BisqueResourceCounts = {
 type BisqueResourceCountsState = {
   requestKey: string;
   counts: BisqueResourceCounts | null;
+};
+
+const MISSING_REQUESTED_CONVERSATION_MESSAGE =
+  "Requested chat was not found. Opened the latest available conversation instead.";
+
+export const shouldShowAppShellBanner = (
+  activePanel: ActivePanel,
+  message: string | null
+): boolean => {
+  if (!message) {
+    return false;
+  }
+  return activePanel === "chat" || message !== MISSING_REQUESTED_CONVERSATION_MESSAGE;
 };
 
 const queueEffectUpdate = (callback: () => void): (() => void) => {
@@ -778,6 +827,20 @@ const CONVERSATION_PAGE_SIZE = 25;
 const RESOURCE_PAGE_SIZE = 50;
 const SCROLL_RESTORE_BOTTOM_THRESHOLD_PX = 280;
 
+const parseResourceTagFilter = (value: string): string[] => {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  value.split(/[\n,]+/).forEach((tag) => {
+    const trimmed = tag.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    tags.push(trimmed);
+  });
+  return tags;
+};
+
 const captureConversationScrollMemory = (
   scrollElement: HTMLElement
 ): ConversationScrollMemory => {
@@ -831,6 +894,8 @@ const replaceConversationIdInLocation = (conversationId: string | null): void =>
 };
 
 const COMPOSER_DRAFTS_STORAGE_KEY = "bisque.frontend.composerDrafts";
+const RESOURCE_UPLOAD_PROGRESS_STORAGE_KEY = "bisque.frontend.resourceUploadProgress.v2";
+const resourceUploadQueueStore = createResourceUploadQueueStore();
 
 const readComposerDraftsFromStorage = (): Record<string, string> => {
   if (typeof window === "undefined") {
@@ -852,6 +917,75 @@ const readComposerDraftsFromStorage = (): Record<string, string> => {
     );
   } catch {
     return {};
+  }
+};
+
+const normalizeResourceUploadProgress = (value: unknown): ResourceUploadProgress | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = String(record.id ?? "").trim();
+  const fileName = String(record.fileName ?? "").trim();
+  if (!id || !fileName) {
+    return null;
+  }
+  return {
+    id,
+    fingerprint:
+      typeof record.fingerprint === "string" && record.fingerprint.trim()
+        ? record.fingerprint.trim()
+        : null,
+    sessionId:
+      typeof record.sessionId === "string" && record.sessionId.trim()
+        ? record.sessionId.trim()
+        : null,
+    fileToken:
+      typeof record.fileToken === "string" && record.fileToken.trim()
+        ? record.fileToken.trim()
+        : null,
+    fileName,
+    relativePath:
+      typeof record.relativePath === "string" && record.relativePath.trim()
+        ? record.relativePath.trim()
+        : null,
+    status: String(record.status ?? "uploading"),
+    totalBytes: Math.max(0, Math.floor(Number(record.totalBytes) || 0)),
+    bytesVerified: Math.max(0, Math.floor(Number(record.bytesVerified) || 0)),
+    error: typeof record.error === "string" && record.error.trim() ? record.error.trim() : null,
+  };
+};
+
+const readResourceUploadProgressFromStorage = (): ResourceUploadProgress[] => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(RESOURCE_UPLOAD_PROGRESS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map(normalizeResourceUploadProgress)
+      .filter((item): item is ResourceUploadProgress => Boolean(item))
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+};
+
+const writeResourceUploadProgressToStorage = (items: ResourceUploadProgress[]): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(RESOURCE_UPLOAD_PROGRESS_STORAGE_KEY, JSON.stringify(items.slice(0, 12)));
+  } catch {
+    // Local persistence is best effort; backend upload sessions remain authoritative.
   }
 };
 
@@ -7562,11 +7696,36 @@ export function App() {
     null
   );
   const [resources, setResources] = useState<ResourceRecord[]>([]);
+  const [resourceCollections, setResourceCollections] = useState<ResourceCollectionRecord[]>([]);
+  const [activeResourceCollectionId, setActiveResourceCollectionId] = useState<string | null>(null);
+  const [activeResourceCollectionSnapshot, setActiveResourceCollectionSnapshot] =
+    useState<ResourceCollectionRecord | null>(null);
   const [resourceTotalCount, setResourceTotalCount] = useState(0);
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourcesLoadingMore, setResourcesLoadingMore] = useState(false);
+  const [resourceCollectionsLoading, setResourceCollectionsLoading] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
   const [resourcesUploading, setResourcesUploading] = useState(false);
+  const [resourceUploadProgress, setResourceUploadProgress] = useState<ResourceUploadProgress[]>(
+    () => readResourceUploadProgressFromStorage()
+  );
+  const resourceUploadProgressBatcherRef =
+    useRef<ReturnType<typeof createResourceUploadProgressFrameBatcher> | null>(null);
+  if (resourceUploadProgressBatcherRef.current === null) {
+    resourceUploadProgressBatcherRef.current = createResourceUploadProgressFrameBatcher({
+      onFlush: (events) => {
+        setResourceUploadProgress((current) => {
+          const next = events.reduce(
+            (items, event) => mergeResourceUploadProgress(items, event),
+            current
+          );
+          writeResourceUploadProgressToStorage(next);
+          return next;
+        });
+      },
+    });
+  }
+  const pausedResourceUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const resourceListKeyRef = useRef("");
   const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
@@ -7583,9 +7742,20 @@ export function App() {
   const [resourceKindFilter, setResourceKindFilter] = useState<ResourceKindFilter>("all");
   const [resourceSourceFilter, setResourceSourceFilter] =
     useState<ResourceSourceFilter>("all");
+  const [resourceSharingFilter, setResourceSharingFilter] =
+    useState<ResourceSharingFilter>("all");
+  const [resourceStatusFilter, setResourceStatusFilter] =
+    useState<ResourceStatusFilter>("active");
+  const [resourceTagFilter, setResourceTagFilter] = useState("");
   const [resourceRefreshToken, setResourceRefreshToken] = useState(0);
+  const [resourceCollectionRefreshToken, setResourceCollectionRefreshToken] = useState(0);
   const [resourceDeletingById, setResourceDeletingById] = useState<Record<string, boolean>>({});
+  const [resourceRestoringById, setResourceRestoringById] = useState<Record<string, boolean>>({});
+  const [resourceCollectionRestoringById, setResourceCollectionRestoringById] = useState<
+    Record<string, boolean>
+  >({});
   const [pendingResourceDelete, setPendingResourceDelete] = useState<ResourceRecord | null>(null);
+  const [pendingBulkResourceDelete, setPendingBulkResourceDelete] = useState<ResourceRecord[]>([]);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
   const [adminOrganizations, setAdminOrganizations] = useState<AdminOrganization[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
@@ -7662,6 +7832,48 @@ export function App() {
     () => new ApiClient({ baseUrl: apiBaseUrl, apiKey: DEFAULT_API_KEY }),
     [apiBaseUrl]
   );
+  useEffect(() => {
+    let cancelled = false;
+    void hydrateResourceUploadProgressFromQueueStore(resourceUploadQueueStore, {
+      loadUploadSession: (sessionId) => apiClient.getUploadSessionStatus(sessionId),
+    })
+      .then((hydratedProgress) => {
+        if (cancelled || hydratedProgress.length === 0) {
+          return;
+        }
+        setResourceUploadProgress((current) => {
+          const hydratedIds = new Set(hydratedProgress.map((item) => item.id));
+          const next = [
+            ...hydratedProgress,
+            ...current.filter((item) => !hydratedIds.has(item.id)),
+          ].slice(0, 12);
+          writeResourceUploadProgressToStorage(next);
+          return next;
+        });
+      })
+      .catch(() => {
+        // Queue hydration is best effort; server upload sessions stay authoritative.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient]);
+  useEffect(
+    () => () => {
+      resourceUploadProgressBatcherRef.current?.clear();
+    },
+    []
+  );
+  const activeResourceCollection = useMemo(() => {
+    if (!activeResourceCollectionId) {
+      return null;
+    }
+    return (
+      resourceCollections.find(
+        (collection) => collection.collection_id === activeResourceCollectionId
+      ) ?? activeResourceCollectionSnapshot
+    );
+  }, [activeResourceCollectionId, activeResourceCollectionSnapshot, resourceCollections]);
   const bisqueResourceCountsRequestKey = useMemo(() => {
     if (
       authStatus !== "authenticated" ||
@@ -8006,9 +8218,11 @@ export function App() {
             if (isCancelled) {
               return;
             }
-            restored = [conversationFromRecord(targetRecord), ...restored].sort(
-              (a, b) => b.updatedAt - a.updatedAt
-            );
+            // The requested conversation may already be present under its
+            // resolved id (the URL can reference it by thread id while the list
+            // holds it under the local conversation id). Dedupe by resolved id
+            // so we never render two history rows with the same React key.
+            restored = prependResolvedConversation(conversationFromRecord(targetRecord), restored);
             setUiErrorBanner(null);
           } catch (error) {
             if (isCancelled) {
@@ -8016,9 +8230,7 @@ export function App() {
             }
             if (error instanceof ApiError && error.status === 404) {
               missingRequestedConversationId = targetConversationId;
-              setUiErrorBanner(
-                "Requested chat was not found. Opened the latest available conversation instead."
-              );
+              setUiErrorBanner(MISSING_REQUESTED_CONVERSATION_MESSAGE);
             } else {
               setUiErrorBanner(`Failed to open chat from URL: ${normalizeApiError(error)}`);
             }
@@ -8194,6 +8406,8 @@ export function App() {
     if (authStatus !== "authenticated") {
       resourceListKeyRef.current = "";
       return queueEffectUpdate(() => {
+        setActiveResourceCollectionId(null);
+        setActiveResourceCollectionSnapshot(null);
         setResources([]);
         setResourceTotalCount(0);
         setResourcesError(null);
@@ -8203,10 +8417,16 @@ export function App() {
     }
     let cancelled = false;
     const activeQuery = debouncedResourceQuery.trim();
+    const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
+    const activeCollectionId = activeResourceCollection?.collection_id ?? "";
     const activeResourceListKey = [
+      activeCollectionId ? `folder:${activeCollectionId}` : "library",
       activeQuery,
       resourceKindFilter,
       resourceSourceFilter,
+      resourceSharingFilter,
+      resourceStatusFilter,
+      activeTagFilters.join("\u0001"),
       String(resourceRefreshToken),
     ].join("\u0000");
     resourceListKeyRef.current = activeResourceListKey;
@@ -8219,13 +8439,28 @@ export function App() {
       setResourcesError(null);
       setResources([]);
     });
-    void loadLibraryResources(apiClient, {
-      limit: RESOURCE_PAGE_SIZE,
-      offset: 0,
-      query: activeQuery || undefined,
-      kind: resourceKindFilter,
-      source: resourceSourceFilter,
-    })
+    const request = activeCollectionId
+      ? loadResourceFolderResources(apiClient, activeCollectionId, {
+          limit: RESOURCE_PAGE_SIZE,
+          offset: 0,
+          query: activeQuery || undefined,
+          kind: resourceKindFilter,
+          source: resourceSourceFilter,
+          sharing: resourceSharingFilter,
+          status: resourceStatusFilter,
+          tags: activeTagFilters,
+        })
+      : loadLibraryResources(apiClient, {
+          limit: RESOURCE_PAGE_SIZE,
+          offset: 0,
+          query: activeQuery || undefined,
+          kind: resourceKindFilter,
+          source: resourceSourceFilter,
+          sharing: resourceSharingFilter,
+          status: resourceStatusFilter,
+          tags: activeTagFilters,
+        });
+    void request
       .then((payload) => {
         if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
           return;
@@ -8253,11 +8488,75 @@ export function App() {
     };
   }, [
     apiClient,
+    activeResourceCollection?.collection_id,
     authStatus,
     debouncedResourceQuery,
     resourceKindFilter,
     resourceRefreshToken,
+    resourceSharingFilter,
     resourceSourceFilter,
+    resourceStatusFilter,
+    resourceTagFilter,
+  ]);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated") {
+      return queueEffectUpdate(() => {
+        setResourceCollections([]);
+        setResourceCollectionsLoading(false);
+      });
+    }
+    let cancelled = false;
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (!cancelled) {
+        setResourceCollectionsLoading(true);
+      }
+    });
+    void loadResourceFolders(apiClient, {
+      limit: 200,
+      query: debouncedResourceQuery,
+      status: resourceStatusFilter,
+    })
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setResourceCollections(payload.collections);
+        setActiveResourceCollectionSnapshot((current) => {
+          if (!activeResourceCollectionId) {
+            return current;
+          }
+          return (
+            payload.collections.find(
+              (collection) => collection.collection_id === activeResourceCollectionId
+            ) ?? current
+          );
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setResourceCollections([]);
+        setResourcesError(normalizeApiError(error));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setResourceCollectionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      cancelQueuedReset();
+    };
+  }, [
+    activeResourceCollectionId,
+    apiClient,
+    authStatus,
+    resourceCollectionRefreshToken,
+    resourceStatusFilter,
+    debouncedResourceQuery,
   ]);
 
   useEffect(() => {
@@ -9758,12 +10057,31 @@ export function App() {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
   const activeConversationStopId = activeConversation?.id ?? null;
+  // Remember the most recent backend run id seen for each conversation so the
+  // Stop button can cancel the server-side run even if the streaming message's
+  // run id is momentarily unavailable (e.g. just after a refresh re-attach).
+  const activeRunIdByConversationRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!activeConversationStopId || !activeStreamingRunId) {
+      return;
+    }
+    activeRunIdByConversationRef.current.set(activeConversationStopId, activeStreamingRunId);
+  }, [activeConversationStopId, activeStreamingRunId]);
   const stopActiveConversation = useCallback((): void => {
     if (!activeConversationStopId) {
       return;
     }
+    const runIdToCancel =
+      activeStreamingRunId ||
+      activeRunIdByConversationRef.current.get(activeConversationStopId) ||
+      "";
     requestStopConversation(activeConversationStopId);
-  }, [activeConversationStopId, requestStopConversation]);
+    if (runIdToCancel) {
+      void apiClient.cancelRun(runIdToCancel, "Stopped from chat composer").catch(() => {
+        // The run may already be terminal; the local stream is already stopped.
+      });
+    }
+  }, [activeConversationStopId, activeStreamingRunId, apiClient, requestStopConversation]);
 
   useEffect(() => {
     const conversationId = activeConversation?.id ?? null;
@@ -9773,26 +10091,32 @@ export function App() {
       return;
     }
     let cancelled = false;
-    let lastFingerprint = "";
+    // Poll incrementally: keep a sequence cursor and accumulate events so each
+    // tick only transfers events the panel does not already hold. Long runs
+    // produce thousands of events; re-paging from zero every tick repeated
+    // dozens of requests per second for no new information.
+    let collectedEvents: RunEvent[] = [];
+    let afterSequence = 0;
 
     const pollRunEvents = async (): Promise<void> => {
       try {
-        const response = await listRunEvents(apiClient, runId, 120);
-        if (cancelled) {
+        const response = await listRunEvents(apiClient, runId, 200, { afterSequence });
+        if (cancelled || response.events.length === 0) {
           return;
         }
-        const fingerprint = JSON.stringify(response.events);
-        if (fingerprint === lastFingerprint) {
-          return;
-        }
-        lastFingerprint = fingerprint;
+        collectedEvents = [...collectedEvents, ...response.events];
+        afterSequence = response.events.reduce((current, event) => {
+          const sequence = Math.floor(Number(event.payload?.sequence) || 0);
+          return sequence > current ? sequence : current;
+        }, afterSequence);
+        const snapshot = collectedEvents;
         updateConversation(conversationId, (current) => ({
           ...current,
           messages: current.messages.map((item) =>
             item.id === messageId
               ? {
                   ...item,
-                  runEvents: response.events,
+                  runEvents: snapshot,
                 }
               : item
           ),
@@ -9943,26 +10267,496 @@ export function App() {
 
   const refreshResources = useCallback((): void => {
     setResourceRefreshToken((value) => value + 1);
+    setResourceCollectionRefreshToken((value) => value + 1);
+  }, []);
+
+  const openResourceCollection = useCallback((collection: ResourceCollectionRecord): void => {
+    const collectionId = String(collection.collection_id || "").trim();
+    if (!collectionId) {
+      return;
+    }
+    setResourcesError(null);
+    setActiveResourceCollectionId(collectionId);
+    setActiveResourceCollectionSnapshot(collection);
+  }, []);
+
+  const clearActiveResourceCollection = useCallback((): void => {
+    setActiveResourceCollectionId(null);
+    setActiveResourceCollectionSnapshot(null);
+  }, []);
+
+  const updateResourceQuery = useCallback((value: string): void => {
+    setResourceQuery(value);
+  }, []);
+
+  const updateResourceKindFilter = useCallback((value: ResourceKindFilter): void => {
+    setResourceKindFilter(value);
+  }, []);
+
+  const updateResourceSourceFilter = useCallback((value: ResourceSourceFilter): void => {
+    setResourceSourceFilter(value);
+  }, []);
+
+  const updateResourceSharingFilter = useCallback((value: ResourceSharingFilter): void => {
+    setResourceSharingFilter(value);
+  }, []);
+
+  const updateResourceStatusFilter = useCallback((value: ResourceStatusFilter): void => {
+    setResourceStatusFilter(value);
+    if (value === "deleted") {
+      setActiveResourceCollectionId(null);
+      setActiveResourceCollectionSnapshot(null);
+    }
+  }, []);
+
+  const updateResourceTagFilter = useCallback((value: string): void => {
+    setResourceTagFilter(value);
+  }, []);
+
+  const flushResourceUploadProgress = useCallback((): void => {
+    resourceUploadProgressBatcherRef.current?.flush();
+  }, []);
+
+  const updateResourceUploadProgress = useCallback((event: UploadProgressEvent): void => {
+    void persistResourceUploadProgressEvent(resourceUploadQueueStore, event);
+    resourceUploadProgressBatcherRef.current?.enqueue(event);
   }, []);
 
   const uploadResourceFiles = useCallback(
-    async (files: File[]): Promise<void> => {
+    async (files: File[], context?: ResourceUploadReselectionContext): Promise<void> => {
       const selectedFiles = files.filter((file) => file.size >= 0);
       if (selectedFiles.length === 0 || resourcesUploading) {
         return;
       }
+      const resumeFrom = context?.resumeFrom;
+      const resumeSession =
+        selectedFiles.length === 1 && resumeFrom?.sessionId && resumeFrom.fileToken
+          ? {
+              sessionId: resumeFrom.sessionId,
+              fileToken: resumeFrom.fileToken,
+              progressId: resumeFrom.id,
+            }
+          : undefined;
+      const uploadTargetCollection = context?.uploadTargetCollection ?? activeResourceCollection;
+      const activeUploadCollectionId = String(uploadTargetCollection?.collection_id ?? "").trim();
+      pausedResourceUploadSessionIdsRef.current.clear();
       setResourcesUploading(true);
       setResourcesError(null);
       try {
-        await apiClient.uploadFiles(selectedFiles);
+        const response = await apiClient.uploadFiles(selectedFiles, {
+          onProgress: updateResourceUploadProgress,
+          resumeSession,
+          pauseSignal: {
+            isPaused: (sessionId: string) => pausedResourceUploadSessionIdsRef.current.has(sessionId),
+          },
+        });
+        const uploadedFileIds = uniqueFileIds(response.uploaded.map((file) => file.file_id));
+        if (activeUploadCollectionId && uploadedFileIds.length > 0) {
+          try {
+            const collectionResponse = await apiClient.addResourcesToCollection(
+              activeUploadCollectionId,
+              uploadedFileIds,
+              {
+                source: "resources_folder_upload",
+              }
+            );
+            setResourceCollections((previous) =>
+              previous.map((collection) =>
+                collection.collection_id === activeUploadCollectionId
+                  ? collectionResponse.collection
+                  : collection
+              )
+            );
+            setActiveResourceCollectionSnapshot((current) =>
+              current?.collection_id === activeUploadCollectionId
+                ? collectionResponse.collection
+                : current
+            );
+          } catch (error) {
+            setResourcesError(`Uploaded, but could not add to folder: ${normalizeApiError(error)}`);
+          }
+        }
+        flushResourceUploadProgress();
+        setResourceUploadProgress((current) => {
+          const next = current.filter((item) => item.status !== "completed");
+          writeResourceUploadProgressToStorage(next);
+          return next;
+        });
         setResourceRefreshToken((value) => value + 1);
+        setResourceCollectionRefreshToken((value) => value + 1);
       } catch (error) {
+        if (error instanceof UploadPausedError) {
+          return;
+        }
         setResourcesError(normalizeApiError(error));
       } finally {
+        flushResourceUploadProgress();
         setResourcesUploading(false);
       }
     },
-    [apiClient, resourcesUploading]
+    [
+      activeResourceCollection,
+      apiClient,
+      flushResourceUploadProgress,
+      resourcesUploading,
+      updateResourceUploadProgress,
+    ]
+  );
+
+  const dismissResourceUploadProgress = useCallback((item: ResourceUploadProgress): void => {
+    void resourceUploadQueueStore.remove(item.id);
+    setResourceUploadProgress((current) => {
+      const next = current.filter((progressItem) => progressItem.id !== item.id);
+      writeResourceUploadProgressToStorage(next);
+      return next;
+    });
+  }, []);
+
+  const pauseResourceUploadProgress = useCallback(
+    async (item: ResourceUploadProgress): Promise<void> => {
+      const sessionId = String(item.sessionId ?? "").trim();
+      if (!sessionId) {
+        return;
+      }
+      pausedResourceUploadSessionIdsRef.current.add(sessionId);
+      updateResourceUploadProgress({
+        id: item.id,
+        fileName: item.fileName,
+        fileIndex: 0,
+        fileToken: item.fileToken ?? undefined,
+        sessionId,
+        fingerprint: item.fingerprint ?? undefined,
+        relativePath: item.relativePath ?? undefined,
+        status: "paused",
+        totalBytes: item.totalBytes,
+        bytesVerified: item.bytesVerified,
+        bytesCommitted: 0,
+      });
+      setResourcesError(null);
+      try {
+        const response = await apiClient.pauseUploadSession(sessionId);
+        updateResourceUploadProgress({
+          id: item.id,
+          fileName: item.fileName,
+          fileIndex: 0,
+          fileToken: item.fileToken ?? undefined,
+          sessionId,
+          fingerprint: item.fingerprint ?? undefined,
+          relativePath: item.relativePath ?? undefined,
+          status: "paused",
+          totalBytes: item.totalBytes,
+          bytesVerified: Math.max(item.bytesVerified, response.session.bytes_verified ?? 0),
+          bytesCommitted: response.session.bytes_committed ?? 0,
+        });
+      } catch (error) {
+        pausedResourceUploadSessionIdsRef.current.delete(sessionId);
+        setResourcesError(normalizeApiError(error));
+      }
+    },
+    [apiClient, updateResourceUploadProgress]
+  );
+
+  const cancelResourceUploadProgress = useCallback(
+    async (item: ResourceUploadProgress): Promise<void> => {
+      const sessionId = String(item.sessionId ?? "").trim();
+      if (!sessionId) {
+        dismissResourceUploadProgress(item);
+        return;
+      }
+      pausedResourceUploadSessionIdsRef.current.delete(sessionId);
+      setResourcesError(null);
+      try {
+        await apiClient.cancelUploadSession(sessionId);
+        dismissResourceUploadProgress(item);
+      } catch (error) {
+        setResourcesError(normalizeApiError(error));
+      }
+    },
+    [apiClient, dismissResourceUploadProgress]
+  );
+
+  const createResourceFolderFromSelection = useCallback(
+    async (request: ResourceCollectionSelectionRequest): Promise<void> => {
+      const folderName = request.name.trim();
+      const resourceIds = Array.from(
+        new Set(request.resourceIds.map((fileId) => fileId.trim()).filter(Boolean))
+      );
+      if (!folderName) {
+        return;
+      }
+      const hasResources = resourceIds.length > 0;
+      const source = hasResources ? "resources_bulk_toolbar" : "resources_new_folder";
+      setResourcesError(null);
+      try {
+        const collectionResponse = await apiClient.createResourceCollection({
+          name: folderName,
+          collection_type: "folder",
+          metadata: {
+            source,
+            selected_resource_count: resourceIds.length,
+          },
+        });
+        if (hasResources) {
+          await apiClient.addResourcesToCollection(
+            collectionResponse.collection.collection_id,
+            resourceIds,
+            {
+              source,
+            }
+          );
+        }
+        setResourceRefreshToken((value) => value + 1);
+        setResourceCollectionRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const addResourcesToFolderFromSelection = useCallback(
+    async (request: ResourceCollectionAddSelectionRequest): Promise<void> => {
+      const collectionId = request.collectionId.trim();
+      const resourceIds = Array.from(
+        new Set(request.resourceIds.map((fileId) => fileId.trim()).filter(Boolean))
+      );
+      if (!collectionId || resourceIds.length === 0) {
+        return;
+      }
+      setResourcesError(null);
+      try {
+        await apiClient.addResourcesToCollection(collectionId, resourceIds, {
+          source: "resources_bulk_toolbar",
+        });
+        setResourceRefreshToken((value) => value + 1);
+        setResourceCollectionRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const renameResourceFromResources = useCallback(
+    async (resource: ResourceRecord, name: string): Promise<void> => {
+      const fileId = String(resource.file_id || "").trim();
+      const nextName = name.trim();
+      if (!fileId || !nextName || nextName === resource.original_name) {
+        return;
+      }
+      setResourcesError(null);
+      try {
+        const response = await renameResourceRequest(apiClient, fileId, nextName);
+        setResources((previous) =>
+          previous.map((item) => (item.file_id === fileId ? response.resource : item))
+        );
+        setComposerResources((previous) =>
+          previous.map((item) => (item.file_id === fileId ? response.resource : item))
+        );
+        setResourceRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const renameResourceCollectionFromResources = useCallback(
+    async (collection: ResourceCollectionRecord, name: string): Promise<void> => {
+      const collectionId = String(collection.collection_id || "").trim();
+      const nextName = name.trim();
+      if (!collectionId || !nextName || nextName === collection.name) {
+        return;
+      }
+      setResourcesError(null);
+      try {
+        const response = await renameResourceCollectionRequest(apiClient, collectionId, nextName);
+        setResourceCollections((previous) =>
+          previous.map((item) =>
+            item.collection_id === collectionId ? response.collection : item
+          )
+        );
+        setActiveResourceCollectionSnapshot((current) =>
+          current?.collection_id === collectionId ? response.collection : current
+        );
+        setResourceCollectionRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const deleteResourceCollectionFromResources = useCallback(
+    async (collection: ResourceCollectionRecord): Promise<void> => {
+      const collectionId = String(collection.collection_id || "").trim();
+      if (!collectionId) {
+        return;
+      }
+      setResourcesError(null);
+      try {
+        await deleteResourceCollectionRequest(apiClient, collectionId);
+        setResourceCollections((previous) =>
+          previous.filter((item) => item.collection_id !== collectionId)
+        );
+        if (activeResourceCollectionId === collectionId) {
+          setActiveResourceCollectionId(null);
+          setActiveResourceCollectionSnapshot(null);
+        }
+        setResourceRefreshToken((value) => value + 1);
+        setResourceCollectionRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [activeResourceCollectionId, apiClient]
+  );
+
+  const removeResourceFromActiveCollection = useCallback(
+    async (resource: ResourceRecord): Promise<void> => {
+      const collectionId = String(activeResourceCollection?.collection_id ?? "").trim();
+      const fileId = String(resource.file_id || "").trim();
+      if (!collectionId || !fileId) {
+        return;
+      }
+      setResourcesError(null);
+      try {
+        const response = await removeResourceFromCollectionRequest(apiClient, collectionId, fileId);
+        setResources((previous) => previous.filter((item) => item.file_id !== fileId));
+        setResourceTotalCount((value) => Math.max(0, value - 1));
+        setResourceCollections((previous) =>
+          previous.map((item) =>
+            item.collection_id === collectionId ? response.collection : item
+          )
+        );
+        setActiveResourceCollectionSnapshot((current) =>
+          current?.collection_id === collectionId ? response.collection : current
+        );
+        setResourceCollectionRefreshToken((value) => value + 1);
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [activeResourceCollection?.collection_id, apiClient]
+  );
+
+  const loadResourceShareGrantsFromResources = useCallback(
+    async (resource: ResourceRecord): Promise<ResourceShareGrantRecord[]> => {
+      const resourceId = String(resource.file_id ?? "").trim();
+      if (!resourceId) {
+        return [];
+      }
+      const response = await loadResourceShareGrantsRequest(apiClient, resourceId);
+      return response.grants;
+    },
+    [apiClient]
+  );
+
+  const createResourceShareGrantFromResources = useCallback(
+    async (
+      resource: ResourceRecord,
+      request: ResourceShareGrantRequest
+    ): Promise<ResourceShareGrantRecord> => {
+      const resourceId = String(resource.file_id ?? "").trim();
+      if (!resourceId) {
+        throw new Error("Resource id is required to grant access.");
+      }
+      setResourcesError(null);
+      try {
+        const response = await createResourceShareGrantRequest(apiClient, resourceId, request);
+        return response.grant;
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const createBulkResourceShareGrantsFromResources = useCallback(
+    async (
+      resources: ResourceRecord[],
+      request: ResourceShareGrantRequest
+    ): Promise<ResourceShareGrantRecord[]> => {
+      const resourceIds = Array.from(
+        new Set(resources.map((resource) => String(resource.file_id ?? "").trim()).filter(Boolean))
+      );
+      if (resourceIds.length === 0) {
+        throw new Error("At least one resource id is required to grant access.");
+      }
+      setResourcesError(null);
+      try {
+        const response = await createBulkResourceShareGrantsRequest(apiClient, resourceIds, request);
+        return response.grants;
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const createResourceCollectionShareGrantsFromResources = useCallback(
+    async (
+      collection: ResourceCollectionRecord,
+      request: ResourceShareGrantRequest
+    ): Promise<ResourceShareGrantRecord[]> => {
+      const collectionId = String(collection.collection_id ?? "").trim();
+      if (!collectionId) {
+        throw new Error("Collection id is required to grant folder access.");
+      }
+      setResourcesError(null);
+      try {
+        const response = await createResourceCollectionShareGrantsRequest(
+          apiClient,
+          collectionId,
+          request
+        );
+        return response.grants;
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const revokeResourceShareGrantFromResources = useCallback(
+    async (
+      resource: ResourceRecord,
+      grant: ResourceShareGrantRecord
+    ): Promise<ResourceShareGrantRecord> => {
+      const resourceId = String(resource.file_id ?? "").trim();
+      const grantId = String(grant.grant_id ?? "").trim();
+      if (!resourceId || !grantId) {
+        throw new Error("Resource id and grant id are required to revoke access.");
+      }
+      setResourcesError(null);
+      try {
+        const response = await revokeResourceShareGrantRequest(apiClient, resourceId, grantId);
+        return response.grant;
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
   );
 
   const resourceHasMore = resources.length < resourceTotalCount;
@@ -9978,20 +10772,41 @@ export function App() {
     }
     const offset = resources.length;
     const activeQuery = debouncedResourceQuery.trim();
+    const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
+    const activeCollectionId = activeResourceCollection?.collection_id ?? "";
     const activeResourceListKey = [
+      activeCollectionId ? `folder:${activeCollectionId}` : "library",
       activeQuery,
       resourceKindFilter,
       resourceSourceFilter,
+      resourceSharingFilter,
+      resourceStatusFilter,
+      activeTagFilters.join("\u0001"),
       String(resourceRefreshToken),
     ].join("\u0000");
     setResourcesLoadingMore(true);
-    void loadLibraryResources(apiClient, {
-      limit: RESOURCE_PAGE_SIZE,
-      offset,
-      query: activeQuery || undefined,
-      kind: resourceKindFilter,
-      source: resourceSourceFilter,
-    })
+    const request = activeCollectionId
+      ? loadResourceFolderResources(apiClient, activeCollectionId, {
+          limit: RESOURCE_PAGE_SIZE,
+          offset,
+          query: activeQuery || undefined,
+          kind: resourceKindFilter,
+          source: resourceSourceFilter,
+          sharing: resourceSharingFilter,
+          status: resourceStatusFilter,
+          tags: activeTagFilters,
+        })
+      : loadLibraryResources(apiClient, {
+          limit: RESOURCE_PAGE_SIZE,
+          offset,
+          query: activeQuery || undefined,
+          kind: resourceKindFilter,
+          source: resourceSourceFilter,
+          sharing: resourceSharingFilter,
+          status: resourceStatusFilter,
+          tags: activeTagFilters,
+        });
+    void request
       .then((payload) => {
         if (resourceListKeyRef.current !== activeResourceListKey) {
           return;
@@ -10023,11 +10838,15 @@ export function App() {
       });
   }, [
     apiClient,
+    activeResourceCollection?.collection_id,
     authStatus,
     debouncedResourceQuery,
     resourceKindFilter,
     resourceRefreshToken,
+    resourceSharingFilter,
     resourceSourceFilter,
+    resourceStatusFilter,
+    resourceTagFilter,
     resourceTotalCount,
     resources.length,
     resourcesLoading,
@@ -10587,74 +11406,87 @@ export function App() {
     setResourceViewerContext(null);
   };
 
+  const removeDeletedResourcesFromClientState = (fileIds: string[]): void => {
+    const deletedFileIds = new Set(uniqueFileIds(fileIds));
+    if (deletedFileIds.size === 0) {
+      return;
+    }
+    setResources((previous) => previous.filter((item) => !deletedFileIds.has(item.file_id)));
+    setConversations((previous) =>
+      previous.map((conversation) => {
+        const filteredUploads = conversation.uploadedFiles.filter(
+          (item) => !deletedFileIds.has(item.file_id)
+        );
+        const nextStagedUploadFileIds = conversation.stagedUploadFileIds.filter(
+          (id) => !deletedFileIds.has(id)
+        );
+        if (
+          filteredUploads.length === conversation.uploadedFiles.length &&
+          nextStagedUploadFileIds.length === conversation.stagedUploadFileIds.length
+        ) {
+          return conversation;
+        }
+        const nextFailed = { ...conversation.failedUploadPreviewIds };
+        const nextBisqueLinks = { ...conversation.bisqueLinksByFileId };
+        deletedFileIds.forEach((fileId) => {
+          delete nextFailed[fileId];
+          delete nextBisqueLinks[fileId];
+        });
+        const currentFocusedFileIds =
+          conversation.activeSelectionContext?.focused_file_ids ?? [];
+        const nextFocusedFileIds = currentFocusedFileIds.filter(
+          (fileId) => !deletedFileIds.has(fileId)
+        );
+        return {
+          ...conversation,
+          uploadedFiles: filteredUploads,
+          stagedUploadFileIds: nextStagedUploadFileIds,
+          activeSelectionContext:
+            nextFocusedFileIds.length === currentFocusedFileIds.length
+              ? conversation.activeSelectionContext
+              : nextFocusedFileIds.length > 0 && conversation.activeSelectionContext
+                ? {
+                    ...conversation.activeSelectionContext,
+                    focused_file_ids: nextFocusedFileIds,
+                  }
+                : null,
+          failedUploadPreviewIds: nextFailed,
+          bisqueLinksByFileId: nextBisqueLinks,
+          updatedAt: Date.now(),
+        };
+      })
+    );
+    setResourceViewerContext((current) => {
+      if (!current) {
+        return current;
+      }
+      const nextFiles = current.uploadedFiles.filter(
+        (item) => !deletedFileIds.has(item.file_id)
+      );
+      if (nextFiles.length === current.uploadedFiles.length) {
+        return current;
+      }
+      if (nextFiles.length === 0) {
+        setViewerOpen(false);
+        return null;
+      }
+      const nextLinks = { ...current.bisqueLinksByFileId };
+      deletedFileIds.forEach((fileId) => {
+        delete nextLinks[fileId];
+      });
+      return {
+        uploadedFiles: nextFiles,
+        bisqueLinksByFileId: nextLinks,
+      };
+    });
+  };
+
   const deleteResource = async (resource: ResourceRecord): Promise<void> => {
     const fileId = resource.file_id;
     setResourceDeletingById((previous) => ({ ...previous, [fileId]: true }));
     try {
       await apiClient.deleteResource(fileId);
-      setResources((previous) => previous.filter((item) => item.file_id !== fileId));
-      setConversations((previous) =>
-        previous.map((conversation) => {
-          const filteredUploads = conversation.uploadedFiles.filter(
-            (item) => item.file_id !== fileId
-          );
-          const nextStagedUploadFileIds = conversation.stagedUploadFileIds.filter(
-            (id) => id !== fileId
-          );
-          if (
-            filteredUploads.length === conversation.uploadedFiles.length &&
-            nextStagedUploadFileIds.length === conversation.stagedUploadFileIds.length
-          ) {
-            return conversation;
-          }
-          const nextFailed = { ...conversation.failedUploadPreviewIds };
-          delete nextFailed[fileId];
-          const nextBisqueLinks = { ...conversation.bisqueLinksByFileId };
-          delete nextBisqueLinks[fileId];
-          return {
-            ...conversation,
-            uploadedFiles: filteredUploads,
-            stagedUploadFileIds: nextStagedUploadFileIds,
-            activeSelectionContext:
-              conversation.activeSelectionContext?.focused_file_ids?.includes(fileId)
-                ? (() => {
-                    const nextFocusedFileIds =
-                      conversation.activeSelectionContext?.focused_file_ids?.filter(
-                        (id) => id !== fileId
-                      ) ?? [];
-                    return nextFocusedFileIds.length > 0
-                      ? {
-                          ...conversation.activeSelectionContext,
-                          focused_file_ids: nextFocusedFileIds,
-                        }
-                      : null;
-                  })()
-                : conversation.activeSelectionContext,
-            failedUploadPreviewIds: nextFailed,
-            bisqueLinksByFileId: nextBisqueLinks,
-            updatedAt: Date.now(),
-          };
-        })
-      );
-      setResourceViewerContext((current) => {
-        if (!current) {
-          return current;
-        }
-        const nextFiles = current.uploadedFiles.filter((item) => item.file_id !== fileId);
-        if (nextFiles.length === current.uploadedFiles.length) {
-          return current;
-        }
-        if (nextFiles.length === 0) {
-          setViewerOpen(false);
-          return null;
-        }
-        const nextLinks = { ...current.bisqueLinksByFileId };
-        delete nextLinks[fileId];
-        return {
-          uploadedFiles: nextFiles,
-          bisqueLinksByFileId: nextLinks,
-        };
-      });
+      removeDeletedResourcesFromClientState([fileId]);
       setResourcesError(null);
     } catch (error) {
       setResourcesError(normalizeApiError(error));
@@ -10667,8 +11499,149 @@ export function App() {
     }
   };
 
+  const restoreResource = async (resource: ResourceRecord): Promise<void> => {
+    const fileId = resource.file_id;
+    setResourceRestoringById((previous) => ({ ...previous, [fileId]: true }));
+    try {
+      const response = await restoreResourceRequest(apiClient, fileId);
+      setResources((previous) => {
+        const remaining = previous.filter((item) => item.file_id !== fileId);
+        if (resourceStatusFilter === "deleted") {
+          return remaining;
+        }
+        return [response.resource, ...remaining];
+      });
+      if (resourceStatusFilter === "deleted") {
+        setResourceTotalCount((value) => Math.max(0, value - 1));
+      }
+      setResourceRefreshToken((value) => value + 1);
+      setResourceCollectionRefreshToken((value) => value + 1);
+      setResourcesError(null);
+    } catch (error) {
+      setResourcesError(normalizeApiError(error));
+    } finally {
+      setResourceRestoringById((previous) => {
+        const next = { ...previous };
+        delete next[fileId];
+        return next;
+      });
+    }
+  };
+
+  const restoreResourceCollection = async (
+    collection: ResourceCollectionRecord
+  ): Promise<void> => {
+    const collectionId = String(collection.collection_id || "").trim();
+    if (!collectionId) {
+      return;
+    }
+    setResourceCollectionRestoringById((previous) => ({
+      ...previous,
+      [collectionId]: true,
+    }));
+    try {
+      const response = await restoreResourceCollectionRequest(apiClient, collectionId);
+      setResourceCollections((previous) => {
+        const remaining = previous.filter((item) => item.collection_id !== collectionId);
+        if (resourceStatusFilter === "deleted") {
+          return remaining;
+        }
+        return [response.collection, ...remaining];
+      });
+      setResourceRefreshToken((value) => value + 1);
+      setResourceCollectionRefreshToken((value) => value + 1);
+      setResourcesError(null);
+    } catch (error) {
+      setResourcesError(normalizeApiError(error));
+    } finally {
+      setResourceCollectionRestoringById((previous) => {
+        const next = { ...previous };
+        delete next[collectionId];
+        return next;
+      });
+    }
+  };
+
+  const restoreSelectedResources = async (targets: ResourceRecord[]): Promise<void> => {
+    const fileIds = uniqueFileIds(targets.map((resource) => resource.file_id));
+    if (fileIds.length === 0) {
+      return;
+    }
+    setResourceRestoringById((previous) => {
+      const next = { ...previous };
+      fileIds.forEach((fileId) => {
+        next[fileId] = true;
+      });
+      return next;
+    });
+    try {
+      const response = await restoreBulkResourcesRequest(apiClient, fileIds);
+      const restoredIds = new Set(response.resources.map((resource) => resource.file_id));
+      setResources((previous) => {
+        const remaining = previous.filter((item) => !restoredIds.has(item.file_id));
+        if (resourceStatusFilter === "deleted") {
+          return remaining;
+        }
+        const existingIds = new Set(remaining.map((item) => item.file_id));
+        const restoredResources = response.resources.filter(
+          (resource) => !existingIds.has(resource.file_id)
+        );
+        return [...restoredResources, ...remaining];
+      });
+      if (resourceStatusFilter === "deleted") {
+        setResourceTotalCount((value) => Math.max(0, value - restoredIds.size));
+      }
+      setResourceRefreshToken((value) => value + 1);
+      setResourceCollectionRefreshToken((value) => value + 1);
+      setResourcesError(null);
+    } catch (error) {
+      setResourcesError(normalizeApiError(error));
+    } finally {
+      setResourceRestoringById((previous) => {
+        const next = { ...previous };
+        fileIds.forEach((fileId) => {
+          delete next[fileId];
+        });
+        return next;
+      });
+    }
+  };
+
+  const deleteSelectedResources = async (targets: ResourceRecord[]): Promise<void> => {
+    const fileIds = uniqueFileIds(targets.map((resource) => resource.file_id));
+    if (fileIds.length === 0) {
+      return;
+    }
+    setResourceDeletingById((previous) => {
+      const next = { ...previous };
+      fileIds.forEach((fileId) => {
+        next[fileId] = true;
+      });
+      return next;
+    });
+    try {
+      await deleteBulkResourcesRequest(apiClient, fileIds);
+      removeDeletedResourcesFromClientState(fileIds);
+      setResourcesError(null);
+    } catch (error) {
+      setResourcesError(normalizeApiError(error));
+    } finally {
+      setResourceDeletingById((previous) => {
+        const next = { ...previous };
+        fileIds.forEach((fileId) => {
+          delete next[fileId];
+        });
+        return next;
+      });
+    }
+  };
+
   const requestResourceDelete = (resource: ResourceRecord): void => {
     setPendingResourceDelete(resource);
+  };
+
+  const requestBulkResourceDelete = (resourcesToDelete: ResourceRecord[]): void => {
+    setPendingBulkResourceDelete(resourcesToDelete);
   };
 
   const uploadPendingFiles = async (
@@ -12418,6 +13391,7 @@ export function App() {
       : "Filename match"
     : null;
   const pendingReuseMatchCount = pendingReuseCandidate?.suggestions.length ?? 0;
+  const showAppShellBanner = shouldShowAppShellBanner(activePanel, uiErrorBanner);
 
   if (authStatus !== "authenticated") {
     if (authStatus === "checking" || authProvider === "workos") {
@@ -12813,7 +13787,7 @@ export function App() {
             <div className="app-mobile-shell-brand">BisQue Ultra</div>
           </div>
 
-          {uiErrorBanner ? (
+          {showAppShellBanner ? (
             <div className="bg-background z-10 shrink-0 px-4 pt-3">
               <SystemMessage variant="error" fill>
                 {uiErrorBanner}
@@ -12894,6 +13868,9 @@ export function App() {
             >
               <LazyResourceBrowser
                 resources={resources}
+                resourceCollections={resourceCollections}
+                resourceCollectionsLoading={resourceCollectionsLoading}
+                activeResourceCollection={activeResourceCollection}
                 totalCount={resourceTotalCount}
                 loading={resourcesLoading}
                 loadingMore={resourcesLoadingMore}
@@ -12902,23 +13879,69 @@ export function App() {
                 query={resourceQuery}
                 kindFilter={resourceKindFilter}
                 sourceFilter={resourceSourceFilter}
+                sharingFilter={resourceSharingFilter}
+                statusFilter={resourceStatusFilter}
+                tagFilter={resourceTagFilter}
                 deletingFileIds={resourceDeletingById}
-                onQueryChange={setResourceQuery}
-                onKindFilterChange={setResourceKindFilter}
-                onSourceFilterChange={setResourceSourceFilter}
+                restoringFileIds={resourceRestoringById}
+                restoringCollectionIds={resourceCollectionRestoringById}
+                onQueryChange={updateResourceQuery}
+                onKindFilterChange={updateResourceKindFilter}
+                onSourceFilterChange={updateResourceSourceFilter}
+                onSharingFilterChange={updateResourceSharingFilter}
+                onStatusFilterChange={updateResourceStatusFilter}
+                onTagFilterChange={updateResourceTagFilter}
                 onRefresh={refreshResources}
                 onLoadMore={loadMoreResources}
-                onUploadFiles={(files: File[]) => {
-                  void uploadResourceFiles(files);
+                onUploadFiles={(files: File[], context?: ResourceUploadReselectionContext) => {
+                  void uploadResourceFiles(files, context);
                 }}
                 uploading={resourcesUploading}
+                uploadProgress={resourceUploadProgress}
+                onDismissUploadProgress={dismissResourceUploadProgress}
+                onPauseUploadProgress={(item: ResourceUploadProgress) => {
+                  void pauseResourceUploadProgress(item);
+                }}
+                onCancelUploadProgress={(item: ResourceUploadProgress) => {
+                  void cancelResourceUploadProgress(item);
+                }}
                 onOpenResource={openResourceInViewer}
                 onUseInChat={addResourceToActiveConversation}
                 onDeleteResource={(resource: ResourceRecord) => {
                   requestResourceDelete(resource);
                 }}
+                onRenameResource={renameResourceFromResources}
+                onRestoreResource={(resource: ResourceRecord) => {
+                  void restoreResource(resource);
+                }}
+                onRemoveResourceFromCollection={removeResourceFromActiveCollection}
+                onDeleteSelectedResources={(selectedResources: ResourceRecord[]) => {
+                  requestBulkResourceDelete(selectedResources);
+                }}
+                onRestoreSelectedResources={(selectedResources: ResourceRecord[]) => {
+                  void restoreSelectedResources(selectedResources);
+                }}
+                onCreateCollectionFromSelection={createResourceFolderFromSelection}
+                onAddSelectionToCollection={addResourcesToFolderFromSelection}
+                onLoadResourceShareGrants={loadResourceShareGrantsFromResources}
+                onCreateResourceShareGrant={createResourceShareGrantFromResources}
+                onCreateBulkResourceShareGrants={createBulkResourceShareGrantsFromResources}
+                onCreateResourceCollectionShareGrants={
+                  createResourceCollectionShareGrantsFromResources
+                }
+                onRevokeResourceShareGrant={revokeResourceShareGrantFromResources}
+                onOpenCollection={openResourceCollection}
+                onRenameCollection={renameResourceCollectionFromResources}
+                onDeleteCollection={deleteResourceCollectionFromResources}
+                onRestoreCollection={(collection: ResourceCollectionRecord) => {
+                  void restoreResourceCollection(collection);
+                }}
+                onClearActiveCollection={clearActiveResourceCollection}
                 thumbnailUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceThumbnailUrl(resource.file_id)
+                }
+                downloadUrlFor={(resource: ResourceRecord) =>
+                  apiClient.resourceDownloadUrl(resource.file_id)
                 }
               />
             </Suspense>
@@ -13584,9 +14607,9 @@ export function App() {
               <AlertDialogMedia className="bg-destructive/12 text-destructive">
                 <Trash className="size-7" />
               </AlertDialogMedia>
-              <AlertDialogTitle>Delete uploaded resource?</AlertDialogTitle>
+              <AlertDialogTitle>Move resource to trash?</AlertDialogTitle>
               <AlertDialogDescription>
-                {`Delete "${pendingResourceDelete?.original_name ?? "this file"}" from your resource browser, BisQue catalog, and local cache?`}
+                {`Move "${pendingResourceDelete?.original_name ?? "this file"}" to Trash. You can restore it from Deleted when needed.`}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -13612,7 +14635,54 @@ export function App() {
                   void deleteResource(target);
                 }}
               >
-                Delete
+                Move to trash
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <AlertDialog
+          open={pendingBulkResourceDelete.length > 0}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPendingBulkResourceDelete([]);
+            }
+          }}
+        >
+          <AlertDialogContent size="default">
+            <AlertDialogHeader>
+              <AlertDialogMedia className="bg-destructive/12 text-destructive">
+                <Trash className="size-7" />
+              </AlertDialogMedia>
+              <AlertDialogTitle>Move selected resources to trash?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {`Move ${pendingBulkResourceDelete.length.toLocaleString()} selected ${
+                  pendingBulkResourceDelete.length === 1 ? "resource" : "resources"
+                } to Trash. You can restore them from Deleted when needed.`}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel
+                onClick={() => {
+                  setPendingBulkResourceDelete([]);
+                }}
+              >
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                disabled={
+                  pendingBulkResourceDelete.length === 0 ||
+                  pendingBulkResourceDelete.some((resource) =>
+                    Boolean(resourceDeletingById[resource.file_id])
+                  )
+                }
+                onClick={() => {
+                  const targets = pendingBulkResourceDelete;
+                  setPendingBulkResourceDelete([]);
+                  void deleteSelectedResources(targets);
+                }}
+              >
+                Move to trash
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

@@ -24,8 +24,9 @@ export const listSessionConversations = (
 export const listRunEvents = (
   apiClient: ApiClient,
   runId: string,
-  limit = 200
-): Promise<RunEventsResponse> => apiClient.getRunEvents(runId, limit);
+  limit = 200,
+  options?: { afterSequence?: number }
+): Promise<RunEventsResponse> => apiClient.getRunEvents(runId, limit, options);
 
 export const listRunArtifacts = (
   apiClient: ApiClient,

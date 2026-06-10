@@ -2,6 +2,7 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 )
@@ -17,6 +18,14 @@ func NewSplitBus(jobs Bus, events Bus) *SplitBus {
 
 func (b *SplitBus) PublishJob(ctx context.Context, job Job) error {
 	return b.jobs.PublishJob(ctx, job)
+}
+
+func (b *SplitBus) PublishDataAgentJob(ctx context.Context, job DataAgentJob) error {
+	publisher, ok := b.jobs.(DataAgentJobPublisher)
+	if !ok {
+		return errors.New("data agent job publisher is not configured")
+	}
+	return publisher.PublishDataAgentJob(ctx, job)
 }
 
 func (b *SplitBus) PublishCancel(ctx context.Context, cancel CancelSignal) error {

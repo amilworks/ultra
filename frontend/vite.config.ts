@@ -39,10 +39,25 @@ export default defineConfig({
     rolldownOptions: {
       output: {
         manualChunks(id) {
-          if (!id.includes("node_modules")) {
+          const normalizedId = id.replace(/\\/g, "/");
+          if (!normalizedId.includes("node_modules")) {
+            if (normalizedId.endsWith("/src/lib/api.ts")) {
+              return "api-client";
+            }
+            if (normalizedId.includes("/src/features/resources/")) {
+              return "resources-client";
+            }
+            if (normalizedId.includes("/src/features/admin/")) {
+              return "admin-client";
+            }
+            if (normalizedId.includes("/src/features/training/")) {
+              return "training-client";
+            }
+            if (normalizedId.includes("/src/features/chat/")) {
+              return "chat-client";
+            }
             return undefined;
           }
-          const normalizedId = id.replace(/\\/g, "/");
           if (
             normalizedId.includes("lucide-react") ||
             normalizedId.includes("use-stick-to-bottom") ||

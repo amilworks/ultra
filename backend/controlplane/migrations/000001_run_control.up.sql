@@ -133,6 +133,224 @@ CREATE TABLE IF NOT EXISTS control_artifacts (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS control_resources (
+  resource_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  original_name text NOT NULL,
+  content_type text,
+  size_bytes bigint NOT NULL DEFAULT 0,
+  sha256 text,
+  storage_uri text,
+  storage_path text,
+  source_type text NOT NULL DEFAULT 'upload',
+  resource_kind text NOT NULL DEFAULT 'file',
+  source_uri text,
+  project_id text,
+  status text NOT NULL DEFAULT 'active',
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  deleted_at timestamptz,
+  retention_expires_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_search_documents (
+  resource_id text PRIMARY KEY REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  project_id text,
+  status text NOT NULL DEFAULT 'active',
+  search_text text NOT NULL DEFAULT '',
+  search_vector tsvector NOT NULL DEFAULT ''::tsvector,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_events (
+  event_id text PRIMARY KEY,
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  actor_user_id text,
+  actor_org_id text,
+  event_type text NOT NULL,
+  ts timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_share_grants (
+  grant_id text PRIMARY KEY,
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  grantee_user_id text,
+  grantee_org_id text,
+  role text NOT NULL DEFAULT 'read',
+  status text NOT NULL DEFAULT 'active',
+  created_by_user_id text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_collections (
+  collection_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  project_id text,
+  parent_collection_id text REFERENCES control_resource_collections(collection_id) ON DELETE SET NULL,
+  name text NOT NULL,
+  description text,
+  collection_type text NOT NULL DEFAULT 'collection',
+  status text NOT NULL DEFAULT 'active',
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_collection_share_grants (
+  grant_id text PRIMARY KEY,
+  collection_id text NOT NULL REFERENCES control_resource_collections(collection_id) ON DELETE CASCADE,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  grantee_user_id text,
+  grantee_org_id text,
+  role text NOT NULL DEFAULT 'read',
+  status text NOT NULL DEFAULT 'active',
+  created_by_user_id text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_resource_collection_members (
+  collection_id text NOT NULL REFERENCES control_resource_collections(collection_id) ON DELETE CASCADE,
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  position bigint NOT NULL DEFAULT 0,
+  added_by_user_id text,
+  added_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  PRIMARY KEY (collection_id, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS control_dataset_snapshots (
+  snapshot_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  project_id text,
+  source_collection_id text REFERENCES control_resource_collections(collection_id) ON DELETE SET NULL,
+  name text NOT NULL,
+  description text,
+  status text NOT NULL DEFAULT 'active',
+  resource_count bigint NOT NULL DEFAULT 0,
+  total_bytes bigint NOT NULL DEFAULT 0,
+  created_by_user_id text,
+  created_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_dataset_snapshot_resources (
+  snapshot_id text NOT NULL REFERENCES control_dataset_snapshots(snapshot_id) ON DELETE CASCADE,
+  resource_id text NOT NULL,
+  position bigint NOT NULL,
+  original_name text NOT NULL,
+  content_type text,
+  size_bytes bigint NOT NULL DEFAULT 0,
+  sha256 text,
+  source_type text NOT NULL DEFAULT 'upload',
+  resource_kind text NOT NULL DEFAULT 'file',
+  storage_uri text,
+  source_uri text,
+  project_id text,
+  resource_created_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  PRIMARY KEY (snapshot_id, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS control_dataset_snapshot_share_grants (
+  grant_id text PRIMARY KEY,
+  snapshot_id text NOT NULL REFERENCES control_dataset_snapshots(snapshot_id) ON DELETE CASCADE,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  grantee_user_id text,
+  grantee_org_id text,
+  role text NOT NULL DEFAULT 'read',
+  status text NOT NULL DEFAULT 'active',
+  created_by_user_id text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_dataset_snapshot_events (
+  event_id text PRIMARY KEY,
+  snapshot_id text NOT NULL REFERENCES control_dataset_snapshots(snapshot_id) ON DELETE CASCADE,
+  actor_user_id text,
+  actor_org_id text,
+  event_type text NOT NULL,
+  ts timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_data_agent_jobs (
+  job_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  project_id text,
+  job_type text NOT NULL,
+  status text NOT NULL DEFAULT 'queued',
+  resource_count bigint NOT NULL DEFAULT 0,
+  progress_completed bigint NOT NULL DEFAULT 0,
+  progress_total bigint NOT NULL DEFAULT 0,
+  error text,
+  created_by_user_id text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  started_at timestamptz,
+  completed_at timestamptz,
+  input_selector jsonb NOT NULL DEFAULT '{}',
+  output_summary jsonb NOT NULL DEFAULT '{}',
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_data_agent_job_resources (
+  job_id text NOT NULL REFERENCES control_data_agent_jobs(job_id) ON DELETE CASCADE,
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  position bigint NOT NULL DEFAULT 0,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  PRIMARY KEY (job_id, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS control_data_agent_job_events (
+  event_id text PRIMARY KEY,
+  job_id text NOT NULL REFERENCES control_data_agent_jobs(job_id) ON DELETE CASCADE,
+  sequence bigint NOT NULL,
+  event_type text NOT NULL,
+  actor_user_id text,
+  actor_org_id text,
+  ts timestamptz NOT NULL,
+  message text,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  UNIQUE (job_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS control_data_agent_job_leases (
+  job_id text PRIMARY KEY REFERENCES control_data_agent_jobs(job_id) ON DELETE CASCADE,
+  worker_id text NOT NULL,
+  lease_token text NOT NULL UNIQUE,
+  lease_expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   session_id text PRIMARY KEY,
   user_id text NOT NULL,
@@ -151,6 +369,75 @@ CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   UNIQUE(user_id, org_id, root_url)
 );
 
+CREATE TABLE IF NOT EXISTS control_upload_sessions (
+  session_id text PRIMARY KEY,
+  owner_user_id text NOT NULL,
+  owner_org_id text,
+  owner_role text,
+  project_id text,
+  source_type text NOT NULL DEFAULT 'upload',
+  status text NOT NULL,
+  total_bytes bigint NOT NULL DEFAULT 0,
+  bytes_received bigint NOT NULL DEFAULT 0,
+  bytes_verified bigint NOT NULL DEFAULT 0,
+  bytes_committed bigint NOT NULL DEFAULT 0,
+  idempotency_key text,
+  browser_fingerprint text,
+  error text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_upload_session_files (
+  session_id text NOT NULL REFERENCES control_upload_sessions(session_id) ON DELETE CASCADE,
+  file_token text NOT NULL,
+  resource_id text,
+  original_name text NOT NULL,
+  relative_path text,
+  content_type text,
+  size_bytes bigint NOT NULL DEFAULT 0,
+  declared_sha256 text,
+  computed_sha256 text,
+  status text NOT NULL,
+  error text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  PRIMARY KEY (session_id, file_token)
+);
+
+CREATE TABLE IF NOT EXISTS control_upload_session_events (
+  event_id text PRIMARY KEY,
+  session_id text NOT NULL REFERENCES control_upload_sessions(session_id) ON DELETE CASCADE,
+  actor_user_id text,
+  actor_org_id text,
+  event_type text NOT NULL,
+  ts timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS control_upload_chunks (
+  session_id text NOT NULL,
+  file_token text NOT NULL,
+  chunk_index integer NOT NULL,
+  byte_offset bigint NOT NULL,
+  size_bytes bigint NOT NULL DEFAULT 0,
+  sha256 text NOT NULL,
+  status text NOT NULL,
+  storage_uri text,
+  received_at timestamptz,
+  verified_at timestamptz,
+  error text,
+  metadata jsonb NOT NULL DEFAULT '{}',
+  PRIMARY KEY (session_id, file_token, chunk_index),
+  FOREIGN KEY (session_id, file_token)
+    REFERENCES control_upload_session_files(session_id, file_token)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
@@ -163,7 +450,52 @@ CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_run_created_idx ON control_artifacts(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_artifacts_sha_idx ON control_artifacts(sha256);
+CREATE INDEX IF NOT EXISTS control_resources_owner_status_created_idx ON control_resources(owner_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_owner_org_status_idx ON control_resources(owner_user_id, owner_org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_project_status_idx ON control_resources(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_sha_idx ON control_resources(sha256);
+CREATE INDEX IF NOT EXISTS control_resources_source_uri_idx ON control_resources(source_uri);
+CREATE INDEX IF NOT EXISTS control_resources_tag_keys_idx ON control_resources USING GIN ((metadata->'tag_keys'));
+CREATE INDEX IF NOT EXISTS control_resource_search_documents_vector_idx ON control_resource_search_documents USING GIN (search_vector);
+CREATE INDEX IF NOT EXISTS control_resource_search_documents_owner_status_idx ON control_resource_search_documents(owner_user_id, owner_org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_search_documents_project_status_idx ON control_resource_search_documents(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_events_resource_ts_idx ON control_resource_events(resource_id, ts DESC);
+CREATE INDEX IF NOT EXISTS control_resource_events_ts_idx ON control_resource_events(ts DESC, event_id ASC);
+CREATE INDEX IF NOT EXISTS control_resource_events_type_ts_idx ON control_resource_events(event_type, ts DESC);
+CREATE INDEX IF NOT EXISTS control_resource_share_grants_resource_status_idx ON control_resource_share_grants(resource_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_share_grants_grantee_user_idx ON control_resource_share_grants(grantee_user_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_share_grants_grantee_org_idx ON control_resource_share_grants(grantee_org_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_collections_owner_type_idx ON control_resource_collections(owner_user_id, owner_org_id, collection_type, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_collections_project_idx ON control_resource_collections(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_collection_status_idx ON control_resource_collection_share_grants(collection_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_grantee_user_idx ON control_resource_collection_share_grants(grantee_user_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_grantee_org_idx ON control_resource_collection_share_grants(grantee_org_id, status);
+CREATE INDEX IF NOT EXISTS control_resource_collection_members_resource_idx ON control_resource_collection_members(resource_id);
+CREATE INDEX IF NOT EXISTS control_resource_collection_members_position_idx ON control_resource_collection_members(collection_id, position, added_at);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshots_owner_status_idx ON control_dataset_snapshots(owner_user_id, owner_org_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshots_collection_idx ON control_dataset_snapshots(source_collection_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_resources_position_idx ON control_dataset_snapshot_resources(snapshot_id, position);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_resources_resource_idx ON control_dataset_snapshot_resources(resource_id);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_share_grants_snapshot_status_idx ON control_dataset_snapshot_share_grants(snapshot_id, status);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_share_grants_grantee_user_idx ON control_dataset_snapshot_share_grants(grantee_user_id, status);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_share_grants_grantee_org_idx ON control_dataset_snapshot_share_grants(grantee_org_id, status);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_events_snapshot_ts_idx ON control_dataset_snapshot_events(snapshot_id, ts DESC);
+CREATE INDEX IF NOT EXISTS control_dataset_snapshot_events_type_ts_idx ON control_dataset_snapshot_events(event_type, ts DESC);
+CREATE INDEX IF NOT EXISTS control_data_agent_jobs_owner_status_idx ON control_data_agent_jobs(owner_user_id, owner_org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_data_agent_jobs_type_idx ON control_data_agent_jobs(job_type, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_data_agent_jobs_project_idx ON control_data_agent_jobs(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_data_agent_job_resources_resource_idx ON control_data_agent_job_resources(resource_id);
+CREATE INDEX IF NOT EXISTS control_data_agent_job_resources_position_idx ON control_data_agent_job_resources(job_id, position);
+CREATE INDEX IF NOT EXISTS control_data_agent_job_events_job_sequence_idx ON control_data_agent_job_events(job_id, sequence);
+CREATE INDEX IF NOT EXISTS control_data_agent_job_leases_expires_idx ON control_data_agent_job_leases(lease_expires_at);
 CREATE INDEX IF NOT EXISTS control_organizations_status_updated_idx ON control_organizations(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_org_status_idx ON control_users(org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_email_idx ON control_users(lower(email));
 CREATE INDEX IF NOT EXISTS control_bisque_credentials_user_status_idx ON control_bisque_credentials(user_id, org_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_upload_sessions_owner_status_idx ON control_upload_sessions(owner_user_id, owner_org_id, status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS control_upload_sessions_idempotency_idx
+  ON control_upload_sessions(owner_user_id, COALESCE(owner_org_id, ''), idempotency_key)
+  WHERE COALESCE(idempotency_key, '') <> '';
+CREATE INDEX IF NOT EXISTS control_upload_session_files_resource_idx ON control_upload_session_files(resource_id);
+CREATE INDEX IF NOT EXISTS control_upload_session_events_session_ts_idx ON control_upload_session_events(session_id, ts DESC);
+CREATE INDEX IF NOT EXISTS control_upload_chunks_status_idx ON control_upload_chunks(session_id, file_token, status);

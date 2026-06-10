@@ -1190,6 +1190,141 @@ describe("ImageViewerShell", () => {
     expect(screen.getByText("0-75%")).toBeInTheDocument();
   });
 
+  const buildMedicalScalarVolume = (modality: string): UploadViewerInfo => {
+    const scalarPlane = {
+      axis: "z" as const,
+      label: "XY plane",
+      axes: ["Y", "X"],
+      pixel_size: { width: 2, height: 2 },
+      spacing: { row: 1, col: 1 },
+      world_size: { width: 2, height: 2 },
+      aspect_ratio: 1,
+    };
+    return {
+      ...viewerInfo,
+      original_name: "head-ct.nii",
+      modality,
+      dims_order: "ZYX",
+      backend_mode: "scalar",
+      axis_sizes: { T: 1, C: 1, Z: 2, Y: 2, X: 2 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      is_volume: true,
+      display_defaults: {
+        ...(viewerInfo.display_defaults ?? {
+          enhancement: "d",
+          negative: false,
+          rotate: 0,
+          fusion_method: "a",
+          channel_mode: "single",
+          channels: [0],
+          channel_colors: ["#ffffff"],
+          time_index: 0,
+          z_index: 0,
+        }),
+        fusion_method: "a",
+        channel_mode: "single",
+        channels: [0],
+        channel_colors: ["#ffffff"],
+        volume_channel: 0,
+        enhancement: "hounsfield:350.000:1800.000",
+      },
+      service_urls: {
+        ...viewerInfo.service_urls,
+        scalar_volume: "/v2/uploads/file-123/scalar-volume",
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        dims_order: "ZYX",
+        array_shape: [2, 2, 2],
+        array_dtype: "int16",
+        array_min: -1024,
+        array_max: 3071,
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        available_surfaces: ["mpr", "volume", "metadata"],
+        default_surface: "volume",
+        default_axis: "z",
+        slice_axes: ["z"],
+        default_plane: scalarPlane,
+        planes: { z: scalarPlane },
+        volume_mode: "scalar",
+        render_policy: "scalar",
+        diagnostic_surface: "mpr",
+        display_capabilities: ["window_level"],
+        viewer_capabilities: ["volume", "metadata"],
+      },
+    };
+  };
+
+  const renderMedicalScalarVolume = (info: UploadViewerInfo) => {
+    const apiClient = {
+      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+    function Harness() {
+      const [displayState, setDisplayState] = useState(info.display_defaults ?? null);
+      return (
+        <ImageViewerShell
+          viewerInfo={info}
+          apiClient={apiClient}
+          selectedSurface="volume"
+          onSurfaceChange={() => {}}
+          selectedDisplayState={displayState}
+          updateSelectedDisplay={(patch) =>
+            setDisplayState((previous) => (previous ? { ...previous, ...patch } : previous))
+          }
+          clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+          debouncedX={0}
+          debouncedY={0}
+          debouncedZ={0}
+          debouncedT={0}
+          xAxisSize={2}
+          yAxisSize={2}
+          zAxisSize={2}
+          tAxisSize={1}
+          setSelectedIndex={() => {}}
+          selectedCaption=""
+          captionLoading={false}
+        />
+      );
+    }
+    render(<Harness />);
+  };
+
+  it("offers one-click CT window presets that retune the window for medical volumes", async () => {
+    renderMedicalScalarVolume(buildMedicalScalarVolume("medical"));
+    openAdvancedControls();
+
+    // Wide default window (350/1800) matches no preset.
+    const brain = await screen.findByRole("button", { name: "Brain" });
+    expect(brain.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(brain);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Brain" }).getAttribute("aria-pressed")).toBe("true");
+      expect((screen.getByLabelText("Window level") as HTMLInputElement).value).toBe("40");
+      expect((screen.getByLabelText("Window width") as HTMLInputElement).value).toBe("80");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bone" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Bone" }).getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("button", { name: "Brain" }).getAttribute("aria-pressed")).toBe("false");
+      expect((screen.getByLabelText("Window level") as HTMLInputElement).value).toBe("600");
+      expect((screen.getByLabelText("Window width") as HTMLInputElement).value).toBe("2800");
+    });
+  });
+
+  it("hides CT window presets for non-medical scalar volumes but keeps the window sliders", () => {
+    renderMedicalScalarVolume(buildMedicalScalarVolume("materials"));
+    openAdvancedControls();
+
+    expect(screen.queryByRole("button", { name: "Brain" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "CT window presets" })).toBeNull();
+    expect(screen.getByLabelText("Window level")).toBeInTheDocument();
+  });
+
   it("focuses a centered interior cutaway around the selected voxel for volume inspection", async () => {
     const scalarPlane = {
       axis: "z" as const,
@@ -2045,19 +2180,19 @@ describe("ImageViewerShell", () => {
       />
     );
 
-    const metadataSummary = screen.getByLabelText("Metadata at a glance");
-    expect(metadataSummary).toHaveAttribute("data-viewer-metadata-layout", "facts");
-    expect(within(metadataSummary).getByText("Shape")).toBeInTheDocument();
+    const metadataSummary = screen.getByLabelText("Image metadata");
+    expect(metadataSummary).toHaveAttribute("data-viewer-metadata-layout", "groups");
+    expect(within(metadataSummary).getByText("Array shape")).toBeInTheDocument();
     expect(screen.getByText("36 × 246 × 246")).toBeInTheDocument();
-    expect(within(metadataSummary).getByText("Spacing")).toBeInTheDocument();
-    expect(screen.getByText("z=5.000 y=0.480 x=0.480")).toBeInTheDocument();
+    expect(within(metadataSummary).getByText("Voxel spacing")).toBeInTheDocument();
+    expect(screen.getByText("X 0.480 · Y 0.480 · Z 5.000")).toBeInTheDocument();
+    expect(within(metadataSummary).getByText("Field of view")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Technical details" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Raw metadata" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Image Header")).not.toBeInTheDocument();
+    expect(screen.queryByText("Image header")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
 
-    expect(await screen.findByText("Image Header")).toBeInTheDocument();
+    expect(await screen.findByText("Image header")).toBeInTheDocument();
     expect(screen.getByText("scanner")).toBeInTheDocument();
     expect(screen.getByText("CT-1")).toBeInTheDocument();
   });

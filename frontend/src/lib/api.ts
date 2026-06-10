@@ -45,9 +45,39 @@ import type {
   PrairieStatusResponse,
   PrairieSyncResponse,
   ProgressEvent,
+  DataAgentJobControlRequest,
+  DataAgentJobCreateRequest,
+  DataAgentJobListResponse,
+  DataAgentJobResponse,
+  DataAgentJobStatusUpdateRequest,
+  DatasetSnapshotCreateRequest,
+  DatasetSnapshotEventListResponse,
+  DatasetSnapshotListResponse,
+  DatasetSnapshotResponse,
+  DatasetSnapshotShareGrantCreateRequest,
+  DatasetSnapshotShareGrantListResponse,
+  DatasetSnapshotShareGrantResponse,
+  ResourceCollectionAddResourcesResponse,
+  ResourceCollectionCreateRequest,
+  ResourceCollectionListResponse,
+  ResourceCollectionPatchRequest,
+  ResourceCollectionRemoveResourcesResponse,
+  ResourceCollectionResponse,
+  ResourceCollectionShareGrantsCreateResponse,
+  ResourceBulkLifecycleRequest,
+  ResourceBulkLifecycleResponse,
+  ResourceBulkTagRequest,
+  ResourceBulkTagResponse,
   ResourceListResponse,
+  ResourceMetadataFilter,
+  ResourceResponse,
   ResourceComputationLookupRequest,
   ResourceComputationLookupResponse,
+  ResourceShareGrantCreateRequest,
+  ResourceShareGrantListResponse,
+  ResourceShareGrantResponse,
+  ResourceShareGrantsCreateRequest,
+  ResourceShareGrantsCreateResponse,
   ResumableUploadChunkResponse,
   ResumableUploadCompleteResponse,
   ResumableUploadInitRequest,
@@ -95,7 +125,11 @@ import type {
   UploadCaptionResponse,
   UploadViewerHistogramResponse,
   UploadViewerInfo,
+  UploadChunkResponse,
   UploadFilesResponse,
+  UploadSessionCreateRequest,
+  UploadSessionFileCompleteResponse,
+  UploadSessionResponse,
 } from "../types";
 import type * as ViewerManifest from "./viewerManifest";
 
@@ -119,6 +153,50 @@ export type RunStreamOptions = ChatStreamOptions & {
   afterSequence?: number;
 };
 
+export type UploadProgressEvent = {
+  id: string;
+  fileName: string;
+  fileIndex: number;
+  fileToken?: string;
+  sessionId?: string;
+  fingerprint?: string;
+  relativePath?: string;
+  contentType?: string;
+  chunkSizeBytes?: number;
+  status: "creating" | "uploading" | "verifying" | "paused" | "completed" | "failed";
+  totalBytes: number;
+  bytesVerified: number;
+  bytesCommitted: number;
+  error?: string | null;
+};
+
+export type UploadPauseSignal = {
+  isPaused: (sessionId: string, fileToken?: string | null) => boolean;
+};
+
+export type UploadResumeSessionOptions = {
+  sessionId: string;
+  fileToken?: string | null;
+  progressId?: string | null;
+};
+
+export type UploadFilesOptions = {
+  onProgress?: (event: UploadProgressEvent) => void;
+  resumeSession?: UploadResumeSessionOptions;
+  pauseSignal?: UploadPauseSignal;
+};
+
+type V2UploadFilePlan = {
+  file: File;
+  fileIndex: number;
+  fileToken: string;
+  fingerprint: string;
+  relativePath: string | null;
+  contentType: string;
+  chunkSize: number;
+  progressID: string;
+};
+
 export type UpsertConversationOptions = {
   titleSource?: "manual";
 };
@@ -132,6 +210,18 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+  }
+}
+
+export class UploadPausedError extends Error {
+  readonly sessionId: string;
+  readonly fileToken?: string | null;
+
+  constructor(sessionId: string, fileToken?: string | null) {
+    super("Upload paused");
+    this.name = "UploadPausedError";
+    this.sessionId = sessionId;
+    this.fileToken = fileToken ?? null;
   }
 }
 
@@ -157,13 +247,28 @@ const loadViewerManifestModule = () => {
   return viewerManifestModulePromise;
 };
 
-const buildUrl = (baseUrl: string, path: string, params?: Record<string, string>): string => {
+const buildUrl = (
+  baseUrl: string,
+  path: string,
+  params?: Record<string, string | string[]>
+): string => {
   const url = new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
   if (params) {
-    Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => url.searchParams.append(key, item));
+        return;
+      }
+      url.searchParams.set(key, value);
+    });
   }
   return url.toString();
 };
+
+const hexDigest = (digest: ArrayBuffer): string =>
+  Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -171,10 +276,59 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const V2_CHAT_THREAD_MAP_STORAGE_KEY = "bisque-ultra:v2-chat-thread-map";
 const V2_CONVERSATION_STATE_METADATA_KEY = "frontend_state";
 const V2_TITLE_STATE_METADATA_KEY = "title_state";
+const V2_UPLOAD_CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
+const V2_UPLOAD_MAX_PARALLEL_FILES = 4;
+const V2_UPLOAD_MAX_PARALLEL_CHUNKS = 4;
+const V2_UPLOAD_HARD_MAX_PARALLEL = 16;
+const V2_UPLOAD_CHUNK_RETRY_DELAYS_MS = [120, 420];
+
+const boundedUploadConcurrency = (value: unknown, fallback: number): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 1) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.floor(numeric), V2_UPLOAD_HARD_MAX_PARALLEL));
+};
+
+const uploadSessionMaxParallelFiles = (state: UploadSessionResponse): number =>
+  boundedUploadConcurrency(state.limits?.max_parallel_files, V2_UPLOAD_MAX_PARALLEL_FILES);
+
+const uploadSessionMaxParallelChunks = (state: UploadSessionResponse): number =>
+  boundedUploadConcurrency(state.limits?.max_parallel_chunks, V2_UPLOAD_MAX_PARALLEL_CHUNKS);
 
 const asPlainString = (value: unknown): string => String(value ?? "");
 
 const asTrimmedString = (value: unknown): string => String(value ?? "").trim();
+
+const uniqueTrimmedStrings = (values: readonly unknown[] | undefined): string[] => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  values?.forEach((value) => {
+    const trimmed = asTrimmedString(value);
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    result.push(trimmed);
+  });
+  return result;
+};
+
+const resourceMetadataFilterSpecs = (
+  filters: readonly ResourceMetadataFilter[] | undefined
+): string[] => {
+  const specs: string[] = [];
+  filters?.forEach((filter) => {
+    const path = asTrimmedString(filter.path);
+    const operator = asTrimmedString(filter.operator).toLowerCase();
+    const value = asTrimmedString(filter.value);
+    if (!path || !operator) {
+      return;
+    }
+    specs.push(`${path}:${operator}:${value}`);
+  });
+  return specs;
+};
 
 const asOptionalString = (value: unknown): string | null => {
   const text = asTrimmedString(value);
@@ -609,6 +763,37 @@ async function parseError(response: Response): Promise<never> {
   }
   throw new ApiError(`Request failed with status ${response.status}`, response.status, detail);
 }
+
+const normalizeUploadProgressError = (error: unknown): string => {
+  if (error instanceof ApiError) {
+    return error.message;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return asPlainString(error) || "Upload failed";
+};
+
+const sleep = (delayMs: number): Promise<void> =>
+  new Promise((resolve) => globalThis.setTimeout(resolve, Math.max(0, delayMs)));
+
+const isRetryableUploadChunkError = (error: unknown): boolean => {
+  if (error instanceof ApiError) {
+    return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+  }
+  return error instanceof TypeError;
+};
+
+const isUploadSessionPausedConflict = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  error.status === 409 &&
+  /upload session is paused/i.test(error.message);
+
+const isUploadSessionPaused = (
+  options: UploadFilesOptions,
+  sessionId: string,
+  fileToken?: string | null
+): boolean => Boolean(options.pauseSignal?.isPaused(sessionId, fileToken));
 
 export class ApiClient {
   private readonly baseUrl: string;
@@ -1454,6 +1639,30 @@ export class ApiClient {
     return (await response.json()) as AdminIssueListResponse;
   }
 
+  /**
+   * Cancel a user's own run on the control plane. Stopping a chat must stop the
+   * backend run (which keeps consuming worker capacity and model tokens), not
+   * just disconnect the local stream. Best-effort: a run that is already
+   * terminal returns 404/409, which callers treat as already-stopped.
+   */
+  async cancelRun(runId: string, reason?: string): Promise<void> {
+    const normalizedRunId = asTrimmedString(runId);
+    if (!normalizedRunId) {
+      return;
+    }
+    const trimmedReason = asTrimmedString(reason);
+    await this.fetchJson<Record<string, unknown>>(
+      `/v2/runs/${encodeURIComponent(normalizedRunId)}/cancel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason: trimmedReason || "Canceled from chat composer",
+        }),
+      }
+    );
+  }
+
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
     const response = await fetch(
       buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/cancel`),
@@ -2247,6 +2456,7 @@ export class ApiClient {
     let terminalStatus: "succeeded" | "failed" | "canceled" | null = null;
     let terminalDetail: unknown = null;
     let terminalResponseText = "";
+    let lastRunEventSequence = afterSequence;
 
     const handleStreamEvent = (eventName: string, payload: unknown): void => {
       if (eventName === "heartbeat") {
@@ -2268,6 +2478,16 @@ export class ApiClient {
       }
       if (eventName !== "run_event" || !isRecord(payload)) {
         return;
+      }
+      // The server delivers run events in strictly increasing sequence order;
+      // anything at or below the last seen sequence is a duplicate (e.g. a
+      // replay overlap after reconnect) and must not be appended again.
+      const eventSequence = Math.floor(asFiniteNumber(payload.sequence, 0));
+      if (eventSequence > 0) {
+        if (eventSequence <= lastRunEventSequence) {
+          return;
+        }
+        lastRunEventSequence = eventSequence;
       }
 
       const eventKind =
@@ -2406,27 +2626,630 @@ export class ApiClient {
     return completedPayload;
   }
 
-  async uploadFiles(files: File[]): Promise<UploadFilesResponse> {
+  async uploadFiles(files: File[], options: UploadFilesOptions = {}): Promise<UploadFilesResponse> {
     if (files.length === 0) {
       return { file_count: 0, uploaded: [] };
     }
-    const payload = new FormData();
-    files.forEach((file) => payload.append("files", file, file.name));
+    if (files.length > 1) {
+      return this.uploadMultipleFilesWithV2Session(files, options);
+    }
+    const uploaded: UploadFilesResponse["uploaded"] = [];
+    for (const [index, file] of files.entries()) {
+      uploaded.push(await this.uploadFileWithV2Session(file, index, options));
+    }
+    return { file_count: uploaded.length, uploaded };
+  }
 
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/uploads"), {
+  async getUploadSessionStatus(sessionId: string): Promise<UploadSessionResponse> {
+    return this.getUploadSession(sessionId);
+  }
+
+  async pauseUploadSession(sessionId: string): Promise<UploadSessionResponse> {
+    return this.updateUploadSessionControl(
+      `/v2/upload-sessions/${encodeURIComponent(sessionId)}/pause`
+    );
+  }
+
+  async resumeUploadSession(sessionId: string): Promise<UploadSessionResponse> {
+    return this.updateUploadSessionControl(
+      `/v2/upload-sessions/${encodeURIComponent(sessionId)}/resume`
+    );
+  }
+
+  async cancelUploadSession(sessionId: string): Promise<UploadSessionResponse> {
+    return this.updateUploadSessionControl(
+      `/v2/upload-sessions/${encodeURIComponent(sessionId)}/cancel`
+    );
+  }
+
+  private async createUploadSession(
+    payload: UploadSessionCreateRequest
+  ): Promise<UploadSessionResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/upload-sessions"), {
       method: "POST",
-      headers: this.headers(),
-      body: payload,
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
       credentials: "include",
     });
     if (!response.ok) {
       return parseError(response);
     }
-    return (await response.json()) as UploadFilesResponse;
+    return (await response.json()) as UploadSessionResponse;
+  }
+
+  private async getUploadSession(sessionId: string): Promise<UploadSessionResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/upload-sessions/${encodeURIComponent(sessionId)}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as UploadSessionResponse;
+  }
+
+  private async updateUploadSessionControl(path: string): Promise<UploadSessionResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, path),
+      {
+        method: "POST",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as UploadSessionResponse;
+  }
+
+  private async uploadSessionChunk(
+    sessionId: string,
+    fileToken: string,
+    chunkIndex: number,
+    offset: number,
+    chunk: Blob
+  ): Promise<UploadChunkResponse> {
+    const chunkSha = await this.sha256Blob(chunk);
+    const chunkUrl = buildUrl(
+      this.baseUrl,
+      `/v2/upload-sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(
+        fileToken
+      )}/chunks/${encodeURIComponent(String(chunkIndex))}`
+    );
+    for (let attemptIndex = 0; ; attemptIndex += 1) {
+      try {
+        const response = await fetch(chunkUrl, {
+          method: "PUT",
+          headers: this.headers({
+            "Content-Type": "application/octet-stream",
+            "X-Upload-Offset": String(Math.max(0, Math.floor(offset))),
+            "X-Upload-Chunk-Sha256": chunkSha,
+          }),
+          body: chunk,
+          credentials: "include",
+        });
+        if (!response.ok) {
+          await parseError(response);
+        }
+        return (await response.json()) as UploadChunkResponse;
+      } catch (error) {
+        const retryDelayMs = V2_UPLOAD_CHUNK_RETRY_DELAYS_MS[attemptIndex];
+        if (retryDelayMs === undefined || !isRetryableUploadChunkError(error)) {
+          throw error;
+        }
+        await sleep(retryDelayMs);
+      }
+    }
+  }
+
+  private async completeUploadSessionFile(
+    sessionId: string,
+    fileToken: string
+  ): Promise<UploadSessionFileCompleteResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/upload-sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(
+          fileToken
+        )}/complete`
+      ),
+      {
+        method: "POST",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as UploadSessionFileCompleteResponse;
+  }
+
+  private async buildV2UploadFilePlan(file: File, fileIndex: number): Promise<V2UploadFilePlan> {
+    const fileToken = await this.uploadFileToken(file, fileIndex);
+    const fingerprint = await this.fileFingerprint(file);
+    const relativePath = this.fileRelativePath(file);
+    const contentType = file.type || "application/octet-stream";
+    const chunkSize = Math.max(256 * 1024, V2_UPLOAD_CHUNK_SIZE_BYTES);
+    return {
+      file,
+      fileIndex,
+      fileToken,
+      fingerprint,
+      relativePath,
+      contentType,
+      chunkSize,
+      progressID: `${fileToken}:${file.size}:${file.lastModified}`,
+    };
+  }
+
+  private emitV2UploadProgress(
+    plan: V2UploadFilePlan,
+    options: UploadFilesOptions,
+    event: Omit<UploadProgressEvent, "id" | "fileName" | "fileIndex" | "totalBytes" | "fingerprint" | "relativePath" | "contentType" | "chunkSizeBytes">
+  ): void {
+    options.onProgress?.({
+      id: plan.progressID,
+      fileName: plan.file.name || "upload.bin",
+      fileIndex: plan.fileIndex,
+      totalBytes: plan.file.size,
+      fingerprint: plan.fingerprint,
+      relativePath: plan.relativePath ?? undefined,
+      contentType: plan.contentType,
+      chunkSizeBytes: plan.chunkSize,
+      ...event,
+    });
+  }
+
+  private async uploadBatchFingerprint(plans: V2UploadFilePlan[]): Promise<string> {
+    const manifest = plans
+      .map((plan) => `${plan.fingerprint}\t${plan.fileToken}\t${plan.relativePath ?? ""}`)
+      .join("\n");
+    const digest = await this.sha256Text(manifest);
+    return `batch:${plans.length}:${digest}`;
+  }
+
+  private async uploadMultipleFilesWithV2Session(
+    files: File[],
+    options: UploadFilesOptions
+  ): Promise<UploadFilesResponse> {
+    const plans = await Promise.all(files.map((file, index) => this.buildV2UploadFilePlan(file, index)));
+    const latestProgressById = new Map<string, UploadProgressEvent>();
+    const trackedOptions: UploadFilesOptions = {
+      ...options,
+      onProgress: (event) => {
+        latestProgressById.set(event.id, event);
+        options.onProgress?.(event);
+      },
+    };
+    plans.forEach((plan) => {
+      this.emitV2UploadProgress(plan, trackedOptions, {
+        fileToken: plan.fileToken,
+        status: "creating",
+        bytesVerified: 0,
+        bytesCommitted: 0,
+      });
+    });
+    try {
+      const idempotencyKey = await this.uploadBatchFingerprint(plans);
+      let state = await this.createUploadSession({
+        idempotency_key: idempotencyKey,
+        browser_fingerprint: idempotencyKey,
+        total_bytes: plans.reduce((sum, plan) => sum + plan.file.size, 0),
+        files: plans.map((plan) => ({
+          file_token: plan.fileToken,
+          original_name: plan.file.name || "upload.bin",
+          relative_path: plan.relativePath ?? undefined,
+          content_type: plan.contentType,
+          size_bytes: plan.file.size,
+        })),
+      });
+      const sessionId = state.session.session_id;
+      if (!sessionId) {
+        throw new ApiError("Upload session response was missing session state", 500, state);
+      }
+      if (state.session.status === "paused") {
+        state = await this.resumeUploadSession(sessionId);
+      }
+      const uploaded: UploadFilesResponse["uploaded"] = Array.from({ length: plans.length });
+      let nextPlanTaskIndex = 0;
+      const uploadNextFile = async () => {
+        for (;;) {
+          const plan = plans[nextPlanTaskIndex];
+          nextPlanTaskIndex += 1;
+          if (!plan) {
+            return;
+          }
+        const sessionFile = state.files.find((item) => item.file_token === plan.fileToken);
+        if (!sessionFile?.file_token) {
+          throw new ApiError("Upload session response was missing session file state", 500, {
+            session_id: sessionId,
+            file_token: plan.fileToken,
+          });
+        }
+          uploaded[plan.fileIndex] = await this.uploadFilePlanInV2Session(
+            plan,
+            state,
+            sessionId,
+            sessionFile,
+            trackedOptions
+          );
+        }
+      };
+      const workerCount = Math.min(uploadSessionMaxParallelFiles(state), plans.length);
+      await Promise.all(Array.from({ length: workerCount }, () => uploadNextFile()));
+      return { file_count: uploaded.length, uploaded };
+    } catch (error) {
+      const pausedError =
+        error instanceof UploadPausedError || isUploadSessionPausedConflict(error)
+          ? error instanceof UploadPausedError
+            ? error
+            : new UploadPausedError("")
+          : null;
+      plans.forEach((plan) => {
+        const latestProgress = latestProgressById.get(plan.progressID);
+        if (latestProgress?.status === "completed") {
+          return;
+        }
+        if (pausedError) {
+          this.emitV2UploadProgress(plan, trackedOptions, {
+            sessionId: latestProgress?.sessionId,
+            fileToken: latestProgress?.fileToken ?? plan.fileToken,
+            status: "paused",
+            bytesVerified: latestProgress?.bytesVerified ?? 0,
+            bytesCommitted: latestProgress?.bytesCommitted ?? 0,
+          });
+          return;
+        }
+        this.emitV2UploadProgress(plan, trackedOptions, {
+          fileToken: plan.fileToken,
+          status: "failed",
+          bytesVerified: latestProgress?.bytesVerified ?? 0,
+          bytesCommitted: latestProgress?.bytesCommitted ?? 0,
+          error: normalizeUploadProgressError(error),
+        });
+      });
+      if (pausedError) {
+        throw pausedError;
+      }
+      throw error;
+    }
+  }
+
+  private async uploadFilePlanInV2Session(
+    plan: V2UploadFilePlan,
+    state: UploadSessionResponse,
+    sessionId: string,
+    sessionFile: UploadSessionResponse["files"][number],
+    options: UploadFilesOptions
+  ): Promise<UploadFilesResponse["uploaded"][number]> {
+    if (sessionFile.status === "completed" && sessionFile.resource_id) {
+      const complete = await this.completeUploadSessionFile(sessionId, sessionFile.file_token);
+      this.emitV2UploadProgress(plan, options, {
+        sessionId,
+        fileToken: sessionFile.file_token,
+        status: "completed",
+        bytesVerified: plan.file.size,
+        bytesCommitted: plan.file.size,
+      });
+      return complete.resource;
+    }
+
+    const verifiedChunks = new Map<number, { offset: number; size: number }>();
+    (state.chunks ?? [])
+      .filter((chunk) => chunk.file_token === sessionFile.file_token && chunk.status === "verified")
+      .forEach((chunk) => {
+        verifiedChunks.set(chunk.chunk_index, { offset: chunk.offset, size: chunk.size_bytes });
+      });
+
+    const missingChunks: Array<{ chunkIndex: number; offset: number; end: number }> = [];
+    const verifiedChunkSizes = new Map<number, number>();
+    for (let offset = 0, chunkIndex = 0; offset < plan.file.size; chunkIndex += 1) {
+      const end = Math.min(offset + plan.chunkSize, plan.file.size);
+      const existing = verifiedChunks.get(chunkIndex);
+      if (existing && existing.offset === offset && existing.size === end - offset) {
+        verifiedChunkSizes.set(chunkIndex, existing.size);
+      } else {
+        missingChunks.push({ chunkIndex, offset, end });
+      }
+      offset = end;
+    }
+
+    let nextChunkTaskIndex = 0;
+    const verifiedBytes = () =>
+      Array.from(verifiedChunkSizes.values()).reduce((sum, size) => sum + size, 0);
+    const emitPaused = () => {
+      this.emitV2UploadProgress(plan, options, {
+        sessionId,
+        fileToken: sessionFile.file_token,
+        status: "paused",
+        bytesVerified: verifiedBytes(),
+        bytesCommitted: 0,
+      });
+    };
+    const throwIfPaused = () => {
+      if (isUploadSessionPaused(options, sessionId, sessionFile.file_token)) {
+        emitPaused();
+        throw new UploadPausedError(sessionId, sessionFile.file_token);
+      }
+    };
+    const uploadNextChunk = async () => {
+      for (;;) {
+        throwIfPaused();
+        const task = missingChunks[nextChunkTaskIndex];
+        nextChunkTaskIndex += 1;
+        if (!task) {
+          return;
+        }
+        let chunkResponse: UploadChunkResponse;
+        try {
+          chunkResponse = await this.uploadSessionChunk(
+            sessionId,
+            sessionFile.file_token,
+            task.chunkIndex,
+            task.offset,
+            plan.file.slice(task.offset, task.end)
+          );
+        } catch (error) {
+          if (isUploadSessionPausedConflict(error)) {
+            emitPaused();
+            throw new UploadPausedError(sessionId, sessionFile.file_token);
+          }
+          throw error;
+        }
+        verifiedChunkSizes.set(task.chunkIndex, chunkResponse.chunk.size_bytes);
+        this.emitV2UploadProgress(plan, options, {
+          sessionId,
+          fileToken: sessionFile.file_token,
+          status: "uploading",
+          bytesVerified: verifiedBytes(),
+          bytesCommitted: 0,
+        });
+        throwIfPaused();
+      }
+    };
+    const workerCount = Math.min(uploadSessionMaxParallelChunks(state), missingChunks.length);
+    await Promise.all(Array.from({ length: workerCount }, () => uploadNextChunk()));
+
+    throwIfPaused();
+    const complete = await this.completeUploadSessionFile(sessionId, sessionFile.file_token);
+    this.emitV2UploadProgress(plan, options, {
+      sessionId,
+      fileToken: sessionFile.file_token,
+      status: "completed",
+      bytesVerified: plan.file.size,
+      bytesCommitted: plan.file.size,
+    });
+    return complete.resource;
+  }
+
+  private async uploadFileWithV2Session(
+    file: File,
+    fileIndex: number,
+    options: UploadFilesOptions
+  ): Promise<UploadFilesResponse["uploaded"][number]> {
+    const resumeSessionId = asTrimmedString(options.resumeSession?.sessionId);
+    const resumeFileToken = asTrimmedString(options.resumeSession?.fileToken);
+    const resumeProgressId = asTrimmedString(options.resumeSession?.progressId);
+    const fileToken = resumeFileToken || (await this.uploadFileToken(file, fileIndex));
+    const fingerprint = await this.fileFingerprint(file);
+    const relativePath = this.fileRelativePath(file);
+    const contentType = file.type || "application/octet-stream";
+    const chunkSize = Math.max(256 * 1024, V2_UPLOAD_CHUNK_SIZE_BYTES);
+    const progressID = resumeProgressId || `${fileToken}:${file.size}:${file.lastModified}`;
+    const emitProgress = (event: Omit<UploadProgressEvent, "id" | "fileName" | "fileIndex" | "totalBytes">) => {
+      options.onProgress?.({
+        id: progressID,
+        fileName: file.name || "upload.bin",
+        fileIndex,
+        totalBytes: file.size,
+        fingerprint,
+        relativePath: relativePath ?? undefined,
+        contentType,
+        chunkSizeBytes: chunkSize,
+        ...event,
+      });
+    };
+    emitProgress({
+      sessionId: resumeSessionId || undefined,
+      fileToken,
+      status: "creating",
+      bytesVerified: 0,
+      bytesCommitted: 0,
+    });
+    let latestSessionId: string | undefined;
+    let latestFileToken = fileToken;
+    let latestBytesVerified = 0;
+    let latestBytesCommitted = 0;
+    try {
+      let state = resumeSessionId
+        ? await this.getUploadSession(resumeSessionId)
+        : await this.createUploadSession({
+            idempotency_key: fingerprint,
+            browser_fingerprint: fingerprint,
+            total_bytes: file.size,
+            files: [
+              {
+                file_token: fileToken,
+                original_name: file.name || "upload.bin",
+                relative_path: relativePath ?? undefined,
+                content_type: contentType,
+                size_bytes: file.size,
+              },
+            ],
+          });
+      const sessionId = state.session.session_id;
+      if (!sessionId) {
+        throw new ApiError("Upload session response was missing session file state", 500, state);
+      }
+      latestSessionId = sessionId;
+      latestBytesVerified = Math.max(latestBytesVerified, state.session.bytes_verified ?? 0);
+      latestBytesCommitted = Math.max(latestBytesCommitted, state.session.bytes_committed ?? 0);
+      if (state.session.status === "paused") {
+        state = await this.resumeUploadSession(sessionId);
+        latestBytesVerified = Math.max(latestBytesVerified, state.session.bytes_verified ?? 0);
+        latestBytesCommitted = Math.max(latestBytesCommitted, state.session.bytes_committed ?? 0);
+      }
+      const sessionFile = resumeFileToken
+        ? state.files.find((item) => item.file_token === resumeFileToken)
+        : state.files.find((item) => item.file_token === fileToken) ?? state.files[0];
+      if (!sessionFile?.file_token) {
+        throw new ApiError("Upload session response was missing session file state", 500, state);
+      }
+      latestFileToken = sessionFile.file_token;
+      if (state.session.status === "completed" && sessionFile.resource_id) {
+        const complete = await this.completeUploadSessionFile(sessionId, sessionFile.file_token);
+        latestBytesVerified = Math.max(latestBytesVerified, complete.session.bytes_verified);
+        latestBytesCommitted = Math.max(latestBytesCommitted, complete.session.bytes_committed);
+        emitProgress({
+          sessionId,
+          fileToken: sessionFile.file_token,
+          status: "completed",
+          bytesVerified: latestBytesVerified,
+          bytesCommitted: latestBytesCommitted,
+        });
+        return complete.resource;
+      }
+
+      const verifiedChunks = new Map<number, { offset: number; size: number }>();
+      (state.chunks ?? [])
+        .filter((chunk) => chunk.file_token === sessionFile.file_token && chunk.status === "verified")
+        .forEach((chunk) => {
+          verifiedChunks.set(chunk.chunk_index, { offset: chunk.offset, size: chunk.size_bytes });
+        });
+
+      const missingChunks: Array<{ chunkIndex: number; offset: number; end: number }> = [];
+      for (let offset = 0, chunkIndex = 0; offset < file.size; chunkIndex += 1) {
+        const end = Math.min(offset + chunkSize, file.size);
+        const existing = verifiedChunks.get(chunkIndex);
+        if (!existing || existing.offset !== offset || existing.size !== end - offset) {
+          missingChunks.push({ chunkIndex, offset, end });
+        }
+        offset = end;
+      }
+      let nextChunkTaskIndex = 0;
+      const emitPaused = () => {
+        emitProgress({
+          sessionId,
+          fileToken: sessionFile.file_token,
+          status: "paused",
+          bytesVerified: latestBytesVerified,
+          bytesCommitted: latestBytesCommitted,
+        });
+      };
+      const throwIfPaused = () => {
+        if (isUploadSessionPaused(options, sessionId, sessionFile.file_token)) {
+          emitPaused();
+          throw new UploadPausedError(sessionId, sessionFile.file_token);
+        }
+      };
+      const uploadNextChunk = async () => {
+        for (;;) {
+          throwIfPaused();
+          const task = missingChunks[nextChunkTaskIndex];
+          nextChunkTaskIndex += 1;
+          if (!task) {
+            return;
+          }
+          let chunkResponse: UploadChunkResponse;
+          try {
+            chunkResponse = await this.uploadSessionChunk(
+              sessionId,
+              sessionFile.file_token,
+              task.chunkIndex,
+              task.offset,
+              file.slice(task.offset, task.end)
+            );
+          } catch (error) {
+            if (isUploadSessionPausedConflict(error)) {
+              emitPaused();
+              throw new UploadPausedError(sessionId, sessionFile.file_token);
+            }
+            throw error;
+          }
+          latestBytesVerified = Math.max(latestBytesVerified, chunkResponse.session.bytes_verified);
+          latestBytesCommitted = Math.max(latestBytesCommitted, chunkResponse.session.bytes_committed);
+          emitProgress({
+            sessionId,
+            fileToken: sessionFile.file_token,
+            status: "uploading",
+            bytesVerified: latestBytesVerified,
+            bytesCommitted: latestBytesCommitted,
+          });
+          throwIfPaused();
+        }
+      };
+      const workerCount = Math.min(uploadSessionMaxParallelChunks(state), missingChunks.length);
+      await Promise.all(Array.from({ length: workerCount }, () => uploadNextChunk()));
+
+      throwIfPaused();
+      try {
+        const complete = await this.completeUploadSessionFile(sessionId, sessionFile.file_token);
+        latestBytesVerified = Math.max(latestBytesVerified, complete.session.bytes_verified);
+        latestBytesCommitted = Math.max(latestBytesCommitted, complete.session.bytes_committed);
+        emitProgress({
+          sessionId,
+          fileToken: sessionFile.file_token,
+          status: "completed",
+          bytesVerified: latestBytesVerified,
+          bytesCommitted: latestBytesCommitted,
+        });
+        return complete.resource;
+      } catch (error) {
+        if (this.isRecoverableResumableUploadError(error)) {
+          state = await this.getUploadSession(sessionId);
+          latestBytesVerified = Math.max(latestBytesVerified, state.session.bytes_verified ?? 0);
+          latestBytesCommitted = Math.max(latestBytesCommitted, state.session.bytes_committed ?? 0);
+          if (state.session.status === "completed") {
+            const complete = await this.completeUploadSessionFile(sessionId, sessionFile.file_token);
+            latestBytesVerified = Math.max(latestBytesVerified, complete.session.bytes_verified);
+            latestBytesCommitted = Math.max(latestBytesCommitted, complete.session.bytes_committed);
+            emitProgress({
+              sessionId,
+              fileToken: sessionFile.file_token,
+              status: "completed",
+              bytesVerified: latestBytesVerified,
+              bytesCommitted: latestBytesCommitted,
+            });
+            return complete.resource;
+          }
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof UploadPausedError) {
+        throw error;
+      }
+      if (isUploadSessionPausedConflict(error) && latestSessionId) {
+        emitProgress({
+          sessionId: latestSessionId,
+          fileToken: latestFileToken,
+          status: "paused",
+          bytesVerified: latestBytesVerified,
+          bytesCommitted: latestBytesCommitted,
+        });
+        throw new UploadPausedError(latestSessionId, latestFileToken);
+      }
+      emitProgress({
+        sessionId: latestSessionId,
+        fileToken: latestFileToken,
+        status: "failed",
+        bytesVerified: latestBytesVerified,
+        bytesCommitted: latestBytesCommitted,
+        error: normalizeUploadProgressError(error),
+      });
+      throw error;
+    }
   }
 
   private async fileFingerprint(file: File): Promise<string> {
-    const base = `${file.name}:${file.size}:${file.lastModified}:${file.type || "application/octet-stream"}`;
+    const identityName = this.fileRelativePath(file) ?? (file.name || "upload.bin");
+    const base = `${identityName}:${file.size}:${file.lastModified}:${file.type || "application/octet-stream"}`;
     if (typeof window === "undefined" || !window.crypto?.subtle) {
       return base;
     }
@@ -2440,6 +3263,49 @@ export class ApiClient {
     } catch {
       return base;
     }
+  }
+
+  private fileRelativePath(file: File): string | null {
+    const rawPath = String((file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "").trim();
+    if (!rawPath) {
+      return null;
+    }
+    const normalized = rawPath
+      .replace(/\\/g, "/")
+      .split("/")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+      .join("/");
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  private async uploadFileToken(file: File, fileIndex: number): Promise<string> {
+    const fingerprint = await this.fileFingerprint(file);
+    const digest = await this.sha256Text(fingerprint);
+    return `file-${fileIndex}-${digest.slice(0, 16)}`;
+  }
+
+  private async sha256Text(value: string): Promise<string> {
+    const crypto = globalThis.crypto;
+    if (crypto?.subtle) {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+      return hexDigest(digest);
+    }
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return Math.abs(hash >>> 0).toString(16).padStart(8, "0").repeat(8);
+  }
+
+  private async sha256Blob(blob: Blob): Promise<string> {
+    const crypto = globalThis.crypto;
+    if (!crypto?.subtle) {
+      throw new ApiError("Browser crypto is required for verified resumable uploads", 0, null);
+    }
+    const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    return hexDigest(digest);
   }
 
   private async initResumableUpload(
@@ -2682,8 +3548,16 @@ export class ApiClient {
     query?: string;
     kind?: "image" | "video" | "table" | "file";
     source?: "upload" | "bisque_import";
+    sharing?: string;
+    processingStatus?: string;
+    status?: string;
+    tags?: string[];
+    descriptors?: string[];
+    metadataFilters?: ResourceMetadataFilter[];
+    createdAfter?: string;
+    createdBefore?: string;
   }): Promise<ResourceListResponse> {
-    const params: Record<string, string> = {
+    const params: Record<string, string | string[]> = {
       limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
       offset: String(Math.max(0, Number(options?.offset) || 0)),
     };
@@ -2699,6 +3573,38 @@ export class ApiClient {
     if (source) {
       params.source = source;
     }
+    const sharing = String(options?.sharing ?? "").trim();
+    if (sharing && sharing !== "all") {
+      params.sharing = sharing;
+    }
+    const processingStatus = String(options?.processingStatus ?? "").trim();
+    if (processingStatus && processingStatus !== "all") {
+      params.processing_status = processingStatus;
+    }
+    const status = String(options?.status ?? "").trim();
+    if (status && status !== "active") {
+      params.status = status;
+    }
+    const tags = uniqueTrimmedStrings(options?.tags);
+    if (tags.length > 0) {
+      params.tags = tags.join(",");
+    }
+    const descriptors = uniqueTrimmedStrings(options?.descriptors);
+    if (descriptors.length > 0) {
+      params.descriptors = descriptors.join(",");
+    }
+    const metadataFilterSpecs = resourceMetadataFilterSpecs(options?.metadataFilters);
+    if (metadataFilterSpecs.length > 0) {
+      params.metadata_filter = metadataFilterSpecs;
+    }
+    const createdAfter = String(options?.createdAfter ?? "").trim();
+    if (createdAfter) {
+      params.created_after = createdAfter;
+    }
+    const createdBefore = String(options?.createdBefore ?? "").trim();
+    if (createdBefore) {
+      params.created_before = createdBefore;
+    }
     const response = await fetch(buildUrl(this.baseUrl, "/v2/resources", params), {
       method: "GET",
       headers: this.headers(),
@@ -2708,6 +3614,755 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as ResourceListResponse;
+  }
+
+  async bulkTagResources(request: ResourceBulkTagRequest): Promise<ResourceBulkTagResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resources/tags/bulk"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        resource_ids: uniqueTrimmedStrings(request.resource_ids),
+        tags: uniqueTrimmedStrings(request.tags),
+        ...(request.metadata ? { metadata: request.metadata } : {}),
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceBulkTagResponse;
+  }
+
+  async deleteResources(
+    request: ResourceBulkLifecycleRequest
+  ): Promise<ResourceBulkLifecycleResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resources/delete/bulk"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        resource_ids: uniqueTrimmedStrings(request.resource_ids),
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceBulkLifecycleResponse;
+  }
+
+  async restoreResources(
+    request: ResourceBulkLifecycleRequest
+  ): Promise<ResourceBulkLifecycleResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resources/restore/bulk"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        resource_ids: uniqueTrimmedStrings(request.resource_ids),
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceBulkLifecycleResponse;
+  }
+
+  async restoreResource(fileId: string): Promise<ResourceResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId.trim())}/restore`),
+      {
+        method: "POST",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceResponse;
+  }
+
+  async patchResourceMetadata(
+    fileId: string,
+    metadata: Record<string, unknown>
+  ): Promise<ResourceResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId.trim())}`),
+      {
+        method: "PATCH",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ metadata }),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceResponse;
+  }
+
+  async renameResource(fileId: string, originalName: string): Promise<ResourceResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId.trim())}`),
+      {
+        method: "PATCH",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ original_name: originalName.trim() }),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceResponse;
+  }
+
+  async listResourceShareGrants(
+    fileId: string,
+    options?: {
+      limit?: number;
+      status?: string;
+    }
+  ): Promise<ResourceShareGrantListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+    };
+    const status = String(options?.status ?? "").trim();
+    if (status) {
+      params.status = status;
+    }
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId)}/shares`, params),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceShareGrantListResponse;
+  }
+
+  async createResourceShareGrant(
+    fileId: string,
+    request: ResourceShareGrantCreateRequest
+  ): Promise<ResourceShareGrantResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId)}/shares`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(request),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceShareGrantResponse;
+  }
+
+  async createResourceShareGrants(
+    request: ResourceShareGrantsCreateRequest
+  ): Promise<ResourceShareGrantsCreateResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resources/shares/bulk"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(request),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceShareGrantsCreateResponse;
+  }
+
+  async createResourceCollectionShareGrants(
+    collectionId: string,
+    request: ResourceShareGrantCreateRequest
+  ): Promise<ResourceCollectionShareGrantsCreateResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/shares`
+      ),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(request),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionShareGrantsCreateResponse;
+  }
+
+  async revokeResourceShareGrant(
+    fileId: string,
+    grantId: string
+  ): Promise<ResourceShareGrantResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/resources/${encodeURIComponent(fileId)}/shares/${encodeURIComponent(grantId)}`
+      ),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceShareGrantResponse;
+  }
+
+  async createResourceCollection(
+    request: ResourceCollectionCreateRequest
+  ): Promise<ResourceCollectionResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resource-collections"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(request),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionResponse;
+  }
+
+  async listResourceCollections(options?: {
+    limit?: number;
+    offset?: number;
+    query?: string;
+    collectionType?: "collection" | "folder" | "dataset" | string;
+    projectId?: string;
+    status?: "active" | "deleted" | string;
+  }): Promise<ResourceCollectionListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+      offset: String(Math.max(0, Number(options?.offset) || 0)),
+    };
+    const query = String(options?.query ?? "").trim();
+    if (query) {
+      params.q = query;
+    }
+    const collectionType = String(options?.collectionType ?? "").trim();
+    if (collectionType) {
+      params.collection_type = collectionType;
+    }
+    const projectId = String(options?.projectId ?? "").trim();
+    if (projectId) {
+      params.project_id = projectId;
+    }
+    const status = String(options?.status ?? "").trim();
+    if (status && status !== "active") {
+      params.status = status;
+    }
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/resource-collections", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionListResponse;
+  }
+
+  async deleteResourceCollection(collectionId: string): Promise<ResourceCollectionResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}`),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionResponse;
+  }
+
+  async patchResourceCollection(
+    collectionId: string,
+    request: ResourceCollectionPatchRequest
+  ): Promise<ResourceCollectionResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}`),
+      {
+        method: "PATCH",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ name: request.name.trim() }),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionResponse;
+  }
+
+  async restoreResourceCollection(collectionId: string): Promise<ResourceCollectionResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/restore`
+      ),
+      {
+        method: "POST",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionResponse;
+  }
+
+  async addResourcesToCollection(
+    collectionId: string,
+    resourceIds: string[],
+    metadata?: Record<string, unknown>
+  ): Promise<ResourceCollectionAddResourcesResponse> {
+    const body: { resource_ids: string[]; metadata?: Record<string, unknown> } = {
+      resource_ids: resourceIds,
+    };
+    if (metadata) {
+      body.metadata = metadata;
+    }
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resource-collections/${encodeURIComponent(collectionId)}/resources`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionAddResourcesResponse;
+  }
+
+  async removeResourceFromCollection(
+    collectionId: string,
+    resourceId: string
+  ): Promise<ResourceCollectionRemoveResourcesResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/resources/${encodeURIComponent(resourceId.trim())}`
+      ),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceCollectionRemoveResourcesResponse;
+  }
+
+  async listResourceCollectionResources(
+    collectionId: string,
+    options?: {
+      limit?: number;
+      offset?: number;
+      query?: string;
+      kind?: "image" | "video" | "table" | "file";
+      source?: "upload" | "bisque_import";
+    projectId?: string;
+    sharing?: string;
+      processingStatus?: string;
+      status?: string;
+      tags?: string[];
+      descriptors?: string[];
+      metadataFilters?: ResourceMetadataFilter[];
+      createdAfter?: string;
+      createdBefore?: string;
+    }
+  ): Promise<ResourceListResponse> {
+    const params: Record<string, string | string[]> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+      offset: String(Math.max(0, Number(options?.offset) || 0)),
+    };
+    const query = String(options?.query ?? "").trim();
+    if (query) {
+      params.q = query;
+    }
+    const kind = String(options?.kind ?? "").trim();
+    if (kind) {
+      params.kind = kind;
+    }
+    const source = String(options?.source ?? "").trim();
+    if (source) {
+      params.source = source;
+    }
+    const projectId = String(options?.projectId ?? "").trim();
+    if (projectId) {
+      params.project_id = projectId;
+    }
+    const sharing = String(options?.sharing ?? "").trim();
+    if (sharing && sharing !== "all") {
+      params.sharing = sharing;
+    }
+    const processingStatus = String(options?.processingStatus ?? "").trim();
+    if (processingStatus && processingStatus !== "all") {
+      params.processing_status = processingStatus;
+    }
+    const status = String(options?.status ?? "").trim();
+    if (status && status !== "active") {
+      params.status = status;
+    }
+    const tags = uniqueTrimmedStrings(options?.tags);
+    if (tags.length > 0) {
+      params.tags = tags.join(",");
+    }
+    const descriptors = uniqueTrimmedStrings(options?.descriptors);
+    if (descriptors.length > 0) {
+      params.descriptors = descriptors.join(",");
+    }
+    const metadataFilterSpecs = resourceMetadataFilterSpecs(options?.metadataFilters);
+    if (metadataFilterSpecs.length > 0) {
+      params.metadata_filter = metadataFilterSpecs;
+    }
+    const createdAfter = String(options?.createdAfter ?? "").trim();
+    if (createdAfter) {
+      params.created_after = createdAfter;
+    }
+    const createdBefore = String(options?.createdBefore ?? "").trim();
+    if (createdBefore) {
+      params.created_before = createdBefore;
+    }
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resource-collections/${encodeURIComponent(collectionId)}/resources`, params),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as ResourceListResponse;
+  }
+
+  async createDatasetSnapshot(request: DatasetSnapshotCreateRequest): Promise<DatasetSnapshotResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/dataset-snapshots"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(request),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotResponse;
+  }
+
+  async listDatasetSnapshots(options?: {
+    limit?: number;
+    offset?: number;
+    query?: string;
+    projectId?: string;
+    sourceCollectionId?: string;
+    status?: string;
+  }): Promise<DatasetSnapshotListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+      offset: String(Math.max(0, Number(options?.offset) || 0)),
+    };
+    const query = String(options?.query ?? "").trim();
+    if (query) {
+      params.q = query;
+    }
+    const projectId = String(options?.projectId ?? "").trim();
+    if (projectId) {
+      params.project_id = projectId;
+    }
+    const sourceCollectionId = String(options?.sourceCollectionId ?? "").trim();
+    if (sourceCollectionId) {
+      params.source_collection_id = sourceCollectionId;
+    }
+    const status = String(options?.status ?? "").trim();
+    if (status && status !== "active") {
+      params.status = status;
+    }
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/dataset-snapshots", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotListResponse;
+  }
+
+  async deleteDatasetSnapshot(snapshotId: string): Promise<DatasetSnapshotResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}`),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotResponse;
+  }
+
+  async restoreDatasetSnapshot(snapshotId: string): Promise<DatasetSnapshotResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}/restore`),
+      {
+        method: "POST",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotResponse;
+  }
+
+  async getDatasetSnapshot(snapshotId: string): Promise<DatasetSnapshotResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotResponse;
+  }
+
+  async listDatasetSnapshotEvents(
+    snapshotId: string,
+    options?: {
+      limit?: number;
+      offset?: number;
+      eventType?: string;
+      actorUserId?: string;
+    }
+  ): Promise<DatasetSnapshotEventListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+      offset: String(Math.max(0, Number(options?.offset) || 0)),
+    };
+    const eventType = String(options?.eventType ?? "").trim();
+    if (eventType) {
+      params.event_type = eventType;
+    }
+    const actorUserId = String(options?.actorUserId ?? "").trim();
+    if (actorUserId) {
+      params.actor_user_id = actorUserId;
+    }
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}/events`,
+        params
+      ),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotEventListResponse;
+  }
+
+  async listDatasetSnapshotShareGrants(
+    snapshotId: string,
+    options?: { limit?: number; status?: string }
+  ): Promise<DatasetSnapshotShareGrantListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+    };
+    const status = String(options?.status ?? "").trim();
+    if (status) {
+      params.status = status;
+    }
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}/shares`,
+        params
+      ),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotShareGrantListResponse;
+  }
+
+  async createDatasetSnapshotShareGrant(
+    snapshotId: string,
+    request: DatasetSnapshotShareGrantCreateRequest
+  ): Promise<DatasetSnapshotShareGrantResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}/shares`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(request),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotShareGrantResponse;
+  }
+
+  async revokeDatasetSnapshotShareGrant(
+    snapshotId: string,
+    grantId: string
+  ): Promise<DatasetSnapshotShareGrantResponse> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/dataset-snapshots/${encodeURIComponent(snapshotId)}/shares/${encodeURIComponent(grantId)}`
+      ),
+      {
+        method: "DELETE",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DatasetSnapshotShareGrantResponse;
+  }
+
+  async createDataAgentJob(request: DataAgentJobCreateRequest): Promise<DataAgentJobResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/data-agent/jobs"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(request),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DataAgentJobResponse;
+  }
+
+  async listDataAgentJobs(options?: {
+    limit?: number;
+    offset?: number;
+    status?: string;
+    jobType?: string;
+    projectId?: string;
+  }): Promise<DataAgentJobListResponse> {
+    const params: Record<string, string> = {
+      limit: String(Math.max(1, Math.min(1000, Number(options?.limit) || 200))),
+      offset: String(Math.max(0, Number(options?.offset) || 0)),
+    };
+    const status = String(options?.status ?? "").trim();
+    if (status) {
+      params.status = status;
+    }
+    const jobType = String(options?.jobType ?? "").trim();
+    if (jobType) {
+      params.job_type = jobType;
+    }
+    const projectId = String(options?.projectId ?? "").trim();
+    if (projectId) {
+      params.project_id = projectId;
+    }
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/data-agent/jobs", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DataAgentJobListResponse;
+  }
+
+  async getDataAgentJob(jobId: string): Promise<DataAgentJobResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/data-agent/jobs/${encodeURIComponent(jobId)}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DataAgentJobResponse;
+  }
+
+  async updateDataAgentJobStatus(
+    jobId: string,
+    request: DataAgentJobStatusUpdateRequest
+  ): Promise<DataAgentJobResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/data-agent/jobs/${encodeURIComponent(jobId)}/status`),
+      {
+        method: "PATCH",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(request),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DataAgentJobResponse;
+  }
+
+  async controlDataAgentJob(
+    jobId: string,
+    request: DataAgentJobControlRequest
+  ): Promise<DataAgentJobResponse> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/data-agent/jobs/${encodeURIComponent(jobId)}/control`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(request),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as DataAgentJobResponse;
   }
 
   async lookupResourceReuse(
@@ -2743,6 +4398,11 @@ export class ApiClient {
   resourceThumbnailUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
     return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
+  }
+
+  resourceDownloadUrl(fileId: string): string {
+    const safeFileId = encodeURIComponent(fileId);
+    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`);
   }
 
   uploadPreviewUrl(fileId: string): string {
@@ -2881,6 +4541,9 @@ export class ApiClient {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
+      // Volume payloads are tens of MB; skip the HTTP disk cache so we neither
+      // bloat it nor fail the fetch on a cache-write error for large responses.
+      cache: "no-store",
     });
     if (!response.ok) {
       return parseError(response);
@@ -3418,11 +5081,17 @@ export class ApiClient {
     };
   }
 
-  async getRunEvents(runId: string, limit = 200): Promise<RunEventsResponse> {
+  async getRunEvents(
+    runId: string,
+    limit = 200,
+    options?: { afterSequence?: number }
+  ): Promise<RunEventsResponse> {
     const requestedLimit = Math.max(1, Math.floor(asFiniteNumber(limit, 200)));
     const events: RunEvent[] = [];
     let resolvedRunId = runId;
-    let afterSequence = 0;
+    // Callers polling a live run pass the last sequence they already hold so
+    // each poll only transfers new events instead of re-paging from zero.
+    let afterSequence = Math.max(0, Math.floor(asFiniteNumber(options?.afterSequence, 0)));
     while (true) {
       const payload = await this.fetchJson<Record<string, unknown>>(
         `/v2/runs/${encodeURIComponent(runId)}/events`,

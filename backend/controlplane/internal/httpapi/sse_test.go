@@ -193,6 +193,101 @@ func TestRunEventsStreamCatchesUpPersistedEventsWithoutLocalFanout(t *testing.T)
 	}
 }
 
+func TestRunEventsStreamDeliversSequenceOrderWhenBusCarriesPartialEvents(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
+
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "local-user", Title: "ordered stream"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "local-user",
+		Goal:     "ordered stream",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "ordered stream"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/events?stream=true&after_sequence=0", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(rec, req)
+		close(done)
+	}()
+	time.Sleep(40 * time.Millisecond)
+
+	// Simulate a second control-plane replica ingesting deltas 2..5: they are
+	// persisted to the shared store but never reach this replica's local bus.
+	// Only the final delta is ingested locally and fanned out on the bus.
+	var lastEvent domain.RunEventRecord
+	for index := 1; index <= 5; index++ {
+		event, err := mem.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "evt-ordered-" + strconv.Itoa(index),
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "message.delta",
+			Message:   "chunk " + strconv.Itoa(index),
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEvent %d: %v", index, err)
+		}
+		lastEvent = event
+	}
+	if err := bus.PublishRunEvent(ctx, lastEvent); err != nil {
+		t.Fatalf("PublishRunEvent: %v", err)
+	}
+
+	// Well under the 1s periodic catch-up: ordering must not depend on it.
+	time.Sleep(250 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	var sequences []int64
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if !strings.Contains(payload, "\"sequence\"") {
+			continue
+		}
+		marker := "\"sequence\":"
+		start := strings.Index(payload, marker)
+		if start == -1 {
+			continue
+		}
+		rest := payload[start+len(marker):]
+		end := strings.IndexAny(rest, ",}")
+		if end == -1 {
+			continue
+		}
+		sequence, err := strconv.ParseInt(strings.TrimSpace(rest[:end]), 10, 64)
+		if err != nil {
+			continue
+		}
+		sequences = append(sequences, sequence)
+	}
+	if len(sequences) != 6 {
+		t.Fatalf("delivered sequences = %v, want all 6 events (1 accepted + 5 deltas); body=%s", sequences, body)
+	}
+	for index, sequence := range sequences {
+		if int64(index+1) != sequence {
+			t.Fatalf("sequence order = %v, want strictly increasing 1..6 with no gaps", sequences)
+		}
+	}
+}
+
 type listRunEventsHookStore struct {
 	runcontrol.Store
 	afterList   func()

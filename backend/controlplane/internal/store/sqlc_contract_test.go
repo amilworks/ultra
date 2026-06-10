@@ -97,3 +97,70 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 		t.Fatalf("schema.sql missing resource project/status index")
 	}
 }
+
+func TestResourceSearchQueriesUseMetadataValuesNotSerializedJSONKeys(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("queries.sql")
+	if err != nil {
+		t.Fatalf("read queries.sql: %v", err)
+	}
+	generated, err := os.ReadFile("sqlc/queries.sql.go")
+	if err != nil {
+		t.Fatalf("read generated sqlc queries: %v", err)
+	}
+	postgres, err := os.ReadFile("postgres.go")
+	if err != nil {
+		t.Fatalf("read postgres.go: %v", err)
+	}
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000001_run_control.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	for _, file := range []struct {
+		name string
+		text string
+	}{
+		{name: "queries.sql", text: string(source)},
+		{name: "sqlc/queries.sql.go", text: string(generated)},
+		{name: "postgres.go", text: string(postgres)},
+	} {
+		if strings.Contains(file.text, "lower(COALESCE(r.metadata::text") {
+			t.Fatalf("%s still searches serialized resource metadata JSON keys", file.name)
+		}
+		if strings.Contains(file.text, "jsonb_path_query(r.metadata") {
+			t.Fatalf("%s still scans resource metadata JSON values at query time", file.name)
+		}
+		if !strings.Contains(file.text, "control_resource_search_documents") {
+			t.Fatalf("%s missing durable resource search-document query wiring", file.name)
+		}
+		if !strings.Contains(file.text, "search_vector @@ plainto_tsquery('simple'") {
+			t.Fatalf("%s missing indexable resource search-vector predicate", file.name)
+		}
+		if !strings.Contains(file.text, "lower(sd.search_text) LIKE") && !strings.Contains(file.text, "lower(COALESCE(sd.search_text") {
+			t.Fatalf("%s missing phrase-preserving resource search-text predicate", file.name)
+		}
+	}
+	for _, ddl := range []struct {
+		name string
+		text string
+	}{
+		{name: "schema.sql", text: string(schema)},
+		{name: "migration", text: string(migration)},
+	} {
+		for _, want := range []string{
+			"CREATE TABLE IF NOT EXISTS control_resource_search_documents",
+			"search_vector tsvector NOT NULL",
+			"control_resource_search_documents_vector_idx",
+			"control_resource_search_documents_owner_status_idx",
+		} {
+			if !strings.Contains(ddl.text, want) {
+				t.Fatalf("%s missing resource search-document DDL %q", ddl.name, want)
+			}
+		}
+	}
+}

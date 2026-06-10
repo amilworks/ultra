@@ -83,18 +83,6 @@ export type ResourceKindFilter = "all" | "image" | "video" | "table" | "file";
 export type ResourceSourceFilter = "all" | "upload" | "bisque_import";
 export type ResourceSharingFilter = "all" | "private" | "shared_by_me" | "shared_with_me" | "public";
 export type ResourceStatusFilter = "active" | "deleted";
-export type ResourceProcessingFilter =
-  | "all"
-  | "caption_ready"
-  | "metadata_ready"
-  | "tags_ready"
-  | "qc_complete"
-  | "dedupe_checked"
-  | "organization_ready"
-  | "data_agent_ready"
-  | "needs_caption"
-  | "needs_metadata"
-  | "data_agent_failed";
 type ResourceViewMode = "cards" | "table";
 
 export type ResourceUploadProgress = {
@@ -145,26 +133,16 @@ type ResourceBrowserProps = {
   kindFilter: ResourceKindFilter;
   sourceFilter: ResourceSourceFilter;
   sharingFilter?: ResourceSharingFilter;
-  processingFilter?: ResourceProcessingFilter;
   statusFilter?: ResourceStatusFilter;
   tagFilter?: string;
-  descriptorFilter?: string;
-  metadataFilter?: string;
-  createdAfter?: string;
-  createdBefore?: string;
   deletingFileIds: Record<string, boolean>;
   restoringFileIds?: Record<string, boolean>;
   onQueryChange: (value: string) => void;
   onKindFilterChange: (value: ResourceKindFilter) => void;
   onSourceFilterChange: (value: ResourceSourceFilter) => void;
   onSharingFilterChange?: (value: ResourceSharingFilter) => void;
-  onProcessingFilterChange?: (value: ResourceProcessingFilter) => void;
   onStatusFilterChange?: (value: ResourceStatusFilter) => void;
   onTagFilterChange?: (value: string) => void;
-  onDescriptorFilterChange?: (value: string) => void;
-  onMetadataFilterChange?: (value: string) => void;
-  onCreatedAfterChange?: (value: string) => void;
-  onCreatedBeforeChange?: (value: string) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
   onUploadFiles?: (files: File[], context?: ResourceUploadReselectionContext) => void;
@@ -607,19 +585,15 @@ export function ResourceBrowser({
   sourceFilter,
   sharingFilter = "all",
   statusFilter = "active",
+  tagFilter = "",
   deletingFileIds,
   restoringFileIds = {},
   onQueryChange,
   onKindFilterChange,
   onSourceFilterChange,
   onSharingFilterChange,
-  onProcessingFilterChange,
   onStatusFilterChange,
   onTagFilterChange,
-  onDescriptorFilterChange,
-  onMetadataFilterChange,
-  onCreatedAfterChange,
-  onCreatedBeforeChange,
   onRefresh,
   onLoadMore,
   onUploadFiles,
@@ -775,11 +749,13 @@ export function ResourceBrowser({
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
   const activeCollectionName = String(activeResourceCollection?.name ?? "").trim();
+  const activeTagFilter = tagFilter.trim();
   const visibleFilterCount =
     Number(kindFilter !== "all") +
     Number(sourceFilter !== "all") +
     Number(sharingFilter !== "all") +
-    Number(statusFilter !== "active");
+    Number(statusFilter !== "active") +
+    Number(activeTagFilter.length > 0);
   const resultSummary = loading
     ? activeCollectionName
       ? `Loading ${activeCollectionName}...`
@@ -1973,6 +1949,19 @@ export function ResourceBrowser({
                 <RefreshCw data-icon="icon" className={cn((loading || loadingMore) && "animate-spin")} />
               </Button>
             </div>
+            {activeTagFilter && onTagFilterChange ? (
+              <div className="resource-browser-active-filters" aria-label="Active filters">
+                <button
+                  type="button"
+                  className="resource-browser-active-filter-chip"
+                  aria-label={`Clear tag filter ${activeTagFilter}`}
+                  onClick={() => applyTagFilter("")}
+                >
+                  <span>Tag: {activeTagFilter}</span>
+                  <XCircle data-icon="inline-end" />
+                </button>
+              </div>
+            ) : null}
           </div>
         </CardHeader>
         <CardContent
@@ -3295,13 +3284,8 @@ export function ResourceBrowser({
                 onKindFilterChange("all");
                 onSourceFilterChange("all");
                 onSharingFilterChange?.("all");
-                onProcessingFilterChange?.("all");
                 onStatusFilterChange?.("active");
                 onTagFilterChange?.("");
-                onDescriptorFilterChange?.("");
-                onMetadataFilterChange?.("");
-                onCreatedAfterChange?.("");
-                onCreatedBeforeChange?.("");
               }}
             >
               Reset

@@ -391,13 +391,6 @@ describe("ResourceBrowser", () => {
     render(
       <ResourceBrowser
         {...baseProps}
-        metadataFilter=""
-        createdAfter=""
-        createdBefore=""
-        onMetadataFilterChange={vi.fn()}
-        onCreatedAfterChange={vi.fn()}
-        onCreatedBeforeChange={vi.fn()}
-        onProcessingFilterChange={vi.fn()}
         onSharingFilterChange={vi.fn()}
         onStatusFilterChange={vi.fn()}
         onCreateCollectionFromSelection={vi.fn().mockResolvedValue(undefined)}
@@ -722,33 +715,43 @@ describe("ResourceBrowser", () => {
   });
 
   it("keeps metadata-specific filters out of the default filter sheet", () => {
-    const onMetadataFilterChange = vi.fn();
-    render(
-      <ResourceBrowser
-        {...baseProps}
-        metadataFilter=""
-        onMetadataFilterChange={onMetadataFilterChange}
-      />
-    );
+    render(<ResourceBrowser {...baseProps} />);
 
     openResourceFilters();
 
     expect(screen.queryByLabelText("Filter resources by metadata")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Metadata filters")).not.toBeInTheDocument();
-    expect(onMetadataFilterChange).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Filter resources by processing status")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Filter resources by scientific descriptors")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Filter resources created after")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Filter resources created before")).not.toBeInTheDocument();
   });
 
-  it("does not count hidden advanced filters in the simple filter trigger", () => {
+  it("surfaces an active tag filter as a clearable chip", () => {
+    const onTagFilterChange = vi.fn();
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        tagFilter="Under 70"
+        onTagFilterChange={onTagFilterChange}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: /More filters/ })).toHaveTextContent("1");
+    const chip = screen.getByRole("button", { name: "Clear tag filter Under 70" });
+    expect(chip).toHaveTextContent("Tag: Under 70");
+
+    fireEvent.click(chip);
+
+    expect(onTagFilterChange).toHaveBeenCalledWith("");
+  });
+
+  it("resets the simple filters from the filter sheet", () => {
     const onKindFilterChange = vi.fn();
     const onSourceFilterChange = vi.fn();
     const onSharingFilterChange = vi.fn();
-    const onProcessingFilterChange = vi.fn();
     const onStatusFilterChange = vi.fn();
     const onTagFilterChange = vi.fn();
-    const onDescriptorFilterChange = vi.fn();
-    const onMetadataFilterChange = vi.fn();
-    const onCreatedAfterChange = vi.fn();
-    const onCreatedBeforeChange = vi.fn();
     render(
       <ResourceBrowser
         {...baseProps}
@@ -756,27 +759,14 @@ describe("ResourceBrowser", () => {
         sourceFilter="all"
         sharingFilter="all"
         statusFilter="active"
-        processingFilter="metadata_ready"
         tagFilter="Under 70"
-        descriptorFilter="NPH, ventriculomegaly"
-        metadataFilter="label:eq:NPH, subject_age:lt:70"
-        createdAfter="2026-01-01"
-        createdBefore="2026-06-01"
         onKindFilterChange={onKindFilterChange}
         onSourceFilterChange={onSourceFilterChange}
         onSharingFilterChange={onSharingFilterChange}
-        onProcessingFilterChange={onProcessingFilterChange}
         onStatusFilterChange={onStatusFilterChange}
         onTagFilterChange={onTagFilterChange}
-        onDescriptorFilterChange={onDescriptorFilterChange}
-        onMetadataFilterChange={onMetadataFilterChange}
-        onCreatedAfterChange={onCreatedAfterChange}
-        onCreatedBeforeChange={onCreatedBeforeChange}
       />
     );
-
-    expect(screen.getByRole("button", { name: "More filters" })).toBeInTheDocument();
-    expect(document.querySelector(".resource-browser-filter-count")).not.toBeInTheDocument();
 
     openResourceFilters();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
@@ -786,34 +776,8 @@ describe("ResourceBrowser", () => {
     expect(onKindFilterChange).toHaveBeenCalledWith("all");
     expect(onSourceFilterChange).toHaveBeenCalledWith("all");
     expect(onSharingFilterChange).toHaveBeenCalledWith("all");
-    expect(onProcessingFilterChange).toHaveBeenCalledWith("all");
     expect(onStatusFilterChange).toHaveBeenCalledWith("active");
     expect(onTagFilterChange).toHaveBeenCalledWith("");
-    expect(onDescriptorFilterChange).toHaveBeenCalledWith("");
-    expect(onMetadataFilterChange).toHaveBeenCalledWith("");
-    expect(onCreatedAfterChange).toHaveBeenCalledWith("");
-    expect(onCreatedBeforeChange).toHaveBeenCalledWith("");
-  });
-
-  it("keeps created-date filters out of the default filter sheet", () => {
-    const onCreatedAfterChange = vi.fn();
-    const onCreatedBeforeChange = vi.fn();
-    render(
-      <ResourceBrowser
-        {...baseProps}
-        createdAfter=""
-        createdBefore=""
-        onCreatedAfterChange={onCreatedAfterChange}
-        onCreatedBeforeChange={onCreatedBeforeChange}
-      />
-    );
-
-    openResourceFilters();
-
-    expect(screen.queryByLabelText("Filter resources created after")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Filter resources created before")).not.toBeInTheDocument();
-    expect(onCreatedAfterChange).not.toHaveBeenCalled();
-    expect(onCreatedBeforeChange).not.toHaveBeenCalled();
   });
 
   it("passes selected files through the Resources upload control", () => {
@@ -1927,10 +1891,7 @@ describe("ResourceBrowser", () => {
         kindFilter="file"
         sourceFilter="upload"
         sharingFilter="private"
-        processingFilter="metadata_ready"
         tagFilter="Under 70"
-        descriptorFilter="NPH, ventriculomegaly"
-        metadataFilter="label:eq:NPH, subject_age:lt:70"
         onDeleteSelectedResources={onDeleteSelectedResources}
       />
     );

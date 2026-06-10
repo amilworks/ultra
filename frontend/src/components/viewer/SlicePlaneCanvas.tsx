@@ -4,6 +4,13 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { UploadViewerInfo } from "@/types";
 
+import {
+  loadScalarSliceBitmap,
+  loadSliceBitmap,
+  sliceBitmapToTexture,
+  type ScalarSliceSource,
+} from "./sliceImageCache";
+
 type PlanePoint = {
   row: number;
   col: number;
@@ -31,6 +38,11 @@ type SlicePlaneCanvasProps = {
   onSelectPoint?: (point: PlanePoint) => void;
   onMeasurePoint?: (point: PlanePoint) => void;
   measureMode?: boolean;
+  /**
+   * When provided, the slice is rendered from the in-memory volume (instant, no
+   * network). Falls back to {@link imageUrl} when absent.
+   */
+  scalarSlice?: ScalarSliceSource | null;
 };
 
 type OverlayState = {
@@ -145,6 +157,7 @@ export function SlicePlaneCanvas({
   onSelectPoint,
   onMeasurePoint,
   measureMode = false,
+  scalarSlice,
 }: SlicePlaneCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -169,6 +182,38 @@ export function SlicePlaneCanvas({
   }, [descriptor.aspect_ratio, worldSize.height, worldSize.width]);
   const planeStyle = { "--viewer-plane-aspect": String(planeAspect) } as CSSProperties;
 
+  // The renderer is built once (below) and reused as the user scrubs slices and
+  // clicks. These per-render inputs are read through a ref so changing them never
+  // tears down and rebuilds the WebGL context.
+  const latestRef = useRef({
+    crosshair,
+    measurement,
+    descriptor,
+    onSelectPoint,
+    onMeasurePoint,
+    measureMode,
+    interactive,
+  });
+  useEffect(() => {
+    latestRef.current = {
+      crosshair,
+      measurement,
+      descriptor,
+      onSelectPoint,
+      onMeasurePoint,
+      measureMode,
+      interactive,
+    };
+  });
+
+  const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
+  const materialRef = useRef<THREE.MeshBasicMaterial | null>(null);
+  const renderRef = useRef<(() => void) | null>(null);
+  const activeTextureRef = useRef<THREE.Texture | null>(null);
+
+  // Build the renderer once per plane geometry. Crucially this does NOT depend on
+  // imageUrl/crosshair/measurement/callbacks, so moving through slices only swaps
+  // a texture instead of recreating three WebGL contexts (one per MPR plane).
   useEffect(() => {
     const container = containerRef.current;
     if (!container) {
@@ -216,10 +261,12 @@ export function SlicePlaneCanvas({
     scene.add(mesh);
 
     const raycaster = new THREE.Raycaster();
-    const loader = new THREE.TextureLoader();
-    let activeTexture: THREE.Texture | null = null;
+    cameraRef.current = camera;
+    materialRef.current = material;
 
     const updateOverlay = () => {
+      const { crosshair: activeCrosshair, measurement: activeMeasurement, descriptor: activeDescriptor } =
+        latestRef.current;
       const width = Math.max(1, container.clientWidth || 1);
       const height = Math.max(1, container.clientHeight || 1);
       const next: OverlayState = {
@@ -227,14 +274,14 @@ export function SlicePlaneCanvas({
         crosshairY: null,
         measurement: null,
       };
-      if (crosshair) {
-        const screen = worldToScreen(planePointToWorld(crosshair, descriptor), camera, width, height);
+      if (activeCrosshair) {
+        const screen = worldToScreen(planePointToWorld(activeCrosshair, activeDescriptor), camera, width, height);
         next.crosshairX = screen.x;
         next.crosshairY = screen.y;
       }
-      if (measurement) {
-        const start = worldToScreen(planePointToWorld(measurement.start, descriptor), camera, width, height);
-        const end = worldToScreen(planePointToWorld(measurement.end, descriptor), camera, width, height);
+      if (activeMeasurement) {
+        const start = worldToScreen(planePointToWorld(activeMeasurement.start, activeDescriptor), camera, width, height);
+        const end = worldToScreen(planePointToWorld(activeMeasurement.end, activeDescriptor), camera, width, height);
         next.measurement = {
           startX: start.x,
           startY: start.y,
@@ -251,6 +298,7 @@ export function SlicePlaneCanvas({
       renderer.render(scene, camera);
       updateOverlay();
     };
+    renderRef.current = render;
 
     const resize = () => {
       const width = Math.max(1, container.clientWidth || 1);
@@ -263,7 +311,14 @@ export function SlicePlaneCanvas({
     };
 
     const handleClick = (event: MouseEvent) => {
-      if (!interactive) {
+      const {
+        interactive: activeInteractive,
+        descriptor: activeDescriptor,
+        onSelectPoint: selectPoint,
+        onMeasurePoint: measurePoint,
+        measureMode: activeMeasureMode,
+      } = latestRef.current;
+      if (!activeInteractive) {
         return;
       }
       const rect = renderer.domElement.getBoundingClientRect();
@@ -281,17 +336,17 @@ export function SlicePlaneCanvas({
       const planePoint = clampPlanePoint(
         {
           row:
-            (0.5 - worldY / Math.max(1e-6, descriptor.world_size.height)) *
-            Math.max(0, descriptor.pixel_size.height - 1),
+            (0.5 - worldY / Math.max(1e-6, activeDescriptor.world_size.height)) *
+            Math.max(0, activeDescriptor.pixel_size.height - 1),
           col:
-            (worldX / Math.max(1e-6, descriptor.world_size.width) + 0.5) *
-            Math.max(0, descriptor.pixel_size.width - 1),
+            (worldX / Math.max(1e-6, activeDescriptor.world_size.width) + 0.5) *
+            Math.max(0, activeDescriptor.pixel_size.width - 1),
         },
-        descriptor
+        activeDescriptor
       );
-      onSelectPoint?.(planePoint);
-      if (measureMode) {
-        onMeasurePoint?.(planePoint);
+      selectPoint?.(planePoint);
+      if (activeMeasureMode) {
+        measurePoint?.(planePoint);
       }
     };
 
@@ -299,27 +354,6 @@ export function SlicePlaneCanvas({
     observer.observe(container);
     controls.addEventListener("change", render);
     renderer.domElement.addEventListener("click", handleClick);
-
-    loader.load(
-      imageUrl,
-      (texture) => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.generateMipmaps = false;
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        if (activeTexture) {
-          activeTexture.dispose();
-        }
-        activeTexture = texture;
-        material.map = texture;
-        material.needsUpdate = true;
-        resize();
-      },
-      undefined,
-      () => {
-        resize();
-      }
-    );
 
     resize();
 
@@ -331,24 +365,51 @@ export function SlicePlaneCanvas({
       controls.dispose();
       geometry.dispose();
       material.dispose();
-      if (activeTexture) {
-        activeTexture.dispose();
-      }
+      activeTextureRef.current?.dispose();
+      activeTextureRef.current = null;
       renderer.dispose();
       renderer.domElement.remove();
+      cameraRef.current = null;
+      materialRef.current = null;
+      renderRef.current = null;
     };
-  }, [
-    crosshair,
-    descriptor,
-    imageUrl,
-    interactive,
-    measureMode,
-    measurement,
-    onMeasurePoint,
-    onSelectPoint,
-    worldSize.height,
-    worldSize.width,
-  ]);
+  }, [interactive, worldSize.width, worldSize.height]);
+
+  // Swap the slice texture as imageUrl changes — served from the shared cache, so
+  // revisited / prefetched slices appear with no network round-trip.
+  useEffect(() => {
+    const material = materialRef.current;
+    if (!material || (!scalarSlice && !imageUrl)) {
+      return;
+    }
+    let cancelled = false;
+    const loadPromise = scalarSlice ? loadScalarSliceBitmap(scalarSlice) : loadSliceBitmap(imageUrl);
+    loadPromise
+      .then((bitmap) => {
+        if (cancelled || materialRef.current !== material) {
+          return;
+        }
+        const texture = sliceBitmapToTexture(bitmap);
+        const previous = activeTextureRef.current;
+        activeTextureRef.current = texture;
+        material.map = texture;
+        material.needsUpdate = true;
+        previous?.dispose();
+        renderRef.current?.();
+      })
+      .catch(() => {
+        renderRef.current?.();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [imageUrl, scalarSlice]);
+
+  // Reposition crosshair/measurement overlays when they move, without rebuilding
+  // the scene.
+  useEffect(() => {
+    renderRef.current?.();
+  }, [crosshair, measurement]);
 
   const renderOverlay = () => (
     <>

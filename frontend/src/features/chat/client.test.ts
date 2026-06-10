@@ -30,9 +30,11 @@ describe("chat slice client", () => {
     } as unknown as ApiClient;
 
     await listRunEvents(apiClient, "run-1", 120);
+    await listRunEvents(apiClient, "run-1", 120, { afterSequence: 40 });
     await listRunArtifacts(apiClient, "run-1", 2000);
 
-    expect(apiClient.getRunEvents).toHaveBeenCalledWith("run-1", 120);
+    expect(apiClient.getRunEvents).toHaveBeenNthCalledWith(1, "run-1", 120, undefined);
+    expect(apiClient.getRunEvents).toHaveBeenNthCalledWith(2, "run-1", 120, { afterSequence: 40 });
     expect(apiClient.listArtifacts).toHaveBeenCalledWith("run-1", 2000);
   });
 });

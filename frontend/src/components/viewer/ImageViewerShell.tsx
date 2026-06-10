@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
-import { ChevronDown, Focus, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronDown, Copy, Focus, RotateCcw, SlidersHorizontal } from "lucide-react";
+
+import { formatBytes } from "@/lib/format";
 
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -19,13 +21,17 @@ import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 import { DirectPlaneImage } from "./DirectPlaneImage";
 import { scalarVolumePayloadValueAt } from "./scalarVolume";
 import { SlicePlaneCanvas } from "./SlicePlaneCanvas";
+import {
+  buildScalarSliceSource,
+  prefetchSliceBitmaps,
+  type ScalarSliceSource,
+} from "./sliceImageCache";
+import type { ScalarSliceAxis } from "./scalarSlice";
 import { SliceStackVolumeCanvas } from "./SliceStackVolumeCanvas";
 import {
   formatViewerSurfaceLabel,
-  getOrientationSummary,
   getPlaneCursor,
   getPlaneOrientationLabels,
-  getSpacingSummary,
   mapPlanePointToViewerIndices,
   type ViewerIndices,
   type ViewerSurface,
@@ -82,6 +88,122 @@ type MetadataSection = {
   rows: Array<{ label: string; value: string }>;
 };
 
+type MetadataDetail = {
+  label: string;
+  value: string;
+  /** Render the value in a monospace font (hashes, ids). */
+  mono?: boolean;
+  /** Show a copy-to-clipboard affordance. */
+  copyable?: boolean;
+  /** A small trailing unit/format hint (e.g. "mm", the raw content type). */
+  hint?: string;
+};
+
+type MetadataGroup = {
+  title: string;
+  details: MetadataDetail[];
+};
+
+const READER_FORMAT_NAMES: Record<string, string> = {
+  "nifti-1": "NIfTI-1",
+  "nifti-2": "NIfTI-2",
+  dicom: "DICOM",
+};
+
+const formatReaderName = (reader: string, contentType?: string): string => {
+  const key = String(reader || "").trim().toLowerCase();
+  if (READER_FORMAT_NAMES[key]) {
+    return READER_FORMAT_NAMES[key];
+  }
+  if (key.includes("ome")) {
+    return "OME-TIFF";
+  }
+  if (key.includes("tiff")) {
+    return "TIFF";
+  }
+  if (key.includes("nifti")) {
+    return "NIfTI";
+  }
+  if (key) {
+    return reader;
+  }
+  return String(contentType || "").trim() || "Unknown";
+};
+
+const titleCaseLabel = (value: string): string => {
+  const safe = String(value || "").trim();
+  return safe ? `${safe.charAt(0).toUpperCase()}${safe.slice(1)}` : safe;
+};
+
+const finitePositive = (value: number | null | undefined): number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+
+const formatExtent = (value: number): string => (value >= 100 ? value.toFixed(0) : value.toFixed(1));
+
+// "px"/"pixel" are not real physical units — treat them as absent so a medical
+// volume's millimetre spacing is not mislabelled.
+const isMeaningfulSpatialUnit = (value: unknown): value is string => {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized !== "" && normalized !== "px" && normalized !== "pixel" && normalized !== "pixels";
+};
+
+const resolveMetadataSpatialUnit = (viewerInfo: UploadViewerInfo): string => {
+  const coordinates = viewerInfo.phys?.coordinates;
+  const spaceUnits =
+    coordinates && typeof coordinates === "object"
+      ? (coordinates as Record<string, unknown>).space_units
+      : null;
+  const spatial =
+    spaceUnits && typeof spaceUnits === "object" ? (spaceUnits as Record<string, unknown>).spatial : null;
+  if (isMeaningfulSpatialUnit(spatial)) {
+    return spatial.trim();
+  }
+  const pixelUnits = viewerInfo.phys?.pixel_units;
+  if (Array.isArray(pixelUnits) && isMeaningfulSpatialUnit(pixelUnits[0])) {
+    return pixelUnits[0].trim();
+  }
+  if (viewerInfo.metadata.physical_spacing && String(viewerInfo.modality) === "medical") {
+    return "mm";
+  }
+  return "";
+};
+
+function MetadataDetailValue({ detail }: { detail: MetadataDetail }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return;
+    }
+    navigator.clipboard
+      .writeText(detail.value)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      })
+      .catch(() => {});
+  };
+  return (
+    <dd className={`viewer-metadata-kv-value${detail.mono ? " viewer-metadata-kv-value-mono" : ""}`}>
+      <span className="viewer-metadata-kv-text">{detail.value}</span>
+      {detail.hint ? <span className="viewer-metadata-kv-hint">{detail.hint}</span> : null}
+      {detail.copyable ? (
+        <button
+          type="button"
+          className="viewer-metadata-copy"
+          onClick={handleCopy}
+          aria-label={copied ? `${detail.label} copied` : `Copy ${detail.label}`}
+          title={copied ? "Copied" : "Copy"}
+        >
+          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        </button>
+      ) : null}
+    </dd>
+  );
+}
+
 type PlaneAxis = "z" | "y" | "x";
 
 type PlanePoint = {
@@ -103,6 +225,10 @@ type MeasurementDraft =
 
 const MIN_CLIP_SPAN = 0.02;
 const INTERIOR_FOCUS_CLIP_SPAN = 0.56;
+// How many neighbouring slices to warm in the background so scrubbing stays ahead
+// of the network. MPR prefetches three axes at once, so it uses a smaller radius.
+const SLICE_PREFETCH_RADIUS_2D = 4;
+const SLICE_PREFETCH_RADIUS_MPR = 2;
 const SCALAR_VOLUME_TRANSFER_PRESETS = [
   { id: "custom", label: "Custom", signalFloor: null, densityScale: null },
   { id: "full", label: "Full range", signalFloor: 0, densityScale: 1 },
@@ -111,6 +237,22 @@ const SCALAR_VOLUME_TRANSFER_PRESETS = [
 ] as const;
 
 type ScalarVolumeTransferPresetId = (typeof SCALAR_VOLUME_TRANSFER_PRESETS)[number]["id"];
+
+// Standard radiology CT windows (Hounsfield center / width). A tight brain window
+// makes the gradient-modulated volume renderer reveal ventricle walls far more
+// strongly than a wide default window, since boundary emphasis is computed on the
+// windowed signal.
+const CT_WINDOW_PRESETS = [
+  { id: "brain", label: "Brain", center: 40, width: 80 },
+  { id: "subdural", label: "Subdural", center: 80, width: 200 },
+  { id: "stroke", label: "Stroke", center: 35, width: 35 },
+  { id: "soft", label: "Soft tissue", center: 40, width: 350 },
+  { id: "fossa", label: "Posterior fossa", center: 40, width: 120 },
+  { id: "bone", label: "Bone", center: 600, width: 2800 },
+  { id: "lung", label: "Lung", center: -600, width: 1500 },
+] as const;
+
+type CtWindowPresetId = (typeof CT_WINDOW_PRESETS)[number]["id"];
 
 const formatNumber = (value: number): string => value.toLocaleString();
 
@@ -219,6 +361,13 @@ const getScalarVolumeTransferPresetId = (
   return preset?.id ?? "custom";
 };
 
+const getActiveCtWindowPresetId = (center: number, width: number): CtWindowPresetId | null => {
+  const preset = CT_WINDOW_PRESETS.find(
+    (candidate) => Math.abs(candidate.center - center) < 0.5 && Math.abs(candidate.width - width) < 0.5
+  );
+  return preset?.id ?? null;
+};
+
 const histogramSampleLabel = (histogram: UploadViewerHistogramResponse | null): string => {
   if (!histogram) {
     return "";
@@ -260,18 +409,6 @@ const recordToRows = (record: Record<string, unknown> | null | undefined) =>
       value: formatJsonishValue(value),
     }))
     .filter((row) => row.value);
-
-const splitMetadataSummaryRows = (
-  cards: MetadataCard[]
-): { primary: MetadataCard[]; secondary: MetadataCard[] } => {
-  const primaryLabels = new Set(["Shape", "Axes", "Type", "Spacing"]);
-  const primary = cards.filter((card) => primaryLabels.has(card.label));
-  const secondary = cards.filter((card) => !primaryLabels.has(card.label));
-  return {
-    primary: primary.length > 0 ? primary : cards.slice(0, 4),
-    secondary: primary.length > 0 ? secondary : cards.slice(4),
-  };
-};
 
 const clampPoint = (
   point: PlanePoint,
@@ -466,124 +603,185 @@ export function ImageViewerShell({
     error: null,
   });
 
-  const metadataSummaryCards: MetadataCard[] = (() => {
-    const cards: MetadataCard[] = [];
-    const spacing = getSpacingSummary(viewerInfo);
-    const orientation = getOrientationSummary(viewerInfo);
-    const bitDepth = viewerInfo.phys?.pixel_depth;
-    cards.push({ label: "Shape", value: viewerInfo.metadata.array_shape.join(" × ") });
-    cards.push({ label: "Axes", value: viewerInfo.metadata.dims_order || viewerInfo.dims_order });
-    cards.push({
-      label: "Type",
-      value: formatPixelType(viewerInfo.metadata.array_dtype, bitDepth),
-    });
-    if (spacing) {
-      cards.push({ label: "Spacing", value: spacing });
+  const metadataGroups: MetadataGroup[] = (() => {
+    const groups: MetadataGroup[] = [];
+    const md = viewerInfo.metadata;
+    const axisSizes = viewerInfo.axis_sizes;
+    const spatialUnit = resolveMetadataSpatialUnit(viewerInfo);
+
+    const fileDetails: MetadataDetail[] = [
+      { label: "Name", value: viewerInfo.original_name },
+      { label: "Format", value: formatReaderName(md.reader, md.content_type), hint: md.content_type },
+    ];
+    if (viewerInfo.modality) {
+      fileDetails.push({ label: "Modality", value: titleCaseLabel(String(viewerInfo.modality)) });
     }
-    if (orientation) {
-      cards.push({ label: "Orientation", value: orientation });
+    if (typeof md.size_bytes === "number" && Number.isFinite(md.size_bytes)) {
+      fileDetails.push({ label: "File size", value: formatBytes(md.size_bytes) });
     }
-    if (viewerInfo.axis_sizes.C > 1) {
-      cards.push({ label: "Channels", value: `${formatNumber(viewerInfo.axis_sizes.C)}` });
+    if (md.sha256) {
+      fileDetails.push({ label: "SHA-256", value: md.sha256, mono: true, copyable: true });
     }
-    if (viewerInfo.axis_sizes.T > 1) {
-      cards.push({ label: "Timepoints", value: `${formatNumber(viewerInfo.axis_sizes.T)}` });
+    fileDetails.push({ label: "File ID", value: viewerInfo.file_id, mono: true, copyable: true });
+    groups.push({ title: "File", details: fileDetails });
+
+    const totalVoxels = md.array_shape.reduce((acc, value) => acc * Math.max(1, Math.floor(value)), 1);
+    const dimensionDetails: MetadataDetail[] = [
+      { label: "Array shape", value: md.array_shape.join(" × "), hint: md.dims_order || viewerInfo.dims_order },
+      { label: "Width (X)", value: formatNumber(axisSizes.X) },
+      { label: "Height (Y)", value: formatNumber(axisSizes.Y) },
+    ];
+    if (viewerInfo.is_volume || axisSizes.Z > 1) {
+      dimensionDetails.push({ label: "Depth (Z)", value: formatNumber(axisSizes.Z) });
     }
-    if (viewerInfo.metadata.scene || viewerInfo.metadata.scene_count > 1) {
-      cards.push({
-        label: "Scene",
-        value: viewerInfo.metadata.scene
-          ? `${viewerInfo.metadata.scene}${
-              viewerInfo.metadata.scene_count > 1 ? ` • ${viewerInfo.metadata.scene_count} scenes` : ""
-            }`
-          : `${viewerInfo.metadata.scene_count} scenes`,
+    if (axisSizes.C > 1) {
+      dimensionDetails.push({ label: "Channels (C)", value: formatNumber(axisSizes.C) });
+    }
+    if (axisSizes.T > 1) {
+      dimensionDetails.push({ label: "Timepoints (T)", value: formatNumber(axisSizes.T) });
+    }
+    if (md.scene || md.scene_count > 1) {
+      dimensionDetails.push({
+        label: "Scenes",
+        value: md.scene
+          ? `${md.scene}${md.scene_count > 1 ? ` (${md.scene_count})` : ""}`
+          : formatNumber(md.scene_count),
       });
     }
-    return cards;
+    dimensionDetails.push({ label: "Total voxels", value: formatNumber(totalVoxels) });
+    groups.push({ title: "Dimensions", details: dimensionDetails });
+
+    const dataDetails: MetadataDetail[] = [
+      { label: "Pixel type", value: formatPixelType(md.array_dtype, viewerInfo.phys?.pixel_depth) },
+    ];
+    const intensityMin = md.array_min ?? md.intensity_stats?.min;
+    const intensityMax = md.array_max ?? md.intensity_stats?.max;
+    if (typeof intensityMin === "number" && typeof intensityMax === "number") {
+      dataDetails.push({
+        label: "Value range",
+        value: `${formatIntensityValue(intensityMin)} → ${formatIntensityValue(intensityMax)}`,
+      });
+      dataDetails.push({ label: "Span", value: formatIntensityValue(Math.abs(intensityMax - intensityMin)) });
+    }
+    groups.push({ title: "Data & intensity", details: dataDetails });
+
+    const spacing = md.physical_spacing;
+    if (spacing) {
+      const sx = finitePositive(spacing.x);
+      const sy = finitePositive(spacing.y);
+      const sz = finitePositive(spacing.z);
+      const geometryDetails: MetadataDetail[] = [];
+      const spacingParts: string[] = [];
+      if (sx) spacingParts.push(`X ${sx.toFixed(3)}`);
+      if (sy) spacingParts.push(`Y ${sy.toFixed(3)}`);
+      if (sz) spacingParts.push(`Z ${sz.toFixed(3)}`);
+      if (spacingParts.length > 0) {
+        geometryDetails.push({
+          label: "Voxel spacing",
+          value: spacingParts.join(" · "),
+          hint: spatialUnit || undefined,
+        });
+      }
+      const extentParts: string[] = [];
+      if (sx) extentParts.push(formatExtent(axisSizes.X * sx));
+      if (sy) extentParts.push(formatExtent(axisSizes.Y * sy));
+      if (sz && (viewerInfo.is_volume || axisSizes.Z > 1)) extentParts.push(formatExtent(axisSizes.Z * sz));
+      if (extentParts.length > 0) {
+        geometryDetails.push({
+          label: "Field of view",
+          value: extentParts.join(" × "),
+          hint: spatialUnit || undefined,
+        });
+      }
+      const positiveSpacings = [sx, sy, sz].filter((value) => value > 0);
+      if (positiveSpacings.length >= 2) {
+        const ratio = Math.max(...positiveSpacings) / Math.min(...positiveSpacings);
+        geometryDetails.push({
+          label: "Sampling",
+          value: ratio > 1.05 ? `Anisotropic (${ratio.toFixed(1)}×)` : "Isotropic",
+        });
+      }
+      if (geometryDetails.length > 0) {
+        groups.push({ title: "Geometry & spacing", details: geometryDetails });
+      }
+    }
+
+    const orientation = viewerInfo.viewer.orientation;
+    if (orientation) {
+      const axisLabels = orientation.axis_labels;
+      const orientationDetails: MetadataDetail[] = [
+        { label: "Frame", value: titleCaseLabel(String(orientation.frame || "pixel")) },
+      ];
+      if (axisLabels?.x) {
+        orientationDetails.push({ label: "X axis", value: `${axisLabels.x.negative ?? "-X"} → ${axisLabels.x.positive ?? "X"}` });
+      }
+      if (axisLabels?.y) {
+        orientationDetails.push({ label: "Y axis", value: `${axisLabels.y.negative ?? "-Y"} → ${axisLabels.y.positive ?? "Y"}` });
+      }
+      if (viewerInfo.is_volume && axisLabels?.z) {
+        orientationDetails.push({ label: "Z axis", value: `${axisLabels.z.negative ?? "-Z"} → ${axisLabels.z.positive ?? "Z"}` });
+      }
+      if (orientationDetails.length > 1) {
+        groups.push({ title: "Orientation", details: orientationDetails });
+      }
+    }
+
+    if (md.dicom) {
+      const dicomDetails: MetadataDetail[] = [];
+      if (md.dicom.modality) dicomDetails.push({ label: "Modality", value: String(md.dicom.modality) });
+      if (typeof md.dicom.wnd_center === "number") {
+        dicomDetails.push({ label: "Window center", value: String(md.dicom.wnd_center) });
+      }
+      if (typeof md.dicom.wnd_width === "number") {
+        dicomDetails.push({ label: "Window width", value: String(md.dicom.wnd_width) });
+      }
+      if (dicomDetails.length > 0) {
+        groups.push({ title: "DICOM", details: dicomDetails });
+      }
+    }
+
+    const microscopy = md.microscopy;
+    if (microscopy) {
+      const microscopyDetails: MetadataDetail[] = [];
+      if (microscopy.channel_names?.length) {
+        microscopyDetails.push({ label: "Channels", value: microscopy.channel_names.join(", ") });
+      }
+      if (microscopy.objective) microscopyDetails.push({ label: "Objective", value: microscopy.objective });
+      if (microscopy.imaging_datetime) microscopyDetails.push({ label: "Acquired", value: microscopy.imaging_datetime });
+      if (microscopy.binning) microscopyDetails.push({ label: "Binning", value: microscopy.binning });
+      if (microscopy.dimensions_present) {
+        microscopyDetails.push({ label: "Dimensions", value: microscopy.dimensions_present });
+      }
+      if (microscopy.position_index != null) {
+        microscopyDetails.push({ label: "Position", value: String(microscopy.position_index) });
+      }
+      if (microscopyDetails.length > 0) {
+        groups.push({ title: "Microscopy", details: microscopyDetails });
+      }
+    }
+
+    return groups;
   })();
 
+  // Raw, verbose key/value dumps shown under "Technical details". Curated
+  // orientation / DICOM / microscopy facts live in the metadata groups above.
   const metadataSections: MetadataSection[] = (() => {
     const sections: MetadataSection[] = [];
     const headerRows = recordToRows(viewerInfo.metadata.header);
     if (headerRows.length > 0) {
-      sections.push({ title: "Image Header", rows: headerRows });
+      sections.push({ title: "Image header", rows: headerRows });
     }
     const exifRows = recordToRows(viewerInfo.metadata.exif);
     if (exifRows.length > 0) {
-      sections.push({ title: "EXIF Tags", rows: exifRows });
+      sections.push({ title: "EXIF tags", rows: exifRows });
     }
-    const dicomRows = [
-      viewerInfo.metadata.dicom?.modality
-        ? { label: "Modality", value: viewerInfo.metadata.dicom.modality }
-        : null,
-      typeof viewerInfo.metadata.dicom?.wnd_center === "number"
-        ? { label: "Window center", value: String(viewerInfo.metadata.dicom.wnd_center) }
-        : null,
-      typeof viewerInfo.metadata.dicom?.wnd_width === "number"
-        ? { label: "Window width", value: String(viewerInfo.metadata.dicom.wnd_width) }
-        : null,
-    ].filter(Boolean) as MetadataSection["rows"];
-    if (dicomRows.length > 0) {
-      sections.push({ title: "DICOM Header", rows: dicomRows });
+    const filenameHintRows = recordToRows(viewerInfo.metadata.filename_hints);
+    if (filenameHintRows.length > 0) {
+      sections.push({ title: "Filename hints", rows: filenameHintRows });
     }
     const geoRows = recordToRows(viewerInfo.metadata.geo);
     if (geoRows.length > 0) {
-      sections.push({ title: "Geospatial Metadata", rows: geoRows });
-    }
-    const microscopyRows = [
-      viewerInfo.metadata.microscopy?.channel_names?.length
-        ? { label: "Channel names", value: viewerInfo.metadata.microscopy.channel_names.join(", ") }
-        : null,
-      viewerInfo.metadata.microscopy?.dimensions_present
-        ? { label: "Dimensions", value: viewerInfo.metadata.microscopy.dimensions_present }
-        : null,
-      viewerInfo.metadata.microscopy?.objective
-        ? { label: "Objective", value: viewerInfo.metadata.microscopy.objective }
-        : null,
-      viewerInfo.metadata.microscopy?.imaging_datetime
-        ? { label: "Acquired", value: viewerInfo.metadata.microscopy.imaging_datetime }
-        : null,
-      viewerInfo.metadata.microscopy?.binning
-        ? { label: "Binning", value: viewerInfo.metadata.microscopy.binning }
-        : null,
-      viewerInfo.metadata.microscopy?.position_index != null
-        ? { label: "Position index", value: String(viewerInfo.metadata.microscopy.position_index) }
-        : null,
-      viewerInfo.metadata.microscopy?.row != null
-        ? { label: "Row", value: String(viewerInfo.metadata.microscopy.row) }
-        : null,
-      viewerInfo.metadata.microscopy?.column != null
-        ? { label: "Column", value: String(viewerInfo.metadata.microscopy.column) }
-        : null,
-    ].filter(Boolean) as MetadataSection["rows"];
-    if (microscopyRows.length > 0) {
-      sections.push({ title: "Microscopy Metadata", rows: microscopyRows });
-    }
-    const orientationRows = [
-      viewerInfo.viewer.orientation?.frame
-        ? { label: "Frame", value: String(viewerInfo.viewer.orientation.frame) }
-        : null,
-      viewerInfo.viewer.orientation?.axis_labels?.x
-        ? {
-            label: "X axis",
-            value: `${viewerInfo.viewer.orientation.axis_labels.x.negative ?? "-X"} ↔ ${viewerInfo.viewer.orientation.axis_labels.x.positive ?? "X"}`,
-          }
-        : null,
-      viewerInfo.viewer.orientation?.axis_labels?.y
-        ? {
-            label: "Y axis",
-            value: `${viewerInfo.viewer.orientation.axis_labels.y.negative ?? "-Y"} ↔ ${viewerInfo.viewer.orientation.axis_labels.y.positive ?? "Y"}`,
-          }
-        : null,
-      viewerInfo.is_volume && viewerInfo.viewer.orientation?.axis_labels?.z
-        ? {
-            label: "Z axis",
-            value: `${viewerInfo.viewer.orientation.axis_labels.z.negative ?? "-Z"} ↔ ${viewerInfo.viewer.orientation.axis_labels.z.positive ?? "Z"}`,
-          }
-        : null,
-    ].filter(Boolean) as MetadataSection["rows"];
-    if (orientationRows.length > 0) {
-      sections.push({ title: "Orientation", rows: orientationRows });
+      sections.push({ title: "Geospatial metadata", rows: geoRows });
     }
     const coordinates = viewerInfo.phys?.coordinates ?? null;
     const coordinateRows = [
@@ -596,11 +794,10 @@ export function ImageViewerShell({
         : null,
     ].filter(Boolean) as MetadataSection["rows"];
     if (coordinateRows.length > 0) {
-      sections.push({ title: "Coordinate Transform", rows: coordinateRows });
+      sections.push({ title: "Coordinate transform", rows: coordinateRows });
     }
     return sections;
   })();
-  const metadataSummaryRows = splitMetadataSummaryRows(metadataSummaryCards);
 
   const displayCapabilities = new Set((viewerInfo.viewer.display_capabilities ?? []).map((value) => String(value)));
   const selectedChannelIndices = Array.isArray(selectedDisplayState?.channels)
@@ -685,6 +882,12 @@ export function ImageViewerShell({
     viewerInfo.viewer.volume_mode === "scalar" &&
     Boolean(viewerInfo.service_urls?.scalar_volume) &&
     displayCapabilities.has("scalar_probe");
+  // Load the full volume for any scalar surface (2D or MPR) so slices can be
+  // rendered client-side (instant scrub + window); the probe readout stays MPR-only.
+  const canLoadScalarVolume =
+    viewerInfo.viewer.volume_mode === "scalar" &&
+    (selectedSurface === "2d" || selectedSurface === "mpr") &&
+    Boolean(viewerInfo.service_urls?.scalar_volume);
   const histogramMin = Number(uploadHistogram?.histogram.min);
   const histogramMax = Number(uploadHistogram?.histogram.max);
   const metadataArrayMin = Number(viewerInfo.metadata.array_min ?? viewerInfo.metadata.intensity_stats?.min ?? 0);
@@ -696,6 +899,8 @@ export function ImageViewerShell({
     viewerInfo.metadata.dicom?.wnd_width ?? Math.max(1, Math.abs(arrayMax - arrayMin))
   );
   const parsedWindow = parseWindowLevel(selectedDisplayState?.enhancement, defaultCenter, defaultWidth);
+  const showCtWindowPresets = isScalarMpr && viewerInfo.modality === "medical";
+  const activeCtWindowPresetId = getActiveCtWindowPresetId(parsedWindow.center, parsedWindow.width);
   const intensityRangeSpan = Math.max(1, Math.abs(arrayMax - arrayMin));
   const intensityStep = intensityRangeSpan <= 16 ? 0.1 : 1;
   const sourceIntensityReady = Boolean(
@@ -803,7 +1008,7 @@ export function ImageViewerShell({
     selectedSurface === "mpr" && selectedChannelIndices.length === 1
       ? Math.max(0, Math.min(selectedChannelIndices[0] ?? 0, Math.max(0, channelNames.length - 1)))
       : volumeChannelIndex;
-  const scalarProbeRequestKey = canLoadScalarProbe
+  const scalarProbeRequestKey = canLoadScalarVolume
     ? [viewerInfo.file_id, debouncedT, scalarProbeChannelIndex].join("\u0000")
     : "";
   const currentScalarProbeState =
@@ -859,59 +1064,144 @@ export function ImageViewerShell({
     String(viewerInfo.metadata.sha256 ?? viewerInfo.file_id).trim() || viewerInfo.file_id
   }:${displayTransformKey}`;
 
+  const buildMprSliceUrl = useCallback(
+    (axis: "x" | "y" | "z", indices: { x: number; y: number; z: number }) =>
+      apiClient.uploadSliceUrl(viewerInfo.file_id, {
+        axis,
+        x: indices.x,
+        y: indices.y,
+        z: indices.z,
+        t: debouncedT,
+        enhancement: selectedDisplayState?.enhancement,
+        fusionMethod: selectedDisplayState?.fusion_method,
+        negative: selectedDisplayState?.negative,
+        channels: selectedDisplayState?.channels,
+        channelColors: selectedDisplayState?.channel_colors,
+        cacheKey: previewCacheKey,
+      }),
+    [
+      apiClient,
+      debouncedT,
+      previewCacheKey,
+      selectedDisplayState?.channel_colors,
+      selectedDisplayState?.channels,
+      selectedDisplayState?.enhancement,
+      selectedDisplayState?.fusion_method,
+      selectedDisplayState?.negative,
+      viewerInfo.file_id,
+    ]
+  );
+  const buildDirect2dSliceUrl = useCallback(
+    (z: number) =>
+      apiClient.uploadSliceUrl(viewerInfo.file_id, {
+        axis: "z",
+        z,
+        t: debouncedT,
+        enhancement: selectedDisplayState?.enhancement,
+        fusionMethod: selectedDisplayState?.fusion_method,
+        negative: selectedDisplayState?.negative,
+        channels: selectedDisplayState?.channels,
+        channelColors: selectedDisplayState?.channel_colors,
+        fullResolution: true,
+        cacheKey: previewCacheKey,
+      }),
+    [
+      apiClient,
+      debouncedT,
+      previewCacheKey,
+      selectedDisplayState?.channel_colors,
+      selectedDisplayState?.channels,
+      selectedDisplayState?.enhancement,
+      selectedDisplayState?.fusion_method,
+      selectedDisplayState?.negative,
+      viewerInfo.file_id,
+    ]
+  );
   const mprSliceUrls = {
-    z: apiClient.uploadSliceUrl(viewerInfo.file_id, {
-      axis: "z",
-      x: debouncedX,
-      y: debouncedY,
-      z: debouncedZ,
-      t: debouncedT,
-      enhancement: selectedDisplayState?.enhancement,
-      fusionMethod: selectedDisplayState?.fusion_method,
-      negative: selectedDisplayState?.negative,
-      channels: selectedDisplayState?.channels,
-      channelColors: selectedDisplayState?.channel_colors,
-      cacheKey: previewCacheKey,
-    }),
-    y: apiClient.uploadSliceUrl(viewerInfo.file_id, {
-      axis: "y",
-      x: debouncedX,
-      y: debouncedY,
-      z: debouncedZ,
-      t: debouncedT,
-      enhancement: selectedDisplayState?.enhancement,
-      fusionMethod: selectedDisplayState?.fusion_method,
-      negative: selectedDisplayState?.negative,
-      channels: selectedDisplayState?.channels,
-      channelColors: selectedDisplayState?.channel_colors,
-      cacheKey: previewCacheKey,
-    }),
-    x: apiClient.uploadSliceUrl(viewerInfo.file_id, {
-      axis: "x",
-      x: debouncedX,
-      y: debouncedY,
-      z: debouncedZ,
-      t: debouncedT,
-      enhancement: selectedDisplayState?.enhancement,
-      fusionMethod: selectedDisplayState?.fusion_method,
-      negative: selectedDisplayState?.negative,
-      channels: selectedDisplayState?.channels,
-      channelColors: selectedDisplayState?.channel_colors,
-      cacheKey: previewCacheKey,
-    }),
+    z: buildMprSliceUrl("z", { x: debouncedX, y: debouncedY, z: debouncedZ }),
+    y: buildMprSliceUrl("y", { x: debouncedX, y: debouncedY, z: debouncedZ }),
+    x: buildMprSliceUrl("x", { x: debouncedX, y: debouncedY, z: debouncedZ }),
   };
-  const direct2dSliceUrl = apiClient.uploadSliceUrl(viewerInfo.file_id, {
-    axis: "z",
-    z: debouncedZ,
-    t: debouncedT,
-    enhancement: selectedDisplayState?.enhancement,
-    fusionMethod: selectedDisplayState?.fusion_method,
-    negative: selectedDisplayState?.negative,
-    channels: selectedDisplayState?.channels,
-    channelColors: selectedDisplayState?.channel_colors,
-    fullResolution: true,
-    cacheKey: previewCacheKey,
-  });
+  const direct2dSliceUrl = buildDirect2dSliceUrl(debouncedZ);
+
+  // --- Client-side slice rendering (instant scrub + window/level, zero network) ---
+  // The full volume is already loaded; slices extracted from it match the backend
+  // PNG pixel-for-pixel. Enabled for single-channel scalar volumes with an explicit
+  // Hounsfield window (the medical case); anything else uses the cached PNG path.
+  // Uses the immediate (non-debounced) indices, since there is no network to gate.
+  const enhancementIsHounsfield = String(selectedDisplayState?.enhancement ?? "").startsWith("hounsfield:");
+  const clientSliceEnabled =
+    Boolean(scalarProbeVolume) && enhancementIsHounsfield && viewerInfo.axis_sizes.C <= 1;
+  const scalarWindowLow = parsedWindow.center - parsedWindow.width / 2;
+  const scalarWindowHigh = parsedWindow.center + parsedWindow.width / 2;
+  const scalarInvert = Boolean(selectedDisplayState?.negative);
+  const makeScalarSlice = useCallback(
+    (axis: ScalarSliceAxis, sliceIndex: number): ScalarSliceSource | null =>
+      clientSliceEnabled && scalarProbeVolume
+        ? buildScalarSliceSource({
+            fileId: viewerInfo.file_id,
+            payload: scalarProbeVolume,
+            axis,
+            sliceIndex,
+            windowLow: scalarWindowLow,
+            windowHigh: scalarWindowHigh,
+            invert: scalarInvert,
+          })
+        : null,
+    [clientSliceEnabled, scalarProbeVolume, scalarWindowLow, scalarWindowHigh, scalarInvert, viewerInfo.file_id]
+  );
+  const direct2dScalarSlice = useMemo(
+    () => makeScalarSlice("z", clampedIndices.z),
+    [makeScalarSlice, clampedIndices.z]
+  );
+  const mprScalarSlices = useMemo(
+    () => ({
+      z: makeScalarSlice("z", clampedIndices.z),
+      y: makeScalarSlice("y", clampedIndices.y),
+      x: makeScalarSlice("x", clampedIndices.x),
+    }),
+    [makeScalarSlice, clampedIndices.x, clampedIndices.y, clampedIndices.z]
+  );
+
+  // Warm neighbouring slices so moving through the stack hits the cache instead of
+  // a fresh ~150ms backend round-trip per slice. Skipped when slices render
+  // client-side (extraction is instant, so there is nothing to warm).
+  useEffect(() => {
+    if (!viewerInfo.is_volume || clientSliceEnabled) {
+      return;
+    }
+    const urls: string[] = [];
+    if (selectedSurface === "2d") {
+      for (let step = 1; step <= SLICE_PREFETCH_RADIUS_2D; step += 1) {
+        if (debouncedZ + step < zAxisSize) urls.push(buildDirect2dSliceUrl(debouncedZ + step));
+        if (debouncedZ - step >= 0) urls.push(buildDirect2dSliceUrl(debouncedZ - step));
+      }
+    } else if (selectedSurface === "mpr") {
+      for (let step = 1; step <= SLICE_PREFETCH_RADIUS_MPR; step += 1) {
+        if (debouncedZ + step < zAxisSize) urls.push(buildMprSliceUrl("z", { x: debouncedX, y: debouncedY, z: debouncedZ + step }));
+        if (debouncedZ - step >= 0) urls.push(buildMprSliceUrl("z", { x: debouncedX, y: debouncedY, z: debouncedZ - step }));
+        if (debouncedY + step < yAxisSize) urls.push(buildMprSliceUrl("y", { x: debouncedX, y: debouncedY + step, z: debouncedZ }));
+        if (debouncedY - step >= 0) urls.push(buildMprSliceUrl("y", { x: debouncedX, y: debouncedY - step, z: debouncedZ }));
+        if (debouncedX + step < xAxisSize) urls.push(buildMprSliceUrl("x", { x: debouncedX + step, y: debouncedY, z: debouncedZ }));
+        if (debouncedX - step >= 0) urls.push(buildMprSliceUrl("x", { x: debouncedX - step, y: debouncedY, z: debouncedZ }));
+      }
+    }
+    if (urls.length > 0) {
+      prefetchSliceBitmaps(urls);
+    }
+  }, [
+    buildDirect2dSliceUrl,
+    buildMprSliceUrl,
+    clientSliceEnabled,
+    debouncedX,
+    debouncedY,
+    debouncedZ,
+    selectedSurface,
+    viewerInfo.is_volume,
+    xAxisSize,
+    yAxisSize,
+    zAxisSize,
+  ]);
   const direct2dDisplayUrl =
     !viewerInfo.is_volume && viewerInfo.service_urls?.display
       ? apiClient.uploadDisplayUrl(viewerInfo.file_id, viewerInfo.service_urls.display, {
@@ -939,10 +1229,6 @@ export function ImageViewerShell({
   ];
   const activeMeasurementPlaneLabel =
     viewerInfo.viewer.planes[activeMeasurementAxis]?.label ?? activeMeasurementAxis.toUpperCase();
-  const metadataOverviewRows = [
-    ...metadataSummaryRows.primary.map((row) => ({ ...row, tone: "primary" as const })),
-    ...metadataSummaryRows.secondary.map((row) => ({ ...row, tone: "secondary" as const })),
-  ];
 
   const updateVolumeClipEdge = (
     edge: "min" | "max",
@@ -1202,6 +1488,7 @@ export function ImageViewerShell({
                   className="viewer-canvas-root"
                   interactive={true}
                   orientationLabels={getPlaneOrientationLabels(viewerInfo, "z")}
+                  scalarSlice={direct2dScalarSlice}
                 />
               </div>
             </div>
@@ -1252,6 +1539,7 @@ export function ImageViewerShell({
                   onSelectPoint={(point) => handlePlaneSelect(axis, point)}
                   onMeasurePoint={(point) => handlePlaneMeasure(axis, point)}
                   measureMode={measurementMode}
+                  scalarSlice={mprScalarSlices[axis]}
                 />
               </article>
             ))}
@@ -1306,28 +1594,30 @@ export function ImageViewerShell({
         </TabsContent>
 
         <TabsContent value="metadata" className="viewer-surface-panel">
-          <section
-            className="viewer-metadata-overview"
+          <div
+            className="viewer-metadata-groups"
             data-viewer-metadata-summary="true"
-            data-viewer-metadata-layout="facts"
-            aria-label="Metadata at a glance"
+            data-viewer-metadata-layout="groups"
+            aria-label="Image metadata"
           >
-            <dl className="viewer-metadata-overview-list">
-              {metadataOverviewRows.map((row) => (
-                <div
-                  key={row.label}
-                  className={
-                    row.tone === "secondary"
-                      ? "viewer-metadata-overview-row viewer-metadata-overview-row-secondary"
-                      : "viewer-metadata-overview-row"
-                  }
-                >
-                  <dt>{row.label}</dt>
-                  <dd>{row.value}</dd>
-                </div>
-              ))}
-            </dl>
-          </section>
+            {metadataGroups.map((group) => (
+              <section
+                key={group.title}
+                className="viewer-metadata-group"
+                data-viewer-metadata-group={group.title}
+              >
+                <h3 className="viewer-metadata-group-title">{group.title}</h3>
+                <dl className="viewer-metadata-kv">
+                  {group.details.map((detail) => (
+                    <div key={`${group.title}-${detail.label}`} className="viewer-metadata-kv-row">
+                      <dt>{detail.label}</dt>
+                      <MetadataDetailValue detail={detail} />
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            ))}
+          </div>
           {viewerInfo.metadata.warnings.length > 0 ? (
             <div className="viewer-metadata-note">
               <strong>Viewer notes</strong>
@@ -1448,10 +1738,46 @@ export function ImageViewerShell({
               ) : null}
               {isScalarMpr ? (
                 <>
+                  {showCtWindowPresets ? (
+                    <div
+                      className="viewer-window-presets"
+                      role="group"
+                      aria-label="CT window presets"
+                      data-viewer-window-presets="true"
+                      data-viewer-active-window-preset={activeCtWindowPresetId ?? "custom"}
+                    >
+                      <span className="viewer-window-presets-label">Window presets</span>
+                      <div className="viewer-window-presets-row">
+                        {CT_WINDOW_PRESETS.map((preset) => {
+                          const active = activeCtWindowPresetId === preset.id;
+                          return (
+                            <Button
+                              key={preset.id}
+                              type="button"
+                              size="sm"
+                              variant={active ? "secondary" : "outline"}
+                              aria-pressed={active}
+                              data-viewer-window-preset={preset.id}
+                              data-active={active ? "true" : "false"}
+                              title={`${preset.label} — center ${preset.center} / width ${preset.width} HU`}
+                              onClick={() =>
+                                updateSelectedDisplay({
+                                  enhancement: buildWindowEnhancement(preset.center, preset.width),
+                                })
+                              }
+                            >
+                              {preset.label}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
                   <label className="viewer-inline-control">
                     <span>Window level</span>
                     <input
                       type="range"
+                      aria-label="Window level"
                       min={Math.floor(arrayMin)}
                       max={Math.ceil(arrayMax)}
                       step="1"
@@ -1468,6 +1794,7 @@ export function ImageViewerShell({
                     <span>Window width</span>
                     <input
                       type="range"
+                      aria-label="Window width"
                       min={1}
                       max={Math.max(1, Math.ceil(Math.abs(arrayMax - arrayMin)))}
                       step="1"

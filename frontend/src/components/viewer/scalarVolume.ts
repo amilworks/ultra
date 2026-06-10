@@ -1,3 +1,5 @@
+import { DataUtils } from "three";
+
 import type { ScalarVolumePayload } from "@/lib/api";
 
 export type ScalarVolumeVoxelIndex = {
@@ -73,18 +75,28 @@ export const scalarVolumePayloadValueAt = (
   return scalarVolumeSampleValue(view, location.offset, payload);
 };
 
-export const scalarVolumePayloadToTextureBytes = (payload: ScalarVolumePayload): Uint8Array => {
+const scalarVolumeNormalizationRange = (
+  payload: ScalarVolumePayload
+): { rawMin: number; range: number } => {
+  const rawMin = Number.isFinite(payload.rawMin) ? payload.rawMin : 0;
+  const rawMax = Number.isFinite(payload.rawMax) && payload.rawMax > rawMin ? payload.rawMax : rawMin + 1;
+  return { rawMin, range: rawMax - rawMin };
+};
+
+const scalarVolumeOutputLength = (payload: ScalarVolumePayload): number => {
   const voxelCount =
     safePositiveInteger(payload.width) *
     safePositiveInteger(payload.height) *
     safePositiveInteger(payload.depth);
   const bytesPerVoxel = Math.max(1, safePositiveInteger(payload.bytesPerVoxel) || 1);
   const availableVoxels = Math.floor(payload.data.byteLength / bytesPerVoxel);
-  const outputLength = voxelCount > 0 ? Math.min(voxelCount, availableVoxels) : availableVoxels;
-  const output = new Uint8Array(outputLength);
-  const rawMin = Number.isFinite(payload.rawMin) ? payload.rawMin : 0;
-  const rawMax = Number.isFinite(payload.rawMax) && payload.rawMax > rawMin ? payload.rawMax : rawMin + 1;
-  const range = rawMax - rawMin;
+  return voxelCount > 0 ? Math.min(voxelCount, availableVoxels) : availableVoxels;
+};
+
+export const scalarVolumePayloadToTextureBytes = (payload: ScalarVolumePayload): Uint8Array => {
+  const bytesPerVoxel = Math.max(1, safePositiveInteger(payload.bytesPerVoxel) || 1);
+  const output = new Uint8Array(scalarVolumeOutputLength(payload));
+  const { rawMin, range } = scalarVolumeNormalizationRange(payload);
   const view = new DataView(payload.data);
   for (let voxelIndex = 0; voxelIndex < output.length; voxelIndex += 1) {
     const offset = voxelIndex * bytesPerVoxel;
@@ -92,6 +104,32 @@ export const scalarVolumePayloadToTextureBytes = (payload: ScalarVolumePayload):
     const finiteValue = Number.isFinite(value) ? value : rawMin;
     const normalized = Math.max(0, Math.min(1, (finiteValue - rawMin) / range));
     output[voxelIndex] = Math.max(0, Math.min(255, Math.round(normalized * 255)));
+  }
+  return output;
+};
+
+/**
+ * Convert a scalar volume to normalized 16-bit half-float samples for GPU upload.
+ *
+ * Medical CT/MRI volumes span a huge raw range (air ~-1024 HU through bone/metal
+ * >3000 HU). Quantizing that to 8 bits collapses the entire brain-tissue band
+ * (CSF ~0-15 HU, parenchyma ~20-45 HU) into ~3 code values, erasing the
+ * ventricle/parenchyma boundary before windowing can ever stretch it. Storing the
+ * normalized value at half-float precision keeps ~11 bits of mantissa, i.e.
+ * sub-HU resolution across the full range, so soft-tissue contrast survives and
+ * window/level stays a cheap GPU uniform. R16F linear filtering is core in WebGL2.
+ */
+export const scalarVolumePayloadToHalfFloat = (payload: ScalarVolumePayload): Uint16Array => {
+  const bytesPerVoxel = Math.max(1, safePositiveInteger(payload.bytesPerVoxel) || 1);
+  const output = new Uint16Array(scalarVolumeOutputLength(payload));
+  const { rawMin, range } = scalarVolumeNormalizationRange(payload);
+  const view = new DataView(payload.data);
+  for (let voxelIndex = 0; voxelIndex < output.length; voxelIndex += 1) {
+    const offset = voxelIndex * bytesPerVoxel;
+    const value = scalarVolumeSampleValue(view, offset, payload);
+    const finiteValue = Number.isFinite(value) ? value : rawMin;
+    const normalized = Math.max(0, Math.min(1, (finiteValue - rawMin) / range));
+    output[voxelIndex] = DataUtils.toHalfFloat(normalized);
   }
   return output;
 };

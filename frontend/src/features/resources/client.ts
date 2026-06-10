@@ -1,11 +1,28 @@
 import type { ApiClient } from "@/lib/api";
 import type {
   ResourceKindFilter,
-  ResourceProcessingFilter,
   ResourceSharingFilter,
   ResourceSourceFilter,
   ResourceStatusFilter,
 } from "@/components/ResourceBrowser";
+
+/**
+ * Data Agent processing-status filter accepted by the resource APIs.
+ * The default Resources UI no longer surfaces this; it is preserved here for
+ * the backend contract and future advanced workflows.
+ */
+export type ResourceProcessingFilter =
+  | "all"
+  | "caption_ready"
+  | "metadata_ready"
+  | "tags_ready"
+  | "qc_complete"
+  | "dedupe_checked"
+  | "organization_ready"
+  | "data_agent_ready"
+  | "needs_caption"
+  | "needs_metadata"
+  | "data_agent_failed";
 import type {
   DataAgentJobCreateRequest,
   DataAgentJobListResponse,

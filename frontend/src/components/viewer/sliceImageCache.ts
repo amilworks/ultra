@@ -1,0 +1,189 @@
+import * as THREE from "three";
+
+import type { ScalarVolumePayload } from "@/lib/api";
+
+import { extractScalarSlice, type ScalarSliceAxis } from "./scalarSlice";
+
+/**
+ * Shared, bounded cache of decoded slice images.
+ *
+ * Moving through a stack used to re-fetch and re-decode a PNG from the backend
+ * for every slice (~150ms each, with no reuse even when scrubbing back over a
+ * visited slice). This cache keeps recently decoded `ImageBitmap`s keyed by their
+ * full slice URL and lets the viewer prefetch neighbours, so revisited and
+ * look-ahead slices render with no network round-trip.
+ *
+ * The URL already encodes everything that changes a slice's pixels (axis, index,
+ * window/level, channels, cache key), so it is a complete cache key.
+ */
+
+const MAX_ENTRIES = 80;
+
+// Insertion order doubles as recency (Map preserves it), so the first key is the
+// least-recently-used entry.
+const bitmapCache = new Map<string, ImageBitmap>();
+const inflight = new Map<string, Promise<ImageBitmap>>();
+
+const promote = (url: string, bitmap: ImageBitmap): void => {
+  bitmapCache.delete(url);
+  bitmapCache.set(url, bitmap);
+  while (bitmapCache.size > MAX_ENTRIES) {
+    const oldest = bitmapCache.keys().next().value as string | undefined;
+    if (oldest === undefined) {
+      break;
+    }
+    // Drop the reference and let GC reclaim it. We deliberately do not call
+    // bitmap.close(): a THREE.Texture built from the bitmap still references it,
+    // and closing underneath a not-yet-uploaded texture would blank the slice.
+    bitmapCache.delete(oldest);
+  }
+};
+
+export const sliceCacheSize = (): number => bitmapCache.size;
+
+export const clearSliceCache = (): void => {
+  bitmapCache.clear();
+  inflight.clear();
+};
+
+export const loadSliceBitmap = (url: string): Promise<ImageBitmap> => {
+  const cached = bitmapCache.get(url);
+  if (cached) {
+    promote(url, cached);
+    return Promise.resolve(cached);
+  }
+  const pending = inflight.get(url);
+  if (pending) {
+    return pending;
+  }
+  const request = (async () => {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) {
+      throw new Error(`Slice request failed: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const bitmap = await createImageBitmap(blob);
+    promote(url, bitmap);
+    return bitmap;
+  })();
+  inflight.set(url, request);
+  void request.then(
+    () => inflight.delete(url),
+    () => inflight.delete(url)
+  );
+  return request;
+};
+
+/**
+ * Warm the cache for slices the user is likely to reach next. Already-cached or
+ * in-flight URLs are skipped, and failures are swallowed (a prefetch that loses a
+ * race with navigation must never surface an error).
+ */
+export const prefetchSliceBitmaps = (urls: Iterable<string>): void => {
+  for (const url of urls) {
+    if (!url || bitmapCache.has(url) || inflight.has(url)) {
+      continue;
+    }
+    void loadSliceBitmap(url).catch(() => {});
+  }
+};
+
+export type ScalarSliceSource = {
+  /** Stable identity of the slice's pixels: file + axis + index + window + invert. */
+  cacheKey: string;
+  payload: ScalarVolumePayload;
+  axis: ScalarSliceAxis;
+  sliceIndex: number;
+  windowLow: number;
+  windowHigh: number;
+  invert: boolean;
+};
+
+/**
+ * Build a {@link ScalarSliceSource} with a canonical cache key. The key captures
+ * everything that changes the slice's pixels so identical requests share a cached
+ * bitmap and any change (slice index, window, invert) misses cleanly.
+ */
+export const buildScalarSliceSource = (params: {
+  fileId: string;
+  payload: ScalarVolumePayload;
+  axis: ScalarSliceAxis;
+  sliceIndex: number;
+  windowLow: number;
+  windowHigh: number;
+  invert: boolean;
+}): ScalarSliceSource => ({
+  cacheKey: [
+    "scalar",
+    params.fileId,
+    params.payload.channel ?? 0,
+    params.axis,
+    params.sliceIndex,
+    params.windowLow.toFixed(3),
+    params.windowHigh.toFixed(3),
+    params.invert ? 1 : 0,
+  ].join(":"),
+  payload: params.payload,
+  axis: params.axis,
+  sliceIndex: params.sliceIndex,
+  windowLow: params.windowLow,
+  windowHigh: params.windowHigh,
+  invert: params.invert,
+});
+
+/**
+ * Render a slice directly from the loaded volume (no network) and cache the
+ * resulting bitmap alongside the network slices. The extraction matches the
+ * backend PNG pixel-for-pixel, so the result is interchangeable with a fetched
+ * slice — same display, same crosshair/measurement alignment.
+ */
+export const loadScalarSliceBitmap = (source: ScalarSliceSource): Promise<ImageBitmap> => {
+  const cached = bitmapCache.get(source.cacheKey);
+  if (cached) {
+    promote(source.cacheKey, cached);
+    return Promise.resolve(cached);
+  }
+  const pending = inflight.get(source.cacheKey);
+  if (pending) {
+    return pending;
+  }
+  const request = (async () => {
+    const image = extractScalarSlice(source.payload, {
+      axis: source.axis,
+      sliceIndex: source.sliceIndex,
+      windowLow: source.windowLow,
+      windowHigh: source.windowHigh,
+      invert: source.invert,
+    });
+    const imageData = new ImageData(image.width, image.height);
+    imageData.data.set(image.data);
+    const bitmap = await createImageBitmap(imageData);
+    promote(source.cacheKey, bitmap);
+    return bitmap;
+  })();
+  inflight.set(source.cacheKey, request);
+  void request.then(
+    () => inflight.delete(source.cacheKey),
+    () => inflight.delete(source.cacheKey)
+  );
+  return request;
+};
+
+export const prefetchScalarSliceBitmaps = (sources: Iterable<ScalarSliceSource>): void => {
+  for (const source of sources) {
+    if (!source || bitmapCache.has(source.cacheKey) || inflight.has(source.cacheKey)) {
+      continue;
+    }
+    void loadScalarSliceBitmap(source).catch(() => {});
+  }
+};
+
+export const sliceBitmapToTexture = (bitmap: ImageBitmap): THREE.Texture => {
+  const texture = new THREE.Texture(bitmap);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+};

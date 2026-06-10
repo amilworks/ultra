@@ -1639,6 +1639,30 @@ export class ApiClient {
     return (await response.json()) as AdminIssueListResponse;
   }
 
+  /**
+   * Cancel a user's own run on the control plane. Stopping a chat must stop the
+   * backend run (which keeps consuming worker capacity and model tokens), not
+   * just disconnect the local stream. Best-effort: a run that is already
+   * terminal returns 404/409, which callers treat as already-stopped.
+   */
+  async cancelRun(runId: string, reason?: string): Promise<void> {
+    const normalizedRunId = asTrimmedString(runId);
+    if (!normalizedRunId) {
+      return;
+    }
+    const trimmedReason = asTrimmedString(reason);
+    await this.fetchJson<Record<string, unknown>>(
+      `/v2/runs/${encodeURIComponent(normalizedRunId)}/cancel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason: trimmedReason || "Canceled from chat composer",
+        }),
+      }
+    );
+  }
+
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
     const response = await fetch(
       buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/cancel`),
@@ -2432,6 +2456,7 @@ export class ApiClient {
     let terminalStatus: "succeeded" | "failed" | "canceled" | null = null;
     let terminalDetail: unknown = null;
     let terminalResponseText = "";
+    let lastRunEventSequence = afterSequence;
 
     const handleStreamEvent = (eventName: string, payload: unknown): void => {
       if (eventName === "heartbeat") {
@@ -2453,6 +2478,16 @@ export class ApiClient {
       }
       if (eventName !== "run_event" || !isRecord(payload)) {
         return;
+      }
+      // The server delivers run events in strictly increasing sequence order;
+      // anything at or below the last seen sequence is a duplicate (e.g. a
+      // replay overlap after reconnect) and must not be appended again.
+      const eventSequence = Math.floor(asFiniteNumber(payload.sequence, 0));
+      if (eventSequence > 0) {
+        if (eventSequence <= lastRunEventSequence) {
+          return;
+        }
+        lastRunEventSequence = eventSequence;
       }
 
       const eventKind =
@@ -4506,6 +4541,9 @@ export class ApiClient {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
+      // Volume payloads are tens of MB; skip the HTTP disk cache so we neither
+      // bloat it nor fail the fetch on a cache-write error for large responses.
+      cache: "no-store",
     });
     if (!response.ok) {
       return parseError(response);
@@ -5043,11 +5081,17 @@ export class ApiClient {
     };
   }
 
-  async getRunEvents(runId: string, limit = 200): Promise<RunEventsResponse> {
+  async getRunEvents(
+    runId: string,
+    limit = 200,
+    options?: { afterSequence?: number }
+  ): Promise<RunEventsResponse> {
     const requestedLimit = Math.max(1, Math.floor(asFiniteNumber(limit, 200)));
     const events: RunEvent[] = [];
     let resolvedRunId = runId;
-    let afterSequence = 0;
+    // Callers polling a live run pass the last sequence they already hold so
+    // each poll only transfers new events instead of re-paging from zero.
+    let afterSequence = Math.max(0, Math.floor(asFiniteNumber(options?.afterSequence, 0)));
     while (true) {
       const payload = await this.fetchJson<Record<string, unknown>>(
         `/v2/runs/${encodeURIComponent(runId)}/events`,

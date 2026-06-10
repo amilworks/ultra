@@ -66,7 +66,7 @@ type ViewerDisplayState = NonNullable<UploadViewerInfo["display_defaults"]>;
 
 type ViewerSurfaceMode = "native" | "bisque";
 
-function useDebouncedNumber(value: number, delayMs = 120): number {
+function useDebouncedNumber(value: number, delayMs = 70): number {
   const [debouncedValue, setDebouncedValue] = useState(value);
 
   useEffect(() => {
@@ -89,11 +89,43 @@ const normalizeSurface = (viewerInfo: UploadViewerInfo | null, current?: string 
   return "2d";
 };
 
+const CT_BRAIN_WINDOW_ENHANCEMENT = "hounsfield:40.000:80.000";
+
+// Hounsfield/CT volumes include air near -1000 HU plus tissue and bone well above
+// zero. MRI and most other scalars start near zero, so this gate keeps the brain
+// window from being applied where Hounsfield units do not exist.
+const looksLikeHounsfieldCt = (viewerInfo: UploadViewerInfo): boolean => {
+  if (String(viewerInfo.modality ?? "").trim().toLowerCase() !== "medical") {
+    return false;
+  }
+  const min = Number(viewerInfo.metadata.array_min ?? viewerInfo.metadata.intensity_stats?.min ?? Number.NaN);
+  const max = Number(viewerInfo.metadata.array_max ?? viewerInfo.metadata.intensity_stats?.max ?? Number.NaN);
+  return Number.isFinite(min) && Number.isFinite(max) && min <= -200 && max >= 200;
+};
+
+// A real DICOM acquisition window (carried on the scan) is honoured; a backend
+// heuristic default window is not — that is what the brain window replaces.
+const hasDicomWindow = (viewerInfo: UploadViewerInfo): boolean => {
+  const center = Number(viewerInfo.metadata.dicom?.wnd_center ?? Number.NaN);
+  const width = Number(viewerInfo.metadata.dicom?.wnd_width ?? Number.NaN);
+  return Number.isFinite(center) && Number.isFinite(width) && width > 0;
+};
+
+// Brain CT volumes (DICOM/NIfTI) open on the brain window so soft tissue and the
+// ventricles are visible immediately, instead of a generic wide default. A genuine
+// DICOM window from the acquisition is respected.
+export const resolveDefaultEnhancement = (viewerInfo: UploadViewerInfo): string => {
+  if (looksLikeHounsfieldCt(viewerInfo) && !hasDicomWindow(viewerInfo)) {
+    return CT_BRAIN_WINDOW_ENHANCEMENT;
+  }
+  return viewerInfo.display_defaults?.enhancement ?? "d";
+};
+
 const buildViewerDisplayState = (
   viewerInfo: UploadViewerInfo,
   override?: Partial<ViewerDisplayState>
 ): ViewerDisplayState => ({
-  enhancement: viewerInfo.display_defaults?.enhancement ?? "d",
+  enhancement: resolveDefaultEnhancement(viewerInfo),
   negative: Boolean(viewerInfo.display_defaults?.negative ?? false),
   rotate: Number(viewerInfo.display_defaults?.rotate ?? 0),
   fusion_method: viewerInfo.display_defaults?.fusion_method ?? "m",

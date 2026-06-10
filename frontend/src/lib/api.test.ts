@@ -318,6 +318,83 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
+  it("skips duplicate run event sequences so replay overlap never doubles streamed text", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (
+        url ===
+        "https://ultra.example.org/v2/runs/run_resume/events?stream=true&after_sequence=7"
+      ) {
+        const body = [
+          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"message.delta","sequence":8,"payload":{"text":" more"}}\n\n',
+          // A reconnect/replay overlap can re-deliver an already-seen event.
+          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"message.delta","sequence":8,"payload":{"text":" more"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"message.delta","sequence":9,"payload":{"text":" text"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"run.completed","sequence":10,"payload":{"response_text":"done more text"}}\n\n',
+        ].join("");
+        return new Response(encoder.encode(body), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_resume") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_resume",
+            status: "succeeded",
+            response_text: "done more text",
+            updated_at: "2026-05-31T00:00:01Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const tokens: string[] = [];
+    const response = await client.resumeRunStream("run_resume", {
+      afterSequence: 7,
+      onToken: (delta) => tokens.push(delta),
+    });
+
+    expect(tokens).toEqual([" more", " text"]);
+    expect(response.response_text).toBe("done more text");
+  });
+
+  it("fetches run events incrementally from a caller-provided sequence cursor", async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("after_sequence=500")) {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_inc",
+            count: 1,
+            events: [
+              { event_id: "evt-501", sequence: 501, run_id: "run_inc", event_kind: "message.delta" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const response = await client.getRunEvents("run_inc", 200, { afterSequence: 500 });
+
+    expect(urls).toEqual([
+      "https://ultra.example.org/v2/runs/run_inc/events?limit=200&after_sequence=500",
+    ]);
+    expect(response.events.map((event) => event.payload?.sequence)).toEqual([501]);
+  });
+
   it("resumes an existing V2 run stream from the beginning with an explicit zero cursor", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -6673,6 +6750,45 @@ describe("ApiClient V2 chat bridge", () => {
     expect(action.updated).toBe(true);
     expect(urls).toEqual(["https://ultra.example.org/v2/admin/runs/run_1/requeue"]);
     expect(JSON.parse(bodies[0])).toEqual({ reason: "expired lease" });
+  });
+
+  it("cancels a user's own run through the V2 run cancel endpoint", async () => {
+    const urls: string[] = [];
+    const methods: string[] = [];
+    const bodies: string[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        urls.push(url);
+        methods.push(String(init?.method ?? "GET"));
+        bodies.push(String(init?.body ?? ""));
+        if (url === "https://ultra.example.org/v2/runs/run_42/cancel") {
+          return new Response(
+            JSON.stringify({ run_id: "run_42", status: "canceled" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.cancelRun("run_42", "Stopped from chat composer");
+
+    expect(urls).toEqual(["https://ultra.example.org/v2/runs/run_42/cancel"]);
+    expect(methods).toEqual(["POST"]);
+    expect(JSON.parse(bodies[0])).toEqual({ reason: "Stopped from chat composer" });
+  });
+
+  it("skips the cancel request when no run id is provided", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.cancelRun("   ");
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("loads training read models from V2 instead of legacy training routes", async () => {

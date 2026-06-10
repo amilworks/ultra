@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/lib/api";
 import type { UploadedFileRecord, UploadViewerInfo } from "@/types";
 
-import { UploadViewerWorkspace } from "./UploadViewerSheet";
+import { resolveDefaultEnhancement, UploadViewerWorkspace } from "./UploadViewerSheet";
 
 vi.mock("./viewer/ImageViewerShell", () => ({
   ImageViewerShell: ({ selectedDisplayState }: { selectedDisplayState: UploadViewerInfo["display_defaults"] }) => (
@@ -194,7 +194,8 @@ describe("UploadViewerWorkspace volume defaults", () => {
     );
 
     const shell = await screen.findByTestId("image-viewer-shell");
-    expect(shell).toHaveAttribute("data-enhancement", "hounsfield:350.000:1800.000");
+    // Brain CT with only a heuristic backend window opens on the brain window.
+    expect(shell).toHaveAttribute("data-enhancement", "hounsfield:40.000:80.000");
     expect(shell).toHaveAttribute("data-fusion", "a");
     expect(shell).toHaveAttribute("data-signal-floor", "0.12");
     expect(shell).toHaveAttribute("data-density", "1.75");
@@ -202,5 +203,48 @@ describe("UploadViewerWorkspace volume defaults", () => {
     expect(shell).toHaveAttribute("data-lighting-strength", "0.72");
     expect(shell).toHaveAttribute("data-view-preset", "iso");
     expect(shell).toHaveAttribute("data-camera-mode", "orthographic");
+  });
+});
+
+describe("resolveDefaultEnhancement", () => {
+  const make = (
+    modality: string,
+    metadata: Record<string, unknown>,
+    enhancement?: string
+  ): UploadViewerInfo =>
+    ({
+      modality,
+      metadata,
+      display_defaults: enhancement ? { enhancement } : {},
+    }) as unknown as UploadViewerInfo;
+
+  it("opens brain CT on the brain window, overriding a generic heuristic window", () => {
+    expect(
+      resolveDefaultEnhancement(
+        make("medical", { array_min: -1024, array_max: 3071 }, "hounsfield:350.000:1800.000")
+      )
+    ).toBe("hounsfield:40.000:80.000");
+  });
+
+  it("leaves non-Hounsfield medical data (MRI starting near zero) on its source default", () => {
+    expect(resolveDefaultEnhancement(make("medical", { array_min: 0, array_max: 1400 }, "d"))).toBe("d");
+  });
+
+  it("does not apply a brain window to non-medical modalities", () => {
+    expect(
+      resolveDefaultEnhancement(make("microscopy", { array_min: -1024, array_max: 3071 }, "d"))
+    ).toBe("d");
+  });
+
+  it("respects a genuine DICOM acquisition window over the brain default", () => {
+    expect(
+      resolveDefaultEnhancement(
+        make(
+          "medical",
+          { array_min: -1024, array_max: 3071, dicom: { wnd_center: 35, wnd_width: 75 } },
+          "hounsfield:35.000:75.000"
+        )
+      )
+    ).toBe("hounsfield:35.000:75.000");
   });
 });

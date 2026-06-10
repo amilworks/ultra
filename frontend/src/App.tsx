@@ -132,7 +132,10 @@ import {
   fallbackConversationTitleFromText,
   resolveConversationTitle,
 } from "./features/chat/conversation-title";
-import { shouldKeepOptimisticConversationAfterHydration } from "./features/chat/stale-conversation";
+import {
+  prependResolvedConversation,
+  shouldKeepOptimisticConversationAfterHydration,
+} from "./features/chat/stale-conversation";
 import {
   createBulkResourceShareGrants as createBulkResourceShareGrantsRequest,
   createResourceCollectionShareGrants as createResourceCollectionShareGrantsRequest,
@@ -152,7 +155,6 @@ import {
   restoreResource as restoreResourceRequest,
   revokeResourceShareGrant as revokeResourceShareGrantRequest,
 } from "./features/resources/client";
-import { parseResourceMetadataFilterInput } from "./features/resources/filters";
 import {
   createResourceUploadQueueStore,
   hydrateResourceUploadProgressFromQueueStore,
@@ -222,7 +224,6 @@ import type {
   ResourceCollectionAddSelectionRequest,
   ResourceCollectionSelectionRequest,
   ResourceKindFilter,
-  ResourceProcessingFilter,
   ResourceShareGrantRequest,
   ResourceSharingFilter,
   ResourceStatusFilter,
@@ -7743,15 +7744,9 @@ export function App() {
     useState<ResourceSourceFilter>("all");
   const [resourceSharingFilter, setResourceSharingFilter] =
     useState<ResourceSharingFilter>("all");
-  const [resourceProcessingFilter, setResourceProcessingFilter] =
-    useState<ResourceProcessingFilter>("all");
   const [resourceStatusFilter, setResourceStatusFilter] =
     useState<ResourceStatusFilter>("active");
   const [resourceTagFilter, setResourceTagFilter] = useState("");
-  const [resourceDescriptorFilter, setResourceDescriptorFilter] = useState("");
-  const [resourceMetadataFilter, setResourceMetadataFilter] = useState("");
-  const [resourceCreatedAfterFilter, setResourceCreatedAfterFilter] = useState("");
-  const [resourceCreatedBeforeFilter, setResourceCreatedBeforeFilter] = useState("");
   const [resourceRefreshToken, setResourceRefreshToken] = useState(0);
   const [resourceCollectionRefreshToken, setResourceCollectionRefreshToken] = useState(0);
   const [resourceDeletingById, setResourceDeletingById] = useState<Record<string, boolean>>({});
@@ -8223,9 +8218,11 @@ export function App() {
             if (isCancelled) {
               return;
             }
-            restored = [conversationFromRecord(targetRecord), ...restored].sort(
-              (a, b) => b.updatedAt - a.updatedAt
-            );
+            // The requested conversation may already be present under its
+            // resolved id (the URL can reference it by thread id while the list
+            // holds it under the local conversation id). Dedupe by resolved id
+            // so we never render two history rows with the same React key.
+            restored = prependResolvedConversation(conversationFromRecord(targetRecord), restored);
             setUiErrorBanner(null);
           } catch (error) {
             if (isCancelled) {
@@ -8421,10 +8418,6 @@ export function App() {
     let cancelled = false;
     const activeQuery = debouncedResourceQuery.trim();
     const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
-    const activeDescriptorFilters = parseResourceTagFilter(resourceDescriptorFilter);
-    const activeMetadataFilters = parseResourceMetadataFilterInput(resourceMetadataFilter);
-    const activeCreatedAfter = resourceCreatedAfterFilter.trim();
-    const activeCreatedBefore = resourceCreatedBeforeFilter.trim();
     const activeCollectionId = activeResourceCollection?.collection_id ?? "";
     const activeResourceListKey = [
       activeCollectionId ? `folder:${activeCollectionId}` : "library",
@@ -8432,13 +8425,8 @@ export function App() {
       resourceKindFilter,
       resourceSourceFilter,
       resourceSharingFilter,
-      resourceProcessingFilter,
       resourceStatusFilter,
       activeTagFilters.join("\u0001"),
-      activeDescriptorFilters.join("\u0001"),
-      activeMetadataFilters.map((filter) => `${filter.path}:${filter.operator}:${filter.value ?? ""}`).join("\u0001"),
-      activeCreatedAfter,
-      activeCreatedBefore,
       String(resourceRefreshToken),
     ].join("\u0000");
     resourceListKeyRef.current = activeResourceListKey;
@@ -8459,13 +8447,8 @@ export function App() {
           kind: resourceKindFilter,
           source: resourceSourceFilter,
           sharing: resourceSharingFilter,
-          processingStatus: resourceProcessingFilter,
           status: resourceStatusFilter,
           tags: activeTagFilters,
-          descriptors: activeDescriptorFilters,
-          metadataFilters: activeMetadataFilters,
-          createdAfter: activeCreatedAfter || undefined,
-          createdBefore: activeCreatedBefore || undefined,
         })
       : loadLibraryResources(apiClient, {
           limit: RESOURCE_PAGE_SIZE,
@@ -8474,13 +8457,8 @@ export function App() {
           kind: resourceKindFilter,
           source: resourceSourceFilter,
           sharing: resourceSharingFilter,
-          processingStatus: resourceProcessingFilter,
           status: resourceStatusFilter,
           tags: activeTagFilters,
-          descriptors: activeDescriptorFilters,
-          metadataFilters: activeMetadataFilters,
-          createdAfter: activeCreatedAfter || undefined,
-          createdBefore: activeCreatedBefore || undefined,
         });
     void request
       .then((payload) => {
@@ -8514,16 +8492,11 @@ export function App() {
     authStatus,
     debouncedResourceQuery,
     resourceKindFilter,
-    resourceProcessingFilter,
     resourceRefreshToken,
     resourceSharingFilter,
     resourceSourceFilter,
     resourceStatusFilter,
-    resourceDescriptorFilter,
-    resourceMetadataFilter,
     resourceTagFilter,
-    resourceCreatedAfterFilter,
-    resourceCreatedBeforeFilter,
   ]);
 
   useEffect(() => {
@@ -10084,12 +10057,31 @@ export function App() {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
   const activeConversationStopId = activeConversation?.id ?? null;
+  // Remember the most recent backend run id seen for each conversation so the
+  // Stop button can cancel the server-side run even if the streaming message's
+  // run id is momentarily unavailable (e.g. just after a refresh re-attach).
+  const activeRunIdByConversationRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!activeConversationStopId || !activeStreamingRunId) {
+      return;
+    }
+    activeRunIdByConversationRef.current.set(activeConversationStopId, activeStreamingRunId);
+  }, [activeConversationStopId, activeStreamingRunId]);
   const stopActiveConversation = useCallback((): void => {
     if (!activeConversationStopId) {
       return;
     }
+    const runIdToCancel =
+      activeStreamingRunId ||
+      activeRunIdByConversationRef.current.get(activeConversationStopId) ||
+      "";
     requestStopConversation(activeConversationStopId);
-  }, [activeConversationStopId, requestStopConversation]);
+    if (runIdToCancel) {
+      void apiClient.cancelRun(runIdToCancel, "Stopped from chat composer").catch(() => {
+        // The run may already be terminal; the local stream is already stopped.
+      });
+    }
+  }, [activeConversationStopId, activeStreamingRunId, apiClient, requestStopConversation]);
 
   useEffect(() => {
     const conversationId = activeConversation?.id ?? null;
@@ -10099,26 +10091,32 @@ export function App() {
       return;
     }
     let cancelled = false;
-    let lastFingerprint = "";
+    // Poll incrementally: keep a sequence cursor and accumulate events so each
+    // tick only transfers events the panel does not already hold. Long runs
+    // produce thousands of events; re-paging from zero every tick repeated
+    // dozens of requests per second for no new information.
+    let collectedEvents: RunEvent[] = [];
+    let afterSequence = 0;
 
     const pollRunEvents = async (): Promise<void> => {
       try {
-        const response = await listRunEvents(apiClient, runId, 120);
-        if (cancelled) {
+        const response = await listRunEvents(apiClient, runId, 200, { afterSequence });
+        if (cancelled || response.events.length === 0) {
           return;
         }
-        const fingerprint = JSON.stringify(response.events);
-        if (fingerprint === lastFingerprint) {
-          return;
-        }
-        lastFingerprint = fingerprint;
+        collectedEvents = [...collectedEvents, ...response.events];
+        afterSequence = response.events.reduce((current, event) => {
+          const sequence = Math.floor(Number(event.payload?.sequence) || 0);
+          return sequence > current ? sequence : current;
+        }, afterSequence);
+        const snapshot = collectedEvents;
         updateConversation(conversationId, (current) => ({
           ...current,
           messages: current.messages.map((item) =>
             item.id === messageId
               ? {
                   ...item,
-                  runEvents: response.events,
+                  runEvents: snapshot,
                 }
               : item
           ),
@@ -10303,10 +10301,6 @@ export function App() {
     setResourceSharingFilter(value);
   }, []);
 
-  const updateResourceProcessingFilter = useCallback((value: ResourceProcessingFilter): void => {
-    setResourceProcessingFilter(value);
-  }, []);
-
   const updateResourceStatusFilter = useCallback((value: ResourceStatusFilter): void => {
     setResourceStatusFilter(value);
     if (value === "deleted") {
@@ -10317,22 +10311,6 @@ export function App() {
 
   const updateResourceTagFilter = useCallback((value: string): void => {
     setResourceTagFilter(value);
-  }, []);
-
-  const updateResourceDescriptorFilter = useCallback((value: string): void => {
-    setResourceDescriptorFilter(value);
-  }, []);
-
-  const updateResourceMetadataFilter = useCallback((value: string): void => {
-    setResourceMetadataFilter(value);
-  }, []);
-
-  const updateResourceCreatedAfterFilter = useCallback((value: string): void => {
-    setResourceCreatedAfterFilter(value);
-  }, []);
-
-  const updateResourceCreatedBeforeFilter = useCallback((value: string): void => {
-    setResourceCreatedBeforeFilter(value);
   }, []);
 
   const flushResourceUploadProgress = useCallback((): void => {
@@ -10795,10 +10773,6 @@ export function App() {
     const offset = resources.length;
     const activeQuery = debouncedResourceQuery.trim();
     const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
-    const activeDescriptorFilters = parseResourceTagFilter(resourceDescriptorFilter);
-    const activeMetadataFilters = parseResourceMetadataFilterInput(resourceMetadataFilter);
-    const activeCreatedAfter = resourceCreatedAfterFilter.trim();
-    const activeCreatedBefore = resourceCreatedBeforeFilter.trim();
     const activeCollectionId = activeResourceCollection?.collection_id ?? "";
     const activeResourceListKey = [
       activeCollectionId ? `folder:${activeCollectionId}` : "library",
@@ -10806,13 +10780,8 @@ export function App() {
       resourceKindFilter,
       resourceSourceFilter,
       resourceSharingFilter,
-      resourceProcessingFilter,
       resourceStatusFilter,
       activeTagFilters.join("\u0001"),
-      activeDescriptorFilters.join("\u0001"),
-      activeMetadataFilters.map((filter) => `${filter.path}:${filter.operator}:${filter.value ?? ""}`).join("\u0001"),
-      activeCreatedAfter,
-      activeCreatedBefore,
       String(resourceRefreshToken),
     ].join("\u0000");
     setResourcesLoadingMore(true);
@@ -10824,13 +10793,8 @@ export function App() {
           kind: resourceKindFilter,
           source: resourceSourceFilter,
           sharing: resourceSharingFilter,
-          processingStatus: resourceProcessingFilter,
           status: resourceStatusFilter,
           tags: activeTagFilters,
-          descriptors: activeDescriptorFilters,
-          metadataFilters: activeMetadataFilters,
-          createdAfter: activeCreatedAfter || undefined,
-          createdBefore: activeCreatedBefore || undefined,
         })
       : loadLibraryResources(apiClient, {
           limit: RESOURCE_PAGE_SIZE,
@@ -10839,13 +10803,8 @@ export function App() {
           kind: resourceKindFilter,
           source: resourceSourceFilter,
           sharing: resourceSharingFilter,
-          processingStatus: resourceProcessingFilter,
           status: resourceStatusFilter,
           tags: activeTagFilters,
-          descriptors: activeDescriptorFilters,
-          metadataFilters: activeMetadataFilters,
-          createdAfter: activeCreatedAfter || undefined,
-          createdBefore: activeCreatedBefore || undefined,
         });
     void request
       .then((payload) => {
@@ -10883,16 +10842,11 @@ export function App() {
     authStatus,
     debouncedResourceQuery,
     resourceKindFilter,
-    resourceProcessingFilter,
     resourceRefreshToken,
     resourceSharingFilter,
     resourceSourceFilter,
     resourceStatusFilter,
-    resourceDescriptorFilter,
-    resourceMetadataFilter,
     resourceTagFilter,
-    resourceCreatedAfterFilter,
-    resourceCreatedBeforeFilter,
     resourceTotalCount,
     resources.length,
     resourcesLoading,
@@ -13926,13 +13880,8 @@ export function App() {
                 kindFilter={resourceKindFilter}
                 sourceFilter={resourceSourceFilter}
                 sharingFilter={resourceSharingFilter}
-                processingFilter={resourceProcessingFilter}
                 statusFilter={resourceStatusFilter}
                 tagFilter={resourceTagFilter}
-                descriptorFilter={resourceDescriptorFilter}
-                metadataFilter={resourceMetadataFilter}
-                createdAfter={resourceCreatedAfterFilter}
-                createdBefore={resourceCreatedBeforeFilter}
                 deletingFileIds={resourceDeletingById}
                 restoringFileIds={resourceRestoringById}
                 restoringCollectionIds={resourceCollectionRestoringById}
@@ -13940,13 +13889,8 @@ export function App() {
                 onKindFilterChange={updateResourceKindFilter}
                 onSourceFilterChange={updateResourceSourceFilter}
                 onSharingFilterChange={updateResourceSharingFilter}
-                onProcessingFilterChange={updateResourceProcessingFilter}
                 onStatusFilterChange={updateResourceStatusFilter}
                 onTagFilterChange={updateResourceTagFilter}
-                onDescriptorFilterChange={updateResourceDescriptorFilter}
-                onMetadataFilterChange={updateResourceMetadataFilter}
-                onCreatedAfterChange={updateResourceCreatedAfterFilter}
-                onCreatedBeforeChange={updateResourceCreatedBeforeFilter}
                 onRefresh={refreshResources}
                 onLoadMore={loadMoreResources}
                 onUploadFiles={(files: File[], context?: ResourceUploadReselectionContext) => {

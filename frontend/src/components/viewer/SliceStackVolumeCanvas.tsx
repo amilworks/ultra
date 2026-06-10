@@ -5,7 +5,7 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 
-import { scalarVolumePayloadToTextureBytes } from "./scalarVolume";
+import { scalarVolumePayloadToHalfFloat } from "./scalarVolume";
 import { getPlaneDescriptor } from "./shared";
 import { computePhysicalVolumeGeometry } from "./volumeGeometry";
 import {
@@ -30,7 +30,11 @@ import {
 } from "./volumeViewPreset";
 import { resolveVolumeOrientationCue } from "./volumeOrientation";
 
-export { scalarVolumePayloadToTextureBytes, scalarVolumePayloadValueAt } from "./scalarVolume";
+export {
+  scalarVolumePayloadToTextureBytes,
+  scalarVolumePayloadToHalfFloat,
+  scalarVolumePayloadValueAt,
+} from "./scalarVolume";
 export { computePhysicalVolumeGeometry, type PhysicalVolumeGeometry } from "./volumeGeometry";
 export { resolveVolumeScaleBar, type VolumeScaleBar } from "./volumeScaleBar";
 export {
@@ -426,6 +430,9 @@ const SCALAR_FRAGMENT_SHADER = `
   uniform bool uLightingEnabled;
   uniform float uLightingStrength;
   uniform vec3 uVoxelStep;
+  uniform vec3 uVolumeScale;
+  uniform float uEdgeStrength;
+  uniform float uInteriorOpacity;
   uniform int uProjectionMode;
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
@@ -521,31 +528,52 @@ const SCALAR_FRAGMENT_SHADER = `
     return 1.0 - pow(1.0 - baseAlpha, stepScale);
   }
 
-  vec3 applyDepthLighting(vec3 location, vec3 color, float value) {
-    if (!uLightingEnabled || uLightingStrength <= 0.0 || value <= uSignalFloor) {
-      return color;
-    }
-
+  // Central-difference gradient of the windowed signal. Components are spaced one
+  // voxel apart on each axis, so this is the local rate of change that marks a
+  // tissue interface (e.g. the CSF<->parenchyma wall of a ventricle).
+  vec3 scalarGradient(vec3 location) {
     float gx = sampleWindowed(location + vec3(uVoxelStep.x, 0.0, 0.0)) -
       sampleWindowed(location - vec3(uVoxelStep.x, 0.0, 0.0));
     float gy = sampleWindowed(location + vec3(0.0, uVoxelStep.y, 0.0)) -
       sampleWindowed(location - vec3(0.0, uVoxelStep.y, 0.0));
     float gz = sampleWindowed(location + vec3(0.0, 0.0, uVoxelStep.z)) -
       sampleWindowed(location - vec3(0.0, 0.0, uVoxelStep.z));
-    vec3 gradient = vec3(gx, gy, gz);
-    if (length(gradient) < 0.0001) {
+    return vec3(gx, gy, gz);
+  }
+
+  // Levoy boundary-emphasis opacity: homogeneous interiors (low gradient) stay
+  // translucent so we can see past them, while tissue interfaces (high gradient)
+  // become opaque surfaces. This is what makes the ventricle walls and other
+  // internal boundaries visible when looking around inside the volume.
+  float structuredOpacity(float opacityValue, vec3 gradient) {
+    float edge = clamp(length(gradient) * uEdgeStrength, 0.0, 1.0);
+    return opacityValue * mix(uInteriorOpacity, 1.0, edge);
+  }
+
+  vec3 applyDepthLighting(vec3 location, vec3 color, vec3 gradient) {
+    if (!uLightingEnabled || uLightingStrength <= 0.0) {
       return color;
     }
 
-    vec3 normal = normalize(gradient);
+    // Anisotropy correction: scale the texture-space gradient back into world
+    // space so the surface normal is not skewed by thick (e.g. 5 mm) slices.
+    vec3 worldGradient = gradient / max(vec3(0.06), uVolumeScale);
+    if (length(worldGradient) < 0.0001) {
+      return color;
+    }
+
+    vec3 normal = normalize(worldGradient);
     vec3 lightDir = normalize(vec3(-0.45, 0.55, 0.72));
     vec3 viewDir = uOrthographicCamera
       ? -normalize(uCameraDirectionLocal)
       : normalize(uCameraPositionLocal - (location - vec3(0.5)));
+    vec3 halfDir = normalize(lightDir + viewDir);
     float diffuse = max(dot(normal, lightDir), dot(-normal, lightDir));
+    float specular = pow(max(dot(normal, halfDir), max(dot(-normal, halfDir), 0.0)), 22.0);
     float rim = pow(1.0 - clamp(abs(dot(normal, viewDir)), 0.0, 1.0), 2.0);
     float shade = clamp(0.42 + 0.72 * diffuse + 0.18 * rim, 0.35, 1.25);
-    return mix(color, color * shade, uLightingStrength);
+    vec3 lit = color * shade + vec3(0.28 * specular);
+    return mix(color, lit, uLightingStrength);
   }
 
   void main() {
@@ -591,8 +619,10 @@ const SCALAR_FRAGMENT_SHADER = `
         location += delta;
         continue;
       }
-      float alpha = alphaFromOpacity(opacityValue, length(delta));
-      vec3 sampleColor = applyDepthLighting(location, scalarColor(sampleValue), sampleValue);
+      vec3 gradient = scalarGradient(location);
+      float opacity = structuredOpacity(opacityValue, gradient);
+      float alpha = alphaFromOpacity(opacity, length(delta));
+      vec3 sampleColor = applyDepthLighting(location, scalarColor(sampleValue), gradient);
       accum.rgb += (1.0 - accum.a) * sampleColor * alpha;
       accum.a += (1.0 - accum.a) * alpha;
       if (accum.a >= 0.985) {
@@ -606,7 +636,7 @@ const SCALAR_FRAGMENT_SHADER = `
       if (maxOpacity < 0.02) {
         discard;
       }
-      vec3 maxColor = applyDepthLighting(maxLocation, scalarColor(maxValue), maxValue);
+      vec3 maxColor = applyDepthLighting(maxLocation, scalarColor(maxValue), scalarGradient(maxLocation));
       gl_FragColor = vec4(maxColor, clamp(maxOpacity * uDensityScale * 1.2, 0.0, 1.0));
       return;
     }
@@ -680,11 +710,14 @@ const scalarToVolumeTexture = async (
   const width = Math.max(1, payload.width);
   const height = Math.max(1, payload.height);
   const depth = Math.max(1, payload.depth);
-  const textureData = scalarVolumePayloadToTextureBytes(payload);
+  // Upload as normalized 16-bit half-float (R16F) instead of 8-bit so the brain's
+  // narrow soft-tissue band keeps real contrast. R16F supports hardware linear
+  // filtering natively in WebGL2, so window/level stays a cheap GPU uniform.
+  const textureData = scalarVolumePayloadToHalfFloat(payload);
   const texture = new THREE.Data3DTexture(textureData, width, height, depth);
   texture.format = THREE.RedFormat;
-  texture.type = THREE.UnsignedByteType;
-  texture.unpackAlignment = 1;
+  texture.type = THREE.HalfFloatType;
+  texture.unpackAlignment = 2;
   texture.generateMipmaps = false;
   texture.minFilter = texturePolicy === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
   texture.magFilter = texturePolicy === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
@@ -1255,9 +1288,16 @@ export function SliceStackVolumeCanvas({
       ? projectionMode === "mip"
         ? 0.9
         : modality === "medical"
-          ? 0.24
+          ? 0.5
           : 0.34
       : 0.22;
+  // Boundary-emphasis transfer function (composite scalar volumes only). A higher
+  // edge strength + lower interior opacity reveals internal tissue interfaces such
+  // as ventricle walls; medical data leans harder on this than generic scalars.
+  const volumeEdgeStrength =
+    renderPolicy === "scalar" ? (modality === "medical" ? 7.0 : 3.5) : 0.0;
+  const volumeInteriorOpacity =
+    renderPolicy === "scalar" ? (modality === "medical" ? 0.14 : 0.5) : 1.0;
   const texturePolicy: "linear" | "nearest" =
     resolvedSource?.texturePolicy === "nearest" || resolvedSource?.texturePolicy === "linear"
       ? resolvedSource.texturePolicy
@@ -1462,6 +1502,9 @@ export function SliceStackVolumeCanvas({
               uLightingEnabled: { value: scalarRenderConfigRef.current.lightingEnabled },
               uLightingStrength: { value: scalarRenderConfigRef.current.lightingStrength },
               uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
+              uVolumeScale: { value: new THREE.Vector3(normalizedScale.x, normalizedScale.y, normalizedScale.z) },
+              uEdgeStrength: { value: volumeEdgeStrength },
+              uInteriorOpacity: { value: volumeInteriorOpacity },
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
               uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
               uClipMax: { value: new THREE.Vector3(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z) },
@@ -1770,6 +1813,8 @@ export function SliceStackVolumeCanvas({
     texturePolicy,
     clearColor,
     density,
+    volumeEdgeStrength,
+    volumeInteriorOpacity,
     projectionMode,
     renderPolicy,
     sampleBudget,

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +55,96 @@ type ServerDeps struct {
 	Bisque            *BisqueService
 	BisqueCredentials *BisqueCredentialStore
 	WorkOS            *WorkOSAuth
+	// WorkerToken authenticates trusted workers (Deep Agents, RareSpot) on the
+	// run-status, run-events, run-lease, and worker-heartbeat endpoints. Empty
+	// disables worker-token auth.
+	WorkerToken string
+}
+
+type workerAuthState int
+
+const (
+	workerAuthAbsent workerAuthState = iota
+	workerAuthValid
+	workerAuthInvalid
+)
+
+var (
+	workerRunPathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
+	workerRunEventsPathPattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
+	workerLeasePathPattern     = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+)
+
+func workerTokenFromRequest(r *http.Request) string {
+	if token := strings.TrimSpace(r.Header.Get("X-Ultra-Worker-Token")); token != "" {
+		return token
+	}
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	const bearerPrefix = "bearer "
+	if len(authorization) > len(bearerPrefix) && strings.EqualFold(authorization[:len(bearerPrefix)], bearerPrefix) {
+		return strings.TrimSpace(authorization[len(bearerPrefix):])
+	}
+	return ""
+}
+
+// workerRequestAuth classifies the worker credential on a request. A presented
+// token never falls through to user scoping: it either matches the configured
+// worker token or the request is rejected.
+func (deps ServerDeps) workerRequestAuth(r *http.Request) workerAuthState {
+	token := workerTokenFromRequest(r)
+	if token == "" {
+		return workerAuthAbsent
+	}
+	if strings.TrimSpace(deps.WorkerToken) == "" {
+		return workerAuthInvalid
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(deps.WorkerToken)) == 1 {
+		return workerAuthValid
+	}
+	return workerAuthInvalid
+}
+
+// isWorkerScopedEndpoint reports whether the request targets one of the
+// endpoints workers are allowed to reach with a worker token.
+func isWorkerScopedEndpoint(r *http.Request) bool {
+	path := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet && workerRunPathPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodGet && workerRunEventsPathPattern.MatchString(path):
+		return true
+	case workerLeasePathPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && (path == "/v1/workers/heartbeat" || path == "/v2/workers/heartbeat"):
+		return true
+	}
+	return false
+}
+
+// runForWorkerOrUser resolves a run for worker-token requests without user
+// scoping, otherwise falls back to the request principal's scope. It writes
+// the HTTP error response itself when resolution fails.
+func (deps ServerDeps) runForWorkerOrUser(w http.ResponseWriter, r *http.Request, runID string) (domain.RunRecord, bool) {
+	switch deps.workerRequestAuth(r) {
+	case workerAuthValid:
+		run, err := deps.Store.GetRun(r.Context(), runID)
+		if err != nil {
+			writeStoreError(w, err)
+			return domain.RunRecord{}, false
+		}
+		return run, true
+	case workerAuthInvalid:
+		writeError(w, http.StatusUnauthorized, errors.New("invalid worker token"))
+		return domain.RunRecord{}, false
+	default:
+		principal := deps.principalFromRequest(r, "")
+		run, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID)
+		if err != nil {
+			writeStoreError(w, err)
+			return domain.RunRecord{}, false
+		}
+		return run, true
+	}
 }
 
 type runEventSource interface {
@@ -1017,6 +1109,10 @@ func (deps ServerDeps) workOSSessionResponseForRequest(w http.ResponseWriter, r 
 
 func (deps ServerDeps) requireWorkOSAccount(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isWorkerScopedEndpoint(r) && deps.workerRequestAuth(r) == workerAuthValid {
+			next.ServeHTTP(w, r)
+			return
+		}
 		snapshot, authenticated := deps.WorkOS.authenticateRequest(w, r)
 		if !authenticated {
 			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
@@ -6397,10 +6493,8 @@ func (deps ServerDeps) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
 	}
-	principal := deps.principalFromRequest(r, "")
-	run, err := deps.Store.GetRunForUser(r.Context(), chi.URLParam(r, "run_id"), principal.UserID)
-	if err != nil {
-		writeStoreError(w, err)
+	run, ok := deps.runForWorkerOrUser(w, r, chi.URLParam(r, "run_id"))
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
@@ -8247,9 +8341,7 @@ func (deps ServerDeps) handleAcquireRunLease(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
-	principal := deps.principalFromRequest(r, "")
-	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
-		writeStoreError(w, err)
+	if _, ok := deps.runForWorkerOrUser(w, r, runID); !ok {
 		return
 	}
 	lease, err := deps.Runs.AcquireRunLease(r.Context(), runcontrol.AcquireRunLeaseRequest{
@@ -8277,9 +8369,7 @@ func (deps ServerDeps) handleRenewRunLease(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
-	principal := deps.principalFromRequest(r, "")
-	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
-		writeStoreError(w, err)
+	if _, ok := deps.runForWorkerOrUser(w, r, runID); !ok {
 		return
 	}
 	lease, err := deps.Runs.RenewRunLease(r.Context(), runcontrol.RenewRunLeaseRequest{
@@ -8307,9 +8397,7 @@ func (deps ServerDeps) handleReleaseRunLease(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
-	principal := deps.principalFromRequest(r, "")
-	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
-		writeStoreError(w, err)
+	if _, ok := deps.runForWorkerOrUser(w, r, runID); !ok {
 		return
 	}
 	if err := deps.Runs.ReleaseRunLease(r.Context(), runcontrol.ReleaseRunLeaseRequest{
@@ -8327,23 +8415,48 @@ func (deps ServerDeps) handleListRunEvents(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	runID := chi.URLParam(r, "run_id")
-	principal := deps.principalFromRequest(r, "")
 	limit := clampLimit(parseLimit(r, 500), runEventMaxPageLimit)
 	afterSequence, hasAfterSequence := parseAfterSequence(r)
+	workerAuth := deps.workerRequestAuth(r)
 	if r.URL.Query().Get("stream") == "true" {
-		if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
-			writeStoreError(w, err)
+		switch workerAuth {
+		case workerAuthValid:
+			if _, err := deps.Store.GetRun(r.Context(), runID); err != nil {
+				writeStoreError(w, err)
+				return
+			}
+		case workerAuthInvalid:
+			writeError(w, http.StatusUnauthorized, errors.New("invalid worker token"))
 			return
+		default:
+			principal := deps.principalFromRequest(r, "")
+			if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+				writeStoreError(w, err)
+				return
+			}
 		}
 		deps.streamRunEvents(w, r, runID, afterSequence, hasAfterSequence, limit)
 		return
 	}
 	var events []domain.RunEventRecord
 	var err error
-	if hasAfterSequence {
-		events, err = deps.Store.ListRunEventsAfterForUser(r.Context(), runID, principal.UserID, afterSequence, limit)
-	} else {
-		events, err = deps.Store.ListRunEventsForUser(r.Context(), runID, principal.UserID, limit)
+	switch workerAuth {
+	case workerAuthValid:
+		if hasAfterSequence {
+			events, err = deps.Store.ListRunEventsAfter(r.Context(), runID, afterSequence, limit)
+		} else {
+			events, err = deps.Store.ListRunEvents(r.Context(), runID, limit)
+		}
+	case workerAuthInvalid:
+		writeError(w, http.StatusUnauthorized, errors.New("invalid worker token"))
+		return
+	default:
+		principal := deps.principalFromRequest(r, "")
+		if hasAfterSequence {
+			events, err = deps.Store.ListRunEventsAfterForUser(r.Context(), runID, principal.UserID, afterSequence, limit)
+		} else {
+			events, err = deps.Store.ListRunEventsForUser(r.Context(), runID, principal.UserID, limit)
+		}
 	}
 	if err != nil {
 		writeStoreError(w, err)
@@ -8458,7 +8571,16 @@ func (deps ServerDeps) streamRunEvents(w http.ResponseWriter, r *http.Request, r
 			if !ok {
 				return
 			}
-			if !deliver(event) {
+			if event.RunID != runID || event.Sequence <= cursor {
+				continue
+			}
+			// Treat local fanout as a wake-up signal and deliver from the
+			// store instead of writing the bus event directly. Another
+			// replica may have ingested earlier sequences that never reached
+			// this replica's bus; writing the bus event first would emit
+			// deltas out of order and scramble streamed text. The store read
+			// returns everything at or below this event's sequence in order.
+			if !catchUpFromStore() {
 				return
 			}
 		case <-catchup.C:

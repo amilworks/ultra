@@ -19,6 +19,7 @@ from ultra_deepagents.nats_worker import (
     RunLeaseConflict,
     build_job_consumer_config,
     fetch_job_messages,
+    fetch_control_plane_run_max_sequence,
     fetch_control_plane_run_status,
     job_ack_extension_interval,
     post_control_plane_worker_heartbeat,
@@ -123,7 +124,8 @@ class FakeConfigAwareStreamingAgent:
         assert version == "v3"
         assert context.run_id == "run-1"
         assert payload["messages"][0]["content"] == "Say hello."
-        assert config == {"recursion_limit": 1234}
+        assert config["recursion_limit"] == 1234
+        assert config["configurable"]["thread_id"] == "run-1"
         yield {
             "type": "event",
             "method": "values",
@@ -156,7 +158,8 @@ class FakeRareSpotCompletionAgent:
         assert version == "v3"
         assert context.run_id == "run-1"
         assert "Run RareSpot on this prairie dog image" in payload["messages"][0]["content"]
-        assert config == {"recursion_limit": 1000}
+        assert config["recursion_limit"] == 1000
+        assert config["configurable"]["thread_id"] == "run-1"
         yield {
             "type": "event",
             "method": "values",
@@ -2196,6 +2199,83 @@ def test_worker_publishes_completion_if_runner_returns_without_terminal_event():
     assert events[-1]["payload"]["response_text"] == "runner returned a final answer"
 
 
+@pytest.mark.parametrize("mode", ["success", "failure", "canceled"])
+def test_worker_clears_checkpoint_runtime_state_after_terminal_job(mode: str, tmp_path: Path):
+    class CleanupTrackingCheckpointer:
+        def __init__(self) -> None:
+            self.cleared: list[str] = []
+
+        def clear_thread(self, thread_id: str) -> None:
+            self.cleared.append(thread_id)
+
+    checkpointer = CleanupTrackingCheckpointer()
+    run_job_calls = 0
+
+    async def run_job_func(*_args, **kwargs):
+        nonlocal run_job_calls
+        run_job_calls += 1
+        assert kwargs["checkpointer"] is checkpointer
+        if mode == "failure":
+            raise RuntimeError("agent failed")
+        return "ok"
+
+    async def run_status(_run_id, _settings):
+        return None
+
+    async def run_lease(_run_id, _settings):
+        return None
+
+    async def worker_heartbeat(_settings, *, status, current_run_id=None, metadata=None):
+        return None
+
+    class CleanupWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            return checkpointer
+
+        async def _run_event_sequence_floor(self, run_id: str) -> int:
+            assert run_id == "run-cleanup"
+            return 0
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / f"workspaces-{mode}"),
+            worker_ack_progress_interval_seconds=0,
+        )
+        worker = CleanupWorker(
+            settings,
+            run_job_func=run_job_func,
+            run_status_func=run_status,
+            run_lease_func=run_lease,
+            worker_heartbeat_func=worker_heartbeat,
+        )
+        worker._checkpointer = checkpointer
+        if mode == "canceled":
+            worker._canceled_run_reasons["run-cleanup"] = "user requested cancel"
+        message = FakeNATSMessage(
+            b'{"run_id":"run-cleanup","thread_id":"thread-1","user_id":"user-1","goal":"cleanup"}'
+        )
+        js = CapturingJetStream()
+        await worker._process_message(message, js)
+        return message, _published_events(js)
+
+    message, events = asyncio.run(scenario())
+
+    assert message.acked == 1
+    assert message.naked == 0
+    assert checkpointer.cleared == ["run-cleanup"]
+    if mode == "canceled":
+        assert run_job_calls == 0
+        assert [event["event_kind"] for event in events] == ["run.canceled"]
+    elif mode == "failure":
+        assert run_job_calls == 1
+        assert [event["event_kind"] for event in events] == ["run.failed"]
+    else:
+        assert run_job_calls == 1
+        assert [event["event_kind"] for event in events] == ["run.completed"]
+
+
 def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_path: Path):
     calls: list[tuple[str, str]] = []
 
@@ -2345,6 +2425,69 @@ def test_worker_naks_and_stops_compute_when_control_plane_run_lease_is_lost(tmp_
     assert message.naked == 1
     assert message.nak_delays == [0.01]
     assert [event["event_kind"] for event in events] == []
+
+
+def test_worker_keeps_computing_through_transient_lease_renewal_outage(tmp_path: Path):
+    # A control-plane replica restart must not abort hours of compute: the
+    # stored lease stays valid for its TTL, so failed renewals are retried
+    # until the validity window closes instead of cancelling the job.
+    renewal_attempts = 0
+    renewals_seen = asyncio.Event()
+
+    async def long_running_run_job(*_args, **_kwargs):
+        await asyncio.wait_for(renewals_seen.wait(), timeout=2.0)
+        return "completed despite renewal outage"
+
+    async def acquire_lease(run_id, settings):
+        return ControlPlaneRunLease(
+            run_id=run_id,
+            worker_id="worker-a",
+            lease_token="lease-token-1",
+        )
+
+    async def renew_unreachable_lease(lease, settings):
+        nonlocal renewal_attempts
+        renewal_attempts += 1
+        if renewal_attempts >= 3:
+            renewals_seen.set()
+        raise RunLeaseUnavailable("control plane connection refused")
+
+    async def release_lease(lease, settings):
+        return None
+
+    async def run_status(_run_id, _settings):
+        return None
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            worker_ack_wait_seconds=1.0,
+            worker_ack_progress_interval_seconds=0.01,
+            control_run_lease_ttl_seconds=600.0,
+        )
+        worker = NATSDeepAgentsWorker(
+            settings,
+            run_job_func=long_running_run_job,
+            run_status_func=run_status,
+            run_lease_func=acquire_lease,
+            renew_run_lease_func=renew_unreachable_lease,
+            release_run_lease_func=release_lease,
+        )
+        message = FakeNATSMessage(
+            b'{"run_id":"run-1","thread_id":"thread-1","user_id":"user-1","goal":"lease"}'
+        )
+        js = CapturingJetStream()
+        await asyncio.wait_for(worker._process_message(message, js), timeout=3.0)
+        return message, _published_events(js)
+
+    message, events = asyncio.run(scenario())
+
+    assert renewal_attempts >= 3
+    assert message.acked == 1
+    assert message.naked == 0
+    assert "run.completed" in [event["event_kind"] for event in events]
 
 
 def test_worker_publishes_run_heartbeat_during_silent_long_running_compute():
@@ -3225,7 +3368,35 @@ def test_worker_acks_missing_control_plane_run_without_starting_compute():
     assert events == []
 
 
-def test_control_plane_status_lookup_maps_404_to_not_found(monkeypatch):
+def test_control_plane_status_lookup_maps_authenticated_404_to_not_found(monkeypatch):
+    def fake_urlopen(_request, timeout=None):
+        _ = timeout
+        raise urllib_error.HTTPError(
+            url="http://control.test/v2/runs/run-missing",
+            code=404,
+            msg="not found",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(nats_worker_module.urllib_request, "urlopen", fake_urlopen)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        control_worker_token="trace-worker-secret",
+    )
+
+    status = asyncio.run(fetch_control_plane_run_status("run-missing", settings))
+
+    assert status == "not_found"
+
+
+def test_control_plane_status_lookup_treats_anonymous_404_as_unknown(monkeypatch):
+    # Without any worker identity a 404 is indistinguishable from an auth
+    # failure (the control plane hides runs it cannot scope to the caller).
+    # Treating it as authoritative would ack and silently drop the job.
     def fake_urlopen(_request, timeout=None):
         _ = timeout
         raise urllib_error.HTTPError(
@@ -3246,7 +3417,110 @@ def test_control_plane_status_lookup_maps_404_to_not_found(monkeypatch):
 
     status = asyncio.run(fetch_control_plane_run_status("run-missing", settings))
 
-    assert status == "not_found"
+    assert status is None
+
+
+def test_control_plane_requests_attach_worker_token_and_job_user(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"status":"running"}'
+
+    def fake_urlopen(request, timeout=None):
+        _ = timeout
+        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        return FakeResponse()
+
+    monkeypatch.setattr(nats_worker_module.urllib_request, "urlopen", fake_urlopen)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        control_worker_token="trace-worker-secret",
+    )
+
+    async def scenario() -> str | None:
+        token = nats_worker_module._control_plane_user_id.set("bisque:researcher")
+        try:
+            return await fetch_control_plane_run_status("run-1", settings)
+        finally:
+            nats_worker_module._control_plane_user_id.reset(token)
+
+    status = asyncio.run(scenario())
+
+    assert status == "running"
+    assert captured["headers"]["x-ultra-worker-token"] == "trace-worker-secret"
+    assert captured["headers"]["x-ultra-user-id"] == "bisque:researcher"
+
+
+def test_control_plane_run_sequence_floor_paginates_events_with_worker_identity(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None):
+        call_index = len(calls)
+        calls.append(
+            {
+                "url": request.full_url,
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "timeout": timeout,
+            }
+        )
+        if call_index == 0:
+            return FakeResponse(
+                {"events": [{"sequence": sequence} for sequence in range(1, 501)]}
+            )
+        return FakeResponse({"events": [{"sequence": 501}, {"sequence": 513}]})
+
+    monkeypatch.setattr(nats_worker_module.urllib_request, "urlopen", fake_urlopen)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        control_worker_token="trace-worker-secret",
+        control_status_timeout_seconds=4.0,
+    )
+
+    async def scenario() -> int:
+        token = nats_worker_module._control_plane_user_id.set("bisque:researcher")
+        try:
+            return await fetch_control_plane_run_max_sequence("run with space", settings)
+        finally:
+            nats_worker_module._control_plane_user_id.reset(token)
+
+    max_sequence = asyncio.run(scenario())
+
+    assert max_sequence == 513
+    assert [call["url"] for call in calls] == [
+        "http://control.test/v2/runs/run%20with%20space/events?limit=500&after_sequence=0",
+        "http://control.test/v2/runs/run%20with%20space/events?limit=500&after_sequence=500",
+    ]
+    for call in calls:
+        assert call["timeout"] == 4.0
+        headers = call["headers"]
+        assert headers["x-ultra-worker-token"] == "trace-worker-secret"
+        assert headers["x-ultra-user-id"] == "bisque:researcher"
 
 
 def test_worker_acks_malformed_job_without_crashing_loop():

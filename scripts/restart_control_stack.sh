@@ -86,6 +86,23 @@ PY
   log "Using generated local control secret encryption key at $local_secret_key_file"
 fi
 
+# Workers authenticate run-status/lease/heartbeat calls with a shared token so
+# durable run leases work even when the control plane is WorkOS-gated.
+ULTRA_CONTROL_WORKER_TOKEN="${ULTRA_CONTROL_WORKER_TOKEN:-}"
+if [ -z "$ULTRA_CONTROL_WORKER_TOKEN" ]; then
+  local_worker_token_file="$STATE_DIR/control-worker-token"
+  if [ ! -s "$local_worker_token_file" ]; then
+    python3 - <<'PY' >"$local_worker_token_file"
+import secrets
+
+print(secrets.token_hex(32))
+PY
+    chmod 600 "$local_worker_token_file"
+  fi
+  ULTRA_CONTROL_WORKER_TOKEN="$(tr -d '[:space:]' <"$local_worker_token_file")"
+  log "Using generated local control worker token at $local_worker_token_file"
+fi
+
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://localhost:8001/v1}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-oss-120b}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
@@ -338,6 +355,7 @@ start_control() {
     ULTRA_CONTROL_BISQUE_MAX_IMPORT_BYTES="$ULTRA_CONTROL_BISQUE_MAX_IMPORT_BYTES" \
     ULTRA_CONTROL_SECRET_ENCRYPTION_KEY="$ULTRA_CONTROL_SECRET_ENCRYPTION_KEY" \
     ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID="$ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID" \
+    ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
     ULTRA_CONTROL_AUTH_PROVIDER="$ULTRA_CONTROL_AUTH_PROVIDER" \
     ULTRA_CONTROL_WORKOS_CLIENT_ID="$ULTRA_CONTROL_WORKOS_CLIENT_ID" \
     ULTRA_CONTROL_WORKOS_API_KEY="$ULTRA_CONTROL_WORKOS_API_KEY" \
@@ -365,6 +383,7 @@ start_deepagents_worker() {
       OPENAI_MODEL="$OPENAI_MODEL" \
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
+      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
       ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
       ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
       ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
@@ -396,6 +415,7 @@ start_deepagents_worker() {
       OPENAI_MODEL="$OPENAI_MODEL" \
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
+      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
       ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
       ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
       ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
@@ -437,6 +457,7 @@ start_rarespot_worker() {
       OPENAI_MODEL="$OPENAI_MODEL" \
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
+      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
       ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
       ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
       ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
@@ -456,6 +477,7 @@ start_rarespot_worker() {
       OPENAI_MODEL="$OPENAI_MODEL" \
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
+      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
       ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
       ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
       ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \

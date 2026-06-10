@@ -50,6 +50,7 @@ type Config struct {
 	RunRecoveryEnabled         bool
 	RunRecoveryInterval        time.Duration
 	RunRecoveryBatchLimit      int
+	WorkerToken                string
 }
 
 func Load() Config {
@@ -95,6 +96,7 @@ func Load() Config {
 		RunRecoveryEnabled:         envBool("ULTRA_CONTROL_RUN_RECOVERY_ENABLED", true),
 		RunRecoveryInterval:        envDurationSeconds("ULTRA_CONTROL_RUN_RECOVERY_INTERVAL_SECONDS", 30),
 		RunRecoveryBatchLimit:      envInt("ULTRA_CONTROL_RUN_RECOVERY_BATCH_LIMIT", 1000),
+		WorkerToken:                envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
 	}
 }
 

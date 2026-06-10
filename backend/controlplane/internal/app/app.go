@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -237,6 +238,7 @@ func New(cfg config.Config) (*App, error) {
 		Bisque:            bisqueService,
 		BisqueCredentials: bisqueCredentialStore,
 		WorkOS:            workOSAuth,
+		WorkerToken:       cfg.WorkerToken,
 	})
 	return &App{
 		Handler:            handler,
@@ -276,10 +278,21 @@ func startRunRecoveryLoop(ctx context.Context, runs *runcontrol.Service, interva
 }
 
 func recoverExpiredRunLeases(ctx context.Context, runs *runcontrol.Service, limit int) {
-	_, _ = runs.RecoverExpiredRunLeases(ctx, runcontrol.RecoverExpiredRunLeasesRequest{
+	result, err := runs.RecoverExpiredRunLeases(ctx, runcontrol.RecoverExpiredRunLeasesRequest{
 		Reason: "automatic expired run lease recovery",
 		Limit:  limit,
 	})
+	if err != nil {
+		slog.Error("run lease recovery pass failed", "error", err, "checked", result.Checked)
+		return
+	}
+	if len(result.RequeuedRuns) > 0 {
+		runIDs := make([]string, 0, len(result.RequeuedRuns))
+		for _, run := range result.RequeuedRuns {
+			runIDs = append(runIDs, run.RunID)
+		}
+		slog.Info("run lease recovery requeued runs", "checked", result.Checked, "requeued", runIDs)
+	}
 }
 
 func startDataAgentRecoveryLoop(ctx context.Context, store dataAgentLeaseRecoveryStore, publisher eventbus.DataAgentJobPublisher, interval time.Duration, limit int) {
@@ -310,6 +323,7 @@ func recoverExpiredDataAgentJobLeases(ctx context.Context, store dataAgentLeaseR
 		Limit:  limit,
 	})
 	if err != nil {
+		slog.Error("data-agent lease recovery pass failed", "error", err)
 		return
 	}
 	for _, job := range result.RequeuedJobs {

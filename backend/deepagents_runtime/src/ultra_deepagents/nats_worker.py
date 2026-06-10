@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import errno
 import fcntl
 import importlib.metadata
@@ -40,6 +41,47 @@ CONTROL_PLANE_STATUSES_WITH_AUTHORITATIVE_TERMINAL_EVENT = {
     CONTROL_PLANE_RUN_NOT_FOUND_STATUS,
 }
 WORKER_TERMINAL_EVENT_KINDS = {"run.completed", "run.failed", "run.canceled"}
+
+
+# The user that owns the job currently being processed. Control-plane HTTP
+# calls attach it as X-Ultra-User-Id so dev-mode deployments without a worker
+# token still resolve user-scoped runs. asyncio tasks created while handling a
+# job (status monitor, heartbeats) inherit the value automatically.
+_control_plane_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ultra_control_plane_user_id", default=None
+)
+
+
+def _control_plane_headers(
+    settings: RuntimeSettings,
+    *,
+    json_body: bool = False,
+) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    token = str(getattr(settings, "control_worker_token", "") or "").strip()
+    if token:
+        headers["X-Ultra-Worker-Token"] = token
+    user_id = _control_plane_user_id.get()
+    if user_id:
+        headers["X-Ultra-User-Id"] = user_id
+    return headers
+
+
+def _control_plane_request_has_identity(settings: RuntimeSettings) -> bool:
+    if str(getattr(settings, "control_worker_token", "") or "").strip():
+        return True
+    return bool(_control_plane_user_id.get())
+
+
+def control_lease_validity_window(settings: RuntimeSettings) -> float:
+    """How long a freshly acquired/renewed control-plane run lease can be
+    trusted while renewals fail. 80% of the TTL leaves a safety margin so this
+    worker stops before lease-expiry recovery hands the run to another worker.
+    """
+    ttl = max(1.0, float(settings.control_run_lease_ttl_seconds))
+    return ttl * 0.8
 
 
 class EventPublishError(RuntimeError):
@@ -140,18 +182,30 @@ async def fetch_control_plane_run_status(
     url = f"{base_url}/v2/runs/{quoted_run_id}"
     timeout = max(0.1, float(settings.control_status_timeout_seconds))
 
+    request_has_identity = _control_plane_request_has_identity(settings)
+
     def fetch() -> str | None:
         request = urllib_request.Request(
             url,
             method="GET",
-            headers={"Accept": "application/json"},
+            headers=_control_plane_headers(settings),
         )
         try:
             with urllib_request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib_error.HTTPError as exc:
             if exc.code == 404:
-                return CONTROL_PLANE_RUN_NOT_FOUND_STATUS
+                if request_has_identity:
+                    return CONTROL_PLANE_RUN_NOT_FOUND_STATUS
+                # An anonymous 404 is indistinguishable from an auth failure
+                # (the control plane hides runs it cannot scope). Treating it
+                # as authoritative would silently drop the job.
+                logger.warning(
+                    "Control-plane run status lookup returned 404 without worker identity; "
+                    "proceeding with job.",
+                    extra={"run_id": run_id},
+                )
+                return None
             logger.warning(
                 "Control-plane run status lookup returned HTTP error; proceeding with job.",
                 extra={"run_id": run_id, "status_code": exc.code},
@@ -170,6 +224,60 @@ async def fetch_control_plane_run_status(
         return status or None
 
     return await asyncio.to_thread(fetch)
+
+
+async def fetch_control_plane_run_max_sequence(
+    run_id: str,
+    settings: RuntimeSettings,
+) -> int:
+    """Return the run's highest persisted event sequence in the control plane,
+    or 0 when none/unreachable. Pages forward from the last seen cursor."""
+    base_url = settings.control_base_url.rstrip("/")
+    if not base_url:
+        return 0
+    quoted_run_id = urllib_parse.quote(run_id, safe="")
+    timeout = max(0.1, float(settings.control_status_timeout_seconds))
+    page_limit = 500
+
+    def fetch_page(after_sequence: int) -> list[dict[str, Any]]:
+        query = urllib_parse.urlencode(
+            {"limit": str(page_limit), "after_sequence": str(after_sequence)}
+        )
+        url = f"{base_url}/v2/runs/{quoted_run_id}/events?{query}"
+        request = urllib_request.Request(
+            url, method="GET", headers=_control_plane_headers(settings)
+        )
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            return []
+        events = payload.get("events")
+        return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+
+    def fetch_max() -> int:
+        cursor = 0
+        try:
+            while True:
+                page = fetch_page(cursor)
+                if not page:
+                    break
+                page_max = cursor
+                for event in page:
+                    sequence = int(event.get("sequence") or 0)
+                    if sequence > page_max:
+                        page_max = sequence
+                if page_max <= cursor:
+                    break
+                cursor = page_max
+                if len(page) < page_limit:
+                    break
+        except urllib_error.HTTPError as exc:
+            if exc.code == 404:
+                return 0
+            raise
+        return cursor
+
+    return await asyncio.to_thread(fetch_max)
 
 
 async def acquire_control_plane_run_lease(
@@ -275,10 +383,7 @@ def _request_control_plane_run_lease(
         url,
         data=body,
         method=method,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
+        headers=_control_plane_headers(settings, json_body=True),
     )
     timeout = max(0.1, float(settings.control_status_timeout_seconds))
     try:
@@ -327,10 +432,7 @@ def _request_control_plane_worker_heartbeat(
         url,
         data=body,
         method="POST",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
+        headers=_control_plane_headers(settings, json_body=True),
     )
     timeout = max(0.1, float(settings.control_status_timeout_seconds))
     try:
@@ -394,6 +496,8 @@ class NATSDeepAgentsWorker:
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._canceled_run_reasons: dict[str, str] = {}
         self._shutting_down = False
+        self._checkpoint_store: Any | None = None
+        self._checkpointer: Any | None = None
 
     async def run_forever(self) -> None:
         nc = await nats.connect(self.settings.nats_url)
@@ -477,6 +581,7 @@ class NATSDeepAgentsWorker:
             message,
             interval_seconds=job_ack_extension_interval(self.settings),
         )
+        user_context_token: contextvars.Token | None = None
         try:
             try:
                 payload = json.loads(message.data.decode("utf-8"))
@@ -485,6 +590,9 @@ class NATSDeepAgentsWorker:
                 logger.exception("Discarding malformed Deep Agents job payload.")
                 await _ack_message(message)
                 return
+            user_context_token = _control_plane_user_id.set(
+                str(job.user_id or "").strip() or None
+            )
 
             last_published_sequence = 0
             terminal_event_published = False
@@ -503,16 +611,37 @@ class NATSDeepAgentsWorker:
 
             heartbeat_index = 0
             control_lease: ControlPlaneRunLease | None = None
+            lease_validity_deadline = float("inf")
 
             async def publish_worker_heartbeat() -> None:
                 nonlocal heartbeat_index, last_published_sequence, control_lease
+                nonlocal lease_validity_deadline
                 async with publish_lock:
                     if terminal_event_published:
                         return
                     if control_lease is not None:
-                        renewed = await self._renew_run_lease(control_lease, self.settings)
+                        try:
+                            renewed = await self._renew_run_lease(control_lease, self.settings)
+                        except RunLeaseConflict:
+                            # Another worker owns the run now: stop immediately.
+                            raise
+                        except RunLeaseUnavailable:
+                            # The control plane is unreachable but the stored
+                            # lease is still valid. Keep computing and retry on
+                            # the next heartbeat; only give up once the lease
+                            # itself can no longer be alive.
+                            if time.monotonic() >= lease_validity_deadline:
+                                raise
+                            logger.warning(
+                                "Control-plane lease renewal unavailable; retrying while the lease is still valid.",
+                                extra={"run_id": job.run_id},
+                            )
+                            renewed = None
                         if renewed is not None:
                             control_lease = renewed
+                            lease_validity_deadline = (
+                                time.monotonic() + control_lease_validity_window(self.settings)
+                            )
                     heartbeat_index += 1
                     sequence = last_published_sequence + 1
                     await self._publish_event(
@@ -580,6 +709,10 @@ class NATSDeepAgentsWorker:
                 return
             try:
                 control_lease = await self._run_lease(job.run_id, self.settings)
+                if control_lease is not None:
+                    lease_validity_deadline = (
+                        time.monotonic() + control_lease_validity_window(self.settings)
+                    )
             except RunLeaseConflict:
                 logger.warning(
                     "Received duplicate delivery for control-plane leased Deep Agents run; redelivering later.",
@@ -656,11 +789,22 @@ class NATSDeepAgentsWorker:
                         worker_task=current_task,
                         on_lease_lost=mark_control_lease_lost,
                     )
+                    resume_kwargs: dict[str, Any] = {}
+                    checkpointer = await self._ensure_checkpointer()
+                    if checkpointer is not None:
+                        # Seed the floor above the run's already-persisted events
+                        # so a resumed run's event ids never collide with the
+                        # original partial run's (which would be deduped/dropped).
+                        resume_kwargs["checkpointer"] = checkpointer
+                        resume_kwargs["sequence_floor"] = (
+                            await self._run_event_sequence_floor(job.run_id)
+                        )
                     try:
                         response_text = await self._run_job(
                             job,
                             self.settings,
                             publish_event=publish_event,
+                            **resume_kwargs,
                         )
                     finally:
                         await _stop_run_heartbeat_task(heartbeat_task)
@@ -722,9 +866,70 @@ class NATSDeepAgentsWorker:
                 if run_lock is not None:
                     run_lock.release()
                 if should_ack:
+                    self._clear_checkpointer_thread(job.run_id)
                     await _ack_message(message)
         finally:
+            if user_context_token is not None:
+                _control_plane_user_id.reset(user_context_token)
             await _stop_ack_progress_task(progress_task)
+
+    async def _ensure_checkpointer(self) -> Any | None:
+        """Lazily build the durable run checkpointer. Returns None when
+        checkpointing is disabled or no control-plane database is configured,
+        which preserves the prior restart-from-scratch behavior."""
+        if not self.settings.checkpointer_enabled:
+            return None
+        if self._checkpointer is not None:
+            return self._checkpointer
+        from ultra_deepagents.checkpointing import (
+            DurableCheckpointer,
+            build_checkpoint_state_store,
+        )
+
+        try:
+            store = build_checkpoint_state_store(self.settings.control_database_url)
+        except Exception:
+            logger.warning(
+                "Could not build durable checkpoint store; runs will not resume.",
+                exc_info=True,
+            )
+            return None
+        if store is None:
+            return None
+        self._checkpoint_store = store
+        self._checkpointer = DurableCheckpointer(store)
+        logger.info("Durable run checkpointing enabled.")
+        return self._checkpointer
+
+    def _clear_checkpointer_thread(self, run_id: str) -> None:
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            return
+        clear_thread = getattr(checkpointer, "clear_thread", None)
+        if clear_thread is None:
+            return
+        try:
+            clear_thread(run_id)
+        except Exception:
+            logger.warning(
+                "Checkpoint runtime cleanup failed; continuing after terminal run.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+
+    async def _run_event_sequence_floor(self, run_id: str) -> int:
+        """The run's current max event sequence in the control plane, used to
+        seed the worker sequencer so resumed events append without colliding
+        with the original partial run's already-persisted events."""
+        try:
+            return await fetch_control_plane_run_max_sequence(run_id, self.settings)
+        except Exception:
+            logger.warning(
+                "Could not read run event sequence floor; using 0.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+            return 0
 
     async def _maybe_post_idle_worker_heartbeat(self, last_posted_at: float) -> float:
         interval_seconds = self.settings.worker_heartbeat_interval_seconds

@@ -106,7 +106,16 @@ type RecoverExpiredRunLeasesRequest struct {
 	Now    time.Time
 	Reason string
 	Limit  int
+	// RedispatchQueuedAfter bounds how long a queued run may sit without any
+	// lease before its job is considered lost and re-dispatched. Zero applies
+	// the default.
+	RedispatchQueuedAfter time.Duration
 }
+
+// defaultRedispatchQueuedAfter is how long a queued run may wait for a worker
+// claim before recovery re-publishes its job. It must comfortably exceed the
+// worst-case queue wait of a healthy worker pool to avoid duplicate dispatch.
+const defaultRedispatchQueuedAfter = 2 * time.Minute
 
 type RecoverExpiredRunLeasesResult struct {
 	Checked      int
@@ -526,6 +535,10 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 	if err != nil {
 		return RecoverExpiredRunLeasesResult{}, err
 	}
+	redispatchQueuedAfter := req.RedispatchQueuedAfter
+	if redispatchQueuedAfter <= 0 {
+		redispatchQueuedAfter = defaultRedispatchQueuedAfter
+	}
 	result := RecoverExpiredRunLeasesResult{Checked: len(runs)}
 	for _, run := range runs {
 		if !isRecoverableRunStatus(run.Status) {
@@ -535,7 +548,32 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 		if err != nil {
 			return result, err
 		}
-		if !found || lease.LeaseExpiresAt.After(now) {
+		if !found {
+			// A queued run with no lease and a stale dispatch means its job
+			// was lost (consumed and dropped, or never delivered). Without
+			// re-dispatch the run would stay queued forever.
+			if run.Status != domain.RunStatusQueued {
+				continue
+			}
+			dispatchedAt := runJobDispatchedAt(run)
+			if dispatchedAt.IsZero() || now.Sub(dispatchedAt) < redispatchQueuedAfter {
+				continue
+			}
+			requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
+				RunID:  run.RunID,
+				Reason: reason,
+				Metadata: domain.JSONMap{
+					"recovery":           "stale_queued_run_without_lease",
+					"last_dispatched_at": dispatchedAt.UTC().Format(time.RFC3339Nano),
+				},
+			})
+			if err != nil {
+				return result, err
+			}
+			result.RequeuedRuns = append(result.RequeuedRuns, requeued)
+			continue
+		}
+		if lease.LeaseExpiresAt.After(now) {
 			continue
 		}
 		requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
@@ -553,6 +591,21 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 		result.RequeuedRuns = append(result.RequeuedRuns, requeued)
 	}
 	return result, nil
+}
+
+// runJobDispatchedAt extracts the last time a job for this run was handed to
+// the queue, falling back to the run's UpdatedAt when the metadata is absent.
+func runJobDispatchedAt(run domain.RunRecord) time.Time {
+	if run.Metadata != nil {
+		if raw, ok := run.Metadata["job_dispatched_at"]; ok {
+			if text, ok := raw.(string); ok {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text)); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return run.UpdatedAt
 }
 
 func isRecoverableRunStatus(status domain.RunStatus) bool {

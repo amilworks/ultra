@@ -252,12 +252,14 @@ func TestNATSBusPublishesJobAndRunEvent(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -288,12 +290,14 @@ func TestNATSBusDeduplicatesPublishRetriesByDeterministicMessageID(t *testing.T)
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -344,14 +348,16 @@ func TestNATSRunEventConsumerSurvivesSubscriberShutdown(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-consumer-" + suffix
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -403,14 +409,16 @@ func TestNATSRunEventConsumerReconcilesExistingUnsafeDefaults(t *testing.T) {
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-reconcile-" + suffix
 	bus, err := NewNATSBus(ctx, NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	})
 	if err != nil {
 		t.Fatalf("NewNATSBus: %v", err)
@@ -464,14 +472,16 @@ func TestNATSRunEventConsumerSupportsMultipleControlPlaneSubscribers(t *testing.
 	jobsSubject := "ultra.test." + suffix + ".jobs"
 	eventsSubject := "ultra.test." + suffix + ".events"
 	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
 	consumer := "ultra-test-event-multi-" + suffix
 	cfg := NATSConfig{
-		URL:           url,
-		Stream:        stream,
-		JobsSubject:   jobsSubject,
-		EventsSubject: eventsSubject,
-		CancelSubject: cancelSubject,
-		EventConsumer: consumer,
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+		EventConsumer:        consumer,
 	}
 	busA, err := NewNATSBus(ctx, cfg)
 	if err != nil {

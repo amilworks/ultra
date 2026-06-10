@@ -15,8 +15,8 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
 from ultra_deepagents.bisque.tools import build_bisque_tools
+from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import build_context_tools, build_tool_capability_manifest_tool
@@ -324,6 +324,7 @@ def build_research_agent(
     artifact_dir: str | Path | None = None,
     tools: Sequence[BaseTool | Any] | None = None,
     context: AgentRunContext | None = None,
+    checkpointer: Any | None = None,
 ) -> Any:
     ensure_ultra_harness_profile()
     resolved_backend = backend
@@ -373,6 +374,7 @@ def build_research_agent(
         backend=resolved_backend,
         memory=MEMORY_PATHS,
         middleware=middleware,
+        checkpointer=checkpointer,
     )
 
 

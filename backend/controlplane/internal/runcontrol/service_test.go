@@ -541,6 +541,176 @@ func TestServiceRecoverExpiredRunLeasesRequeuesOnlyExpiredLeases(t *testing.T) {
 	}
 }
 
+func TestServiceRecoverExpiredRunLeasesRedispatchesStaleQueuedRunWithoutLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover stale queued run",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	staleRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "long analysis whose dispatched job was lost",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun stale: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	// The dispatched job was consumed and dropped: the run is queued with no
+	// lease and no worker will ever claim it again without recovery.
+	fresh, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:    domain.Now().Add(30 * time.Second),
+		Reason: "automatic expired run lease recovery",
+		Limit:  100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases fresh: %v", err)
+	}
+	if len(fresh.RequeuedRuns) != 0 {
+		t.Fatalf("fresh queued run was requeued early: %+v", fresh.RequeuedRuns)
+	}
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:    domain.Now().Add(10 * time.Minute),
+		Reason: "automatic expired run lease recovery",
+		Limit:  100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases stale: %v", err)
+	}
+	if len(result.RequeuedRuns) != 1 || result.RequeuedRuns[0].RunID != staleRun.RunID {
+		t.Fatalf("requeued runs = %+v, want stale queued run", result.RequeuedRuns)
+	}
+
+	requeuedJobs := 0
+	for {
+		select {
+		case job := <-bus.Jobs():
+			if job.RunID == staleRun.RunID && job.DispatchID != "" {
+				requeuedJobs++
+			}
+		default:
+			if requeuedJobs != 1 {
+				t.Fatalf("requeued jobs = %d, want 1", requeuedJobs)
+			}
+			recovered, err := mem.GetRun(ctx, staleRun.RunID)
+			if err != nil {
+				t.Fatalf("GetRun recovered: %v", err)
+			}
+			if recovered.Status != domain.RunStatusQueued {
+				t.Fatalf("recovered run status = %s, want queued", recovered.Status)
+			}
+			return
+		}
+	}
+}
+
+func TestServiceRecoverExpiredRunLeasesDoesNotStormRedispatchedRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recovery storm guard",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "stale run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "stale run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	first, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:   domain.Now().Add(10 * time.Minute),
+		Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases first: %v", err)
+	}
+	if len(first.RequeuedRuns) != 1 {
+		t.Fatalf("first pass requeued = %+v, want one run", first.RequeuedRuns)
+	}
+
+	// A second recovery pass shortly after the redispatch (e.g. the other
+	// replica's loop ticking) must not redispatch the same run again: the
+	// requeue refreshed job_dispatched_at.
+	second, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:   domain.Now().Add(30 * time.Second),
+		Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases second: %v", err)
+	}
+	if len(second.RequeuedRuns) != 0 {
+		t.Fatalf("second pass requeued = %+v, want none", second.RequeuedRuns)
+	}
+	_ = run
+}
+
+func TestServiceRecoverExpiredRunLeasesLeavesRunningLeaselessRunAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Running leaseless run",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "legacy leaseless run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "legacy"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := mem.UpdateRunStatus(ctx, run.RunID, domain.RunStatusRunning, "", ""); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:    domain.Now().Add(10 * time.Minute),
+		Reason: "automatic expired run lease recovery",
+		Limit:  100,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 0 {
+		t.Fatalf("running leaseless run was requeued: %+v", result.RequeuedRuns)
+	}
+}
+
 func TestServiceIngestRunEventUpdatesLifecycleAndArtifacts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

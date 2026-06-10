@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from ultra_deepagents.agent import build_research_agent
+from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import stage_uploaded_files
@@ -49,9 +50,12 @@ PublishEvent = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class RunEventSequencer:
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, *, start: int = 0) -> None:
         self.run_id = run_id
-        self.sequence = 0
+        # On resume the worker seeds ``start`` above the run's already-persisted
+        # events so resumed event ids never collide with (and get deduped
+        # against) the original partial run's events.
+        self.sequence = max(0, int(start))
 
     def stamp(self, event: dict[str, Any]) -> dict[str, Any]:
         self.sequence += 1
@@ -524,6 +528,8 @@ async def run_job(
     publish_event: PublishEvent,
     agent_factory: Callable[..., Any] = build_research_agent,
     title_model_factory: Callable[[RuntimeSettings], Any] | None = None,
+    checkpointer: Any | None = None,
+    sequence_floor: int = 0,
 ) -> str:
     workspace_dir = Path(settings.workspace_root).expanduser() / job.run_id
     artifact_dir = Path(settings.artifact_root).expanduser() / job.run_id
@@ -533,7 +539,7 @@ async def run_job(
         artifact_root=str(artifact_dir),
         workspace_root=str(workspace_dir),
     )
-    sequencer = RunEventSequencer(context.run_id)
+    sequencer = RunEventSequencer(context.run_id, start=sequence_floor)
     _write_workspace_lease(context, status="running")
 
     await publish_event(
@@ -579,12 +585,46 @@ async def run_job(
                 messages,
                 preloaded_rarespot_result,
             )
-        agent = agent_factory(
+        agent = _build_agent_with_optional_checkpointer(
+            agent_factory,
             settings,
             workspace_dir=workspace_dir,
             artifact_dir=artifact_dir,
             context=context,
+            checkpointer=checkpointer,
         )
+        run_config = run_graph_config(
+            context.run_id, recursion_limit=settings.langgraph_recursion_limit
+        )
+        resume_from_checkpoint = False
+        if checkpointer is not None:
+            # Load any durable checkpoint for this run into the (fresh) worker's
+            # in-memory checkpointer before asking the graph whether work is
+            # pending; otherwise a restarted worker always sees empty state and
+            # restarts the run from scratch.
+            hydrate = getattr(checkpointer, "hydrate", None)
+            if hydrate is not None:
+                try:
+                    await hydrate(context.run_id)
+                except Exception:
+                    pass
+            resume_from_checkpoint = await checkpoint_has_pending_work(agent, run_config)
+            if resume_from_checkpoint:
+                await publish_event(
+                    sequencer.stamp(
+                        RunEvent(
+                            run_id=context.run_id,
+                            thread_id=context.thread_id,
+                            event_kind="run.resumed",
+                            event_type="run",
+                            node_name="coordinator",
+                            agent_role="coordinator",
+                            level="info",
+                            message="Resuming run from durable checkpoint.",
+                            payload={"resumed_from_checkpoint": True},
+                        ).to_dict()
+                    )
+                )
         artifact_events: list[dict[str, Any]] = []
         attempt_result = AgentAttemptResult(
             final_response_text="",
@@ -604,7 +644,12 @@ async def run_job(
                     publish_event=publish_event,
                     model_stream_idle_timeout_seconds=settings.model_stream_idle_timeout_seconds,
                     langgraph_recursion_limit=settings.langgraph_recursion_limit,
+                    run_config=run_config,
+                    resume_from_checkpoint=resume_from_checkpoint,
                 )
+                # Only the first attempt of a redelivered run resumes from the
+                # checkpoint; continuation passes feed fresh messages.
+                resume_from_checkpoint = False
             except AgentStreamIdleTimeoutError as exc:
                 if model_stream_recoveries_used >= settings.model_stream_idle_max_recoveries:
                     raise
@@ -725,6 +770,36 @@ async def run_job(
     return response_text
 
 
+def _build_agent_with_optional_checkpointer(
+    agent_factory: Callable[..., Any],
+    settings: RuntimeSettings,
+    *,
+    workspace_dir: Any,
+    artifact_dir: Any,
+    context: AgentRunContext,
+    checkpointer: Any | None,
+) -> Any:
+    """Build the agent, passing the checkpointer only when the factory accepts
+    it so custom/test factories without that parameter still work."""
+    kwargs: dict[str, Any] = {
+        "workspace_dir": workspace_dir,
+        "artifact_dir": artifact_dir,
+        "context": context,
+    }
+    if checkpointer is not None:
+        try:
+            parameters = inspect.signature(agent_factory).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if "checkpointer" in parameters or accepts_var_kwargs:
+            kwargs["checkpointer"] = checkpointer
+    return agent_factory(settings, **kwargs)
+
+
 async def _stream_agent_attempt(
     agent: Any,
     *,
@@ -734,18 +809,23 @@ async def _stream_agent_attempt(
     publish_event: PublishEvent,
     model_stream_idle_timeout_seconds: float = 0.0,
     langgraph_recursion_limit: int = 1000,
+    run_config: dict[str, Any] | None = None,
+    resume_from_checkpoint: bool = False,
 ) -> AgentAttemptResult:
     response_parts: list[str] = []
     post_tool_response_parts: list[str] = []
     final_state: dict[str, Any] | None = None
     tool_names_by_call_id: dict[str, str] = {}
-    payload = {"messages": messages}
+    config = run_config or {"recursion_limit": max(1, int(langgraph_recursion_limit))}
+    # Resuming a redelivered run: pass None so LangGraph continues from the last
+    # checkpoint instead of appending the original messages again.
+    payload = None if resume_from_checkpoint else {"messages": messages}
     stream = _start_agent_event_stream(
         agent,
         payload,
         context=context,
         version="v3",
-        config={"recursion_limit": max(1, int(langgraph_recursion_limit))},
+        config=config,
     )
     if inspect.isawaitable(stream):
         stream = await stream

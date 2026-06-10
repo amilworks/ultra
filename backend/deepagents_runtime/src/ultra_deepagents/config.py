@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from socket import gethostname
 
-
 DEFAULT_WORKER_MAX_CONCURRENCY = 2
 
 
@@ -53,10 +52,15 @@ class RuntimeSettings:
     worker_kind: str = "deepagents"
     worker_heartbeat_interval_seconds: float = 30.0
     control_base_url: str = "http://127.0.0.1:8088"
+    control_worker_token: str = ""
     control_status_timeout_seconds: float = 2.0
     control_status_poll_interval_seconds: float = 30.0
     control_run_lease_ttl_seconds: float = 600.0
     control_run_lease_required: bool = False
+    # Durable LangGraph checkpointing so long runs resume mid-trajectory after a
+    # worker/replica restart. Uses the control-plane Postgres when configured.
+    control_database_url: str = ""
+    checkpointer_enabled: bool = True
     workspace_root: str = "data/deepagents/workspaces"
     memory_root: str = "data/deepagents/memory"
     artifact_root: str = "data/artifacts"
@@ -234,6 +238,9 @@ class RuntimeSettings:
                 "ULTRA_CONTROL_BASE_URL",
                 "http://127.0.0.1:8088",
             ).rstrip("/"),
+            control_worker_token=os.getenv("ULTRA_CONTROL_WORKER_TOKEN", "").strip(),
+            control_database_url=os.getenv("ULTRA_CONTROL_DATABASE_URL", "").strip(),
+            checkpointer_enabled=_env_bool("ULTRA_DEEPAGENTS_CHECKPOINTER_ENABLED", True),
             control_status_timeout_seconds=float(
                 os.getenv("ULTRA_DEEPAGENTS_CONTROL_STATUS_TIMEOUT_SECONDS", "2")
             ),

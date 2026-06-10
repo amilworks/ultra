@@ -1628,6 +1628,249 @@ func TestV2RunLeaseClaimRenewAndRelease(t *testing.T) {
 	}
 }
 
+func TestV2WorkerTokenAuthorizesRunStatusAndLeaseLifecycle(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+	})
+
+	thread, err := service.CreateThread(context.Background(), runcontrol.CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "worker token",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(context.Background(), runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "worker token run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "worker token run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Without any identity the run must stay hidden (anti-enumeration).
+	anonymous := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID, nil)
+	anonymousRec := httptest.NewRecorder()
+	router.ServeHTTP(anonymousRec, anonymous)
+	if anonymousRec.Code != http.StatusNotFound {
+		t.Fatalf("anonymous run status = %d, want 404", anonymousRec.Code)
+	}
+
+	// A wrong worker token must be rejected, not fall through to user scoping.
+	wrongToken := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID, nil)
+	wrongToken.Header.Set("Authorization", "Bearer wrong-secret")
+	wrongTokenRec := httptest.NewRecorder()
+	router.ServeHTTP(wrongTokenRec, wrongToken)
+	if wrongTokenRec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token run status = %d, want 401", wrongTokenRec.Code)
+	}
+
+	// The worker token grants run visibility without user scoping.
+	status := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID, nil)
+	status.Header.Set("Authorization", "Bearer trace-worker-secret")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, status)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("worker token run status = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var fetched domain.RunRecord
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	if fetched.RunID != run.RunID || fetched.Status != domain.RunStatusQueued {
+		t.Fatalf("fetched run = %+v, want queued %s", fetched, run.RunID)
+	}
+
+	claim := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(`{"worker_id":"worker-a","ttl_seconds":60}`))
+	claim.Header.Set("Content-Type", "application/json")
+	claim.Header.Set("X-Ultra-Worker-Token", "trace-worker-secret")
+	claimRec := httptest.NewRecorder()
+	router.ServeHTTP(claimRec, claim)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("worker token claim status = %d body=%s", claimRec.Code, claimRec.Body.String())
+	}
+	var lease domain.RunLeaseRecord
+	if err := json.Unmarshal(claimRec.Body.Bytes(), &lease); err != nil {
+		t.Fatalf("decode lease: %v", err)
+	}
+
+	renewBody := `{"lease_token":"` + lease.LeaseToken + `","ttl_seconds":120}`
+	renew := httptest.NewRequest(http.MethodPatch, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(renewBody))
+	renew.Header.Set("Content-Type", "application/json")
+	renew.Header.Set("Authorization", "Bearer trace-worker-secret")
+	renewRec := httptest.NewRecorder()
+	router.ServeHTTP(renewRec, renew)
+	if renewRec.Code != http.StatusOK {
+		t.Fatalf("worker token renew status = %d body=%s", renewRec.Code, renewRec.Body.String())
+	}
+
+	releaseBody := `{"lease_token":"` + lease.LeaseToken + `"}`
+	release := httptest.NewRequest(http.MethodDelete, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(releaseBody))
+	release.Header.Set("Content-Type", "application/json")
+	release.Header.Set("Authorization", "Bearer trace-worker-secret")
+	releaseRec := httptest.NewRecorder()
+	router.ServeHTTP(releaseRec, release)
+	if releaseRec.Code != http.StatusOK {
+		t.Fatalf("worker token release status = %d body=%s", releaseRec.Code, releaseRec.Body.String())
+	}
+}
+
+func TestV2WorkerTokenBypassesWorkOSGateForWorkerEndpoints(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	thread, err := service.CreateThread(context.Background(), runcontrol.CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "workos worker token",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(context.Background(), runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "workos worker token run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "workos worker token run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Without a worker token the WorkOS gate rejects the unauthenticated call.
+	anonymous := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID, nil)
+	anonymousRec := httptest.NewRecorder()
+	router.ServeHTTP(anonymousRec, anonymous)
+	if anonymousRec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status under workos = %d, want 401", anonymousRec.Code)
+	}
+
+	status := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID, nil)
+	status.Header.Set("Authorization", "Bearer trace-worker-secret")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, status)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("worker token status under workos = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+
+	claim := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/lease", strings.NewReader(`{"worker_id":"worker-a","ttl_seconds":60}`))
+	claim.Header.Set("Content-Type", "application/json")
+	claim.Header.Set("Authorization", "Bearer trace-worker-secret")
+	claimRec := httptest.NewRecorder()
+	router.ServeHTTP(claimRec, claim)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("worker token claim under workos = %d body=%s", claimRec.Code, claimRec.Body.String())
+	}
+
+	heartbeat := httptest.NewRequest(http.MethodPost, "/v2/workers/heartbeat", strings.NewReader(`{"worker_id":"worker-a","status":"busy"}`))
+	heartbeat.Header.Set("Content-Type", "application/json")
+	heartbeat.Header.Set("Authorization", "Bearer trace-worker-secret")
+	heartbeatRec := httptest.NewRecorder()
+	router.ServeHTTP(heartbeatRec, heartbeat)
+	if heartbeatRec.Code != http.StatusOK {
+		t.Fatalf("worker token heartbeat under workos = %d body=%s", heartbeatRec.Code, heartbeatRec.Body.String())
+	}
+}
+
+func TestV2WorkerTokenBypassesWorkOSGateForRunEvents(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "workos worker token run events",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "workos worker token run events",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "workos worker token run events"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	for idx := 0; idx < 3; idx++ {
+		if _, err := mem.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "message.delta",
+			Message:   "chunk",
+			Payload:   domain.JSONMap{"idx": idx},
+		}); err != nil {
+			t.Fatalf("AppendRunEvent %d: %v", idx, err)
+		}
+	}
+
+	anonymous := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/events?limit=10&after_sequence=0", nil)
+	anonymousRec := httptest.NewRecorder()
+	router.ServeHTTP(anonymousRec, anonymous)
+	if anonymousRec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous events under workos = %d, want 401", anonymousRec.Code)
+	}
+
+	wrongToken := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/events?limit=10&after_sequence=0", nil)
+	wrongToken.Header.Set("Authorization", "Bearer wrong-secret")
+	wrongTokenRec := httptest.NewRecorder()
+	router.ServeHTTP(wrongTokenRec, wrongToken)
+	if wrongTokenRec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong worker token events under workos = %d, want 401", wrongTokenRec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/events?limit=10&after_sequence=0", nil)
+	req.Header.Set("X-Ultra-Worker-Token", "trace-worker-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worker token events under workos = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response runEventsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if response.RunID != run.RunID || response.Count != 4 {
+		t.Fatalf("response run/count = %s/%d, want %s/4", response.RunID, response.Count, run.RunID)
+	}
+	for idx, event := range response.Events {
+		if event.Sequence != int64(idx+1) {
+			t.Fatalf("event %d sequence = %d, want %d", idx, event.Sequence, idx+1)
+		}
+	}
+}
+
 func TestV2AdminOverviewIncludesRuntimeTransportSummary(t *testing.T) {
 	t.Parallel()
 

@@ -1,8 +1,8 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
-
 from ultra_deepagents.code_execution import docker
 from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
@@ -95,6 +95,63 @@ def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
     assert command[-3:] == ["bash", "-lc", "python train.py"]
 
 
+def test_docker_sandbox_ignores_tool_timeout_when_admin_timeout_is_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int | None,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=0),
+    )
+
+    result = backend.execute("python train.py", timeout=7)
+
+    assert captured["timeout"] is None
+    assert result.exit_code == 0
+    assert result.output == "ok"
+
+
+def test_docker_sandbox_admin_timeout_overrides_tool_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int | None,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=1800),
+    )
+
+    result = backend.execute("python train.py", timeout=7)
+
+    assert captured["timeout"] == 1800
+    assert result.exit_code == 0
+
+
 def test_unlimited_output_limit_does_not_truncate():
     output, truncated = docker._truncate_output("x" * 1_000_000, 0)
 
@@ -115,6 +172,21 @@ def test_docker_sandbox_rejects_recursive_root_globs_before_launch(tmp_path: Pat
     assert violation is not None
     assert result.exit_code == 126
     assert "Recursive searches must stay under /workspace" in result.output
+
+
+def test_docker_sandbox_rejects_shell_timeout_wrappers_before_launch(tmp_path: Path):
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+
+    unsafe = "cd /workspace && timeout 200 python3 train.py"
+    violation = docker.validate_sandbox_command(unsafe)
+    result = backend.execute(unsafe)
+
+    assert violation is not None
+    assert result.exit_code == 126
+    assert "Do not wrap sandbox commands with shell timeout" in result.output
 
 
 def test_docker_sandbox_allows_workspace_scoped_recursive_searches():

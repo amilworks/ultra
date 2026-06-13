@@ -226,6 +226,52 @@ async def fetch_control_plane_run_status(
     return await asyncio.to_thread(fetch)
 
 
+async def fetch_control_plane_user_profile(
+    run_id: str,
+    settings: RuntimeSettings,
+) -> dict[str, Any] | None:
+    """Fetch the run owner's self-described profile from the control plane.
+
+    Uses the worker-scoped ``GET /v2/runs/{run_id}/user-profile`` endpoint; the
+    browser's ``/v2/me`` is bound to a WorkOS session and cannot be read with a
+    worker token. Returns the profile mapping or ``None``. Best-effort: never
+    raises, so a profile lookup can't fail a run.
+    """
+    base_url = settings.control_base_url.rstrip("/")
+    if not base_url:
+        return None
+    if not _control_plane_request_has_identity(settings):
+        return None
+    quoted_run_id = urllib_parse.quote(run_id, safe="")
+    url = f"{base_url}/v2/runs/{quoted_run_id}/user-profile"
+    timeout = max(0.1, float(settings.control_status_timeout_seconds))
+
+    def fetch() -> dict[str, Any] | None:
+        request = urllib_request.Request(
+            url, method="GET", headers=_control_plane_headers(settings)
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            logger.warning(
+                "Control-plane profile lookup failed; proceeding without profile.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+            return None
+        if not isinstance(payload, dict):
+            return None
+        profile = payload.get("profile")
+        if isinstance(profile, dict) and any(
+            str(value or "").strip() for value in profile.values()
+        ):
+            return profile
+        return None
+
+    return await asyncio.to_thread(fetch)
+
+
 async def fetch_control_plane_run_max_sequence(
     run_id: str,
     settings: RuntimeSettings,
@@ -278,6 +324,107 @@ async def fetch_control_plane_run_max_sequence(
         return cursor
 
     return await asyncio.to_thread(fetch_max)
+
+
+async def fetch_control_plane_run_usage_summary(
+    run_id: str,
+    settings: RuntimeSettings,
+) -> dict[str, Any] | None:
+    """Return deduped token usage already persisted as run.token_usage events."""
+    base_url = settings.control_base_url.rstrip("/")
+    if not base_url:
+        return None
+    if not _control_plane_request_has_identity(settings):
+        return None
+    quoted_run_id = urllib_parse.quote(run_id, safe="")
+    timeout = max(0.1, float(settings.control_status_timeout_seconds))
+    page_limit = 500
+
+    def fetch_page(after_sequence: int) -> list[dict[str, Any]]:
+        query = urllib_parse.urlencode(
+            {"limit": str(page_limit), "after_sequence": str(after_sequence)}
+        )
+        url = f"{base_url}/v2/runs/{quoted_run_id}/events?{query}"
+        request = urllib_request.Request(
+            url, method="GET", headers=_control_plane_headers(settings)
+        )
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            return []
+        events = payload.get("events")
+        return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+
+    def fetch_all() -> dict[str, Any] | None:
+        after_sequence = 0
+        seen_usage_ids: set[str] = set()
+        summary = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        model = ""
+        try:
+            while True:
+                events = fetch_page(after_sequence)
+                if not events:
+                    break
+                page_max = after_sequence
+                for event in events:
+                    sequence = _event_sequence(event) or 0
+                    if sequence > page_max:
+                        page_max = sequence
+                    if str(event.get("event_kind") or event.get("event_type") or "") != "run.token_usage":
+                        continue
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    usage_event_id = str(
+                        payload.get("usage_event_id") or event.get("event_id") or ""
+                    ).strip()
+                    if not usage_event_id or usage_event_id in seen_usage_ids:
+                        continue
+                    seen_usage_ids.add(usage_event_id)
+                    input_tokens = _positive_int(payload.get("input_tokens"))
+                    output_tokens = _positive_int(payload.get("output_tokens"))
+                    total_tokens = _positive_int(payload.get("total_tokens"))
+                    if total_tokens <= 0:
+                        total_tokens = input_tokens + output_tokens
+                    if input_tokens <= 0 and output_tokens <= 0 and total_tokens <= 0:
+                        continue
+                    summary["input_tokens"] += input_tokens
+                    summary["output_tokens"] += output_tokens
+                    summary["total_tokens"] += total_tokens
+                    if not model:
+                        model = str(payload.get("model") or "").strip()
+                if page_max <= after_sequence:
+                    break
+                after_sequence = page_max
+                if len(events) < page_limit:
+                    break
+        except urllib_error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise
+        if summary["input_tokens"] <= 0 and summary["output_tokens"] <= 0 and summary["total_tokens"] <= 0:
+            return None
+        if model:
+            summary["model"] = model
+        return summary
+
+    try:
+        return await asyncio.to_thread(fetch_all)
+    except Exception:
+        logger.warning(
+            "Could not read run token usage summary; proceeding without prior usage.",
+            extra={"run_id": run_id},
+            exc_info=True,
+        )
+        return None
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 async def acquire_control_plane_run_lease(
@@ -485,6 +632,9 @@ class NATSDeepAgentsWorker:
             [ControlPlaneRunLease, RuntimeSettings], Awaitable[None]
         ] = release_control_plane_run_lease,
         worker_heartbeat_func: WorkerHeartbeatFunc = post_control_plane_worker_heartbeat,
+        user_profile_func: Callable[
+            [str, RuntimeSettings], Awaitable[dict[str, Any] | None]
+        ] = fetch_control_plane_user_profile,
     ) -> None:
         self.settings = settings or RuntimeSettings.from_env()
         self._run_job = run_job_func
@@ -493,6 +643,7 @@ class NATSDeepAgentsWorker:
         self._renew_run_lease = renew_run_lease_func
         self._release_run_lease = release_run_lease_func
         self._worker_heartbeat = worker_heartbeat_func
+        self._user_profile = user_profile_func
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._canceled_run_reasons: dict[str, str] = {}
         self._shutting_down = False
@@ -799,6 +950,12 @@ class NATSDeepAgentsWorker:
                         resume_kwargs["sequence_floor"] = (
                             await self._run_event_sequence_floor(job.run_id)
                         )
+                    prior_usage = await self._run_token_usage_summary(job.run_id)
+                    if prior_usage:
+                        resume_kwargs["prior_usage"] = prior_usage
+                    user_profile = await self._load_user_profile(job.run_id)
+                    if user_profile:
+                        resume_kwargs["user_profile"] = user_profile
                     try:
                         response_text = await self._run_job(
                             job,
@@ -930,6 +1087,22 @@ class NATSDeepAgentsWorker:
                 exc_info=True,
             )
             return 0
+
+    async def _run_token_usage_summary(self, run_id: str) -> dict[str, Any] | None:
+        """Best-effort prior token usage for final payload continuity."""
+        return await fetch_control_plane_run_usage_summary(run_id, self.settings)
+
+    async def _load_user_profile(self, run_id: str) -> dict[str, Any] | None:
+        """Best-effort fetch of the run owner's profile for memory seeding."""
+        try:
+            return await self._user_profile(run_id, self.settings)
+        except Exception:
+            logger.warning(
+                "Could not load user profile for memory seeding; continuing.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+            return None
 
     async def _maybe_post_idle_worker_heartbeat(self, last_posted_at: float) -> float:
         interval_seconds = self.settings.worker_heartbeat_interval_seconds

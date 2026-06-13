@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.rarespot.config import RareSpotConfig
@@ -85,12 +88,12 @@ def test_runtime_settings_default_to_higher_autonomous_continuation_guard(monkey
     assert settings.completion_max_continuations == 8
 
 
-def test_runtime_settings_default_to_two_worker_slots(monkeypatch):
+def test_runtime_settings_default_to_vllm_worker_slot_capacity(monkeypatch):
     monkeypatch.delenv("ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY", raising=False)
 
     settings = RuntimeSettings.from_env()
 
-    assert settings.worker_max_concurrency == 2
+    assert settings.worker_max_concurrency == 64
 
 
 def test_runtime_settings_load_worker_max_concurrency(monkeypatch):
@@ -123,6 +126,230 @@ def test_runtime_settings_load_completion_continuation_guard(monkeypatch):
     settings = RuntimeSettings.from_env()
 
     assert settings.completion_max_continuations == 6
+
+
+def test_runtime_settings_default_to_no_async_subagents(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON", raising=False)
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.async_subagents == ()
+
+
+def test_runtime_settings_load_async_subagents_from_json(monkeypatch):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs on a remote LangGraph server.",
+                    "graph_id": "ultra-training-agent",
+                    "url": "https://langgraph.example.test",
+                    "headers": {"X-Ultra-Async-Token": "secret-ref"},
+                }
+            ]
+        ),
+    )
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.async_subagents == (
+        {
+            "name": "remote-training-runner",
+            "description": "Runs long model training jobs on a remote LangGraph server.",
+            "graph_id": "ultra-training-agent",
+            "url": "https://langgraph.example.test",
+            "headers": {"X-Ultra-Async-Token": "secret-ref"},
+        },
+    )
+
+
+def test_runtime_settings_reject_async_subagents_without_required_fields(monkeypatch):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps([{"name": "remote-training-runner", "graph_id": "ultra-training-agent"}]),
+    )
+
+    with pytest.raises(ValueError, match="description"):
+        RuntimeSettings.from_env()
+
+
+def test_runtime_settings_reject_duplicate_async_subagent_names(monkeypatch):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                },
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs another remote job.",
+                    "graph_id": "ultra-other-agent",
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Duplicate async subagent name"):
+        RuntimeSettings.from_env()
+
+
+def test_runtime_settings_reject_case_insensitive_duplicate_async_subagent_names(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                },
+                {
+                    "name": "Remote-Training-Runner",
+                    "description": "Runs another remote job.",
+                    "graph_id": "ultra-other-agent",
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Duplicate async subagent name"):
+        RuntimeSettings.from_env()
+
+
+def test_runtime_settings_reject_case_insensitive_duplicate_async_subagent_headers(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                    "headers": {
+                        "X-Auth-Scheme": "ultra-workos",
+                        "x-auth-scheme": "langsmith",
+                    },
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Duplicate async subagent header name"):
+        RuntimeSettings.from_env()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/langgraph.sock",
+        "/tmp/langgraph.sock",
+        "langgraph.example.test",
+        "ftp://langgraph.example.test",
+        "http:/langgraph.example.test",
+    ],
+)
+def test_runtime_settings_reject_async_subagent_urls_that_are_not_http_endpoints(
+    monkeypatch,
+    url,
+):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                    "url": url,
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"url.*http:// or https://"):
+        RuntimeSettings.from_env()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://runner-token@langgraph.example.test",
+        "https://ultra:secret@langgraph.example.test",
+    ],
+)
+def test_runtime_settings_reject_async_subagent_urls_with_credentials(
+    monkeypatch,
+    url,
+):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                    "url": url,
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"url.*credentials"):
+        RuntimeSettings.from_env()
+
+
+@pytest.mark.parametrize("header_value", ["", 123, None])
+def test_runtime_settings_reject_async_subagent_header_values_that_are_not_non_empty_strings(
+    monkeypatch,
+    header_value,
+):
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-training-runner",
+                    "description": "Runs long model training jobs.",
+                    "graph_id": "ultra-training-agent",
+                    "headers": {"Authorization": header_value},
+                },
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="headers.Authorization"):
+        RuntimeSettings.from_env()
+
+
+@pytest.mark.parametrize("field_name", ["name", "description", "graph_id", "url"])
+def test_runtime_settings_reject_async_subagent_string_fields_with_non_string_values(
+    monkeypatch,
+    field_name,
+):
+    spec = {
+        "name": "remote-training-runner",
+        "description": "Runs long model training jobs.",
+        "graph_id": "ultra-training-agent",
+        "url": "https://langgraph.example.test",
+    }
+    spec[field_name] = 123
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps([spec]),
+    )
+
+    with pytest.raises(ValueError, match=rf"{field_name}.*string"):
+        RuntimeSettings.from_env()
 
 
 def test_runtime_settings_load_control_status_poll_interval(monkeypatch):

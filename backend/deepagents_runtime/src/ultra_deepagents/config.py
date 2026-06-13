@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from socket import gethostname
+from typing import Any
+from urllib.parse import urlparse
 
-DEFAULT_WORKER_MAX_CONCURRENCY = 2
+DEFAULT_WORKER_MAX_CONCURRENCY = 64
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,10 @@ class RuntimeSettings:
     max_retries: int = 1
     title_generation_enabled: bool = False
     title_generation_timeout_seconds: float = 8.0
+    # Sidebar titles need ~12 tokens; on hybrid-reasoning models the thinking
+    # phase alone can exceed the title timeout, so it is disabled per call.
+    title_thinking_disabled: bool = True
+    title_max_tokens: int = 96
     langgraph_recursion_limit: int = 1000
     sandbox_image: str = "bisque-ultra-codeexec:py311"
     sandbox_network: str = "none"
@@ -28,6 +35,7 @@ class RuntimeSettings:
     sandbox_timeout_seconds: int = 0
     sandbox_output_limit_bytes: int = 0
     completion_max_continuations: int = 8
+    async_subagents: tuple[dict[str, Any], ...] = ()
     nats_url: str = "nats://127.0.0.1:4222"
     nats_stream: str = "ULTRA_RUNS"
     nats_jobs_subject: str = "ultra.runs.jobs"
@@ -64,6 +72,10 @@ class RuntimeSettings:
     workspace_root: str = "data/deepagents/workspaces"
     memory_root: str = "data/deepagents/memory"
     artifact_root: str = "data/artifacts"
+    # Agent skills (progressive-disclosure protocols, e.g. experiment rigor and
+    # report contracts). Empty means the repo-shipped skills directory next to
+    # the package; set to an absolute path to override per deployment.
+    skills_root: str = ""
     rarespot_tool_enabled: bool = True
     rarespot_control_base_url: str = "http://127.0.0.1:8088"
     rarespot_nats_url: str = "nats://127.0.0.1:4222"
@@ -87,7 +99,7 @@ class RuntimeSettings:
     rarespot_imgsz: int = 512
 
     @classmethod
-    def from_env(cls) -> "RuntimeSettings":
+    def from_env(cls) -> RuntimeSettings:
         return cls(
             openai_base_url=os.getenv("OPENAI_BASE_URL", "http://localhost:8001/v1"),
             openai_model=os.getenv("OPENAI_MODEL", "deepseek_v4"),
@@ -114,6 +126,14 @@ class RuntimeSettings:
                 0.0,
                 float(os.getenv("ULTRA_DEEPAGENTS_TITLE_GENERATION_TIMEOUT_SECONDS", "8")),
             ),
+            title_thinking_disabled=_env_bool(
+                "ULTRA_DEEPAGENTS_TITLE_THINKING_DISABLED",
+                True,
+            ),
+            title_max_tokens=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_TITLE_MAX_TOKENS", "96")),
+            ),
             langgraph_recursion_limit=max(
                 1,
                 int(os.getenv("ULTRA_DEEPAGENTS_RECURSION_LIMIT", "1000")),
@@ -136,6 +156,7 @@ class RuntimeSettings:
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_COMPLETION_MAX_CONTINUATIONS", "8")),
             ),
+            async_subagents=_async_subagents_from_env(),
             nats_url=os.getenv(
                 "ULTRA_NATS_URL",
                 os.getenv("ULTRA_CONTROL_NATS_URL", "nats://127.0.0.1:4222"),
@@ -267,6 +288,7 @@ class RuntimeSettings:
                 "ULTRA_ARTIFACT_ROOT",
                 os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),
             ),
+            skills_root=os.getenv("ULTRA_DEEPAGENTS_SKILLS_ROOT", "").strip(),
             rarespot_tool_enabled=_env_bool("ULTRA_RARESPOT_TOOL_ENABLED", True),
             rarespot_control_base_url=os.getenv(
                 "ULTRA_CONTROL_BASE_URL",
@@ -331,6 +353,117 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_tuple(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
     return tuple(token.strip() for token in raw.split(os.pathsep) if token.strip())
+
+
+def _async_subagents_from_env() -> tuple[dict[str, Any], ...]:
+    raw = os.getenv("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON", "").strip()
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON must be valid JSON"
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ValueError("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON must be a JSON array")
+
+    specs: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(
+                "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON entries must be objects"
+            )
+        prefix = f"ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON[{index}]"
+        name = _required_async_subagent_string(item, "name", prefix=prefix)
+        description = _required_async_subagent_string(item, "description", prefix=prefix)
+        graph_id = _required_async_subagent_string(item, "graph_id", prefix=prefix)
+        normalized_name = name.lower()
+        if normalized_name in seen_names:
+            raise ValueError(f"Duplicate async subagent name: {name}")
+        seen_names.add(normalized_name)
+        spec: dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "graph_id": graph_id,
+        }
+        url = _optional_async_subagent_url(item, "url", prefix=prefix)
+        if url:
+            spec["url"] = url
+        headers = _async_subagent_headers(item.get("headers"), prefix=prefix)
+        if headers:
+            spec["headers"] = headers
+        specs.append(spec)
+    return tuple(specs)
+
+
+def _required_async_subagent_string(item: dict[str, Any], field: str, *, prefix: str) -> str:
+    if field not in item or item[field] is None:
+        raise ValueError(f"{prefix}.{field} is required")
+    value = item[field]
+    if not isinstance(value, str):
+        raise ValueError(f"{prefix}.{field} must be a non-empty string")
+    value = value.strip()
+    if not value:
+        raise ValueError(f"{prefix}.{field} is required")
+    return value
+
+
+def _optional_async_subagent_string(
+    item: dict[str, Any],
+    field: str,
+    *,
+    prefix: str,
+) -> str:
+    if field not in item:
+        return ""
+    value = item[field]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{prefix}.{field} must be a non-empty string when provided")
+    return value.strip()
+
+
+def _optional_async_subagent_url(
+    item: dict[str, Any],
+    field: str,
+    *,
+    prefix: str,
+) -> str:
+    value = _optional_async_subagent_string(item, field, prefix=prefix)
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            f"{prefix}.{field} must be an http:// or https:// endpoint when provided"
+        )
+    if parsed.username or parsed.password:
+        raise ValueError(f"{prefix}.{field} must not include credentials")
+    return value
+
+
+def _async_subagent_headers(value: Any, *, prefix: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{prefix}.headers must be an object when provided")
+    headers: dict[str, str] = {}
+    seen_header_names: set[str] = set()
+    for raw_key, raw_value in value.items():
+        if not isinstance(raw_key, str):
+            raise ValueError(f"{prefix}.headers contains a non-string header name")
+        key = raw_key.strip()
+        if not key:
+            raise ValueError(f"{prefix}.headers contains an empty header name")
+        normalized_key = key.lower()
+        if normalized_key in seen_header_names:
+            raise ValueError(f"Duplicate async subagent header name: {key}")
+        seen_header_names.add(normalized_key)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise ValueError(f"{prefix}.headers.{key} must be a non-empty string")
+        headers[key] = raw_value.strip()
+    return headers
 
 
 def _rarespot_upload_roots() -> tuple[str, ...]:

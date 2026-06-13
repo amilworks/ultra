@@ -11,7 +11,6 @@ from deepagents.backends.sandbox import BaseSandbox
 
 from ultra_deepagents.code_execution.paths import resolve_workspace_file
 
-
 MATPLOTLIBRC = """\
 backend: Agg
 figure.dpi: 300
@@ -116,7 +115,8 @@ class DockerSandboxBackend(BaseSandbox):
         if violation is not None:
             return ExecuteResponse(output=violation, exit_code=126)
 
-        timeout_seconds = self.config.timeout_seconds if timeout is None else timeout
+        _ = timeout
+        timeout_seconds = self.config.timeout_seconds
         try:
             completed = subprocess.run(
                 self.build_docker_command(command),
@@ -195,6 +195,8 @@ def validate_sandbox_command(command: str) -> str | None:
     normalized = " ".join(str(command or "").split())
     if not normalized:
         return "Command is empty."
+    if _uses_shell_timeout_wrapper(normalized):
+        return _shell_timeout_message()
     if _searches_root_with_python_glob(normalized):
         return _root_search_message()
     if re.search(r"\bfind\s+/(?:\s|$)", normalized):
@@ -210,6 +212,10 @@ def validate_sandbox_command(command: str) -> str | None:
     return None
 
 
+def _uses_shell_timeout_wrapper(command: str) -> bool:
+    return bool(re.search(r"(?:^|(?:&&|\|\||;|\|)\s*)g?timeout\b", command))
+
+
 def _searches_root_with_python_glob(command: str) -> bool:
     if "glob" not in command and "rglob" not in command:
         return False
@@ -221,6 +227,14 @@ def _root_search_message() -> str:
         "Recursive searches must stay under /workspace. Uploaded files are app "
         "storage handles; stage exact IDs with stage_uploaded_files_for_analysis "
         "before reading them, and use /workspace paths only."
+    )
+
+
+def _shell_timeout_message() -> str:
+    return (
+        "Do not wrap sandbox commands with shell timeout. Long-running analysis is "
+        "allowed; run the command directly and let the platform's operator-configured "
+        "sandbox policy handle any hard limit."
     )
 
 

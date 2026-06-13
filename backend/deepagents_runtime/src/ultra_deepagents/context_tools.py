@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
@@ -16,14 +17,18 @@ def build_prior_artifact_manifest(context: AgentRunContext) -> dict[str, Any]:
     for descriptor in context.resource_descriptors:
         if str(descriptor.get("type") or "artifact") != "artifact":
             continue
-        entry = dict(descriptor)
-        entry["access"] = "stage_artifact_for_analysis"
+        entry = _public_descriptor(descriptor)
+        entry["access"] = (
+            "remote_storage_uri"
+            if str(entry.get("remote_storage_uri") or "").strip()
+            else "stage_artifact_for_analysis"
+        )
         artifacts.append(entry)
     return {
         "run_id": context.run_id,
         "thread_id": context.thread_id,
-        "workspace_root": context.workspace_root,
-        "artifact_root": context.artifact_root,
+        "workspace_root": "/workspace",
+        "artifact_root": "/outputs",
         "prior_artifacts": artifacts,
     }
 
@@ -117,6 +122,36 @@ def stage_artifact(context: AgentRunContext, *, artifact_id: str = "", path: str
     }
 
 
+def stage_artifact_for_analysis_text(
+    context: AgentRunContext,
+    *,
+    artifact_id: str = "",
+    path: str = "",
+) -> str:
+    """Return model-visible artifact staging output with sandbox paths only."""
+    return json.dumps(
+        _public_stage_result(stage_artifact(context, artifact_id=artifact_id, path=path)),
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def stage_uploaded_files_for_analysis_text(
+    context: AgentRunContext,
+    *,
+    upload_roots: Iterable[str | Path] = (),
+    file_ids: Iterable[str] | str | None = None,
+) -> str:
+    """Return model-visible upload staging output with sandbox paths only."""
+    return json.dumps(
+        _public_stage_result(
+            stage_uploaded_files(context, upload_roots=upload_roots, file_ids=file_ids)
+        ),
+        indent=2,
+        sort_keys=True,
+    )
+
+
 @tool
 def artifact_manifest(runtime: ToolRuntime[AgentRunContext]) -> str:
     """List prior durable artifacts available to this run with IDs, paths, types, and checksums."""
@@ -130,11 +165,7 @@ def stage_artifact_for_analysis(
     path: str = "",
 ) -> str:
     """Copy a prior artifact into /workspace/staged_artifacts so execute() code can read or modify it."""
-    return json.dumps(
-        stage_artifact(runtime.context, artifact_id=artifact_id, path=path),
-        indent=2,
-        sort_keys=True,
-    )
+    return stage_artifact_for_analysis_text(runtime.context, artifact_id=artifact_id, path=path)
 
 
 def build_context_tools(upload_roots: Iterable[str | Path] = ()) -> list[Any]:
@@ -146,20 +177,21 @@ def build_context_tools(upload_roots: Iterable[str | Path] = ()) -> list[Any]:
         file_ids: list[str] | str | None = None,
     ) -> str:
         """Copy selected uploaded files into /workspace/staged_uploads so execute() code can analyze them."""
-        return json.dumps(
-            stage_uploaded_files(
-                runtime.context,
-                upload_roots=resolved_upload_roots,
-                file_ids=file_ids,
-            ),
-            indent=2,
-            sort_keys=True,
+        return stage_uploaded_files_for_analysis_text(
+            runtime.context,
+            upload_roots=resolved_upload_roots,
+            file_ids=file_ids,
         )
 
     return [artifact_manifest, stage_artifact_for_analysis, stage_uploaded_files_for_analysis]
 
 
-def build_tool_capability_manifest(registered_tools: Iterable[Any]) -> dict[str, Any]:
+def build_tool_capability_manifest(
+    registered_tools: Iterable[Any],
+    *,
+    available_subagents: Iterable[dict[str, Any]] = (),
+    available_async_subagents: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
     """Build the model-visible manifest for the active Deep Agents tool surface."""
     registered_tool_names = sorted(
         {
@@ -168,50 +200,99 @@ def build_tool_capability_manifest(registered_tools: Iterable[Any]) -> dict[str,
             if str(getattr(tool_obj, "name", "") or "").strip()
         }
     )
+    subagent_descriptors = _public_subagent_descriptors(available_subagents)
+    async_subagent_descriptors = _public_subagent_descriptors(available_async_subagents)
+    builtin_tools = [
+        {
+            "name": "execute",
+            "category": "sandbox",
+            "purpose": "Run shell or Python commands in the per-run /workspace sandbox.",
+        },
+        {
+            "name": "write_file",
+            "category": "filesystem",
+            "purpose": "Write source, reports, and other working files into the active backend.",
+        },
+        {
+            "name": "read_file",
+            "category": "filesystem",
+            "purpose": "Read text files from /workspace, /outputs, /memories, or staged artifacts.",
+        },
+        {
+            "name": "edit_file",
+            "category": "filesystem",
+            "purpose": "Patch existing text files without rewriting them from scratch.",
+        },
+        {
+            "name": "ls",
+            "category": "filesystem",
+            "purpose": "Inspect directory contents under the active backend routes.",
+        },
+        {
+            "name": "glob",
+            "category": "filesystem",
+            "purpose": "Find files by pattern under the active backend routes.",
+        },
+        {
+            "name": "grep",
+            "category": "filesystem",
+            "purpose": "Search text files under the active backend routes.",
+        },
+        {
+            "name": "write_todos",
+            "category": "planning",
+            "purpose": "Track multi-step task progress during autonomous work.",
+        },
+    ]
+    if subagent_descriptors:
+        builtin_tools.append(
+            {
+                "name": "task",
+                "category": "delegation",
+                "purpose": (
+                    "Launch one of the available scoped subagents for isolated, "
+                    "multi-step work and reconcile its final report."
+                ),
+            }
+        )
+    if async_subagent_descriptors:
+        builtin_tools.extend(
+            [
+                {
+                    "name": "start_async_task",
+                    "category": "background_delegation",
+                    "purpose": (
+                        "Launch one configured remote async subagent as a background task "
+                        "and return its task ID immediately."
+                    ),
+                },
+                {
+                    "name": "check_async_task",
+                    "category": "background_delegation",
+                    "purpose": "Check the latest status or result for a configured async subagent task.",
+                },
+                {
+                    "name": "update_async_task",
+                    "category": "background_delegation",
+                    "purpose": "Send follow-up instructions to a running async subagent task.",
+                },
+                {
+                    "name": "cancel_async_task",
+                    "category": "background_delegation",
+                    "purpose": "Cancel a running async subagent task.",
+                },
+                {
+                    "name": "list_async_tasks",
+                    "category": "background_delegation",
+                    "purpose": "List tracked async subagent tasks with their latest known statuses.",
+                },
+            ]
+        )
     return {
-        "deepagents_builtin_tools": [
-            {
-                "name": "execute",
-                "category": "sandbox",
-                "purpose": "Run shell or Python commands in the per-run /workspace sandbox.",
-            },
-            {
-                "name": "write_file",
-                "category": "filesystem",
-                "purpose": "Write source, reports, and other working files into the active backend.",
-            },
-            {
-                "name": "read_file",
-                "category": "filesystem",
-                "purpose": "Read text files from /workspace, /outputs, /memories, or staged artifacts.",
-            },
-            {
-                "name": "edit_file",
-                "category": "filesystem",
-                "purpose": "Patch existing text files without rewriting them from scratch.",
-            },
-            {
-                "name": "ls",
-                "category": "filesystem",
-                "purpose": "Inspect directory contents under the active backend routes.",
-            },
-            {
-                "name": "glob",
-                "category": "filesystem",
-                "purpose": "Find files by pattern under the active backend routes.",
-            },
-            {
-                "name": "grep",
-                "category": "filesystem",
-                "purpose": "Search text files under the active backend routes.",
-            },
-            {
-                "name": "write_todos",
-                "category": "planning",
-                "purpose": "Track multi-step task progress during autonomous work.",
-            },
-        ],
+        "deepagents_builtin_tools": builtin_tools,
         "registered_tools": registered_tool_names,
+        "available_subagents": subagent_descriptors,
+        "available_async_subagents": async_subagent_descriptors,
         "selected_tool_names": (
             "The current run may include selected_tool_names in runtime context. "
             "Use domain tools only when they are relevant to the user goal."
@@ -226,9 +307,72 @@ def build_tool_capability_manifest(registered_tools: Iterable[Any]) -> dict[str,
     }
 
 
-def build_tool_capability_manifest_tool(registered_tools: Iterable[Any]) -> Any:
+def _public_subagent_descriptors(
+    subagents: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    descriptors: list[dict[str, Any]] = []
+    for subagent in subagents:
+        name = str(subagent.get("name") or "").strip()
+        description = str(subagent.get("description") or "").strip()
+        if not name or not description:
+            continue
+        descriptor = {"name": name, "description": description}
+        tool_names = sorted(
+            {
+                str(getattr(tool_obj, "name", "") or "").strip()
+                for tool_obj in subagent.get("tools") or []
+                if str(getattr(tool_obj, "name", "") or "").strip()
+            }
+        )
+        if tool_names:
+            descriptor["tool_names"] = tool_names
+        response_format = _public_response_format_descriptor(
+            subagent.get("response_format")
+        )
+        if response_format:
+            descriptor["response_format"] = response_format
+        descriptors.append(descriptor)
+    return descriptors
+
+
+def _public_response_format_descriptor(response_format: Any) -> dict[str, Any]:
+    if not isinstance(response_format, dict):
+        return {}
+    schema_type = str(response_format.get("type") or "").strip()
+    raw_required = response_format.get("required")
+    required = [
+        str(item).strip()
+        for item in (raw_required if isinstance(raw_required, list | tuple) else [])
+        if str(item).strip()
+    ]
+    properties = response_format.get("properties")
+    property_names = (
+        sorted(str(key).strip() for key in properties if str(key).strip())
+        if isinstance(properties, dict)
+        else []
+    )
+    descriptor: dict[str, Any] = {}
+    if schema_type:
+        descriptor["type"] = schema_type
+    if required:
+        descriptor["required"] = required
+    if property_names:
+        descriptor["properties"] = property_names
+    return descriptor
+
+
+def build_tool_capability_manifest_tool(
+    registered_tools: Iterable[Any],
+    *,
+    available_subagents: Iterable[dict[str, Any]] = (),
+    available_async_subagents: Iterable[dict[str, Any]] = (),
+) -> Any:
     """Expose a compact, model-visible manifest of the active tool surface."""
-    manifest = build_tool_capability_manifest(registered_tools)
+    manifest = build_tool_capability_manifest(
+        registered_tools,
+        available_subagents=available_subagents,
+        available_async_subagents=available_async_subagents,
+    )
 
     @tool
     def tool_capability_manifest() -> str:
@@ -260,6 +404,15 @@ def _find_artifact_descriptor(
             if target_path in candidate_paths:
                 return dict(descriptor)
     return None
+
+
+def artifact_source_path(context: AgentRunContext, descriptor: dict[str, Any]) -> Path | None:
+    """Resolve a prior-artifact descriptor to its durable host path under the artifact store.
+
+    Public entry point so other tool modules (e.g. BisQue upload) reuse the exact
+    same resolution rules instead of re-deriving artifact-store paths.
+    """
+    return _artifact_source_path(context, descriptor)
 
 
 def _artifact_source_path(context: AgentRunContext, descriptor: dict[str, Any]) -> Path | None:
@@ -297,19 +450,63 @@ def _is_under(path: Path, root: Path) -> bool:
 
 def _public_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "type",
         "artifact_id",
         "output_id",
         "run_id",
         "kind",
         "title",
         "path",
+        "relative_path",
         "mime_type",
         "size_bytes",
         "sha256",
         "tool_name",
         "deepagents_path",
+        "remote_storage_uri",
     }
     return {key: value for key, value in descriptor.items() if key in allowed}
+
+
+def _public_stage_result(result: dict[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {}
+    for key, value in result.items():
+        if key in {"source_path", "storage_uri"}:
+            continue
+        if key == "artifact" and isinstance(value, dict):
+            public[key] = _public_descriptor(value)
+            continue
+        if key == "staged_files" and isinstance(value, list):
+            public[key] = [
+                _public_staged_file(item)
+                for item in value
+                if isinstance(item, dict)
+            ]
+            continue
+        if key == "staged_path":
+            public[key] = _sandbox_path_or_value(result, value)
+            continue
+        public[key] = value
+    return public
+
+
+def _public_staged_file(item: dict[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {}
+    for key, value in item.items():
+        if key in {"source_path", "storage_uri"}:
+            continue
+        if key == "staged_path":
+            public[key] = _sandbox_path_or_value(item, value)
+            continue
+        public[key] = value
+    return public
+
+
+def _sandbox_path_or_value(payload: dict[str, Any], fallback: Any) -> Any:
+    sandbox_path = str(payload.get("sandbox_path") or "").strip()
+    if sandbox_path.startswith("/workspace/") or sandbox_path.startswith("/outputs/"):
+        return sandbox_path
+    return fallback
 
 
 def _safe_path_token(value: str) -> str:

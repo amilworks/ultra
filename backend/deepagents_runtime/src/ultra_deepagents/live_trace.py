@@ -5,7 +5,6 @@ import http.cookiejar
 import json
 import os
 import re
-import sys
 import time
 import uuid
 from collections import Counter
@@ -15,9 +14,16 @@ from urllib import parse, request
 
 
 class ControlPlaneClient:
-    def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: float = 10.0,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.extra_headers = _clean_extra_headers(extra_headers or {})
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = request.build_opener(request.HTTPCookieProcessor(self.cookie_jar))
 
@@ -45,16 +51,20 @@ class ControlPlaneClient:
         messages: list[dict[str, str]],
         idempotency_key: str,
         file_ids: list[str] | None = None,
+        workflow_hint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "goal": goal,
+            "messages": messages,
+            "idempotency_key": idempotency_key,
+            "file_ids": file_ids or [],
+        }
+        if workflow_hint:
+            body["workflow_hint"] = workflow_hint
         payload = self._request(
             "POST",
             f"/v2/threads/{parse.quote(thread_id, safe='')}/runs",
-            {
-                "goal": goal,
-                "messages": messages,
-                "idempotency_key": idempotency_key,
-                "file_ids": file_ids or [],
-            },
+            body,
             headers={"Idempotency-Key": idempotency_key},
         )
         return _unwrap(payload, "run")
@@ -143,6 +153,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-Role", "researcher")
         for key, value in (headers or {}).items():
             req.add_header(key, value)
+        self._add_extra_headers(req)
         with self.opener.open(req, timeout=self.timeout_seconds) as response:
             body = response.read().decode("utf-8")
         return json.loads(body) if body else {}
@@ -152,6 +163,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-User-Id", "local-user")
         req.add_header("X-Ultra-Org-Id", "local-org")
         req.add_header("X-Ultra-Role", "researcher")
+        self._add_extra_headers(req)
         with self.opener.open(req, timeout=self.timeout_seconds) as response:
             return response.read()
 
@@ -163,19 +175,17 @@ class ControlPlaneClient:
             filename = file_path.name
             chunks.extend(
                 [
-                    f"--{boundary}\r\n".encode("utf-8"),
+                    f"--{boundary}\r\n".encode(),
                     (
                         'Content-Disposition: form-data; name="files"; '
                         f'filename="{_escape_multipart_filename(filename)}"\r\n'
-                    ).encode("utf-8"),
-                    f"Content-Type: {_content_type_for_path(file_path)}\r\n\r\n".encode(
-                        "utf-8"
-                    ),
+                    ).encode(),
+                    f"Content-Type: {_content_type_for_path(file_path)}\r\n\r\n".encode(),
                     data,
                     b"\r\n",
                 ]
             )
-        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        chunks.append(f"--{boundary}--\r\n".encode())
         body = b"".join(chunks)
         req = request.Request(f"{self.base_url}{path}", data=body, method="POST")
         req.add_header("Accept", "application/json")
@@ -183,9 +193,14 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-User-Id", "local-user")
         req.add_header("X-Ultra-Org-Id", "local-org")
         req.add_header("X-Ultra-Role", "researcher")
+        self._add_extra_headers(req)
         with self.opener.open(req, timeout=self.timeout_seconds) as response:
             response_body = response.read().decode("utf-8")
         return json.loads(response_body) if response_body else {}
+
+    def _add_extra_headers(self, req: request.Request) -> None:
+        for key, value in self.extra_headers.items():
+            req.add_header(key, value)
 
 
 def build_followup_messages(
@@ -247,6 +262,9 @@ def summarize_run_trace(
     idle_recoveries = _idle_recoveries(events)
     rarespot_configurations = _rarespot_configurations(events)
     tool_capability_manifests = _tool_capability_manifests(events)
+    context_tool_hygiene = _context_tool_output_hygiene(events)
+    delegation = _delegation_evidence(events)
+    async_delegation = _async_delegation_evidence(events)
     return {
         "run_id": run.get("run_id"),
         "thread_id": run.get("thread_id"),
@@ -258,6 +276,9 @@ def summarize_run_trace(
         "tool_names": tool_names,
         "rarespot_configurations": rarespot_configurations,
         "tool_capability_manifests": tool_capability_manifests,
+        "context_tool_hygiene": context_tool_hygiene,
+        "delegation": delegation,
+        "async_delegation": async_delegation,
         "event_counts": dict(sorted(event_counts.items())),
         "accepted_ms": _round_ms(accepted_ms),
         "first_event_ms": _round_ms(first_event_ms),
@@ -288,6 +309,7 @@ def trace_prompt(
     timeout_seconds: float = 300.0,
     poll_interval_seconds: float = 1.0,
     verify_downloads: bool = False,
+    workflow_hint: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     key = idempotency_key or f"trace-{uuid.uuid4().hex}"
     accepted_started = time.monotonic()
@@ -297,6 +319,7 @@ def trace_prompt(
         messages=messages or [{"role": "user", "content": prompt}],
         idempotency_key=key,
         file_ids=file_ids,
+        workflow_hint=workflow_hint,
     )
     accepted_ms = (time.monotonic() - accepted_started) * 1000
     run_id = str(run["run_id"])
@@ -371,12 +394,17 @@ def trace_prompt(
 
 
 def run_trace(args: argparse.Namespace) -> dict[str, Any]:
-    client = ControlPlaneClient(args.base_url, timeout_seconds=args.http_timeout)
+    client_kwargs: dict[str, Any] = {"timeout_seconds": args.http_timeout}
+    auth_headers = _auth_headers_from_args(args)
+    if auth_headers:
+        client_kwargs["extra_headers"] = auth_headers
+    client = ControlPlaneClient(args.base_url, **client_kwargs)
     bisque_session = _login_bisque_from_args(client, args)
     file_ids = client.upload_files(args.upload_file) if args.upload_file else []
     thread = client.create_thread(title=args.title)
     thread_id = str(thread["thread_id"])
     transcript = [{"role": "user", "content": args.prompt}]
+    workflow_hint = _workflow_hint_from_args(args)
     first_run, first_summary = trace_prompt(
         client,
         thread_id=thread_id,
@@ -386,6 +414,7 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
         verify_downloads=args.verify_downloads,
+        workflow_hint=workflow_hint,
     )
     result: dict[str, Any] = {
         "thread_id": thread_id,
@@ -413,6 +442,7 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
             timeout_seconds=args.timeout,
             poll_interval_seconds=args.poll_interval,
             verify_downloads=args.verify_downloads,
+            workflow_hint=workflow_hint,
         )
         followup_summaries.append(followup_summary)
     if followup_summaries:
@@ -793,6 +823,7 @@ def evaluate_tool_capability_trace_quality(
         "ls",
         "glob",
         "grep",
+        "task",
     }
     declared_names = builtin_names | registered_names
     allowed_without_manifest = known_builtin_names | TOOL_CAPABILITY_TOOL_NAMES
@@ -825,6 +856,8 @@ def evaluate_tool_capability_trace_quality(
         for manifest in manifests
     )
     used_tools_declared = not missing_used_tools
+    context_tool_hygiene = _trace_context_tool_hygiene(turns)
+    context_tool_outputs_safe = int(context_tool_hygiene.get("host_path_leak_count") or 0) == 0
 
     score = 0.0
     if terminal_ok:
@@ -858,6 +891,8 @@ def evaluate_tool_capability_trace_quality(
             "used tools were not declared in any captured manifest: "
             + ", ".join(missing_used_tools)
         )
+    if not context_tool_outputs_safe:
+        issues.append("context tool output leaked host paths")
 
     rounded_score = round(min(score, 10.0), 1)
     return {
@@ -873,7 +908,240 @@ def evaluate_tool_capability_trace_quality(
             "context_tools_declared": context_tools_declared,
             "storage_declared": storage_declared,
             "used_tools_declared": used_tools_declared,
+            "context_tool_outputs_safe": context_tool_outputs_safe,
         },
+        "context_tool_hygiene": context_tool_hygiene,
+    }
+
+
+def evaluate_delegation_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    manifests = _trace_tool_capability_manifests(turns)
+    builtin_names = _manifest_builtin_tool_names(manifests)
+    available_subagents = _manifest_available_subagent_names(manifests)
+    scoped_subagent_context_tools = _manifest_scoped_subagent_context_tool_names(manifests)
+    delegation = _trace_delegation_evidence(turns)
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 500 for turn in turns)
+    task_declared = "task" in builtin_names
+    subagents_declared = bool(available_subagents)
+    scoped_subagent_context_tools_declared = bool(
+        scoped_subagent_context_tools
+    ) and all(
+        _context_staging_tool_names().issubset(set(tool_names))
+        for tool_names in scoped_subagent_context_tools.values()
+    )
+    task_used = int(delegation.get("task_call_count") or 0) > 0
+    subagent_observed = bool(delegation.get("subagent_names"))
+    subagent_deltas = int(delegation.get("subagent_message_delta_count") or 0) > 0
+    scoped_tool_events = int(delegation.get("scoped_tool_event_count") or 0) > 0
+    scoped_usage_events = int(delegation.get("scoped_usage_event_count") or 0) > 0
+    subagent_tools = bool(delegation.get("subagent_tool_names"))
+    no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
+    context_tool_hygiene = _trace_context_tool_hygiene(turns)
+    context_tool_outputs_safe = int(context_tool_hygiene.get("host_path_leak_count") or 0) == 0
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.0
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 1.0
+    else:
+        issues.append("one or more responses are too short for delegation trace")
+    if task_declared:
+        score += 1.5
+    else:
+        issues.append("task was not declared by any captured tool capability manifest")
+    if subagents_declared:
+        score += 1.5
+    else:
+        issues.append("no available subagents were declared by any captured manifest")
+    if not scoped_subagent_context_tools_declared:
+        issues.append("scoped subagent context tools were not declared by any captured manifest")
+    if task_used:
+        score += 1.5
+    else:
+        issues.append("task tool was not used")
+    if subagent_observed:
+        score += 1.0
+    else:
+        issues.append("no subagent names were observed in trace events")
+    if subagent_deltas:
+        score += 1.0
+    else:
+        issues.append("no subagent message deltas were observed")
+    if scoped_tool_events:
+        score += 1.0
+    else:
+        issues.append("no scoped subagent tool events were observed")
+    if scoped_usage_events:
+        score += 0.75
+    else:
+        issues.append("no scoped subagent token usage events were observed")
+    if subagent_tools:
+        score += 0.75
+    else:
+        issues.append("no subagent tool names were observed")
+    if no_recoveries:
+        score += 0.75
+    else:
+        issues.append("run had idle recoveries")
+    if not context_tool_outputs_safe:
+        issues.append("context tool output leaked host paths")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "task_declared": task_declared,
+            "subagents_declared": subagents_declared,
+            "scoped_subagent_context_tools_declared": scoped_subagent_context_tools_declared,
+            "task_used": task_used,
+            "subagent_observed": subagent_observed,
+            "subagent_message_deltas": subagent_deltas,
+            "subagent_tools_scoped": scoped_tool_events,
+            "subagent_usage_scoped": scoped_usage_events,
+            "subagent_tools": subagent_tools,
+            "no_idle_recoveries": no_recoveries,
+            "context_tool_outputs_safe": context_tool_outputs_safe,
+        },
+        "delegation": delegation,
+        "context_tool_hygiene": context_tool_hygiene,
+        "available_subagents": sorted(available_subagents),
+        "scoped_subagent_context_tools": scoped_subagent_context_tools,
+    }
+
+
+def evaluate_async_delegation_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 8.5,
+) -> dict[str, Any]:
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    manifests = _trace_tool_capability_manifests(turns)
+    builtin_names = _manifest_builtin_tool_names(manifests)
+    available_async_subagents = _manifest_available_async_subagent_names(manifests)
+    async_delegation = _trace_async_delegation_evidence(turns)
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    response_ok = all(int(turn.get("response_len") or 0) >= 50 for turn in turns)
+    async_tools_declared = ASYNC_TASK_TOOL_NAMES.issubset(builtin_names)
+    async_subagents_declared = bool(available_async_subagents)
+    start_used = int(async_delegation.get("start_call_count") or 0) > 0
+    task_id_captured = bool(async_delegation.get("task_ids"))
+    monitor_used = int(async_delegation.get("monitor_call_count") or 0) > 0
+    statuses_observed = bool(async_delegation.get("statuses"))
+    subagent_observed = bool(async_delegation.get("subagent_names"))
+    failure_statuses = sorted(
+        {
+            str(status)
+            for status in (async_delegation.get("statuses") or [])
+            if str(status).lower() in ASYNC_FAILURE_STATUSES
+        }
+    )
+    no_async_failures = int(async_delegation.get("failure_count") or 0) == 0 and not failure_statuses
+    no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
+
+    score = 0.0
+    if terminal_ok:
+        score += 1.0
+    else:
+        issues.append("one or more turns did not succeed")
+    if response_ok:
+        score += 0.75
+    else:
+        issues.append("one or more responses are too short for async delegation trace")
+    if async_tools_declared:
+        score += 1.25
+    else:
+        issues.append("async subagent tools were not declared by any captured manifest")
+    if async_subagents_declared:
+        score += 1.25
+    else:
+        issues.append("no available async subagents were declared by any captured manifest")
+    if start_used:
+        score += 1.5
+    else:
+        issues.append("start_async_task was not used")
+    if task_id_captured:
+        score += 1.0
+    else:
+        issues.append("no async task_id was captured")
+    if monitor_used:
+        score += 1.0
+    else:
+        issues.append("no async task monitor tool was used")
+    if statuses_observed:
+        score += 0.75
+    else:
+        issues.append("no async task statuses were observed")
+    if subagent_observed:
+        score += 0.75
+    else:
+        issues.append("no async subagent names were observed")
+    if not no_async_failures:
+        if int(async_delegation.get("failure_count") or 0) > 0:
+            issues.append("async subagent tool failure observed")
+        for status in failure_statuses:
+            issues.append(f"async task reported terminal failure status: {status}")
+        for error in async_delegation.get("errors") or []:
+            issues.append(f"async subagent error: {error}")
+    if no_recoveries:
+        score += 0.75
+    else:
+        issues.append("run had idle recoveries")
+
+    rounded_score = round(min(score, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "response_ok": response_ok,
+            "async_tools_declared": async_tools_declared,
+            "async_subagents_declared": async_subagents_declared,
+            "start_used": start_used,
+            "task_id_captured": task_id_captured,
+            "monitor_used": monitor_used,
+            "statuses_observed": statuses_observed,
+            "subagent_observed": subagent_observed,
+            "no_async_failures": no_async_failures,
+            "no_idle_recoveries": no_recoveries,
+        },
+        "async_delegation": async_delegation,
+        "available_async_subagents": sorted(available_async_subagents),
     }
 
 
@@ -985,7 +1253,18 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     manifests = _trace_tool_capability_manifests(turns)
     builtin_names = _manifest_builtin_tool_names(manifests)
     registered_names = _manifest_registered_tool_names(manifests)
+    available_subagents = _manifest_available_subagent_names(manifests)
+    available_async_subagents = _manifest_available_async_subagent_names(manifests)
+    scoped_subagent_context_tools = _manifest_scoped_subagent_context_tool_names(manifests)
+    scoped_subagent_context_tools_declared = bool(
+        scoped_subagent_context_tools
+    ) and all(
+        _context_staging_tool_names().issubset(set(tool_names))
+        for tool_names in scoped_subagent_context_tools.values()
+    )
     declared_names = builtin_names | registered_names | TOOL_CAPABILITY_TOOL_NAMES
+    delegation = _trace_delegation_evidence(turns)
+    async_delegation = _trace_async_delegation_evidence(turns)
     all_used_tools = {
         str(tool_name)
         for turn in turns
@@ -1000,7 +1279,8 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
         "ls",
         "glob",
         "grep",
-    }
+        "task",
+    } | ASYNC_TASK_TOOL_NAMES
     storage_routes = [
         manifest.get("storage")
         for manifest in manifests
@@ -1027,6 +1307,25 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             "available": outputs_declared,
             "used": bool(_trace_artifacts(turns)),
         },
+        "delegation": {
+            "available": "task" in builtin_names
+            and bool(available_subagents),
+            "used": bool(delegation["subagent_names"]),
+            "available_subagents": sorted(available_subagents),
+            "scoped_subagent_context_tools_declared": scoped_subagent_context_tools_declared,
+            "scoped_subagent_context_tools": scoped_subagent_context_tools,
+        },
+        "background_delegation": {
+            "available": ASYNC_TASK_TOOL_NAMES.issubset(builtin_names)
+            and bool(available_async_subagents),
+            "used": int(async_delegation.get("start_call_count") or 0) > 0,
+            "available_async_subagents": sorted(available_async_subagents),
+            "start_call_count": int(async_delegation.get("start_call_count") or 0),
+            "monitor_call_count": int(async_delegation.get("monitor_call_count") or 0),
+            "failure_count": int(async_delegation.get("failure_count") or 0),
+            "statuses": list(async_delegation.get("statuses") or []),
+            "errors": list(async_delegation.get("errors") or []),
+        },
         "paper_review": {
             "available": bool(PAPER_TOOL_NAMES & registered_names),
             "used": bool(PAPER_TOOL_NAMES & all_used_tools),
@@ -1038,6 +1337,18 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     }
     turn_summaries: list[dict[str, Any]] = []
     for index, turn in enumerate(turns):
+        turn_manifests = [
+            raw
+            for raw in (turn.get("tool_capability_manifests") or [])
+            if isinstance(raw, dict)
+        ]
+        turn_available_subagents = _manifest_available_subagent_names(turn_manifests)
+        turn_available_async_subagents = _manifest_available_async_subagent_names(
+            turn_manifests
+        )
+        turn_scoped_subagent_context_tools = (
+            _manifest_scoped_subagent_context_tool_names(turn_manifests)
+        )
         turn_tools = {
             str(tool_name)
             for tool_name in (turn.get("tool_names") or [])
@@ -1048,6 +1359,9 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                 "run_id": turn.get("run_id"),
                 "status": turn.get("status"),
                 "tool_names": sorted(turn_tools),
+                "available_subagents": sorted(turn_available_subagents),
+                "available_async_subagents": sorted(turn_available_async_subagents),
+                "scoped_subagent_context_tools": turn_scoped_subagent_context_tools,
                 "artifact_count": len(
                     [
                         raw
@@ -1074,6 +1388,24 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                         }
                         & turn_tools
                     ),
+                    "delegation": "task" in turn_tools
+                    or bool(
+                        (
+                            turn.get("delegation", {})
+                            if isinstance(turn.get("delegation"), dict)
+                            else {}
+                        ).get("subagent_names")
+                    ),
+                    "background_delegation": bool(ASYNC_TASK_TOOL_NAMES & turn_tools)
+                    or int(
+                        (
+                            turn.get("async_delegation", {})
+                            if isinstance(turn.get("async_delegation"), dict)
+                            else {}
+                        ).get("start_call_count")
+                        or 0
+                    )
+                    > 0,
                     "paper_review": bool(PAPER_TOOL_NAMES & turn_tools),
                     "rarespot_detection": bool(RARESPOT_TOOL_NAMES & turn_tools),
                 },
@@ -1224,6 +1556,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--http-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--auth-cookie-env",
+        default="ULTRA_LIVE_TRACE_COOKIE",
+        help=(
+            "Environment variable containing a Cookie header for authenticated "
+            "WorkOS/dev live traces. Set to an empty string to disable."
+        ),
+    )
+    parser.add_argument(
+        "--authorization-env",
+        default="ULTRA_LIVE_TRACE_AUTHORIZATION",
+        help=(
+            "Environment variable containing an Authorization header for authenticated "
+            "live traces. Set to an empty string to disable."
+        ),
+    )
+    parser.add_argument(
+        "--workflow-hint-id",
+        default="",
+        help=(
+            "Optional workflow hint id sent on run creation (e.g. pro_mode to "
+            "exercise Intelligence Pro rigor enforcement)."
+        ),
+    )
     parser.add_argument("--verify-downloads", action="store_true")
     parser.add_argument("--require-downloads", action="store_true")
     parser.add_argument("--min-artifacts", type=int, default=0)
@@ -1240,6 +1596,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tool-capability-quality", action="store_true")
     parser.add_argument("--require-tool-capability-quality", action="store_true")
     parser.add_argument("--min-tool-capability-quality-score", type=float, default=8.5)
+    parser.add_argument("--delegation-quality", action="store_true")
+    parser.add_argument("--require-delegation-quality", action="store_true")
+    parser.add_argument("--min-delegation-quality-score", type=float, default=8.5)
+    parser.add_argument("--async-delegation-quality", action="store_true")
+    parser.add_argument("--require-async-delegation-quality", action="store_true")
+    parser.add_argument("--min-async-delegation-quality-score", type=float, default=8.5)
     parser.add_argument("--bisque-quality", action="store_true")
     parser.add_argument("--require-bisque-quality", action="store_true")
     parser.add_argument("--min-bisque-quality-score", type=float, default=8.5)
@@ -1314,6 +1676,31 @@ def main(argv: list[str] | None = None) -> int:
                     f"tool capability quality: {issue}"
                     for issue in tool_capability_quality["issues"]
                 )
+        if args.delegation_quality or args.require_delegation_quality:
+            delegation_quality = evaluate_delegation_trace_quality(
+                result,
+                min_score=args.min_delegation_quality_score,
+            )
+            result["delegation_quality"] = delegation_quality
+            if args.require_delegation_quality and not delegation_quality["passed"]:
+                issues.extend(
+                    f"delegation quality: {issue}"
+                    for issue in delegation_quality["issues"]
+                )
+        if args.async_delegation_quality or args.require_async_delegation_quality:
+            async_delegation_quality = evaluate_async_delegation_trace_quality(
+                result,
+                min_score=args.min_async_delegation_quality_score,
+            )
+            result["async_delegation_quality"] = async_delegation_quality
+            if (
+                args.require_async_delegation_quality
+                and not async_delegation_quality["passed"]
+            ):
+                issues.extend(
+                    f"async delegation quality: {issue}"
+                    for issue in async_delegation_quality["issues"]
+                )
         if args.capability_matrix:
             result["capability_matrix"] = build_tool_capability_matrix(result)
         if args.bisque_quality or args.require_bisque_quality:
@@ -1361,6 +1748,40 @@ def _followup_prompts(args: argparse.Namespace) -> list[str]:
     if isinstance(raw, list | tuple):
         return [str(item) for item in raw if str(item).strip()]
     return [str(raw)] if str(raw).strip() else []
+
+
+def _workflow_hint_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    hint_id = str(getattr(args, "workflow_hint_id", "") or "").strip()
+    if not hint_id:
+        return None
+    return {"id": hint_id, "source": "live_trace"}
+
+
+def _auth_headers_from_args(args: argparse.Namespace) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    cookie_env = str(getattr(args, "auth_cookie_env", "ULTRA_LIVE_TRACE_COOKIE") or "").strip()
+    authorization_env = str(
+        getattr(args, "authorization_env", "ULTRA_LIVE_TRACE_AUTHORIZATION") or ""
+    ).strip()
+    if cookie_env:
+        cookie = str(os.environ.get(cookie_env) or "").strip()
+        if cookie:
+            headers["Cookie"] = cookie
+    if authorization_env:
+        authorization = str(os.environ.get(authorization_env) or "").strip()
+        if authorization:
+            headers["Authorization"] = authorization
+    return headers
+
+
+def _clean_extra_headers(headers: dict[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized_key = str(key or "").strip()
+        normalized_value = str(value or "").strip()
+        if normalized_key and normalized_value:
+            cleaned[normalized_key] = normalized_value
+    return cleaned
 
 
 def _login_bisque_from_args(
@@ -1479,6 +1900,386 @@ def _tool_capability_manifests(events: list[dict[str, Any]]) -> list[dict[str, A
             continue
         manifests.append(parsed)
     return manifests
+
+
+def _context_tool_output_hygiene(events: list[dict[str, Any]]) -> dict[str, Any]:
+    checked_output_count = 0
+    leaks: list[str] = []
+    for event in events:
+        if event.get("event_kind") != "tool_call.completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
+        if tool_name not in _context_staging_tool_names():
+            continue
+        checked_output_count += 1
+        output_text = str(payload.get("output_preview") or payload.get("output") or "")
+        parsed = _json_object_from_text(output_text)
+        if parsed is None:
+            leaks.extend(_raw_context_tool_host_path_leaks(tool_name, output_text))
+            continue
+        leaks.extend(_context_tool_host_path_leaks(tool_name, parsed))
+    return {
+        "checked_output_count": checked_output_count,
+        "host_path_leak_count": len(leaks),
+        "safe": not leaks,
+        "leaks": sorted(leaks),
+    }
+
+
+def _context_tool_host_path_leaks(
+    tool_name: str,
+    value: Any,
+    *,
+    location: str = "$",
+) -> list[str]:
+    leaks: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            child_location = f"{location}.{key_text}" if location else key_text
+            if key_text in _CONTEXT_TOOL_PRIVATE_PATH_KEYS:
+                leaks.append(f"{tool_name}: {child_location}={_short_leak_value(item)}")
+                continue
+            leaks.extend(
+                _context_tool_host_path_leaks(
+                    tool_name,
+                    item,
+                    location=child_location,
+                )
+            )
+        return leaks
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            leaks.extend(
+                _context_tool_host_path_leaks(
+                    tool_name,
+                    item,
+                    location=f"{location}[{index}]",
+                )
+            )
+        return leaks
+    if isinstance(value, str) and _looks_like_host_path_leak(value):
+        leaks.append(f"{tool_name}: {location}={_short_leak_value(value)}")
+    return leaks
+
+
+def _raw_context_tool_host_path_leaks(tool_name: str, output_text: str) -> list[str]:
+    leaks: list[str] = []
+    for match in _HOST_PATH_TEXT_PATTERN.finditer(output_text):
+        leaks.append(f"{tool_name}: raw={_short_leak_value(match.group(0))}")
+    if "file://" in output_text:
+        leaks.append(f"{tool_name}: raw=file://...")
+    return sorted(set(leaks))
+
+
+def _looks_like_host_path_leak(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if text.startswith("file://"):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return True
+    return any(text.startswith(prefix) for prefix in _HOST_PATH_PREFIXES)
+
+
+def _short_leak_value(value: Any, *, limit: int = 120) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _delegation_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
+    task_call_count = 0
+    subagent_names: set[str] = set()
+    subagent_tool_names: set[str] = set()
+    subagent_message_delta_count = 0
+    scoped_tool_event_count = 0
+    scoped_usage_event_count = 0
+
+    for event in events:
+        event_kind = str(event.get("event_kind") or "")
+        agent_role = str(event.get("agent_role") or "").strip()
+        payload = event.get("payload")
+        payload_dict = payload if isinstance(payload, dict) else {}
+
+        if event_kind == "tool_call.started":
+            tool_name = str(
+                payload_dict.get("tool_name")
+                or payload_dict.get("name")
+                or payload_dict.get("tool")
+                or ""
+            ).strip()
+            if tool_name == "task":
+                task_call_count += 1
+                subagent_type = str(payload_dict.get("subagent_type") or "").strip()
+                if subagent_type:
+                    subagent_names.add(subagent_type)
+            subagent_name = str(payload_dict.get("subagent_name") or "").strip()
+            namespace = payload_dict.get("namespace")
+            namespace_name = ""
+            if isinstance(namespace, list) and namespace:
+                namespace_name = str(namespace[-1] or "").strip()
+            scoped_subagent_name = subagent_name or namespace_name
+            if scoped_subagent_name:
+                scoped_tool_event_count += 1
+                subagent_names.add(scoped_subagent_name)
+                if tool_name:
+                    subagent_tool_names.add(tool_name)
+            elif agent_role and agent_role not in {"tool", "assistant"}:
+                scoped_tool_event_count += 1
+                subagent_names.add(agent_role)
+                if tool_name:
+                    subagent_tool_names.add(tool_name)
+
+        if event_kind == "run.token_usage":
+            subagent_name = str(payload_dict.get("subagent_name") or "").strip()
+            namespace = payload_dict.get("namespace")
+            namespace_name = ""
+            if isinstance(namespace, list) and namespace:
+                namespace_name = str(namespace[-1] or "").strip()
+            scoped_subagent_name = subagent_name or namespace_name
+            if scoped_subagent_name:
+                scoped_usage_event_count += 1
+                subagent_names.add(scoped_subagent_name)
+            elif agent_role and agent_role not in {"assistant", "coordinator", "tool"}:
+                scoped_usage_event_count += 1
+                subagent_names.add(agent_role)
+
+        if event_kind == "subagent.message.delta":
+            subagent_message_delta_count += 1
+            subagent_name = str(payload_dict.get("subagent_name") or "").strip()
+            if subagent_name:
+                subagent_names.add(subagent_name)
+            elif agent_role:
+                subagent_names.add(agent_role)
+
+    return {
+        "task_call_count": task_call_count,
+        "subagent_names": sorted(subagent_names),
+        "subagent_tool_names": sorted(subagent_tool_names),
+        "subagent_message_delta_count": subagent_message_delta_count,
+        "scoped_tool_event_count": scoped_tool_event_count,
+        "scoped_usage_event_count": scoped_usage_event_count,
+    }
+
+
+def _async_delegation_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
+    start_call_count = 0
+    check_call_count = 0
+    update_call_count = 0
+    cancel_call_count = 0
+    list_call_count = 0
+    completed_result_count = 0
+    task_ids: set[str] = set()
+    subagent_names: set[str] = set()
+    statuses: set[str] = set()
+    tool_names: set[str] = set()
+    failure_count = 0
+    errors: set[str] = set()
+
+    for event in events:
+        event_kind = str(event.get("event_kind") or "")
+        payload = event.get("payload")
+        payload_dict = payload if isinstance(payload, dict) else {}
+        tool_name = str(
+            payload_dict.get("tool_name")
+            or payload_dict.get("name")
+            or payload_dict.get("tool")
+            or ""
+        ).strip()
+        if tool_name not in ASYNC_TASK_TOOL_NAMES:
+            continue
+        tool_names.add(tool_name)
+
+        event_failed = False
+        for task_id in _async_payload_values(payload_dict, "async_task_id", "async_task_ids"):
+            task_ids.add(task_id)
+        for agent_name in _async_payload_values(
+            payload_dict,
+            "async_subagent_name",
+            "async_subagent_names",
+        ):
+            subagent_names.add(agent_name)
+        for status in _async_payload_values(payload_dict, "async_status", "async_statuses"):
+            statuses.add(status)
+            if status.lower() in ASYNC_FAILURE_STATUSES:
+                event_failed = True
+        for error in _async_payload_values(payload_dict, "async_error", "async_errors"):
+            event_failed = True
+            errors.add(error)
+        if payload_dict.get("async_failure") is True:
+            event_failed = True
+
+        if event_kind == "tool_call.started":
+            if tool_name == "start_async_task":
+                start_call_count += 1
+                subagent_type = str(payload_dict.get("subagent_type") or "").strip()
+                if subagent_type:
+                    subagent_names.add(subagent_type)
+            elif tool_name == "check_async_task":
+                check_call_count += 1
+            elif tool_name == "update_async_task":
+                update_call_count += 1
+            elif tool_name == "cancel_async_task":
+                cancel_call_count += 1
+            elif tool_name == "list_async_tasks":
+                list_call_count += 1
+
+            task_id = str(payload_dict.get("task_id") or "").strip()
+            if task_id:
+                task_ids.add(task_id)
+            continue
+
+        if event_kind != "tool_call.completed":
+            continue
+
+        output_text = str(payload_dict.get("output_preview") or payload_dict.get("output") or "")
+        for task_id in _async_task_ids_from_text(output_text):
+            task_ids.add(task_id)
+        for agent_name in _async_agent_names_from_text(output_text):
+            subagent_names.add(agent_name)
+        for status in _async_statuses_from_text(output_text):
+            statuses.add(status)
+            if status.lower() in ASYNC_FAILURE_STATUSES:
+                event_failed = True
+        failure_text = _async_failure_text(output_text)
+        if failure_text:
+            event_failed = True
+            errors.add(failure_text)
+        else:
+            for error in _async_errors_from_text(output_text):
+                event_failed = True
+                errors.add(error)
+        parsed = _json_object_from_text(output_text)
+        if parsed:
+            task_id = str(parsed.get("thread_id") or parsed.get("task_id") or "").strip()
+            if task_id:
+                task_ids.add(task_id)
+            status = str(parsed.get("status") or "").strip()
+            if status:
+                statuses.add(status)
+                if status.lower() in ASYNC_FAILURE_STATUSES:
+                    event_failed = True
+            error = str(parsed.get("error") or "").strip()
+            if error:
+                event_failed = True
+                errors.add(error)
+            result = str(parsed.get("result") or "").strip()
+            if status == "success" and result:
+                completed_result_count += 1
+        if event_failed:
+            failure_count += 1
+
+    monitor_call_count = check_call_count + list_call_count
+    return {
+        "start_call_count": start_call_count,
+        "check_call_count": check_call_count,
+        "update_call_count": update_call_count,
+        "cancel_call_count": cancel_call_count,
+        "list_call_count": list_call_count,
+        "monitor_call_count": monitor_call_count,
+        "task_ids": sorted(task_ids),
+        "subagent_names": sorted(subagent_names),
+        "statuses": sorted(statuses),
+        "completed_result_count": completed_result_count,
+        "failure_count": failure_count,
+        "errors": sorted(errors),
+        "tool_names": sorted(tool_names),
+    }
+
+
+def _async_payload_values(payload: dict[str, Any], *keys: str) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list | tuple | set):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    values.append(text)
+            continue
+        text = str(value or "").strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _async_task_ids_from_text(text: str) -> list[str]:
+    ids: list[str] = []
+    for match in re.finditer(r"\btask_id:\s*([^\s,;]+)", text):
+        task_id = match.group(1).strip()
+        if task_id:
+            ids.append(task_id)
+    for match in re.finditer(r"\bCancelled async subagent task:\s*([^\s,;]+)", text):
+        task_id = match.group(1).strip()
+        if task_id:
+            ids.append(task_id)
+    return ids
+
+
+def _async_agent_names_from_text(text: str) -> list[str]:
+    names: list[str] = []
+    for match in re.finditer(r"\bagent:\s*([^\s,;]+)", text):
+        name = match.group(1).strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _async_statuses_from_text(text: str) -> list[str]:
+    statuses: list[str] = []
+    for match in re.finditer(r"\bstatus:\s*([A-Za-z_:-]+)", text):
+        status = match.group(1).strip()
+        if status:
+            statuses.append(status)
+    if re.search(r"\bCancelled async subagent task:\s*[^\s,;]+", text):
+        statuses.append("cancelled")
+    return statuses
+
+
+def _async_errors_from_text(text: str) -> list[str]:
+    errors: list[str] = []
+    for line in text.splitlines():
+        for match in re.finditer(
+            r"\berror:\s*(.+?)(?=\s+\b(?:task_id|agent|status|error):|$)",
+            line,
+        ):
+            error = " ".join(match.group(1).strip().split())
+            if error:
+                errors.append(error)
+    return errors
+
+
+def _async_failure_text(text: str) -> str:
+    stripped = " ".join(text.strip().split())
+    if not stripped:
+        return ""
+    lowered = stripped.lower()
+    failure_prefixes = (
+        "failed to launch async subagent",
+        "failed to get run status",
+        "failed to update async subagent",
+        "failed to cancel run",
+        "unknown async subagent type",
+        "no async subagents are configured",
+        "no tracked task found",
+        "unknown async subagent task",
+        "async subagent task is missing required state",
+        "task_id is required",
+        "start_async_task description is required",
+        "update_async_task message is required",
+        "agentruncontext is required",
+    )
+    if any(lowered.startswith(prefix) for prefix in failure_prefixes):
+        return stripped[:500]
+    if "requires async invocation" in lowered:
+        return stripped[:500]
+    return ""
 
 
 def _json_object_from_text(text: str) -> dict[str, Any] | None:
@@ -1802,6 +2603,28 @@ def _trace_tool_capability_manifests(turns: list[dict[str, Any]]) -> list[dict[s
     return manifests
 
 
+def _trace_context_tool_hygiene(turns: list[dict[str, Any]]) -> dict[str, Any]:
+    checked_output_count = 0
+    host_path_leak_count = 0
+    leaks: set[str] = set()
+    for turn in turns:
+        raw = turn.get("context_tool_hygiene")
+        if not isinstance(raw, dict):
+            continue
+        checked_output_count += int(raw.get("checked_output_count") or 0)
+        host_path_leak_count += int(raw.get("host_path_leak_count") or 0)
+        for leak in raw.get("leaks") or []:
+            text = str(leak or "").strip()
+            if text:
+                leaks.add(text)
+    return {
+        "checked_output_count": checked_output_count,
+        "host_path_leak_count": host_path_leak_count,
+        "safe": host_path_leak_count == 0,
+        "leaks": sorted(leaks),
+    }
+
+
 def _manifest_builtin_tool_names(manifests: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for manifest in manifests:
@@ -1825,12 +2648,180 @@ def _manifest_registered_tool_names(manifests: list[dict[str, Any]]) -> set[str]
     return names
 
 
+def _manifest_available_subagent_names(manifests: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for manifest in manifests:
+        for raw in manifest.get("available_subagents") or []:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "").strip()
+            else:
+                name = str(raw or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _manifest_scoped_subagent_context_tool_names(
+    manifests: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    tools_by_subagent: dict[str, set[str]] = {}
+    for manifest in manifests:
+        for raw in manifest.get("available_subagents") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if name not in SCOPED_DELEGATION_SUBAGENT_NAMES:
+                continue
+            tools = {
+                str(tool_name or "").strip()
+                for tool_name in (raw.get("tool_names") or [])
+                if str(tool_name or "").strip()
+            }
+            tools_by_subagent.setdefault(name, set()).update(tools)
+    return {
+        name: sorted(tool_names)
+        for name, tool_names in sorted(tools_by_subagent.items())
+    }
+
+
+def _manifest_available_async_subagent_names(manifests: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for manifest in manifests:
+        for raw in manifest.get("available_async_subagents") or []:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "").strip()
+            else:
+                name = str(raw or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _trace_delegation_evidence(turns: list[dict[str, Any]]) -> dict[str, Any]:
+    task_call_count = 0
+    subagent_names: set[str] = set()
+    subagent_tool_names: set[str] = set()
+    subagent_message_delta_count = 0
+    scoped_tool_event_count = 0
+    scoped_usage_event_count = 0
+
+    for turn in turns:
+        raw = turn.get("delegation")
+        if not isinstance(raw, dict):
+            continue
+        task_call_count += int(raw.get("task_call_count") or 0)
+        subagent_message_delta_count += int(raw.get("subagent_message_delta_count") or 0)
+        scoped_tool_event_count += int(raw.get("scoped_tool_event_count") or 0)
+        scoped_usage_event_count += int(raw.get("scoped_usage_event_count") or 0)
+        for name in raw.get("subagent_names") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                subagent_names.add(normalized)
+        for name in raw.get("subagent_tool_names") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                subagent_tool_names.add(normalized)
+
+    return {
+        "task_call_count": task_call_count,
+        "subagent_names": sorted(subagent_names),
+        "subagent_tool_names": sorted(subagent_tool_names),
+        "subagent_message_delta_count": subagent_message_delta_count,
+        "scoped_tool_event_count": scoped_tool_event_count,
+        "scoped_usage_event_count": scoped_usage_event_count,
+    }
+
+
+def _trace_async_delegation_evidence(turns: list[dict[str, Any]]) -> dict[str, Any]:
+    start_call_count = 0
+    check_call_count = 0
+    update_call_count = 0
+    cancel_call_count = 0
+    list_call_count = 0
+    monitor_call_count = 0
+    completed_result_count = 0
+    task_ids: set[str] = set()
+    subagent_names: set[str] = set()
+    statuses: set[str] = set()
+    tool_names: set[str] = set()
+    failure_count = 0
+    errors: set[str] = set()
+
+    for turn in turns:
+        raw = turn.get("async_delegation")
+        if not isinstance(raw, dict):
+            continue
+        start_call_count += int(raw.get("start_call_count") or 0)
+        check_call_count += int(raw.get("check_call_count") or 0)
+        update_call_count += int(raw.get("update_call_count") or 0)
+        cancel_call_count += int(raw.get("cancel_call_count") or 0)
+        list_call_count += int(raw.get("list_call_count") or 0)
+        monitor_call_count += int(raw.get("monitor_call_count") or 0)
+        completed_result_count += int(raw.get("completed_result_count") or 0)
+        failure_count += int(raw.get("failure_count") or 0)
+        for name in raw.get("task_ids") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                task_ids.add(normalized)
+        for name in raw.get("subagent_names") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                subagent_names.add(normalized)
+        for status in raw.get("statuses") or []:
+            normalized = str(status or "").strip()
+            if normalized:
+                statuses.add(normalized)
+        for name in raw.get("tool_names") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                tool_names.add(normalized)
+        for error in raw.get("errors") or []:
+            normalized = str(error or "").strip()
+            if normalized:
+                errors.add(normalized)
+
+    return {
+        "start_call_count": start_call_count,
+        "check_call_count": check_call_count,
+        "update_call_count": update_call_count,
+        "cancel_call_count": cancel_call_count,
+        "list_call_count": list_call_count,
+        "monitor_call_count": monitor_call_count,
+        "task_ids": sorted(task_ids),
+        "subagent_names": sorted(subagent_names),
+        "statuses": sorted(statuses),
+        "completed_result_count": completed_result_count,
+        "failure_count": failure_count,
+        "errors": sorted(errors),
+        "tool_names": sorted(tool_names),
+    }
+
+
 def _context_staging_tool_names() -> set[str]:
     return {
         "artifact_manifest",
         "stage_artifact_for_analysis",
         "stage_uploaded_files_for_analysis",
     }
+
+
+SCOPED_DELEGATION_SUBAGENT_NAMES = {"code-runner", "data-analyst"}
+_CONTEXT_TOOL_PRIVATE_PATH_KEYS = {"source_path", "storage_uri"}
+_MACOS_USER_PREFIX = "/" + "Users/"
+_HOST_PATH_PREFIXES = (
+    _MACOS_USER_PREFIX,
+    "/home/",
+    "/tmp/",
+    "/private/",
+    "/var/",
+    "/Volumes/",
+    "/srv/",
+)
+_HOST_PATH_TEXT_PATTERN = re.compile(
+    r"(?:file://)?(?:"
+    + "|".join(re.escape(prefix) for prefix in _HOST_PATH_PREFIXES)
+    + r")[^\s\"'}\]]+"
+)
 
 
 def _turns_have_page_citations(turns: list[dict[str, Any]]) -> bool:
@@ -1906,6 +2897,14 @@ def _trace_has_technical_content(turns: list[dict[str, Any]]) -> bool:
 
 RARESPOT_TOOL_NAMES = {"rarespot_ecology_inference"}
 TOOL_CAPABILITY_TOOL_NAMES = {"tool_capability_manifest"}
+ASYNC_TASK_TOOL_NAMES = {
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+}
+ASYNC_FAILURE_STATUSES = {"error", "failed", "failure", "timeout", "interrupted"}
 
 
 def _trace_has_rarespot_tool(turns: list[dict[str, Any]]) -> bool:

@@ -16,6 +16,39 @@ type DeepZoomCanvasProps = {
 };
 
 type TileKey = `${number}:${number}:${number}`;
+type TileLevel = UploadViewerInfo["viewer"]["tile_scheme"]["levels"][number];
+
+export const orderTileLevelsForRendering = (levels: TileLevel[]): TileLevel[] =>
+  [...levels].sort((left, right) => {
+    const downsampleDelta = right.downsample - left.downsample;
+    if (downsampleDelta !== 0) {
+      return downsampleDelta;
+    }
+    return left.width * left.height - right.width * right.height;
+  });
+
+// How far past native (1 screen px per source px) the user may zoom for pixel
+// inspection. The zoom cap is derived per-image from this so a 95k-px pyramid can
+// actually reach native detail while a small image isn't over-zoomed absurdly.
+const NATIVE_OVERZOOM = 2;
+
+// Derive the OrbitControls zoom cap from the fit so the user can reach (and slightly
+// exceed) native 1:1 regardless of image size. At fit (zoom 1) the whole image fills
+// the viewport, so a 95174px-wide image shows ~0.01 screen px per source px and a
+// fixed cap (was 64) never reaches detail (needs ~95x). Returns at least 8 so small
+// images still zoom in a little. Pure + exported for tests.
+export const computeAdaptiveMaxZoom = (
+  viewportWidth: number,
+  visibleWidthAtFit: number,
+  worldWidth: number,
+  fullWidth: number,
+  overzoom: number = NATIVE_OVERZOOM
+): number => {
+  const screenPxPerSourcePxAtFit =
+    (Math.max(1, viewportWidth) * Math.max(1e-9, worldWidth)) /
+    (Math.max(1e-9, visibleWidthAtFit) * Math.max(1e-9, fullWidth));
+  return Math.max(8, overzoom / Math.max(screenPxPerSourcePxAtFit, 1e-9));
+};
 
 const fitOrthographicCamera = (
   camera: THREE.OrthographicCamera,
@@ -63,7 +96,10 @@ export function DeepZoomCanvas({
     () => viewerInfo.viewer.planes[axis] ?? viewerInfo.viewer.default_plane,
     [axis, viewerInfo.viewer.default_plane, viewerInfo.viewer.planes]
   );
-  const tileLevels = viewerInfo.viewer.tile_scheme.levels;
+  const tileLevels = useMemo(
+    () => orderTileLevelsForRendering(viewerInfo.viewer.tile_scheme.levels),
+    [viewerInfo.viewer.tile_scheme.levels]
+  );
   const fallbackImageUrl = useMemo(
     () =>
       apiClient.uploadSliceUrl(fileId, {
@@ -213,18 +249,34 @@ export function DeepZoomCanvas({
       const centerY = worldHeight / 2 - ((startY + pixelHeight / 2) / levelPixelHeight) * worldHeight;
 
       const geometry = new THREE.PlaneGeometry(worldTileWidth, worldTileHeight);
-      const material = new THREE.MeshBasicMaterial({ toneMapped: false });
+      // transparent: honor the tile's alpha channel — geospatial orthomosaics
+      // (and any RGBA raster) encode no-data regions as alpha=0, which must blend
+      // to the page background, not composite as opaque black. depthWrite:false
+      // avoids z-fighting between adjacent transparent tile quads.
+      const material = new THREE.MeshBasicMaterial({
+        toneMapped: false,
+        transparent: true,
+        depthWrite: false,
+      });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(centerX, centerY, 0);
+      // Hidden until its texture resolves, so a not-yet-loaded (or failed) tile
+      // shows the clear background rather than a flat white/colored placeholder quad.
+      mesh.visible = false;
       group.add(mesh);
       tileMeshes.set(key, mesh);
       materialCache.set(key, material);
 
+      const reveal = (texture: THREE.Texture) => {
+        material.map = texture;
+        material.needsUpdate = true;
+        mesh.visible = true;
+        render();
+      };
+
       const cachedTexture = textureCache.get(key);
       if (cachedTexture) {
-        material.map = cachedTexture;
-        material.needsUpdate = true;
-        render();
+        reveal(cachedTexture);
         return;
       }
 
@@ -234,6 +286,11 @@ export function DeepZoomCanvas({
         level: level.level,
         tileX,
         tileY,
+        // Retile at the SAME size as the grid math (tile_scheme.tile_size). The served
+        // file may be a derived pyramid with a different native tile size (e.g. 512 vs
+        // the source's 256); without this the engine retiles at its default and the
+        // canvas's (col,row) lands on the wrong region — half the tiles 500.
+        size: tileSize,
         z: zIndex,
         t: tIndex,
       });
@@ -250,13 +307,18 @@ export function DeepZoomCanvas({
           texture.minFilter = THREE.LinearFilter;
           texture.magFilter = THREE.LinearFilter;
           textureCache.set(key, texture);
-          material.map = texture;
-          material.needsUpdate = true;
-          render();
+          reveal(texture);
         },
         undefined,
         () => {
           inflight.delete(key);
+          // Drop the failed placeholder entirely so it is re-fetched on the next
+          // pan/zoom instead of leaving a permanent untextured (white) quad.
+          group.remove(mesh);
+          mesh.geometry.dispose();
+          material.dispose();
+          materialCache.delete(key);
+          tileMeshes.delete(key);
           render();
         }
       );
@@ -303,6 +365,12 @@ export function DeepZoomCanvas({
       const height = Math.max(1, container.clientHeight || 1);
       renderer.setSize(width, height, false);
       fitOrthographicCamera(camera, width, height, worldWidth, worldHeight);
+      // Derive the zoom cap from the fit so the user can reach native resolution.
+      // At fit (zoom 1) the whole image fills the viewport, so a 95174px-wide image
+      // is ~0.01 screen px per source px — a fixed maxZoom (was 64) never reaches
+      // 1:1 (needs ~95x). Cap at NATIVE_OVERZOOM past native, scaled per image.
+      const visibleWidthAtFit = camera.right - camera.left;
+      controls.maxZoom = computeAdaptiveMaxZoom(width, visibleWidthAtFit, worldWidth, fullWidth);
       controls.target.set(0, 0, 0);
       controls.update();
       updateTiles();

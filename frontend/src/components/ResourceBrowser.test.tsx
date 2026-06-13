@@ -2317,15 +2317,59 @@ describe("ResourceBrowser", () => {
     );
 
     expect(screen.getByLabelText("Active folder")).toHaveTextContent("NPH review folder");
+    expect(screen.getByLabelText("Folder path")).toHaveTextContent("Resources>NPH review folder");
     expect(screen.getByText("2 of 2 resources in NPH review folder")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Folder actions" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Snapshot folder" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start folder Data Agent" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Share folder" })).not.toBeInTheDocument();
 
+    const activeFolderButton = screen.getByRole("button", {
+      name: "Leave folder NPH review folder",
+    });
+    expect(activeFolderButton).toHaveTextContent("NPH review folder");
+
+    fireEvent.click(activeFolderButton);
+
+    expect(onClearActiveCollection).toHaveBeenCalledTimes(1);
+    onClearActiveCollection.mockClear();
+
     fireEvent.click(screen.getByRole("button", { name: "All resources" }));
 
     expect(onClearActiveCollection).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves up to the parent folder from the active folder crumb when nested", () => {
+    const parentFolder: ResourceCollectionRecord = {
+      ...nphFolder,
+      collection_id: "collection_parent",
+      name: "Parent folder",
+      resource_count: 3,
+    };
+    const nestedFolder: ResourceCollectionRecord = {
+      ...nphFolder,
+      collection_id: "collection_nested",
+      name: "Nested folder",
+      parent_collection_id: parentFolder.collection_id,
+      resource_count: 2,
+    };
+    const onClearActiveCollection = vi.fn();
+    const onOpenCollection = vi.fn();
+
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        activeResourceCollection={nestedFolder}
+        resourceCollections={[parentFolder, nestedFolder]}
+        onClearActiveCollection={onClearActiveCollection}
+        onOpenCollection={onOpenCollection}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Go up from folder Nested folder" }));
+
+    expect(onOpenCollection).toHaveBeenCalledWith(parentFolder);
+    expect(onClearActiveCollection).not.toHaveBeenCalled();
   });
 
   it("keeps active-folder actions in the context menu without a visible folder three-dot button", async () => {

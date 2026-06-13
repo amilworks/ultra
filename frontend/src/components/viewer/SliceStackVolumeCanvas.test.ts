@@ -23,6 +23,8 @@ import {
   resolveVolumeAxisCue,
   resolveVolumeScaleBar,
   resolveVolumeProjectionMode,
+  resolveVolumeCutawayCutZ,
+  resolveVolumeCutawayClip,
   resolveVolumeOrientationCue,
   scalarVolumePayloadValueAt,
   scalarVolumePayloadToTextureBytes,
@@ -211,6 +213,34 @@ describe("volume interior inspection camera", () => {
   it("keeps wireframe context out of the center-inside inspection view", () => {
     expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
     expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: true })).toBe(false);
+  });
+});
+
+describe("volume Z-cursor cutaway", () => {
+  it("slices at voxel centers so the cut face matches the 2D slice at the same index", () => {
+    const depth = 10;
+    // (index + 0.5) / depth — identical to the backend slice extraction.
+    expect(resolveVolumeCutawayCutZ(0, depth)).toBeCloseTo(0.05, 5);
+    expect(resolveVolumeCutawayCutZ(4, depth)).toBeCloseTo(0.45, 5);
+    expect(resolveVolumeCutawayCutZ(9, depth)).toBeCloseTo(0.95, 5);
+  });
+
+  it("centers the cut when the Z index is missing and clamps out-of-range indices", () => {
+    expect(resolveVolumeCutawayCutZ(null, 10)).toBeCloseTo(0.45, 5);
+    expect(resolveVolumeCutawayCutZ(undefined, 10)).toBeCloseTo(0.45, 5);
+    // Below the first / past the last slice still resolves to an in-volume cut.
+    expect(resolveVolumeCutawayCutZ(-5, 10)).toBeCloseTo(0.05, 5);
+    expect(resolveVolumeCutawayCutZ(99, 10)).toBeCloseTo(0.95, 5);
+    // Degenerate single-slice and empty volumes never divide by zero.
+    expect(resolveVolumeCutawayCutZ(0, 1)).toBeCloseTo(0.5, 5);
+    expect(resolveVolumeCutawayCutZ(0, 0)).toBeCloseTo(0.5, 5);
+  });
+
+  it("keeps the volume from z=0 up to the cut face so the cross-section faces the camera", () => {
+    expect(resolveVolumeCutawayClip(0.45)).toEqual({
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 1, y: 1, z: 0.45 },
+    });
   });
 });
 
@@ -631,8 +661,20 @@ describe("scalar volume boundary-emphasis transfer function", () => {
     expect(source).toContain("float opacity = structuredOpacity(opacityValue, gradient);");
   });
 
-  it("corrects the shading normal for anisotropic voxel spacing", () => {
-    expect(source).toContain("uniform vec3 uVolumeScale;");
-    expect(source).toContain("gradient / max(vec3(0.06), uVolumeScale)");
+  it("corrects the shading normal by voxel spacing, not full-axis extent", () => {
+    // A central difference spans one voxel, so the world gradient divides by the
+    // voxel SPACING ratio (uVoxelSpacing), not the box extent (uVolumeScale,
+    // which includes voxel count and previously tilted normals toward thick axes).
+    expect(source).toContain("uniform vec3 uVoxelSpacing;");
+    expect(source).toContain("gradient / max(vec3(0.06), uVoxelSpacing)");
+    expect(source).not.toContain("gradient / max(vec3(0.06), uVolumeScale)");
+    // The spacing-ratio uniform is wired from the physical geometry.
+    expect(source).toContain("uVoxelSpacing: { value: new THREE.Vector3(voxelSpacingRatio.x");
+  });
+
+  it("accumulates optical depth in physical (world) space on anisotropic volumes", () => {
+    // The ray marches in normalized cube space; scaling the step by the box
+    // extents makes accumulated opacity invariant to viewing direction.
+    expect(source).toContain("length(delta * uVolumeScale)");
   });
 });

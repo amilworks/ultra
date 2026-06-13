@@ -72,6 +72,10 @@ describe("sidebar settings menu", () => {
     expect(app).toMatch(/<span>New chat<\/span>/);
     expect(app).toMatch(/isMobileConversationSearchActive \? "Search results" : "Recents"/);
     expect(app).toMatch(/<Settings data-icon="inline-start" aria-hidden="true" \/>/);
+    expect(settingsDialog).toMatch(/GitBranch/);
+    expect(settingsDialog).toMatch(
+      /<GitBranch data-icon="inline-start" aria-hidden="true" \/>\s*GitHub/
+    );
     expect(app).not.toMatch(/app-settings-nav-icon/);
 
     expect(styles).toMatch(/\.app-sidebar-user-menu/);
@@ -131,22 +135,40 @@ describe("sidebar settings menu", () => {
       /\.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*background:\s*var\(--popover\);[^}]*color:\s*var\(--popover-foreground\);/s
     );
     expect(styles).toMatch(
-      /\.app-settings-sidebar-pane\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--popover\) 96%, var\(--muted\) 4%\);/s
+      /\.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*--settings-dialog-main-offset:\s*calc\(var\(--sidebar-width\) \/ 2\);[^}]*left:\s*calc\(50% \+ var\(--settings-dialog-main-offset\)\);[^}]*width:\s*min\(calc\(var\(--user-chat-width\) \+ 8rem\), calc\(100vw - 2rem\)\);/s
     );
     expect(styles).toMatch(
-      /\.app-settings-nav-item\[data-slot="tabs-trigger"\]\s*\{[^}]*min-height:\s*2\.125rem;[^}]*font-size:\s*0\.8125rem;[^}]*font-weight:\s*400;/s
+      /body:has\(\[data-slot="sidebar"\]\[data-state="collapsed"\]\) \.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*--settings-dialog-main-offset:\s*calc\(var\(--sidebar-width-icon, 4rem\) \/ 2\);/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-sidebar-pane\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--popover\) 98%, var\(--muted\) 2%\);/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-shell\s*\{[^}]*grid-template-columns:\s*minmax\(11\.25rem,\s*13rem\) minmax\(0,\s*1fr\);/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-nav-item\[data-slot="tabs-trigger"\]\s*\{[^}]*min-height:\s*2\.08rem;[^}]*gap:\s*var\(--sidebar-item-gap\);[^}]*font-size:\s*0\.875rem;[^}]*font-weight:\s*400;/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-nav-item\[data-slot="tabs-trigger"\] svg\[data-icon\]\s*\{[^}]*width:\s*1rem;[^}]*height:\s*1rem;[^}]*flex:\s*0 0 1rem;/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-nav-item\[data-state="active"\]\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--muted\) 68%, transparent\);[^}]*font-weight:\s*460;/s
     );
     expect(styles).toMatch(
       /\.app-settings-row,\s*\.app-settings-account-summary\s*\{[^}]*min-height:\s*3\.25rem;/s
     );
     expect(styles).toMatch(
-      /\.app-settings-header \[data-slot="dialog-title"\]\s*\{[^}]*font-size:\s*0\.98rem;[^}]*font-weight:\s*500;/s
+      /\.app-settings-header \[data-slot="dialog-title"\]\s*\{[^}]*font-size:\s*0\.95rem;[^}]*font-weight:\s*520;/s
     );
     expect(styles).toMatch(
       /\.app-settings-panel-heading h2\s*\{[^}]*font-size:\s*0\.98rem;[^}]*font-weight:\s*500;/s
     );
     expect(styles).toMatch(
       /\.app-settings-row-title,\s*\.app-settings-account-name\s*\{[^}]*font-size:\s*0\.86rem;[^}]*font-weight:\s*470;/s
+    );
+    expect(styles).toMatch(
+      /\.app-settings-inline-actions\s*\{[^}]*flex-wrap:\s*nowrap;/s
     );
     expect(styles).toMatch(/\.app-settings-bisque-link-form/);
     expect(styles).toMatch(

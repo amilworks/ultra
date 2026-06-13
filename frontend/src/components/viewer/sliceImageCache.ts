@@ -57,12 +57,29 @@ export const loadSliceBitmap = (url: string): Promise<ImageBitmap> => {
     return pending;
   }
   const request = (async () => {
-    const response = await fetch(url, { credentials: "include" });
+    // Bound the request so a hung image-service read fails the z-scrub frame instead of
+    // leaving the slider spinning forever; the viewer surfaces the rejection as an error.
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 45000);
+    let response: Response;
+    try {
+      response = await fetch(url, { credentials: "include", signal: controller.signal });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw Object.assign(new Error("Slice request timed out"), { cause: error });
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
     if (!response.ok) {
       throw new Error(`Slice request failed: ${response.status}`);
     }
     const blob = await response.blob();
-    const bitmap = await createImageBitmap(blob);
+    // WebGL ignores texture.flipY for ImageBitmap sources, so bake the vertical
+    // flip in here — otherwise slices render upside-down vs the old TextureLoader
+    // (HTMLImage) path, which had flipY honoured.
+    const bitmap = await createImageBitmap(blob, { imageOrientation: "flipY" });
     promote(url, bitmap);
     return bitmap;
   })();
@@ -157,7 +174,10 @@ export const loadScalarSliceBitmap = (source: ScalarSliceSource): Promise<ImageB
     });
     const imageData = new ImageData(image.width, image.height);
     imageData.data.set(image.data);
-    const bitmap = await createImageBitmap(imageData);
+    // Match the network-slice path: bake the vertical flip in (WebGL ignores
+    // texture.flipY for ImageBitmap), so row 0 of the extracted slice renders
+    // at the top exactly like the backend PNG.
+    const bitmap = await createImageBitmap(imageData, { imageOrientation: "flipY" });
     promote(source.cacheKey, bitmap);
     return bitmap;
   })();
@@ -184,6 +204,9 @@ export const sliceBitmapToTexture = (bitmap: ImageBitmap): THREE.Texture => {
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.generateMipmaps = false;
+  // The vertical flip is already baked into the bitmap (createImageBitmap with
+  // imageOrientation: "flipY"); don't let the GPU flip it a second time.
+  texture.flipY = false;
   texture.needsUpdate = true;
   return texture;
 };

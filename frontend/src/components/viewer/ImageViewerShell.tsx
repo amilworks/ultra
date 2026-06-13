@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
+import { DeepZoomCanvas } from "./DeepZoomCanvas";
 import { DirectPlaneImage } from "./DirectPlaneImage";
 import { scalarVolumePayloadValueAt } from "./scalarVolume";
 import { SlicePlaneCanvas } from "./SlicePlaneCanvas";
@@ -245,14 +246,53 @@ type ScalarVolumeTransferPresetId = (typeof SCALAR_VOLUME_TRANSFER_PRESETS)[numb
 const CT_WINDOW_PRESETS = [
   { id: "brain", label: "Brain", center: 40, width: 80 },
   { id: "subdural", label: "Subdural", center: 80, width: 200 },
-  { id: "stroke", label: "Stroke", center: 35, width: 35 },
-  { id: "soft", label: "Soft tissue", center: 40, width: 350 },
+  // Narrow acute-stroke window (W8) maximizes gray-white differentiation for
+  // early infarct; this is the textbook stroke window, not a wide brain detail.
+  { id: "stroke", label: "Stroke", center: 35, width: 8 },
+  { id: "soft", label: "Soft tissue", center: 40, width: 400 },
   { id: "fossa", label: "Posterior fossa", center: 40, width: 120 },
   { id: "bone", label: "Bone", center: 600, width: 2800 },
   { id: "lung", label: "Lung", center: -600, width: 1500 },
 ] as const;
 
 type CtWindowPresetId = (typeof CT_WINDOW_PRESETS)[number]["id"];
+
+// computeRobustHistogramWindow returns the [loPct, hiPct] percentile intensity
+// range from a histogram. MR/microscopy have no absolute units, so the default
+// window must be robust: a single hot voxel inflates the raw max and washes the
+// image out under a min..max stretch. Percentile edges keep tissue legible.
+export function computeRobustHistogramWindow(
+  histogram: { histogram?: { min?: unknown; max?: unknown; bins?: unknown } } | null | undefined,
+  loPct: number,
+  hiPct: number
+): { min: number; max: number } | null {
+  const h = histogram?.histogram;
+  const bins = Array.isArray(h?.bins) ? (h?.bins as unknown[]) : null;
+  const min = Number(h?.min);
+  const max = Number(h?.max);
+  if (!bins || bins.length === 0 || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return null;
+  }
+  const counts = bins.map((c) => Math.max(0, Number(c) || 0));
+  const total = counts.reduce((sum, c) => sum + c, 0);
+  if (total <= 0) {
+    return null;
+  }
+  const valueAtPercentile = (pct: number): number => {
+    const target = pct * total;
+    let cumulative = 0;
+    for (let i = 0; i < counts.length; i += 1) {
+      cumulative += counts[i];
+      if (cumulative >= target) {
+        return min + ((i + 0.5) / counts.length) * (max - min);
+      }
+    }
+    return max;
+  };
+  const lo = valueAtPercentile(loPct);
+  const hi = valueAtPercentile(hiPct);
+  return hi > lo ? { min: lo, max: hi } : null;
+}
 
 const formatNumber = (value: number): string => value.toLocaleString();
 
@@ -806,11 +846,16 @@ export function ImageViewerShell({
   const selectedChannelKey = selectedChannelIndices.join(",");
   const selectedChannelColorKey = (selectedDisplayState?.channel_colors ?? []).map((value) => String(value || "").trim()).join(",");
   const hasMultipleChannels = Boolean(viewerInfo.is_multichannel) || viewerInfo.axis_sizes.C > 1;
+  // An RGB(A) photo (render_policy "display") renders its native colors directly — its
+  // bands are not science channels, so the per-channel pills + LUT colors don't apply
+  // (e.g. an RGBA orthomosaic must not expose Red/Green/Blue/Alpha composite controls).
+  const isDisplayPhoto = viewerInfo.viewer.render_policy === "display";
   const canControlChannels =
-    hasMultipleChannels ||
-    displayCapabilities.has("channel_visibility") ||
-    displayCapabilities.has("channel_mix") ||
-    displayCapabilities.has("channel_color");
+    !isDisplayPhoto &&
+    (hasMultipleChannels ||
+      displayCapabilities.has("channel_visibility") ||
+      displayCapabilities.has("channel_mix") ||
+      displayCapabilities.has("channel_color"));
   const canControlChannelColor = displayCapabilities.has("channel_color");
   const canLoadScalarVolumeHistogram =
     viewerInfo.is_volume && viewerInfo.viewer.volume_mode === "scalar";
@@ -894,9 +939,21 @@ export function ImageViewerShell({
   const metadataArrayMax = Number(viewerInfo.metadata.array_max ?? viewerInfo.metadata.intensity_stats?.max ?? 1);
   const arrayMin = Number.isFinite(histogramMin) ? histogramMin : metadataArrayMin;
   const arrayMax = Number.isFinite(histogramMax) ? histogramMax : metadataArrayMax;
-  const defaultCenter = Number(viewerInfo.metadata.dicom?.wnd_center ?? (arrayMin + arrayMax) / 2);
+  // The default window anchors on a robust p1..p99 range (not the raw min..max)
+  // so non-CT scalars aren't washed out by outliers. The slider still spans the
+  // full arrayMin..arrayMax. CT supplies an explicit Hounsfield window, and a
+  // real DICOM acquisition window takes precedence over both.
+  const robustWindow = useMemo(
+    () => computeRobustHistogramWindow(uploadHistogram, 0.01, 0.99),
+    [uploadHistogram]
+  );
+  const windowAnchorMin = robustWindow ? robustWindow.min : arrayMin;
+  const windowAnchorMax = robustWindow ? robustWindow.max : arrayMax;
+  const defaultCenter = Number(
+    viewerInfo.metadata.dicom?.wnd_center ?? (windowAnchorMin + windowAnchorMax) / 2
+  );
   const defaultWidth = Number(
-    viewerInfo.metadata.dicom?.wnd_width ?? Math.max(1, Math.abs(arrayMax - arrayMin))
+    viewerInfo.metadata.dicom?.wnd_width ?? Math.max(1, Math.abs(windowAnchorMax - windowAnchorMin))
   );
   const parsedWindow = parseWindowLevel(selectedDisplayState?.enhancement, defaultCenter, defaultWidth);
   const showCtWindowPresets = isScalarMpr && viewerInfo.modality === "medical";
@@ -1214,6 +1271,12 @@ export function ImageViewerShell({
       : null;
   const direct2dImageUrl = direct2dDisplayUrl ?? direct2dSliceUrl;
   const direct2dPreviewUrl = apiClient.uploadPreviewUrl(viewerInfo.file_id);
+  const canUseDeepZoom2D =
+    !viewerInfo.is_volume &&
+    (viewerInfo.backend_mode === "pyramid" ||
+      viewerInfo.viewer.backend_mode === "pyramid" ||
+      viewerInfo.viewer.delivery_mode === "deferred_multiscale") &&
+    viewerInfo.viewer.tile_scheme.levels.length > 0;
 
   const scalarProbeValue =
     canLoadScalarProbe && scalarProbeVolume
@@ -1254,22 +1317,23 @@ export function ImageViewerShell({
     updateSelectedDisplay({
       volume_clip_min: { x: 0, y: 0, z: 0 },
       volume_clip_max: { x: 1, y: 1, z: 1 },
+      volume_cutaway: false,
     });
   };
 
+  // Interior focus is now a Z-cursor cutaway: the renderer cuts the volume at the
+  // live Z slice and exposes a high-resolution interior cross-section with the
+  // camera kept in overview (no fly-inside fog). The cut sweeps as the user
+  // scrubs Z, so no static clip box is stored here.
   const focusInteriorVolume = () => {
-    const nextClip = buildInteriorVolumeClipBounds({
-      axisSizes: viewerInfo.axis_sizes,
-      indices: clampedIndices,
-    });
     updateSelectedDisplay({
-      volume_clip_min: nextClip.min,
-      volume_clip_max: nextClip.max,
+      volume_cutaway: true,
       volume_camera_mode: "perspective",
     });
   };
 
-  const volumeClipActive = isVolumeClipActive(clipBounds);
+  const cutawayActive = Boolean(selectedDisplayState?.volume_cutaway);
+  const volumeClipActive = cutawayActive || isVolumeClipActive(clipBounds);
 
   const activeMeasurement = measurementsByAxis[activeMeasurementAxis] ?? null;
   const activeMeasurementDescriptor =
@@ -1477,19 +1541,31 @@ export function ImageViewerShell({
             <div className="viewer-canvas-shell viewer-canvas-shell-2d">
               <div
                 data-viewer-surface="2d"
-                data-viewer-backend="direct"
+                data-viewer-backend={canUseDeepZoom2D ? "pyramid" : "direct"}
                 data-viewer-aspect={viewerInfo.viewer.default_plane.aspect_ratio.toFixed(4)}
               >
-                <DirectPlaneImage
-                  imageUrl={direct2dImageUrl}
-                  placeholderUrl={direct2dPreviewUrl}
-                  descriptor={viewerInfo.viewer.default_plane}
-                  title="2d-plane"
-                  className="viewer-canvas-root"
-                  interactive={true}
-                  orientationLabels={getPlaneOrientationLabels(viewerInfo, "z")}
-                  scalarSlice={direct2dScalarSlice}
-                />
+                {canUseDeepZoom2D ? (
+                  <DeepZoomCanvas
+                    apiClient={apiClient}
+                    fileId={viewerInfo.file_id}
+                    viewerInfo={viewerInfo}
+                    axis="z"
+                    zIndex={clampedIndices.z}
+                    tIndex={clampedIndices.t}
+                    className="viewer-canvas-root"
+                  />
+                ) : (
+                  <DirectPlaneImage
+                    imageUrl={direct2dImageUrl}
+                    placeholderUrl={direct2dPreviewUrl}
+                    descriptor={viewerInfo.viewer.default_plane}
+                    title="2d-plane"
+                    className="viewer-canvas-root"
+                    interactive={true}
+                    orientationLabels={getPlaneOrientationLabels(viewerInfo, "z")}
+                    scalarSlice={direct2dScalarSlice}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -1576,6 +1652,21 @@ export function ImageViewerShell({
                     </Button>
                   ) : null}
                 </div>
+                {cutawayActive && zAxisSize > 1 ? (
+                  <label className="viewer-volume-cutaway-depth" data-viewer-cutaway-depth="true">
+                    <span>Depth (Z)</span>
+                    <input
+                      type="range"
+                      aria-label="Cutaway depth"
+                      min={0}
+                      max={Math.max(0, zAxisSize - 1)}
+                      step={1}
+                      value={clampedIndices.z}
+                      onChange={(event) => setSelectedIndex("z", Number(event.target.value))}
+                    />
+                    <strong>{`${clampedIndices.z + 1}/${zAxisSize}`}</strong>
+                  </label>
+                ) : null}
               </div>
             ) : null}
             <div className="viewer-canvas-shell viewer-canvas-shell-volume">
@@ -1583,9 +1674,9 @@ export function ImageViewerShell({
                 apiClient={apiClient}
                 fileId={viewerInfo.file_id}
                 viewerInfo={viewerInfo}
-                xIndex={debouncedX}
-                yIndex={debouncedY}
-                zIndex={debouncedZ}
+                xIndex={clampedIndices.x}
+                yIndex={clampedIndices.y}
+                zIndex={clampedIndices.z}
                 tIndex={debouncedT}
                 displayState={selectedDisplayState}
               />

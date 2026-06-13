@@ -16,6 +16,28 @@ vi.mock("./DirectPlaneImage", () => ({
   ),
 }));
 
+vi.mock("./DeepZoomCanvas", () => ({
+  DeepZoomCanvas: ({
+    fileId,
+    viewerInfo,
+    zIndex,
+    tIndex,
+  }: {
+    fileId: string;
+    viewerInfo: UploadViewerInfo;
+    zIndex: number;
+    tIndex: number;
+  }) => (
+    <div
+      data-testid="deep-zoom-canvas"
+      data-file-id={fileId}
+      data-level-count={String(viewerInfo.viewer.tile_scheme.levels.length)}
+      data-z-index={String(zIndex)}
+      data-t-index={String(tIndex)}
+    />
+  ),
+}));
+
 vi.mock("./SlicePlaneCanvas", () => ({
   SlicePlaneCanvas: ({ imageUrl, title }: { imageUrl: string; title: string }) => (
     <div data-testid="slice-plane-canvas" data-image-url={imageUrl} data-title={title} />
@@ -39,6 +61,7 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
       volume_camera_mode?: string;
       volume_clip_min?: { x: number; y: number; z: number };
       volume_clip_max?: { x: number; y: number; z: number };
+      volume_cutaway?: boolean | null;
     } | null;
     xIndex?: number;
     yIndex?: number;
@@ -46,6 +69,7 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
   }) => (
     <div
       data-testid="slice-stack-volume-canvas"
+      data-cutaway={displayState?.volume_cutaway ? "true" : "false"}
       data-scalar-colormap={displayState?.scalar_colormap ?? ""}
       data-signal-floor={displayState?.volume_signal_floor == null ? "" : String(displayState.volume_signal_floor)}
       data-density={displayState?.volume_density == null ? "" : String(displayState.volume_density)}
@@ -328,8 +352,11 @@ describe("ImageViewerShell", () => {
     fireEvent.change(centerSlider, { target: { value: "1002" } });
 
     await waitFor(() =>
+      // The default width now anchors on the robust p1..p99 range (2.25 for this
+      // uniform 4-bin fixture) instead of the full 3.0 min..max span; the slider
+      // still drives the center.
       expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain(
-        "enhancement=hounsfield%3A1002.000%3A3.000"
+        "enhancement=hounsfield%3A1002.000%3A2.250"
       )
     );
   });
@@ -363,7 +390,11 @@ describe("ImageViewerShell", () => {
       },
       viewer: {
         ...viewerInfo.viewer,
-        render_policy: "display",
+        // A real direct multichannel science image is the scalar (window/level) path;
+        // render_policy "display" is reserved for RGB(A) photos, which have no science
+        // channels to choose (so they intentionally hide the per-channel controls).
+        render_policy: "scalar",
+        channel_mode: "composite",
         display_capabilities: ["histogram", "channel_visibility"],
       },
     };
@@ -417,6 +448,136 @@ describe("ImageViewerShell", () => {
       const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
       expect(imageUrl).toContain("channels=1");
     });
+  });
+
+  it("hides per-channel controls for an RGB(A) display photo", async () => {
+    // An RGBA orthomosaic (render_policy "display", channel_mode "single") is color
+    // data, not science channels — the Red/Green/Blue/Alpha pills must NOT appear even
+    // though C>1.
+    const photoViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      modality: "image",
+      axis_sizes: { ...viewerInfo.axis_sizes, C: 4 },
+      is_multichannel: true,
+      display_defaults: {
+        ...(viewerInfo.display_defaults ?? {
+          enhancement: "d", negative: false, rotate: 0, fusion_method: "m",
+          channel_mode: "single", channels: [0], channel_colors: [], time_index: 0, z_index: 0,
+        }),
+        channel_mode: "single",
+        channels: [0],
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        render_policy: "display",
+        channel_mode: "single",
+        display_capabilities: ["histogram", "channel_visibility"],
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={photoViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="2d"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={photoViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+        debouncedX={0} debouncedY={0} debouncedZ={0} debouncedT={0}
+        xAxisSize={4} yAxisSize={1} zAxisSize={1} tAxisSize={1}
+        setSelectedIndex={() => {}} selectedCaption="" captionLoading={false}
+      />
+    );
+
+    expect(await screen.findByTestId("direct-plane-image")).toBeInTheDocument();
+    // No per-channel pills (the composite UI is suppressed for a photo).
+    expect(screen.queryByRole("button", { name: "Channel 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Channel 2" })).toBeNull();
+  });
+
+  it("uses deep zoom tiles for pyramid-backed 2D images", () => {
+    const pyramidPlane = {
+      ...defaultPlane,
+      pixel_size: { width: 95174, height: 91416 },
+      world_size: { width: 95174, height: 91416 },
+      aspect_ratio: 95174 / 91416,
+    };
+    const pyramidViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      original_name: "large-pyramid.tif",
+      backend_mode: "pyramid",
+      axis_sizes: { T: 1, C: 4, Z: 1, Y: 91416, X: 95174 },
+      is_multichannel: true,
+      service_urls: {
+        ...viewerInfo.service_urls,
+        tile: "/v2/uploads/file-123/tiles/{axis}/{level}/{tile_x}/{tile_y}",
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        reader: "libbioimage",
+        array_shape: [4, 91416, 95174],
+        array_dtype: "uint8",
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        backend_mode: "pyramid",
+        delivery_mode: "deferred_multiscale",
+        first_paint_mode: "webgl",
+        tile_scheme: {
+          tile_size: 512,
+          format: "png",
+          levels: [
+            { level: 8, width: 371, height: 357, columns: 1, rows: 1, downsample: 256 },
+            { level: 7, width: 743, height: 714, columns: 2, rows: 2, downsample: 128 },
+            { level: 0, width: 95174, height: 91416, columns: 186, rows: 179, downsample: 1 },
+          ],
+        },
+        default_plane: pyramidPlane,
+        planes: { z: pyramidPlane },
+        viewer_capabilities: ["2d", "metadata", "deep_zoom"],
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+      uploadTileUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/tiles/z/8/0/0"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={pyramidViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="2d"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={pyramidViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+        debouncedX={0}
+        debouncedY={0}
+        debouncedZ={0}
+        debouncedT={0}
+        xAxisSize={95174}
+        yAxisSize={91416}
+        zAxisSize={1}
+        tAxisSize={1}
+        setSelectedIndex={() => {}}
+        selectedCaption=""
+        captionLoading={false}
+      />
+    );
+
+    expect(screen.getByTestId("deep-zoom-canvas")).toHaveAttribute("data-level-count", "3");
+    expect(screen.getByTestId("deep-zoom-canvas")).toHaveAttribute("data-z-index", "0");
+    expect(screen.queryByTestId("direct-plane-image")).not.toBeInTheDocument();
   });
 
   it("presents OME TIFF stacks with single-channel slice controls", async () => {
@@ -1325,7 +1486,7 @@ describe("ImageViewerShell", () => {
     expect(screen.getByLabelText("Window level")).toBeInTheDocument();
   });
 
-  it("focuses a centered interior cutaway around the selected voxel for volume inspection", async () => {
+  it("enables the Z-cursor cutaway with overview camera and a depth scrubber on interior focus", async () => {
     const scalarPlane = {
       axis: "z" as const,
       label: "XY plane",
@@ -1430,15 +1591,14 @@ describe("ImageViewerShell", () => {
 
     await waitFor(() => {
       const canvas = screen.getByTestId("slice-stack-volume-canvas");
-      expect(canvas.dataset.clipXMin).toBe("0.17");
-      expect(canvas.dataset.clipXMax).toBe("0.73");
-      expect(canvas.dataset.clipYMin).toBe("0.27");
-      expect(canvas.dataset.clipYMax).toBe("0.83");
-      expect(canvas.dataset.clipZMin).toBe("0.37");
-      expect(canvas.dataset.clipZMax).toBe("0.93");
+      // Cutaway mode is on; the cut is derived live from Z (camera stays overview),
+      // so no static clip box is written to display state.
+      expect(canvas.dataset.cutaway).toBe("true");
       expect(canvas.dataset.cameraMode).toBe("perspective");
     });
     expect(screen.getByText("Interior cutaway active")).toBeInTheDocument();
+    // The user sweeps the cut through Z from the Volume tab.
+    expect(screen.getByLabelText("Cutaway depth")).toBeInTheDocument();
   });
 
   it("passes volume view preset changes into the volume renderer state", async () => {

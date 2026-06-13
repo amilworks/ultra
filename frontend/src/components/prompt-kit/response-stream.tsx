@@ -28,6 +28,12 @@ export type UseTextStreamResult = {
   resume: () => void
 }
 
+// Live-stream catch-up: beyond this backlog the renderer drops the typewriter
+// delay (frame-rate only) and allows larger per-frame slices, so visible text
+// can't fall unboundedly behind a model that streams faster than ~300 chars/s.
+const STREAM_CATCHUP_PENDING_CHARS = 240
+const STREAM_CATCHUP_MAX_CHUNK = 64
+
 type WordSegment = { segment: string }
 
 type IntlWithSegmenter = typeof Intl & {
@@ -220,9 +226,13 @@ function useTextStream({
       if (pendingChars <= baseChunkSize) {
         return pendingChars
       }
+      const softMaxCeiling =
+        pendingChars > STREAM_CATCHUP_PENDING_CHARS
+          ? STREAM_CATCHUP_MAX_CHUNK
+          : 18
       const softMax = Math.max(
         4,
-        Math.min(18, Math.round(Math.sqrt(Math.max(1, pendingChars))))
+        Math.min(softMaxCeiling, Math.round(Math.sqrt(Math.max(1, pendingChars))))
       )
       return Math.min(
         softMax,
@@ -297,7 +307,14 @@ function useTextStream({
           if (controller.signal.aborted) {
             return
           }
-          await waitForProcessingDelay()
+          // Far behind a fast model stream: render every animation frame so
+          // the visible text converges instead of "typing" long after the
+          // model finished. The typewriter cadence resumes near parity.
+          const stillPending =
+            targetText.length - displayedTextRef.current.length
+          if (stillPending <= STREAM_CATCHUP_PENDING_CHARS) {
+            await waitForProcessingDelay()
+          }
         }
       }
 

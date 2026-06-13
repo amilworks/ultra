@@ -1,12 +1,16 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
+  Activity,
   Check,
   Database,
   ExternalLink,
   FolderOpen,
+  GitBranch,
+  IdCard,
   Images,
   Info,
   Link2,
+  Loader2,
   LogOut,
   Settings,
   Shield,
@@ -45,9 +49,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import type { BisqueNavLinks } from "@/features/auth/bisqueNavigation";
 import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
+import { formatDurationSeconds, formatTokens } from "@/lib/format";
+import type {
+  CurrentUserProfile,
+  CurrentUserResponse,
+  TokenUsageResponse,
+} from "@/types";
+import { TokenActivityHeatmap } from "./TokenActivityHeatmap";
 import { SystemMessage } from "./prompt-kit/system-message";
 
 type ThemePreference = "system" | "light" | "dark";
@@ -82,8 +95,44 @@ export type AppSettingsDialogProps = {
   onLinkBisqueAccount: (payload: LinkBisqueAccountPayload) => Promise<{
     imageCount: number;
   }>;
+  loadProfile?: () => Promise<CurrentUserResponse>;
+  saveProfile?: (profile: CurrentUserProfile) => Promise<CurrentUserResponse>;
+  loadTokenUsage?: (days: number) => Promise<TokenUsageResponse>;
   formatError: (error: unknown) => string;
 };
+
+type ProfileFormState = {
+  displayName: string;
+  title: string;
+  institution: string;
+  researchInterests: string;
+  bio: string;
+};
+
+const EMPTY_PROFILE_FORM: ProfileFormState = {
+  displayName: "",
+  title: "",
+  institution: "",
+  researchInterests: "",
+  bio: "",
+};
+
+const profileFormFromResponse = (response: CurrentUserResponse): ProfileFormState => ({
+  displayName: response.profile.display_name ?? response.user.display_name ?? "",
+  title: response.profile.title ?? "",
+  institution: response.profile.institution ?? "",
+  researchInterests: response.profile.research_interests ?? "",
+  bio: response.profile.bio ?? "",
+});
+
+function UsageStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="app-settings-usage-stat">
+      <div className="app-settings-usage-stat-value">{value}</div>
+      <div className="app-settings-usage-stat-label">{label}</div>
+    </div>
+  );
+}
 
 const THEME_OPTIONS: ThemeOption[] = [
   {
@@ -160,6 +209,9 @@ export function AppSettingsDialog({
   onLogout,
   onUnlinkBisqueAccount,
   onLinkBisqueAccount,
+  loadProfile,
+  saveProfile,
+  loadTokenUsage,
   formatError,
 }: AppSettingsDialogProps) {
   const accountName = getAccountDisplayName(authUser, authMode);
@@ -185,6 +237,105 @@ export function AppSettingsDialog({
   const [bisqueImageCount, setBisqueImageCount] = useState<number | null>(null);
   const bisqueLinked = Boolean(bisqueCredentialsLinked && authUser);
   const bisqueRootHref = bisqueNavLinks?.home ?? DEFAULT_BISQUE_BROWSER_URL;
+
+  const profileEnabled = Boolean(loadProfile && saveProfile);
+  const usageEnabled = Boolean(loadTokenUsage);
+
+  const [profileForm, setProfileForm] = useState<ProfileFormState>(EMPTY_PROFILE_FORM);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSaved, setProfileSaved] = useState(false);
+
+  const [tokenUsage, setTokenUsage] = useState<TokenUsageResponse | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    let cancelled = false;
+    if (loadProfile) {
+      void (async () => {
+        setProfileLoading(true);
+        setProfileError(null);
+        try {
+          const response = await loadProfile();
+          if (!cancelled) {
+            setProfileForm(profileFormFromResponse(response));
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setProfileError(formatError(error));
+          }
+        } finally {
+          if (!cancelled) {
+            setProfileLoading(false);
+          }
+        }
+      })();
+    }
+    if (loadTokenUsage) {
+      void (async () => {
+        setUsageLoading(true);
+        setUsageError(null);
+        try {
+          const response = await loadTokenUsage(365);
+          if (!cancelled) {
+            setTokenUsage(response);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setUsageError(formatError(error));
+          }
+        } finally {
+          if (!cancelled) {
+            setUsageLoading(false);
+          }
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [open, loadProfile, loadTokenUsage, formatError]);
+
+  const updateProfileField = (field: keyof ProfileFormState, value: string): void => {
+    setProfileSaved(false);
+    setProfileForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const submitProfile = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!saveProfile) {
+      return;
+    }
+    setProfileSaving(true);
+    setProfileError(null);
+    try {
+      const response = await saveProfile({
+        display_name: profileForm.displayName.trim(),
+        title: profileForm.title.trim(),
+        institution: profileForm.institution.trim(),
+        research_interests: profileForm.researchInterests.trim(),
+        bio: profileForm.bio.trim(),
+      });
+      setProfileForm(profileFormFromResponse(response));
+      setProfileSaved(true);
+      toast.success("Profile saved", {
+        description: "Your research agent will use this to personalize runs.",
+      });
+    } catch (error) {
+      const message = formatError(error);
+      setProfileError(message);
+      toast.error("Could not save profile", { description: message });
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const usageSummary = tokenUsage?.summary;
 
   const runAndClose = (action: () => void): void => {
     onOpenChange(false);
@@ -269,6 +420,18 @@ export function AppSettingsDialog({
                 <Settings data-icon="inline-start" aria-hidden="true" />
                 General
               </TabsTrigger>
+              {profileEnabled ? (
+                <TabsTrigger value="profile" className="app-settings-nav-item">
+                  <IdCard data-icon="inline-start" aria-hidden="true" />
+                  Profile
+                </TabsTrigger>
+              ) : null}
+              {usageEnabled ? (
+                <TabsTrigger value="usage" className="app-settings-nav-item">
+                  <Activity data-icon="inline-start" aria-hidden="true" />
+                  Usage
+                </TabsTrigger>
+              ) : null}
               <TabsTrigger value="account" className="app-settings-nav-item">
                 <UserRound data-icon="inline-start" aria-hidden="true" />
                 Account
@@ -331,6 +494,177 @@ export function AppSettingsDialog({
                 <Badge variant="secondary">{resolvedThemeLabel}</Badge>
               </div>
             </TabsContent>
+
+            {profileEnabled ? (
+              <TabsContent value="profile" className="app-settings-tab-content">
+                <div className="app-settings-panel-heading">
+                  <h2>Profile</h2>
+                  <p>
+                    Tell Ultra about your work. Your research agent reads this to tailor
+                    depth, terminology, and examples to you.
+                  </p>
+                </div>
+                <Separator />
+                {profileLoading ? (
+                  <div className="app-settings-profile-loading">
+                    <Skeleton className="h-9 w-full" />
+                    <Skeleton className="h-9 w-full" />
+                    <Skeleton className="h-24 w-full" />
+                  </div>
+                ) : (
+                  <form className="app-settings-profile-form" onSubmit={submitProfile}>
+                    <div className="app-settings-field-grid">
+                      <div className="app-settings-field">
+                        <Label htmlFor="settings-profile-name">Display name</Label>
+                        <Input
+                          id="settings-profile-name"
+                          value={profileForm.displayName}
+                          onChange={(event) =>
+                            updateProfileField("displayName", event.target.value)
+                          }
+                          placeholder="How Ultra should address you"
+                          disabled={profileSaving}
+                        />
+                      </div>
+                      <div className="app-settings-field">
+                        <Label htmlFor="settings-profile-title">Title or role</Label>
+                        <Input
+                          id="settings-profile-title"
+                          value={profileForm.title}
+                          onChange={(event) =>
+                            updateProfileField("title", event.target.value)
+                          }
+                          placeholder="e.g. PhD candidate, PI"
+                          disabled={profileSaving}
+                        />
+                      </div>
+                    </div>
+                    <div className="app-settings-field">
+                      <Label htmlFor="settings-profile-institution">Institution</Label>
+                      <Input
+                        id="settings-profile-institution"
+                        value={profileForm.institution}
+                        onChange={(event) =>
+                          updateProfileField("institution", event.target.value)
+                        }
+                        placeholder="e.g. UCSB Vision Research Lab"
+                        disabled={profileSaving}
+                      />
+                    </div>
+                    <div className="app-settings-field">
+                      <Label htmlFor="settings-profile-interests">
+                        Research interests
+                      </Label>
+                      <Textarea
+                        id="settings-profile-interests"
+                        value={profileForm.researchInterests}
+                        onChange={(event) =>
+                          updateProfileField("researchInterests", event.target.value)
+                        }
+                        placeholder="Areas, methods, organisms, or imaging modalities you focus on"
+                        rows={2}
+                        disabled={profileSaving}
+                      />
+                    </div>
+                    <div className="app-settings-field">
+                      <Label htmlFor="settings-profile-bio">About you</Label>
+                      <Textarea
+                        id="settings-profile-bio"
+                        value={profileForm.bio}
+                        onChange={(event) =>
+                          updateProfileField("bio", event.target.value)
+                        }
+                        placeholder="A few sentences about your background and what you are working toward."
+                        rows={4}
+                        disabled={profileSaving}
+                      />
+                      <p className="app-settings-field-hint">
+                        Saved to your private agent memory and used to personalize runs.
+                        Never shared with other users.
+                      </p>
+                    </div>
+                    {profileError ? (
+                      <SystemMessage variant="error" fill>
+                        {profileError}
+                      </SystemMessage>
+                    ) : null}
+                    <div className="app-settings-action-row">
+                      <Button type="submit" disabled={profileSaving}>
+                        {profileSaving ? (
+                          <Loader2
+                            data-icon="inline-start"
+                            className="animate-spin"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Check data-icon="inline-start" aria-hidden="true" />
+                        )}
+                        {profileSaving
+                          ? "Saving..."
+                          : profileSaved
+                            ? "Saved"
+                            : "Save profile"}
+                      </Button>
+                    </div>
+                  </form>
+                )}
+              </TabsContent>
+            ) : null}
+
+            {usageEnabled ? (
+              <TabsContent value="usage" className="app-settings-tab-content">
+                <div className="app-settings-panel-heading">
+                  <h2>Usage</h2>
+                  <p>Token activity across all of your runs.</p>
+                </div>
+                <Separator />
+                {usageLoading ? (
+                  <div className="app-settings-usage-loading">
+                    <Skeleton className="h-20 w-full" />
+                    <Skeleton className="h-32 w-full" />
+                  </div>
+                ) : usageError ? (
+                  <SystemMessage variant="error" fill>
+                    {usageError}
+                  </SystemMessage>
+                ) : usageSummary ? (
+                  <>
+                    <div className="app-settings-usage-stats">
+                      <UsageStat
+                        label="Lifetime tokens"
+                        value={formatTokens(usageSummary.lifetime_total_tokens)}
+                      />
+                      <UsageStat
+                        label="Peak day"
+                        value={formatTokens(usageSummary.peak_daily_total)}
+                      />
+                      <UsageStat
+                        label="Longest task"
+                        value={formatDurationSeconds(usageSummary.longest_task_seconds)}
+                      />
+                      <UsageStat
+                        label="Current streak"
+                        value={`${usageSummary.current_streak_days} day${
+                          usageSummary.current_streak_days === 1 ? "" : "s"
+                        }`}
+                      />
+                      <UsageStat
+                        label="Longest streak"
+                        value={`${usageSummary.longest_streak_days} day${
+                          usageSummary.longest_streak_days === 1 ? "" : "s"
+                        }`}
+                      />
+                    </div>
+                    <Separator />
+                    <TokenActivityHeatmap daily={tokenUsage?.daily ?? []} />
+                  </>
+                ) : (
+                  <div className="app-settings-unavailable">
+                    No token usage recorded yet. Run a task to start tracking.
+                  </div>
+                )}
+              </TabsContent>
+            ) : null}
 
             <TabsContent value="account" className="app-settings-tab-content">
               <div className="app-settings-panel-heading">
@@ -590,7 +924,7 @@ export function AppSettingsDialog({
                       target="_blank"
                       rel="noreferrer"
                     >
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      <GitBranch data-icon="inline-start" aria-hidden="true" />
                       GitHub
                     </a>
                   </Button>
@@ -626,7 +960,7 @@ export function AppSettingsDialog({
                 <div className="app-settings-inline-actions">
                   <Button asChild variant="outline" size="sm">
                     <a href="https://github.com/amilworks" target="_blank" rel="noreferrer">
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      <GitBranch data-icon="inline-start" aria-hidden="true" />
                       Creator
                     </a>
                   </Button>
@@ -636,7 +970,7 @@ export function AppSettingsDialog({
                       target="_blank"
                       rel="noreferrer"
                     >
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
+                      <GitBranch data-icon="inline-start" aria-hidden="true" />
                       Issues
                     </a>
                   </Button>

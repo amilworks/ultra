@@ -262,6 +262,58 @@ export type RunEventsResponse = {
   events: RunEvent[];
 };
 
+export type RunTokenUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  model?: string;
+};
+
+export type CurrentUserProfile = {
+  display_name?: string;
+  title?: string;
+  institution?: string;
+  research_interests?: string;
+  bio?: string;
+};
+
+export type CurrentUserResponse = {
+  user: {
+    user_id: string;
+    email?: string;
+    display_name?: string;
+    role?: string;
+    org_id?: string;
+  };
+  profile: CurrentUserProfile;
+};
+
+export type TokenUsageSummary = {
+  lifetime_input_tokens: number;
+  lifetime_output_tokens: number;
+  lifetime_total_tokens: number;
+  peak_daily_total: number;
+  longest_task_seconds: number;
+  current_streak_days: number;
+  longest_streak_days: number;
+  active_days: number;
+  last_active_day?: string;
+};
+
+export type TokenUsageDailyPoint = {
+  day: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  run_count: number;
+};
+
+export type TokenUsageResponse = {
+  days: number;
+  summary: TokenUsageSummary;
+  daily: TokenUsageDailyPoint[];
+};
+
 export type RunResponse = {
   run_id: string;
   goal: string;
@@ -1698,11 +1750,33 @@ export type BisqueUploadRecord = {
   resource_uri: string;
   name?: string | null;
   resource_uniq?: string | null;
+  client_view_url?: string | null;
 };
 
 export type BisqueUploadResponse = {
   count: number;
   uploads: BisqueUploadRecord[];
+};
+
+export type BisqueDatasetRecord = {
+  collection_id?: string | null;
+  name: string;
+  resource_uri: string;
+  resource_uniq?: string | null;
+  member_count: number;
+  client_view_url?: string | null;
+};
+
+export type BisquePushRequest = {
+  fileIds?: string[];
+  collectionIds?: string[];
+  datasetName?: string;
+};
+
+export type BisquePushResponse = {
+  count: number;
+  uploads: BisqueUploadRecord[];
+  datasets: BisqueDatasetRecord[];
 };
 
 export type Hdf5ViewerTreeNode = {
@@ -1988,6 +2062,10 @@ export type UploadViewerInfo = {
     volume_camera_mode?: string | null;
     volume_clip_min?: { x: number; y: number; z: number };
     volume_clip_max?: { x: number; y: number; z: number };
+    // Z-cursor cutaway: when true the Volume tab cuts the volume at the live Z
+    // slice and exposes a high-resolution interior cross-section (overview camera),
+    // independent of the manual volume_clip box.
+    volume_cutaway?: boolean | null;
   };
   service_urls?: {
     preview?: string;

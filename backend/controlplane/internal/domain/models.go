@@ -378,6 +378,13 @@ type ResourceStorageStats struct {
 	TotalBytes     int64
 }
 
+// ResourceRetentionBacklog summarizes soft-deleted resources whose undelete window has
+// elapsed (retention_expires_at < now) — the storage a retention GC can reclaim.
+type ResourceRetentionBacklog struct {
+	Count int64
+	Bytes int64
+}
+
 type ResourceCollectionRecord struct {
 	CollectionID       string    `json:"collection_id"`
 	OwnerUserID        string    `json:"owner_user_id"`
@@ -847,6 +854,50 @@ type UploadSessionTotals struct {
 	AllComplete    bool
 }
 
+// AdminWindowCounts carries one metric counted over the admin dashboard's
+// standard activity windows.
+type AdminWindowCounts struct {
+	Total   int
+	Last24h int
+	Last7d  int
+	Last30d int
+}
+
+// AdminUserMessageStats is one user's thread-message activity, aggregated in
+// the store instead of by fetching every thread's messages.
+type AdminUserMessageStats struct {
+	UserID            string
+	Messages          AdminWindowCounts
+	UserMessages      AdminWindowCounts
+	AssistantMessages AdminWindowCounts
+}
+
+// AdminUserEventStats is one user's tool-call/artifact event activity,
+// aggregated in the store instead of by fetching every run's events.
+type AdminUserEventStats struct {
+	UserID    string
+	ToolCalls AdminWindowCounts
+	Artifacts AdminWindowCounts
+}
+
+// AdminResourceOwnerStats is one owner's (user/org/project) resource usage.
+type AdminResourceOwnerStats struct {
+	Owner        string
+	Uploads      int
+	StorageBytes int64
+}
+
+// AdminResourceStats summarizes the resource catalog for the admin
+// dashboard without listing every resource row.
+type AdminResourceStats struct {
+	ActiveResources      int
+	SoftDeletedResources int
+	ActiveBytes          int64
+	Users                []AdminResourceOwnerStats
+	Orgs                 []AdminResourceOwnerStats
+	Projects             []AdminResourceOwnerStats
+}
+
 type UploadSessionOperationalMetrics struct {
 	Total          int   `json:"total"`
 	Active         int   `json:"active"`
@@ -979,6 +1030,98 @@ type UserAccount struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Metadata    JSONMap   `json:"metadata"`
+}
+
+// RecordUserTokenUsageInput folds one completed run's token spend into the
+// per-user daily and lifetime aggregates.
+type RecordUserTokenUsageInput struct {
+	UserID       string
+	Day          time.Time
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+	OccurredAt   time.Time
+}
+
+// RecordRunTokenUsageInput records one observed model-call usage delta. The
+// (run_id, usage_event_id) pair is the idempotency key for redeliveries.
+type RecordRunTokenUsageInput struct {
+	RunID        string
+	UsageEventID string
+	UserID       string
+	Model        string
+	Day          time.Time
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+	OccurredAt   time.Time
+}
+
+// RunTokenUsageRecord is one durable model-call usage ledger entry.
+type RunTokenUsageRecord struct {
+	RunID        string    `json:"run_id"`
+	UsageEventID string    `json:"usage_event_id"`
+	UserID       string    `json:"user_id"`
+	Model        string    `json:"model,omitempty"`
+	Day          time.Time `json:"day"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	TotalTokens  int64     `json:"total_tokens"`
+	OccurredAt   time.Time `json:"occurred_at"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// RunTokenUsageSummary is the aggregate token spend for a run.
+type RunTokenUsageSummary struct {
+	RunID        string    `json:"run_id"`
+	UserID       string    `json:"user_id"`
+	Model        string    `json:"model,omitempty"`
+	Day          time.Time `json:"day"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	TotalTokens  int64     `json:"total_tokens"`
+	Finalized    bool      `json:"finalized"`
+}
+
+type FinalizeRunTokenUsageInput struct {
+	RunID       string
+	CompletedAt time.Time
+}
+
+// UserTokenUsageStats is the lifetime aggregate row for a user.
+type UserTokenUsageStats struct {
+	UserID         string     `json:"user_id"`
+	InputTokens    int64      `json:"input_tokens"`
+	OutputTokens   int64      `json:"output_tokens"`
+	TotalTokens    int64      `json:"total_tokens"`
+	PeakDailyTotal int64      `json:"peak_daily_total"`
+	LastActiveDay  *time.Time `json:"last_active_day,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// UserTokenUsageDaily is one day's token aggregate for a user.
+type UserTokenUsageDaily struct {
+	Day          time.Time `json:"day"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	TotalTokens  int64     `json:"total_tokens"`
+	RunCount     int64     `json:"run_count"`
+}
+
+// UserProfile is the self-described, user-editable profile that personalizes a
+// researcher's agent runs. It is persisted under UserAccount.metadata.profile.
+type UserProfile struct {
+	DisplayName       string `json:"display_name,omitempty"`
+	Title             string `json:"title,omitempty"`
+	Institution       string `json:"institution,omitempty"`
+	ResearchInterests string `json:"research_interests,omitempty"`
+	Bio               string `json:"bio,omitempty"`
+}
+
+// UpdateUserProfileInput carries a full replacement of the editable profile.
+type UpdateUserProfileInput struct {
+	UserID  string
+	Profile UserProfile
 }
 
 type BisqueCredentialRecord struct {

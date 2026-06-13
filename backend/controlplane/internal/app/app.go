@@ -46,7 +46,11 @@ func New(cfg config.Config) (*App, error) {
 	var closeFns []func()
 	storeBackend := "memory"
 	if cfg.DatabaseURL != "" {
-		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		poolConfig, err := postgresPoolConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -95,14 +99,15 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.NATSURL != "" {
 		var err error
 		natsBus, err = eventbus.NewNATSBus(ctx, eventbus.NATSConfig{
-			URL:                  cfg.NATSURL,
-			Stream:               cfg.NATSStream,
-			JobsSubject:          cfg.NATSJobsSubject,
-			RareSpotJobsSubject:  cfg.NATSRareSpotJobsSubject,
-			DataAgentJobsSubject: cfg.NATSDataAgentJobsSubject,
-			EventsSubject:        cfg.NATSEventsSubject,
-			CancelSubject:        cfg.NATSCancelSubject,
-			EventConsumer:        cfg.NATSEventConsumer,
+			URL:                    cfg.NATSURL,
+			Stream:                 cfg.NATSStream,
+			JobsSubject:            cfg.NATSJobsSubject,
+			RareSpotJobsSubject:    cfg.NATSRareSpotJobsSubject,
+			DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
+			EventsSubject:          cfg.NATSEventsSubject,
+			CancelSubject:          cfg.NATSCancelSubject,
+			EventConsumer:          cfg.NATSEventConsumer,
+			EventIngestConcurrency: cfg.NATSEventIngestConcurrency,
 			ConsumerTargets: []eventbus.QueueConsumerTarget{
 				{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
 				{Name: cfg.NATSRareSpotWorkerDurable, Role: "rarespot", Subject: cfg.NATSRareSpotJobsSubject},
@@ -165,6 +170,17 @@ func New(cfg config.Config) (*App, error) {
 			}
 			return nil
 		})
+	}
+	// Retention GC permanently reclaims artifacts of resources past their undelete window.
+	// Off by default (it deletes data); an operator enables it after watching the
+	// retention_backlog the admin overview reports.
+	if cfg.RetentionGCEnabled {
+		if gcStore, ok := controlStore.(httpapi.RetentionGCStore); ok {
+			startFns = append(startFns, func(ctx context.Context) error {
+				go httpapi.RunRetentionGC(ctx, gcStore, cfg.UploadRoot, cfg.RetentionGCInterval, cfg.RetentionGCBatch)
+				return nil
+			})
+		}
 	}
 	bisqueService := httpapi.NewBisqueService(httpapi.BisqueServiceConfig{
 		RootURL:       cfg.BisqueRootURL,
@@ -231,6 +247,7 @@ func New(cfg config.Config) (*App, error) {
 		Bus:               runEvents,
 		ArtifactRoot:      cfg.ArtifactRoot,
 		UploadRoot:        cfg.UploadRoot,
+		ImageServiceURL:   cfg.ImageServiceURL,
 		DevAdminEnabled:   cfg.DevAdminEnabled,
 		Runtime:           runtime,
 		QueueDiagnostics:  natsBus,
@@ -420,11 +437,32 @@ func pingPostgres(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+func postgresPoolConfig(cfg config.Config) (*pgxpool.Config, error) {
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.DatabaseMaxConns > 0 {
+		poolConfig.MaxConns = int32(cfg.DatabaseMaxConns)
+	}
+	if cfg.DatabaseMinConns > 0 {
+		poolConfig.MinConns = int32(cfg.DatabaseMinConns)
+	}
+	if poolConfig.MinConns > poolConfig.MaxConns {
+		return nil, fmt.Errorf("ULTRA_CONTROL_DATABASE_MIN_CONNS (%d) cannot exceed ULTRA_CONTROL_DATABASE_MAX_CONNS (%d)", poolConfig.MinConns, poolConfig.MaxConns)
+	}
+	return poolConfig, nil
+}
+
 func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return fmt.Errorf("ULTRA_CONTROL_DATABASE_URL or RUN_STORE_PATH is required to migrate the control-plane Postgres schema")
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	poolConfig, err := postgresPoolConfig(cfg)
+	if err != nil {
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return err
 	}

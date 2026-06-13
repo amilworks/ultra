@@ -36,6 +36,48 @@ CREATE TABLE IF NOT EXISTS control_users (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS control_user_token_usage_daily (
+  user_id text NOT NULL,
+  day date NOT NULL,
+  input_tokens bigint NOT NULL DEFAULT 0,
+  output_tokens bigint NOT NULL DEFAULT 0,
+  total_tokens bigint NOT NULL DEFAULT 0,
+  run_count bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS control_user_token_usage_lifetime (
+  user_id text PRIMARY KEY,
+  input_tokens bigint NOT NULL DEFAULT 0,
+  output_tokens bigint NOT NULL DEFAULT 0,
+  total_tokens bigint NOT NULL DEFAULT 0,
+  peak_daily_total bigint NOT NULL DEFAULT 0,
+  last_active_day date,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS control_run_token_usage (
+  run_id text NOT NULL,
+  usage_event_id text NOT NULL,
+  user_id text NOT NULL,
+  model text NOT NULL DEFAULT '',
+  day date NOT NULL,
+  input_tokens bigint NOT NULL DEFAULT 0,
+  output_tokens bigint NOT NULL DEFAULT 0,
+  total_tokens bigint NOT NULL DEFAULT 0,
+  occurred_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (run_id, usage_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS control_run_token_usage_finalized (
+  run_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  day date NOT NULL,
+  finalized_at timestamptz NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS control_thread_messages (
   message_id text PRIMARY KEY,
   thread_id text NOT NULL REFERENCES control_threads(thread_id) ON DELETE CASCADE,
@@ -69,6 +111,19 @@ CREATE TABLE IF NOT EXISTS control_runs (
   started_at timestamptz,
   completed_at timestamptz,
   metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+-- Per-run event sequence allocator. Appends serialize on this row's lock and
+-- read the next sequence from it in one statement, instead of an advisory
+-- lock plus MAX() in a multi-statement transaction. last_sequence may run
+-- ahead of the events table (a failed append after a counter bump leaves a
+-- gap); consumers only rely on sequences being unique and increasing.
+-- Declared before control_run_events on purpose: the append statement locks
+-- the counter row first and the events table second, and keeping DDL in the
+-- same order avoids opposite-order lock acquisition against live appenders.
+CREATE TABLE IF NOT EXISTS control_run_event_sequences (
+  run_id text PRIMARY KEY REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  last_sequence bigint NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS control_run_events (
@@ -440,6 +495,7 @@ CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   UNIQUE(user_id, org_id, root_url)
 );
 
+CREATE INDEX IF NOT EXISTS control_thread_messages_thread_created_idx ON control_thread_messages(thread_id, created_at);
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_threads_user_status_updated_idx ON control_threads(user_id, status, updated_at DESC);
@@ -448,6 +504,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
   WHERE COALESCE(metadata->>'idempotency_key', '') <> '';
 CREATE INDEX IF NOT EXISTS control_run_events_run_sequence_idx ON control_run_events(run_id, sequence_number);
 CREATE INDEX IF NOT EXISTS control_run_events_run_event_idx ON control_run_events(run_id, event_id);
+-- Partial index for the admin activity aggregate: only tool-call/artifact
+-- events pay the write cost, and the dashboard's grouped count query reads
+-- just these rows instead of scanning the whole events table.
+CREATE INDEX IF NOT EXISTS control_run_events_admin_activity_idx ON control_run_events(event_kind, ts)
+  WHERE event_kind IN ('tool_call.started', 'artifact.created');
 CREATE INDEX IF NOT EXISTS control_run_leases_expires_idx ON control_run_leases(lease_expires_at);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_worker_heartbeats(worker_kind, status, last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);
@@ -501,4 +562,7 @@ CREATE INDEX IF NOT EXISTS control_upload_chunks_status_idx ON control_upload_ch
 CREATE INDEX IF NOT EXISTS control_organizations_status_updated_idx ON control_organizations(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_org_status_idx ON control_users(org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_users_email_idx ON control_users(lower(email));
+CREATE INDEX IF NOT EXISTS control_user_token_usage_daily_user_day_idx ON control_user_token_usage_daily(user_id, day DESC);
+CREATE INDEX IF NOT EXISTS control_run_token_usage_user_day_idx ON control_run_token_usage(user_id, day DESC);
+CREATE INDEX IF NOT EXISTS control_run_token_usage_run_idx ON control_run_token_usage(run_id);
 CREATE INDEX IF NOT EXISTS control_bisque_credentials_user_status_idx ON control_bisque_credentials(user_id, org_id, status, updated_at DESC);

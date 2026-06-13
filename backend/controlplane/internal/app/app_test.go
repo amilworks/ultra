@@ -53,6 +53,38 @@ func TestNewRejectsUnreachablePostgresBeforeServing(t *testing.T) {
 	}
 }
 
+func TestPostgresPoolConfigAppliesConnectionLimits(t *testing.T) {
+	t.Parallel()
+
+	poolConfig, err := postgresPoolConfig(config.Config{
+		DatabaseURL:      "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		DatabaseMaxConns: 7,
+		DatabaseMinConns: 2,
+	})
+	if err != nil {
+		t.Fatalf("postgresPoolConfig: %v", err)
+	}
+	if poolConfig.MaxConns != 7 {
+		t.Fatalf("MaxConns = %d, want 7", poolConfig.MaxConns)
+	}
+	if poolConfig.MinConns != 2 {
+		t.Fatalf("MinConns = %d, want 2", poolConfig.MinConns)
+	}
+}
+
+func TestPostgresPoolConfigRejectsMinAboveMax(t *testing.T) {
+	t.Parallel()
+
+	_, err := postgresPoolConfig(config.Config{
+		DatabaseURL:      "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		DatabaseMaxConns: 4,
+		DatabaseMinConns: 5,
+	})
+	if err == nil {
+		t.Fatalf("postgresPoolConfig error = nil, want min/max validation error")
+	}
+}
+
 func TestAppStartRecoversExpiredRunLeases(t *testing.T) {
 	t.Parallel()
 	application, err := New(config.Config{

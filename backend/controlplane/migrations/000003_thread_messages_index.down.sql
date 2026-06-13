@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS control_thread_messages_thread_created_idx;

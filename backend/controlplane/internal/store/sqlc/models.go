@@ -420,6 +420,46 @@ type ControlUser struct {
 	Metadata    []byte             `json:"metadata"`
 }
 
+type ControlUserTokenUsageDaily struct {
+	UserID       string             `json:"user_id"`
+	Day          pgtype.Date        `json:"day"`
+	InputTokens  int64              `json:"input_tokens"`
+	OutputTokens int64              `json:"output_tokens"`
+	TotalTokens  int64              `json:"total_tokens"`
+	RunCount     int64              `json:"run_count"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlUserTokenUsageLifetime struct {
+	UserID         string             `json:"user_id"`
+	InputTokens    int64              `json:"input_tokens"`
+	OutputTokens   int64              `json:"output_tokens"`
+	TotalTokens    int64              `json:"total_tokens"`
+	PeakDailyTotal int64              `json:"peak_daily_total"`
+	LastActiveDay  pgtype.Date        `json:"last_active_day"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlRunTokenUsage struct {
+	RunID        string             `json:"run_id"`
+	UsageEventID string             `json:"usage_event_id"`
+	UserID       string             `json:"user_id"`
+	Model        string             `json:"model"`
+	Day          pgtype.Date        `json:"day"`
+	InputTokens  int64              `json:"input_tokens"`
+	OutputTokens int64              `json:"output_tokens"`
+	TotalTokens  int64              `json:"total_tokens"`
+	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlRunTokenUsageFinalized struct {
+	RunID       string             `json:"run_id"`
+	UserID      string             `json:"user_id"`
+	Day         pgtype.Date        `json:"day"`
+	FinalizedAt pgtype.Timestamptz `json:"finalized_at"`
+}
+
 type ControlWorkerHeartbeat struct {
 	WorkerID        string             `json:"worker_id"`
 	WorkerKind      string             `json:"worker_kind"`

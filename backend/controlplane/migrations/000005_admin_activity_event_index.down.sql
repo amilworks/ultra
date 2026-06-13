@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS control_run_events_admin_activity_idx;

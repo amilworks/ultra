@@ -16,7 +16,12 @@ type schemaExecer interface {
 }
 
 func ApplyPostgresSchema(ctx context.Context, db schemaExecer) error {
-	if _, err := db.Exec(ctx, postgresControlSchemaSQL); err != nil {
+	// The whole schema runs as one implicit transaction. Concurrent appliers
+	// (rolling deploys running `migrate` from several replicas, or parallel
+	// test packages) would otherwise interleave DDL lock acquisition and can
+	// deadlock; the advisory lock serializes them.
+	script := "SELECT pg_advisory_xact_lock(hashtext('ultra_control_schema_apply')::bigint);\n" + postgresControlSchemaSQL
+	if _, err := db.Exec(ctx, script); err != nil {
 		return fmt.Errorf("apply postgres schema: %w", err)
 	}
 	return nil

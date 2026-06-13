@@ -2,14 +2,19 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/workos/workos-go/v8"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -17,6 +22,13 @@ const (
 	workOSStateCookieName     = "ultra_workos_oauth_state"
 	workOSStateCookieMaxAge   = 10 * time.Minute
 	workOSSessionCookieMaxAge = 7 * 24 * time.Hour
+	// WorkOS requires session cookie passwords to be at least 32 characters.
+	workOSCookiePasswordMinLength = 32
+	// How long a refreshed session stays addressable by the stale cookie that
+	// triggered the refresh, so requests already in flight with the old cookie
+	// do not retry the single-use refresh token.
+	workOSRefreshGraceWindow = time.Minute
+	workOSRefreshTimeout     = 30 * time.Second
 )
 
 type WorkOSAuthConfig struct {
@@ -40,6 +52,18 @@ type WorkOSAuth struct {
 	cookiePassword       string
 	cookieSecure         bool
 	baseURL              string
+
+	// WorkOS rotates refresh tokens on every use, so concurrent requests
+	// holding the same stale session cookie must share one refresh call
+	// instead of racing the single-use token.
+	refreshGroup    singleflight.Group
+	refreshMu       sync.Mutex
+	recentRefreshes map[string]workOSRecentRefresh
+}
+
+type workOSRecentRefresh struct {
+	sealedSession string
+	expiresAt     time.Time
 }
 
 type workOSOAuthState struct {
@@ -89,6 +113,9 @@ func NewWorkOSAuth(cfg WorkOSAuthConfig) (*WorkOSAuth, error) {
 	if cookiePassword == "" {
 		return nil, errors.New("WorkOS cookie password is required")
 	}
+	if len(cookiePassword) < workOSCookiePasswordMinLength {
+		return nil, fmt.Errorf("WorkOS cookie password must be at least %d characters; generate one with `openssl rand -hex 32`", workOSCookiePasswordMinLength)
+	}
 	options := []workos.ClientOption{
 		workos.WithClientID(clientID),
 		workos.WithAppInfo("bisque-ultra-control-plane", "dev", "https://github.com/amilworks/bisque-ultra"),
@@ -106,6 +133,7 @@ func NewWorkOSAuth(cfg WorkOSAuthConfig) (*WorkOSAuth, error) {
 		cookiePassword:       cookiePassword,
 		cookieSecure:         cfg.CookieSecure,
 		baseURL:              baseURL,
+		recentRefreshes:      make(map[string]workOSRecentRefresh),
 	}, nil
 }
 
@@ -141,29 +169,42 @@ func (auth *WorkOSAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCallback finishes the AuthKit redirect. It runs as a top-level
+// browser navigation, so every failure redirects back into the app with an
+// auth_error message instead of rendering a JSON dead end.
 func (auth *WorkOSAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
-	code := strings.TrimSpace(r.URL.Query().Get("code"))
-	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	query := r.URL.Query()
+	if errParam := strings.TrimSpace(query.Get("error")); errParam != "" {
+		slog.Warn("workos callback returned error", "error", errParam, "description", query.Get("error_description"))
+		message := "WorkOS could not complete sign-in. Please try again."
+		if errParam == "access_denied" {
+			message = "Sign-in was cancelled. Please try again."
+		}
+		auth.redirectCallbackError(w, r, message)
+		return
+	}
+	code := strings.TrimSpace(query.Get("code"))
+	state := strings.TrimSpace(query.Get("state"))
 	if code == "" || state == "" {
-		writeError(w, http.StatusBadRequest, errors.New("missing WorkOS authorization code or state"))
+		auth.redirectCallbackError(w, r, "The sign-in response was incomplete. Please try again.")
 		return
 	}
 	stateCookie, err := r.Cookie(workOSStateCookieName)
 	if err != nil || strings.TrimSpace(stateCookie.Value) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("missing WorkOS state cookie"))
+		auth.redirectCallbackError(w, r, "Your sign-in attempt expired. Please try again.")
 		return
 	}
 	expected, err := workos.Unseal[workOSOAuthState](stateCookie.Value, auth.cookiePassword)
 	if err != nil || expected.State == "" || expected.CodeVerifier == "" {
-		writeError(w, http.StatusBadRequest, errors.New("invalid WorkOS state cookie"))
+		auth.redirectCallbackError(w, r, "Your sign-in attempt could not be verified. Please try again.")
 		return
 	}
 	if time.Since(time.Unix(expected.CreatedAt, 0)) > workOSStateCookieMaxAge {
-		writeError(w, http.StatusBadRequest, errors.New("expired WorkOS state cookie"))
+		auth.redirectCallbackError(w, r, "Your sign-in attempt expired. Please try again.")
 		return
 	}
 	if state != expected.State {
-		writeError(w, http.StatusBadRequest, errors.New("invalid WorkOS OAuth state"))
+		auth.redirectCallbackError(w, r, "Your sign-in attempt could not be verified. Please try again.")
 		return
 	}
 	authResponse, err := auth.client.AuthKitPKCECodeExchange(r.Context(), workos.AuthKitPKCECodeExchangeParams{
@@ -171,7 +212,8 @@ func (auth *WorkOSAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		CodeVerifier: expected.CodeVerifier,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("WorkOS code exchange failed: %w", err))
+		slog.Error("workos code exchange failed", "error", err)
+		auth.redirectCallbackError(w, r, "WorkOS could not complete sign-in. Please try again.")
 		return
 	}
 	user := workOSUserSnapshot{}
@@ -189,7 +231,8 @@ func (auth *WorkOSAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		auth.cookiePassword,
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		slog.Error("workos session seal failed", "error", err)
+		auth.redirectCallbackError(w, r, "Sign-in could not be completed. Please try again.")
 		return
 	}
 	auth.setCookie(w, workOSSessionCookieName, sealedSession, int(workOSSessionCookieMaxAge.Seconds()))
@@ -197,22 +240,20 @@ func (auth *WorkOSAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, auth.postLoginRedirectURI, http.StatusFound)
 }
 
-func (auth *WorkOSAuth) handleSession(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, auth.sessionResponseForRequest(w, r))
+func (auth *WorkOSAuth) redirectCallbackError(w http.ResponseWriter, r *http.Request, message string) {
+	auth.clearCookie(w, workOSStateCookieName)
+	http.Redirect(w, r, appendAuthErrorParam(auth.postLoginRedirectURI, message), http.StatusFound)
 }
 
-func (auth *WorkOSAuth) sessionResponseForRequest(w http.ResponseWriter, r *http.Request) map[string]any {
-	snapshot, authenticated := auth.authenticateRequest(w, r)
-	if !authenticated {
-		return map[string]any{
-			"authenticated": false,
-			"user":          nil,
-			"mode":          "workos",
-			"provider":      "workos",
-			"bisque_linked": false,
-		}
+func appendAuthErrorParam(target string, message string) string {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed.String() == "" {
+		parsed = &url.URL{Path: "/"}
 	}
-	return snapshot.sessionResponse()
+	query := parsed.Query()
+	query.Set("auth_error", message)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func (auth *WorkOSAuth) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -250,12 +291,17 @@ func (auth *WorkOSAuth) authenticateRequest(w http.ResponseWriter, r *http.Reque
 		return workOSSessionSnapshot{}, false
 	}
 	if result.NeedsRefresh {
-		refreshed, refreshErr := session.Refresh(r.Context())
-		if refreshErr != nil || !refreshed.Authenticated || strings.TrimSpace(refreshed.SealedSession) == "" {
+		sealedSession, refreshErr := auth.refreshSealedSession(cookie.Value)
+		if refreshErr != nil {
+			if errors.Is(refreshErr, errWorkOSRefreshRevoked) {
+				// The session is permanently dead; drop the cookie so later
+				// requests stop retrying the revoked token against WorkOS.
+				auth.clearCookie(w, workOSSessionCookieName)
+			}
 			return workOSSessionSnapshot{}, false
 		}
-		auth.setCookie(w, workOSSessionCookieName, refreshed.SealedSession, int(workOSSessionCookieMaxAge.Seconds()))
-		session = workos.NewSession(auth.client, refreshed.SealedSession, auth.cookiePassword)
+		auth.setCookie(w, workOSSessionCookieName, sealedSession, int(workOSSessionCookieMaxAge.Seconds()))
+		session = workos.NewSession(auth.client, sealedSession, auth.cookiePassword)
 		result, err = session.Authenticate()
 		if err != nil {
 			return workOSSessionSnapshot{}, false
@@ -265,6 +311,63 @@ func (auth *WorkOSAuth) authenticateRequest(w http.ResponseWriter, r *http.Reque
 		return workOSSessionSnapshot{}, false
 	}
 	return snapshotFromWorkOSResult(result), true
+}
+
+// errWorkOSRefreshRevoked marks a refresh rejected with invalid_grant: the
+// token can never succeed again, unlike transient WorkOS or network failures.
+var errWorkOSRefreshRevoked = errors.New("WorkOS refresh token revoked")
+
+// refreshSealedSession exchanges the refresh token inside a stale session
+// cookie for a freshly sealed session. All concurrent requests carrying the
+// same stale cookie share a single WorkOS call, and the result is kept for a
+// short grace window so requests that were already in flight with the old
+// cookie value reuse it instead of burning the rotated refresh token.
+func (auth *WorkOSAuth) refreshSealedSession(staleCookie string) (string, error) {
+	digest := sha256.Sum256([]byte(staleCookie))
+	key := hex.EncodeToString(digest[:])
+
+	auth.refreshMu.Lock()
+	if recent, ok := auth.recentRefreshes[key]; ok && time.Now().Before(recent.expiresAt) {
+		auth.refreshMu.Unlock()
+		return recent.sealedSession, nil
+	}
+	auth.refreshMu.Unlock()
+
+	sealed, err, _ := auth.refreshGroup.Do(key, func() (any, error) {
+		// Deliberately detached from the request context: the refresh outcome
+		// is shared by every request waiting on this key, so the first
+		// caller's cancellation must not fail the others.
+		ctx, cancel := context.WithTimeout(context.Background(), workOSRefreshTimeout)
+		defer cancel()
+		refreshed, err := workos.NewSession(auth.client, staleCookie, auth.cookiePassword).Refresh(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !refreshed.Authenticated || strings.TrimSpace(refreshed.SealedSession) == "" {
+			if refreshed.Reason == "refresh_token_revoked" {
+				return "", errWorkOSRefreshRevoked
+			}
+			return "", fmt.Errorf("WorkOS session refresh rejected: %s", firstNonEmpty(refreshed.Reason, "unknown"))
+		}
+		auth.refreshMu.Lock()
+		now := time.Now()
+		for cachedKey, cached := range auth.recentRefreshes {
+			if now.After(cached.expiresAt) {
+				delete(auth.recentRefreshes, cachedKey)
+			}
+		}
+		auth.recentRefreshes[key] = workOSRecentRefresh{
+			sealedSession: refreshed.SealedSession,
+			expiresAt:     now.Add(workOSRefreshGraceWindow),
+		}
+		auth.refreshMu.Unlock()
+		return refreshed.SealedSession, nil
+	})
+	if err != nil {
+		slog.Warn("workos session refresh failed", "error", err)
+		return "", err
+	}
+	return sealed.(string), nil
 }
 
 func (auth *WorkOSAuth) principalFromRequest(r *http.Request) (requestPrincipal, bool) {
@@ -283,20 +386,6 @@ func (auth *WorkOSAuth) principalFromRequest(r *http.Request) (requestPrincipal,
 		return requestPrincipal{}, false
 	}
 	return snapshotFromWorkOSResult(result).Principal, true
-}
-
-func (auth *WorkOSAuth) requireAuth(next http.Handler) http.Handler {
-	if !auth.Enabled() {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		snapshot, authenticated := auth.authenticateRequest(w, r)
-		if !authenticated {
-			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), workOSPrincipalContextKey{}, snapshot)))
-	})
 }
 
 func (snapshot workOSSessionSnapshot) sessionResponse() map[string]any {
@@ -400,18 +489,4 @@ func (auth *WorkOSAuth) clearCookie(w http.ResponseWriter, name string) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
-}
-
-func safeRedirectPath(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "/"
-	}
-	if parsed, err := url.Parse(value); err == nil && parsed.IsAbs() {
-		return value
-	}
-	if strings.HasPrefix(value, "/") {
-		return value
-	}
-	return "/"
 }

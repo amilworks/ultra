@@ -17,6 +17,7 @@ import (
 type Store interface {
 	CreateThread(context.Context, domain.CreateThreadInput) (domain.ThreadRecord, error)
 	UpdateThreadForUser(context.Context, domain.UpdateThreadInput) (domain.ThreadRecord, error)
+	SoftDeleteThreadForUser(context.Context, string, string, time.Time) (domain.ThreadRecord, error)
 	ApplyGeneratedThreadTitle(context.Context, domain.ApplyGeneratedThreadTitleInput) (domain.ThreadRecord, error)
 	GetThread(context.Context, string) (domain.ThreadRecord, error)
 	GetThreadForUser(context.Context, string, string) (domain.ThreadRecord, error)
@@ -33,6 +34,9 @@ type Store interface {
 	ListRunsForUser(context.Context, string, string, string, int, int) ([]domain.RunRecord, error)
 	UpdateRunStatus(context.Context, string, domain.RunStatus, string, string) (domain.RunRecord, error)
 	CompleteRun(context.Context, domain.CompleteRunInput) (domain.RunRecord, error)
+	RecordUserTokenUsage(context.Context, domain.RecordUserTokenUsageInput) error
+	RecordRunTokenUsage(context.Context, domain.RecordRunTokenUsageInput) (domain.RunTokenUsageRecord, bool, error)
+	FinalizeRunTokenUsage(context.Context, domain.FinalizeRunTokenUsageInput) (domain.RunTokenUsageSummary, bool, error)
 	GetRunLease(context.Context, string) (domain.RunLeaseRecord, bool, error)
 	AcquireRunLease(context.Context, domain.AcquireRunLeaseInput) (domain.RunLeaseRecord, error)
 	RenewRunLease(context.Context, domain.RenewRunLeaseInput) (domain.RunLeaseRecord, error)
@@ -55,11 +59,32 @@ type runDispatchMarker interface {
 	MarkRunDispatched(context.Context, string, time.Time) (domain.RunRecord, error)
 }
 
+// activeRunEventAppender is the single-statement ingest fast path: dedupe by
+// event ID (returning the stored record), append when the run is live, or
+// drop when it is missing or terminal. Stores that do not implement it fall
+// back to the read-then-append legacy path.
+type activeRunEventAppender interface {
+	AppendRunEventIfRunActive(context.Context, domain.AppendRunEventInput) (domain.RunEventRecord, store.RunEventAppendOutcome, error)
+}
+
+type workerHeartbeatReader interface {
+	GetWorkerHeartbeat(context.Context, string) (domain.WorkerHeartbeatRecord, bool, error)
+}
+
+// heartbeatStatusWriteInterval bounds how often a run.heartbeat event is
+// allowed to write run status to the store. Heartbeats only reassert
+// "running"; worker liveness is tracked by leases, so coalescing these
+// writes loses nothing except sub-15s freshness of runs.updated_at.
+const heartbeatStatusWriteInterval = 15 * time.Second
+
 type Service struct {
 	store            Store
 	bus              eventbus.Bus
 	idempotencyLocks [64]sync.Mutex
 	eventIDLocks     [128]sync.Mutex
+
+	heartbeatMu           sync.Mutex
+	heartbeatStatusWrites map[string]time.Time
 }
 
 type CreateThreadRequest struct {
@@ -110,12 +135,21 @@ type RecoverExpiredRunLeasesRequest struct {
 	// lease before its job is considered lost and re-dispatched. Zero applies
 	// the default.
 	RedispatchQueuedAfter time.Duration
+	// WorkerHeartbeatStaleAfter bounds how long an unexpired run lease may go
+	// without both lease renewal and owner heartbeat before recovery treats the
+	// owner as gone. Zero applies the default.
+	WorkerHeartbeatStaleAfter time.Duration
 }
 
 // defaultRedispatchQueuedAfter is how long a queued run may wait for a worker
 // claim before recovery re-publishes its job. It must comfortably exceed the
 // worst-case queue wait of a healthy worker pool to avoid duplicate dispatch.
 const defaultRedispatchQueuedAfter = 2 * time.Minute
+
+// defaultWorkerHeartbeatStaleAfter is intentionally longer than the Deep
+// Agents busy heartbeat/lease-renewal cadence, but much shorter than the
+// control-plane lease TTL so crashed workers do not pin runs for ten minutes.
+const defaultWorkerHeartbeatStaleAfter = 2 * time.Minute
 
 type RecoverExpiredRunLeasesResult struct {
 	Checked      int
@@ -140,7 +174,7 @@ type ReleaseRunLeaseRequest struct {
 }
 
 func NewService(store Store, bus eventbus.Bus) *Service {
-	return &Service{store: store, bus: bus}
+	return &Service{store: store, bus: bus, heartbeatStatusWrites: map[string]time.Time{}}
 }
 
 func (s *Service) CreateThread(ctx context.Context, req CreateThreadRequest) (domain.ThreadRecord, error) {
@@ -494,10 +528,9 @@ func (s *Service) RequeueRun(ctx context.Context, req RequeueRunRequest) (domain
 		return run, fmt.Errorf("clear requeued run lease: %w", err)
 	}
 	run = s.markRunJobDispatched(ctx, run)
-	payload := domain.JSONMap{
-		"reason":      reason,
-		"dispatch_id": dispatchID,
-	}
+	payload := cloneMap(req.Metadata)
+	payload["reason"] = reason
+	payload["dispatch_id"] = dispatchID
 	if leaseEvicted {
 		payload["evicted_lease_worker_id"] = evictedLease.WorkerID
 		payload["evicted_lease_expires_at"] = evictedLease.LeaseExpiresAt.Format(time.RFC3339Nano)
@@ -531,7 +564,7 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 	if reason == "" {
 		reason = "automatic expired run lease recovery"
 	}
-	runs, err := s.store.ListRuns(ctx, "", "", limit, 0)
+	runs, err := s.listRecoverableRuns(ctx, limit)
 	if err != nil {
 		return RecoverExpiredRunLeasesResult{}, err
 	}
@@ -539,6 +572,11 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 	if redispatchQueuedAfter <= 0 {
 		redispatchQueuedAfter = defaultRedispatchQueuedAfter
 	}
+	workerHeartbeatStaleAfter := req.WorkerHeartbeatStaleAfter
+	if workerHeartbeatStaleAfter <= 0 {
+		workerHeartbeatStaleAfter = defaultWorkerHeartbeatStaleAfter
+	}
+	heartbeatReader, canReadWorkerHeartbeats := s.store.(workerHeartbeatReader)
 	result := RecoverExpiredRunLeasesResult{Checked: len(runs)}
 	for _, run := range runs {
 		if !isRecoverableRunStatus(run.Status) {
@@ -574,6 +612,39 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 			continue
 		}
 		if lease.LeaseExpiresAt.After(now) {
+			if !canReadWorkerHeartbeats {
+				continue
+			}
+			heartbeat, stale, err := staleRunLeaseOwnerHeartbeat(
+				ctx,
+				heartbeatReader,
+				lease,
+				now,
+				workerHeartbeatStaleAfter,
+			)
+			if err != nil {
+				return result, err
+			}
+			if !stale {
+				continue
+			}
+			requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
+				RunID:  run.RunID,
+				Reason: reason,
+				Metadata: domain.JSONMap{
+					"recovery":                 "stale_run_lease_worker_heartbeat",
+					"lease_worker_id":          lease.WorkerID,
+					"lease_expires_at":         lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+					"lease_updated_at":         lease.UpdatedAt.UTC().Format(time.RFC3339Nano),
+					"worker_last_heartbeat_at": heartbeat.LastHeartbeatAt.UTC().Format(time.RFC3339Nano),
+					"worker_status":            heartbeat.Status,
+					"worker_current_run_id":    heartbeat.CurrentRunID,
+				},
+			})
+			if err != nil {
+				return result, err
+			}
+			result.RequeuedRuns = append(result.RequeuedRuns, requeued)
 			continue
 		}
 		requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
@@ -591,6 +662,49 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 		result.RequeuedRuns = append(result.RequeuedRuns, requeued)
 	}
 	return result, nil
+}
+
+func (s *Service) listRecoverableRuns(ctx context.Context, limit int) ([]domain.RunRecord, error) {
+	statuses := []domain.RunStatus{
+		domain.RunStatusQueued,
+		domain.RunStatusRunning,
+		domain.RunStatusWaitingForTask,
+	}
+	runs := make([]domain.RunRecord, 0, len(statuses)*limit)
+	for _, status := range statuses {
+		batch, err := s.store.ListRuns(ctx, "", string(status), limit, 0)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, batch...)
+	}
+	return runs, nil
+}
+
+func staleRunLeaseOwnerHeartbeat(
+	ctx context.Context,
+	reader workerHeartbeatReader,
+	lease domain.RunLeaseRecord,
+	now time.Time,
+	staleAfter time.Duration,
+) (domain.WorkerHeartbeatRecord, bool, error) {
+	if staleAfter <= 0 {
+		staleAfter = defaultWorkerHeartbeatStaleAfter
+	}
+	if now.Sub(lease.UpdatedAt) < staleAfter {
+		return domain.WorkerHeartbeatRecord{}, false, nil
+	}
+	heartbeat, found, err := reader.GetWorkerHeartbeat(ctx, lease.WorkerID)
+	if err != nil {
+		return domain.WorkerHeartbeatRecord{}, false, err
+	}
+	if !found {
+		return domain.WorkerHeartbeatRecord{}, false, nil
+	}
+	if now.Sub(heartbeat.LastHeartbeatAt) < staleAfter {
+		return heartbeat, false, nil
+	}
+	return heartbeat, true, nil
 }
 
 // runJobDispatchedAt extracts the last time a job for this run was handed to
@@ -679,6 +793,61 @@ func (s *Service) ReleaseRunLease(ctx context.Context, req ReleaseRunLeaseReques
 }
 
 func (s *Service) IngestRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	if appender, ok := s.store.(activeRunEventAppender); ok {
+		return s.ingestRunEventFast(ctx, appender, input)
+	}
+	return s.ingestRunEventLegacy(ctx, input)
+}
+
+// ingestRunEventFast is one store round trip on the happy path: the append
+// statement itself deduplicates by event ID (returning the stored record so
+// a mutated redelivery can never win), enforces "run exists and is live"
+// (dropping late events), and assigns the sequence. Duplicates replay side
+// effects and fanout, because a crash between append and side effects
+// redelivers the message.
+func (s *Service) ingestRunEventFast(ctx context.Context, appender activeRunEventAppender, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	if input.EventID != "" {
+		lock := s.eventIDLock(input.EventID)
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	event, outcome, err := appender.AppendRunEventIfRunActive(ctx, input)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) && input.EventID != "" {
+			// Lost a cross-replica race on the event-id primary key: the
+			// event now exists, so degrade to the duplicate path.
+			existing, found, getErr := s.store.GetRunEvent(ctx, input.EventID)
+			if getErr != nil {
+				return domain.RunEventRecord{}, getErr
+			}
+			if found {
+				event, outcome = existing, store.RunEventAppendOutcomeDuplicate
+			} else {
+				return domain.RunEventRecord{}, err
+			}
+		} else {
+			return domain.RunEventRecord{}, err
+		}
+	}
+	switch outcome {
+	case store.RunEventAppendOutcomeAppended:
+		if err := s.applyRunEventSideEffects(ctx, input); err != nil {
+			return domain.RunEventRecord{}, err
+		}
+	case store.RunEventAppendOutcomeDuplicate:
+		if err := s.applyRunEventSideEffects(ctx, appendInputFromEventRecord(event)); err != nil {
+			return domain.RunEventRecord{}, err
+		}
+	default:
+		return droppedRunEvent(input), nil
+	}
+	if err := s.bus.PublishRunEvent(ctx, event); err != nil {
+		return domain.RunEventRecord{}, err
+	}
+	return event, nil
+}
+
+func (s *Service) ingestRunEventLegacy(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
 	run, err := s.store.GetRun(ctx, input.RunID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -747,7 +916,21 @@ func (s *Service) applyRunEventSideEffects(ctx context.Context, input domain.App
 			return err
 		}
 	case "run.heartbeat":
+		if !s.shouldWriteHeartbeatStatus(input.RunID) {
+			return nil
+		}
 		if _, err := s.store.UpdateRunStatus(ctx, input.RunID, domain.RunStatusRunning, "", ""); err != nil {
+			return err
+		}
+	case "run.token_usage":
+		run, err := s.store.GetRun(ctx, input.RunID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := s.recordRunTokenUsageDelta(ctx, run, input, false); err != nil {
 			return err
 		}
 	case "run.completed":
@@ -755,10 +938,14 @@ func (s *Service) applyRunEventSideEffects(ctx context.Context, input domain.App
 		if responseText == "" {
 			responseText = input.Message
 		}
-		if _, err := s.store.CompleteRun(ctx, domain.CompleteRunInput{
+		completedRun, err := s.store.CompleteRun(ctx, domain.CompleteRunInput{
 			RunID:        input.RunID,
 			ResponseText: responseText,
-		}); err != nil {
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.ensureTerminalRunTokenUsageFinalized(ctx, completedRun, input); err != nil {
 			return err
 		}
 		conversationTitle := stringFromPayload(input.Payload, "conversation_title")
@@ -794,6 +981,105 @@ func (s *Service) applyRunEventSideEffects(ctx context.Context, input domain.App
 		}
 	}
 	return nil
+}
+
+// shouldWriteHeartbeatStatus rate-limits heartbeat-driven status writes per
+// run. The first heartbeat for a run always writes (it may transition the
+// run to running); later ones write at most once per interval.
+func (s *Service) shouldWriteHeartbeatStatus(runID string) bool {
+	now := domain.Now()
+	s.heartbeatMu.Lock()
+	defer s.heartbeatMu.Unlock()
+	if last, ok := s.heartbeatStatusWrites[runID]; ok && now.Sub(last) < heartbeatStatusWriteInterval {
+		return false
+	}
+	if len(s.heartbeatStatusWrites) > 4096 {
+		cutoff := now.Add(-4 * heartbeatStatusWriteInterval)
+		for staleRunID, last := range s.heartbeatStatusWrites {
+			if last.Before(cutoff) {
+				delete(s.heartbeatStatusWrites, staleRunID)
+			}
+		}
+	}
+	s.heartbeatStatusWrites[runID] = now
+	return true
+}
+
+func (s *Service) recordRunTokenUsageDelta(ctx context.Context, run domain.RunRecord, input domain.AppendRunEventInput, nested bool) error {
+	userID := strings.TrimSpace(run.UserID)
+	if userID == "" {
+		return nil
+	}
+	usage := input.Payload
+	if nested {
+		usage = jsonMapFromPayload(input.Payload, "usage")
+	}
+	if len(usage) == 0 {
+		return nil
+	}
+	usageEventID := stringFromPayload(usage, "usage_event_id")
+	if usageEventID == "" {
+		usageEventID = stringFromPayload(input.Payload, "usage_event_id")
+	}
+	if usageEventID == "" {
+		usageEventID = input.EventID
+	}
+	if usageEventID == "" {
+		usageEventID = input.RunID + ":terminal_usage"
+	}
+	inputTokens := int64FromPayload(usage, "input_tokens")
+	outputTokens := int64FromPayload(usage, "output_tokens")
+	totalTokens := int64FromPayload(usage, "total_tokens")
+	if totalTokens <= 0 {
+		totalTokens = inputTokens + outputTokens
+	}
+	if totalTokens <= 0 && inputTokens <= 0 && outputTokens <= 0 {
+		return nil
+	}
+	day := input.TS
+	if day.IsZero() {
+		day = domain.Now()
+	}
+	if nested && run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+		day = *run.CompletedAt
+	}
+	_, _, err := s.store.RecordRunTokenUsage(ctx, domain.RecordRunTokenUsageInput{
+		RunID:        run.RunID,
+		UsageEventID: usageEventID,
+		UserID:       userID,
+		Model:        stringFromPayload(usage, "model"),
+		Day:          day,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  totalTokens,
+		OccurredAt:   domain.Now(),
+	})
+	return err
+}
+
+func (s *Service) ensureTerminalRunTokenUsageFinalized(ctx context.Context, run domain.RunRecord, input domain.AppendRunEventInput) error {
+	completedAt := domain.Now()
+	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+		completedAt = *run.CompletedAt
+	}
+	summary, _, err := s.store.FinalizeRunTokenUsage(ctx, domain.FinalizeRunTokenUsageInput{
+		RunID:       input.RunID,
+		CompletedAt: completedAt,
+	})
+	if err != nil {
+		return err
+	}
+	if summary.TotalTokens > 0 || summary.InputTokens > 0 || summary.OutputTokens > 0 {
+		return nil
+	}
+	if err := s.recordRunTokenUsageDelta(ctx, run, input, true); err != nil {
+		return err
+	}
+	_, _, err = s.store.FinalizeRunTokenUsage(ctx, domain.FinalizeRunTokenUsageInput{
+		RunID:       input.RunID,
+		CompletedAt: completedAt,
+	})
+	return err
 }
 
 func (s *Service) reconcileStoredTerminalEvent(ctx context.Context, run domain.RunRecord) (domain.RunRecord, error) {

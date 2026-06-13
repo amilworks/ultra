@@ -65,6 +65,10 @@ func normalizedThreadTitle(value string) string {
 	return strings.Join(strings.Fields(strings.Trim(value, " \t\r\n\"'`")), " ")
 }
 
+func threadVisibleForUserRead(thread domain.ThreadRecord) bool {
+	return thread.Status != domain.ThreadStatusDeleted
+}
+
 func threadTitleStateSource(metadata domain.JSONMap) string {
 	state, ok := metadata[threadTitleStateKey].(domain.JSONMap)
 	if !ok {

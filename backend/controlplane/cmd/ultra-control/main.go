@@ -48,13 +48,7 @@ func main() {
 		}
 	}
 
-	server := &http.Server{
-		Addr:         cfg.HTTPAddr,
-		Handler:      application.Handler,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		IdleTimeout:  cfg.IdleTimeout,
-	}
+	server := newControlHTTPServer(cfg, application.Handler)
 
 	errs := make(chan error, 1)
 	if application.JobSource != nil && application.Worker != nil {
@@ -105,6 +99,17 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("shutdown failed", "error", err)
 		os.Exit(1)
+	}
+}
+
+func newControlHTTPServer(cfg config.Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 }
 

@@ -322,6 +322,379 @@ RETURNING user_id, COALESCE(email, ''), COALESCE(display_name, ''), role, status
 	return scanUserAccount(row)
 }
 
+func (s *PostgresStore) UpdateUserProfile(ctx context.Context, input domain.UpdateUserProfileInput) (domain.UserAccount, error) {
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		return domain.UserAccount{}, ErrNotFound
+	}
+	profileJSON, err := json.Marshal(input.Profile)
+	if err != nil {
+		return domain.UserAccount{}, err
+	}
+	displayName := strings.TrimSpace(input.Profile.DisplayName)
+	row := s.pool.QueryRow(ctx, `
+UPDATE control_users
+SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{profile}', $2::jsonb, true),
+    display_name = CASE WHEN $3 <> '' THEN $3 ELSE display_name END,
+    updated_at = $4
+WHERE user_id = $1
+RETURNING user_id, COALESCE(email, ''), COALESCE(display_name, ''), role, status, COALESCE(org_id, ''), created_at, updated_at, metadata`,
+		userID,
+		profileJSON,
+		displayName,
+		domain.Now(),
+	)
+	return scanUserAccount(row)
+}
+
+func (s *PostgresStore) RecordUserTokenUsage(ctx context.Context, input domain.RecordUserTokenUsageInput) error {
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		return nil
+	}
+	now := input.OccurredAt
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	day := tokenUsageBucketDay(input.Day, now)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Increment the daily bucket and read back its new running total so the
+	// lifetime row can track the peak single-day spend correctly.
+	var newDailyTotal int64
+	if err := tx.QueryRow(ctx, `
+INSERT INTO control_user_token_usage_daily (user_id, day, input_tokens, output_tokens, total_tokens, run_count, updated_at)
+VALUES ($1, $2, $3, $4, $5, 1, $6)
+ON CONFLICT (user_id, day) DO UPDATE SET
+  input_tokens = control_user_token_usage_daily.input_tokens + EXCLUDED.input_tokens,
+  output_tokens = control_user_token_usage_daily.output_tokens + EXCLUDED.output_tokens,
+  total_tokens = control_user_token_usage_daily.total_tokens + EXCLUDED.total_tokens,
+  run_count = control_user_token_usage_daily.run_count + 1,
+  updated_at = EXCLUDED.updated_at
+RETURNING total_tokens`,
+		userID, day, input.InputTokens, input.OutputTokens, input.TotalTokens, now,
+	).Scan(&newDailyTotal); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO control_user_token_usage_lifetime (user_id, input_tokens, output_tokens, total_tokens, peak_daily_total, last_active_day, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (user_id) DO UPDATE SET
+  input_tokens = control_user_token_usage_lifetime.input_tokens + EXCLUDED.input_tokens,
+  output_tokens = control_user_token_usage_lifetime.output_tokens + EXCLUDED.output_tokens,
+  total_tokens = control_user_token_usage_lifetime.total_tokens + EXCLUDED.total_tokens,
+  peak_daily_total = GREATEST(control_user_token_usage_lifetime.peak_daily_total, EXCLUDED.peak_daily_total),
+  last_active_day = EXCLUDED.last_active_day,
+  updated_at = EXCLUDED.updated_at`,
+		userID, input.InputTokens, input.OutputTokens, input.TotalTokens, newDailyTotal, day, now,
+	); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) RecordRunTokenUsage(ctx context.Context, input domain.RecordRunTokenUsageInput) (domain.RunTokenUsageRecord, bool, error) {
+	runID := strings.TrimSpace(input.RunID)
+	usageEventID := strings.TrimSpace(input.UsageEventID)
+	userID := strings.TrimSpace(input.UserID)
+	if runID == "" || usageEventID == "" || userID == "" {
+		return domain.RunTokenUsageRecord{}, false, nil
+	}
+	totalTokens := input.TotalTokens
+	if totalTokens <= 0 {
+		totalTokens = input.InputTokens + input.OutputTokens
+	}
+	if totalTokens <= 0 && input.InputTokens <= 0 && input.OutputTokens <= 0 {
+		return domain.RunTokenUsageRecord{}, false, nil
+	}
+	now := input.OccurredAt
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	day := tokenUsageBucketDay(input.Day, now)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	record, inserted, err := insertRunTokenUsageTx(ctx, tx, domain.RecordRunTokenUsageInput{
+		RunID:        runID,
+		UsageEventID: usageEventID,
+		UserID:       userID,
+		Model:        strings.TrimSpace(input.Model),
+		Day:          day,
+		InputTokens:  input.InputTokens,
+		OutputTokens: input.OutputTokens,
+		TotalTokens:  totalTokens,
+		OccurredAt:   now,
+	})
+	if err != nil {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	if !inserted {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.RunTokenUsageRecord{}, false, err
+		}
+		return record, false, nil
+	}
+	if _, err := incrementUserTokenUsageTx(ctx, tx, userID, day, input.InputTokens, input.OutputTokens, totalTokens, 0, now); err != nil {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func (s *PostgresStore) FinalizeRunTokenUsage(ctx context.Context, input domain.FinalizeRunTokenUsageInput) (domain.RunTokenUsageSummary, bool, error) {
+	runID := strings.TrimSpace(input.RunID)
+	if runID == "" {
+		return domain.RunTokenUsageSummary{}, false, nil
+	}
+	completedAt := input.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = domain.Now()
+	}
+	day := completedAt.UTC().Truncate(24 * time.Hour)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.RunTokenUsageSummary{}, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	summary := domain.RunTokenUsageSummary{RunID: runID, Day: day}
+	err = tx.QueryRow(ctx, `
+SELECT user_id,
+       COALESCE(MAX(NULLIF(model, '')), '') AS model,
+       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+       COALESCE(SUM(total_tokens), 0) AS total_tokens
+FROM control_run_token_usage
+WHERE run_id = $1
+GROUP BY user_id
+ORDER BY user_id
+LIMIT 1`, runID).Scan(
+		&summary.UserID,
+		&summary.Model,
+		&summary.InputTokens,
+		&summary.OutputTokens,
+		&summary.TotalTokens,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return summary, false, nil
+		}
+		return domain.RunTokenUsageSummary{}, false, err
+	}
+	if summary.UserID == "" || (summary.TotalTokens <= 0 && summary.InputTokens <= 0 && summary.OutputTokens <= 0) {
+		return summary, false, nil
+	}
+	tag, err := tx.Exec(ctx, `
+INSERT INTO control_run_token_usage_finalized (run_id, user_id, day, finalized_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (run_id) DO NOTHING`, runID, summary.UserID, day, timestamptz(completedAt))
+	if err != nil {
+		return domain.RunTokenUsageSummary{}, false, err
+	}
+	if tag.RowsAffected() == 0 {
+		summary.Finalized = true
+		if err := tx.Commit(ctx); err != nil {
+			return domain.RunTokenUsageSummary{}, false, err
+		}
+		return summary, false, nil
+	}
+	if _, err := incrementUserTokenUsageTx(ctx, tx, summary.UserID, day, 0, 0, 0, 1, completedAt); err != nil {
+		return domain.RunTokenUsageSummary{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.RunTokenUsageSummary{}, false, err
+	}
+	summary.Finalized = true
+	return summary, true, nil
+}
+
+func insertRunTokenUsageTx(ctx context.Context, tx pgx.Tx, input domain.RecordRunTokenUsageInput) (domain.RunTokenUsageRecord, bool, error) {
+	var record domain.RunTokenUsageRecord
+	err := tx.QueryRow(ctx, `
+INSERT INTO control_run_token_usage (run_id, usage_event_id, user_id, model, day, input_tokens, output_tokens, total_tokens, occurred_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (run_id, usage_event_id) DO NOTHING
+RETURNING run_id, usage_event_id, user_id, model, day, input_tokens, output_tokens, total_tokens, occurred_at, created_at`,
+		input.RunID,
+		input.UsageEventID,
+		input.UserID,
+		input.Model,
+		input.Day,
+		input.InputTokens,
+		input.OutputTokens,
+		input.TotalTokens,
+		timestamptz(input.OccurredAt),
+		timestamptz(input.OccurredAt),
+	).Scan(
+		&record.RunID,
+		&record.UsageEventID,
+		&record.UserID,
+		&record.Model,
+		&record.Day,
+		&record.InputTokens,
+		&record.OutputTokens,
+		&record.TotalTokens,
+		&record.OccurredAt,
+		&record.CreatedAt,
+	)
+	if err == nil {
+		return record, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT run_id, usage_event_id, user_id, model, day, input_tokens, output_tokens, total_tokens, occurred_at, created_at
+FROM control_run_token_usage
+WHERE run_id = $1 AND usage_event_id = $2`, input.RunID, input.UsageEventID).Scan(
+		&record.RunID,
+		&record.UsageEventID,
+		&record.UserID,
+		&record.Model,
+		&record.Day,
+		&record.InputTokens,
+		&record.OutputTokens,
+		&record.TotalTokens,
+		&record.OccurredAt,
+		&record.CreatedAt,
+	); err != nil {
+		return domain.RunTokenUsageRecord{}, false, err
+	}
+	return record, false, nil
+}
+
+func incrementUserTokenUsageTx(ctx context.Context, tx pgx.Tx, userID string, day time.Time, inputTokens int64, outputTokens int64, totalTokens int64, runCount int64, now time.Time) (int64, error) {
+	var newDailyTotal int64
+	if err := tx.QueryRow(ctx, `
+INSERT INTO control_user_token_usage_daily (user_id, day, input_tokens, output_tokens, total_tokens, run_count, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (user_id, day) DO UPDATE SET
+  input_tokens = control_user_token_usage_daily.input_tokens + EXCLUDED.input_tokens,
+  output_tokens = control_user_token_usage_daily.output_tokens + EXCLUDED.output_tokens,
+  total_tokens = control_user_token_usage_daily.total_tokens + EXCLUDED.total_tokens,
+  run_count = control_user_token_usage_daily.run_count + EXCLUDED.run_count,
+  updated_at = EXCLUDED.updated_at
+RETURNING total_tokens`,
+		userID, day, inputTokens, outputTokens, totalTokens, runCount, now,
+	).Scan(&newDailyTotal); err != nil {
+		return 0, err
+	}
+
+	_, err := tx.Exec(ctx, `
+INSERT INTO control_user_token_usage_lifetime (user_id, input_tokens, output_tokens, total_tokens, peak_daily_total, last_active_day, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (user_id) DO UPDATE SET
+  input_tokens = control_user_token_usage_lifetime.input_tokens + EXCLUDED.input_tokens,
+  output_tokens = control_user_token_usage_lifetime.output_tokens + EXCLUDED.output_tokens,
+  total_tokens = control_user_token_usage_lifetime.total_tokens + EXCLUDED.total_tokens,
+  peak_daily_total = GREATEST(control_user_token_usage_lifetime.peak_daily_total, EXCLUDED.peak_daily_total),
+  last_active_day = EXCLUDED.last_active_day,
+  updated_at = EXCLUDED.updated_at`,
+		userID, inputTokens, outputTokens, totalTokens, newDailyTotal, day, now,
+	)
+	return newDailyTotal, err
+}
+
+func (s *PostgresStore) GetUserTokenUsageStats(ctx context.Context, userID string) (domain.UserTokenUsageStats, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.UserTokenUsageStats{}, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+SELECT user_id, input_tokens, output_tokens, total_tokens, peak_daily_total, last_active_day, updated_at
+FROM control_user_token_usage_lifetime
+WHERE user_id = $1`, userID)
+	var stats domain.UserTokenUsageStats
+	var lastActive *time.Time
+	if err := row.Scan(
+		&stats.UserID,
+		&stats.InputTokens,
+		&stats.OutputTokens,
+		&stats.TotalTokens,
+		&stats.PeakDailyTotal,
+		&lastActive,
+		&stats.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.UserTokenUsageStats{UserID: userID}, nil
+		}
+		return domain.UserTokenUsageStats{}, err
+	}
+	stats.LastActiveDay = lastActive
+	return stats, nil
+}
+
+func (s *PostgresStore) ListUserTokenUsageDaily(ctx context.Context, userID string, since time.Time) ([]domain.UserTokenUsageDaily, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []domain.UserTokenUsageDaily{}, nil
+	}
+	sinceDay := since.UTC().Truncate(24 * time.Hour)
+	rows, err := s.pool.Query(ctx, `
+SELECT day, input_tokens, output_tokens, total_tokens, run_count
+FROM control_user_token_usage_daily
+WHERE user_id = $1 AND day >= $2
+ORDER BY day ASC`, userID, sinceDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	daily := []domain.UserTokenUsageDaily{}
+	for rows.Next() {
+		var record domain.UserTokenUsageDaily
+		if err := rows.Scan(
+			&record.Day,
+			&record.InputTokens,
+			&record.OutputTokens,
+			&record.TotalTokens,
+			&record.RunCount,
+		); err != nil {
+			return nil, err
+		}
+		daily = append(daily, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return daily, nil
+}
+
+func (s *PostgresStore) GetUserLongestRunSeconds(ctx context.Context, userID string) (int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, nil
+	}
+	var seconds float64
+	err := s.pool.QueryRow(ctx, `
+SELECT COALESCE(MAX(EXTRACT(EPOCH FROM (completed_at - started_at))), 0)
+FROM control_runs
+WHERE user_id = $1
+  AND started_at IS NOT NULL
+  AND completed_at IS NOT NULL
+  AND completed_at >= started_at`, userID).Scan(&seconds)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return int64(seconds), nil
+}
+
 func (s *PostgresStore) UpsertBisqueCredential(ctx context.Context, input domain.UpsertBisqueCredentialInput) (domain.BisqueCredentialRecord, error) {
 	now := domain.Now()
 	sessionID := strings.TrimSpace(input.SessionID)
@@ -502,6 +875,21 @@ LIMIT $1`, limit32(limit, 250))
 	return workers, nil
 }
 
+func (s *PostgresStore) GetWorkerHeartbeat(ctx context.Context, workerID string) (domain.WorkerHeartbeatRecord, bool, error) {
+	worker, err := scanWorkerHeartbeat(s.pool.QueryRow(ctx, `
+SELECT worker_id, worker_kind, status, COALESCE(current_run_id, ''), COALESCE(hostname, ''), COALESCE(version, ''),
+       started_at, last_heartbeat_at, updated_at, metadata
+FROM control_worker_heartbeats
+WHERE worker_id = $1`, strings.TrimSpace(workerID)))
+	if err == nil {
+		return worker, true, nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return domain.WorkerHeartbeatRecord{}, false, nil
+	}
+	return domain.WorkerHeartbeatRecord{}, false, err
+}
+
 func (s *PostgresStore) CreateThread(ctx context.Context, input domain.CreateThreadInput) (domain.ThreadRecord, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -561,7 +949,11 @@ func (s *PostgresStore) GetThreadForUser(ctx context.Context, threadID string, u
 	if err != nil {
 		return domain.ThreadRecord{}, mapPgError(err)
 	}
-	return threadFromRow(row), nil
+	thread := threadFromRow(row)
+	if !threadVisibleForUserRead(thread) {
+		return domain.ThreadRecord{}, ErrNotFound
+	}
+	return thread, nil
 }
 
 func (s *PostgresStore) UpdateThreadForUser(ctx context.Context, input domain.UpdateThreadInput) (domain.ThreadRecord, error) {
@@ -569,10 +961,11 @@ func (s *PostgresStore) UpdateThreadForUser(ctx context.Context, input domain.Up
 	row, err := s.pool.Query(ctx, `
 UPDATE control_threads
 SET title = COALESCE(NULLIF($3, ''), title),
-    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
-    updated_at = $5
-WHERE thread_id = $1 AND user_id = $2
-RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata`,
+	    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+	    updated_at = $5
+	WHERE thread_id = $1 AND user_id = $2
+	  AND status <> 'deleted'
+	RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata`,
 		input.ThreadID,
 		input.UserID,
 		normalizedThreadTitle(input.Title),
@@ -584,6 +977,34 @@ RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_
 	}
 	defer row.Close()
 	thread, err := pgx.CollectOneRow(row, pgx.RowToStructByName[sqlc.ControlThread])
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	return threadFromRow(thread), nil
+}
+
+func (s *PostgresStore) SoftDeleteThreadForUser(ctx context.Context, threadID string, userID string, deletedAt time.Time) (domain.ThreadRecord, error) {
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	rows, err := s.pool.Query(ctx, `
+UPDATE control_threads
+SET status = $3,
+    updated_at = $4
+WHERE thread_id = $1
+  AND user_id = $2
+  AND status <> $3
+RETURNING thread_id, user_id, title, status, created_at, updated_at, latest_run_id, checkpoint_id, summary, metadata`,
+		threadID,
+		userID,
+		string(domain.ThreadStatusDeleted),
+		timestamptz(deletedAt.UTC()),
+	)
+	if err != nil {
+		return domain.ThreadRecord{}, mapPgError(err)
+	}
+	defer rows.Close()
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[sqlc.ControlThread])
 	if err != nil {
 		return domain.ThreadRecord{}, mapPgError(err)
 	}
@@ -1280,21 +1701,149 @@ RETURNING run_id, worker_id, lease_token, lease_expires_at, created_at, updated_
 	return domain.RunLeaseRecord{}, false, nil
 }
 
-func (s *PostgresStore) AppendRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.RunEventRecord{}, err
-	}
-	defer tx.Rollback(ctx)
+// appendRunEventSQL inserts one event in a single statement. The CTE chain
+// allocates the next sequence from control_run_event_sequences: writers for
+// the same run serialize on that row's lock, and the outer INSERT reads the
+// CTE's output, so the allocation is ordered by data dependency. GREATEST
+// against the events table's actual MAX makes the allocator self-healing if
+// the counter is ever stale (missing backfill, mixed-version writers); the
+// UNIQUE(run_id, sequence_number) constraint remains the final guard.
+//
+// $1 event_id, $2 run_id, $3 thread_id, $4 event_kind, $5 event_type,
+// $6 node_name, $7 task_id, $8 checkpoint_id, $9 scope_id, $10 agent_role,
+// $11 level, $12 ts, $13 message, $14 payload
+const appendRunEventSQL = `
+WITH next AS (
+  INSERT INTO control_run_event_sequences AS s (run_id, last_sequence)
+  VALUES ($2, COALESCE((SELECT MAX(sequence_number) FROM control_run_events WHERE run_id = $2), 0) + 1)
+  ON CONFLICT (run_id) DO UPDATE
+    SET last_sequence = GREATEST(
+      s.last_sequence,
+      COALESCE((SELECT MAX(e.sequence_number) FROM control_run_events e WHERE e.run_id = s.run_id), 0)
+    ) + 1
+  RETURNING last_sequence
+)
+INSERT INTO control_run_events (
+  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+)
+SELECT $1, next.last_sequence, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+FROM next
+RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+`
 
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", input.RunID); err != nil {
-		return domain.RunEventRecord{}, err
-	}
-	q := s.queries.WithTx(tx)
-	sequence, err := q.NextRunEventSequence(ctx, input.RunID)
-	if err != nil {
+// appendRunEventIfRunActiveSQL is the single-statement ingest path. Outcome
+// is encoded in the returned row's "appended" column:
+//
+//   - (row, appended=true): the event was inserted; the run was live.
+//   - (row, appended=false): an event with this ID already exists; the stored
+//     row is returned untouched so a redelivered (possibly mutated) duplicate
+//     can never win over what was first ingested. Checked BEFORE the live-run
+//     gate: duplicates of a terminal event must still be reported as
+//     duplicates so their side effects and fanout can be replayed.
+//   - no row: no duplicate and the run is missing or terminal; the event is
+//     deliberately dropped and the sequence counter is left untouched.
+//
+// A concurrent insert of the same event ID on another replica can still
+// surface as a primary-key ErrConflict; callers handle that by re-reading.
+const appendRunEventIfRunActiveSQL = `
+WITH live_run AS (
+  SELECT run_id FROM control_runs
+  WHERE run_id = $2 AND status NOT IN ('succeeded', 'failed', 'canceled')
+    AND NOT EXISTS (SELECT 1 FROM control_run_events d WHERE d.event_id = $1)
+), next AS (
+  INSERT INTO control_run_event_sequences AS s (run_id, last_sequence)
+  SELECT live_run.run_id, COALESCE((SELECT MAX(sequence_number) FROM control_run_events WHERE run_id = live_run.run_id), 0) + 1
+  FROM live_run
+  ON CONFLICT (run_id) DO UPDATE
+    SET last_sequence = GREATEST(
+      s.last_sequence,
+      COALESCE((SELECT MAX(e.sequence_number) FROM control_run_events e WHERE e.run_id = s.run_id), 0)
+    ) + 1
+  RETURNING last_sequence
+), inserted AS (
+  INSERT INTO control_run_events (
+    event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+    node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+  )
+  SELECT $1, next.last_sequence, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+  FROM next
+  RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+)
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload, true AS appended
+FROM inserted
+UNION ALL
+SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload, false
+FROM control_run_events e
+WHERE e.event_id = $1 AND NOT EXISTS (SELECT 1 FROM inserted)
+`
+
+// RunEventAppendOutcome reports what a conditional event append did.
+type RunEventAppendOutcome int
+
+const (
+	// RunEventAppendOutcomeDropped: no duplicate exists and the run is
+	// missing or terminal; nothing was written.
+	RunEventAppendOutcomeDropped RunEventAppendOutcome = iota
+	// RunEventAppendOutcomeAppended: the event was inserted.
+	RunEventAppendOutcomeAppended
+	// RunEventAppendOutcomeDuplicate: an event with this ID already exists;
+	// the stored record is returned and nothing was written.
+	RunEventAppendOutcomeDuplicate
+)
+
+func (s *PostgresStore) AppendRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	// The sequence allocator makes collisions on (run_id, sequence_number)
+	// impossible among writers that go through it; the bounded retry covers
+	// writers that bypassed it (e.g. an older binary during a rolling deploy).
+	const maxSequenceCollisionRetries = 3
+	args := appendRunEventArgs(input)
+	var lastErr error
+	for attempt := 0; attempt < maxSequenceCollisionRetries; attempt++ {
+		var row sqlc.ControlRunEvent
+		err := s.pool.QueryRow(ctx, appendRunEventSQL, args...).Scan(runEventRowDestinations(&row)...)
+		if err == nil {
+			return runEventFromRow(row), nil
+		}
+		if isRunEventSequenceCollision(err) {
+			lastErr = err
+			continue
+		}
 		return domain.RunEventRecord{}, mapPgError(err)
 	}
+	return domain.RunEventRecord{}, mapPgError(lastErr)
+}
+
+// AppendRunEventIfRunActive performs ingest's dedupe-or-append-or-drop in a
+// single statement; see appendRunEventIfRunActiveSQL for outcome semantics.
+func (s *PostgresStore) AppendRunEventIfRunActive(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, RunEventAppendOutcome, error) {
+	const maxSequenceCollisionRetries = 3
+	args := appendRunEventArgs(input)
+	var lastErr error
+	for attempt := 0; attempt < maxSequenceCollisionRetries; attempt++ {
+		var row sqlc.ControlRunEvent
+		var appended bool
+		err := s.pool.QueryRow(ctx, appendRunEventIfRunActiveSQL, args...).
+			Scan(append(runEventRowDestinations(&row), &appended)...)
+		if err == nil {
+			if appended {
+				return runEventFromRow(row), RunEventAppendOutcomeAppended, nil
+			}
+			return runEventFromRow(row), RunEventAppendOutcomeDuplicate, nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, nil
+		}
+		if isRunEventSequenceCollision(err) {
+			lastErr = err
+			continue
+		}
+		return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, mapPgError(err)
+	}
+	return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, mapPgError(lastErr)
+}
+
+func appendRunEventArgs(input domain.AppendRunEventInput) []any {
 	eventID := input.EventID
 	if eventID == "" {
 		eventID = domain.NewID("event")
@@ -1303,30 +1852,174 @@ func (s *PostgresStore) AppendRunEvent(ctx context.Context, input domain.AppendR
 	if ts.IsZero() {
 		ts = domain.Now()
 	}
-	row, err := q.AppendRunEvent(ctx, sqlc.AppendRunEventParams{
-		EventID:        eventID,
-		SequenceNumber: int64(sequence),
-		RunID:          input.RunID,
-		ThreadID:       nullableText(input.ThreadID),
-		EventKind:      input.EventKind,
-		EventType:      nullableText(input.EventType),
-		NodeName:       nullableText(input.NodeName),
-		TaskID:         nullableText(input.TaskID),
-		CheckpointID:   nullableText(input.CheckpointID),
-		ScopeID:        nullableText(input.ScopeID),
-		AgentRole:      nullableText(input.AgentRole),
-		Level:          nullableText(input.Level),
-		Ts:             timestamptz(ts),
-		Message:        nullableText(input.Message),
-		Payload:        jsonBytes(input.Payload),
-	})
+	return []any{
+		eventID,
+		input.RunID,
+		nullableText(input.ThreadID),
+		input.EventKind,
+		nullableText(input.EventType),
+		nullableText(input.NodeName),
+		nullableText(input.TaskID),
+		nullableText(input.CheckpointID),
+		nullableText(input.ScopeID),
+		nullableText(input.AgentRole),
+		nullableText(input.Level),
+		timestamptz(ts),
+		nullableText(input.Message),
+		jsonBytes(input.Payload),
+	}
+}
+
+func runEventRowDestinations(row *sqlc.ControlRunEvent) []any {
+	return []any{
+		&row.EventID,
+		&row.SequenceNumber,
+		&row.RunID,
+		&row.ThreadID,
+		&row.EventKind,
+		&row.EventType,
+		&row.NodeName,
+		&row.TaskID,
+		&row.CheckpointID,
+		&row.ScopeID,
+		&row.AgentRole,
+		&row.Level,
+		&row.Ts,
+		&row.Message,
+		&row.Payload,
+	}
+}
+
+func isRunEventSequenceCollision(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "control_run_events_run_id_sequence_number_key"
+}
+
+// AdminUserMessageStats aggregates per-user thread-message activity for the
+// admin dashboard in one grouped query, replacing a ListThreadMessages call
+// per thread.
+func (s *PostgresStore) AdminUserMessageStats(ctx context.Context, since24h, since7d, since30d time.Time) ([]domain.AdminUserMessageStats, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT t.user_id,
+  count(*)::int,
+  count(*) FILTER (WHERE m.created_at >= $1)::int,
+  count(*) FILTER (WHERE m.created_at >= $2)::int,
+  count(*) FILTER (WHERE m.created_at >= $3)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'user')::int,
+  count(*) FILTER (WHERE lower(m.role) = 'user' AND m.created_at >= $1)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'user' AND m.created_at >= $2)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'user' AND m.created_at >= $3)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'assistant')::int,
+  count(*) FILTER (WHERE lower(m.role) = 'assistant' AND m.created_at >= $1)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'assistant' AND m.created_at >= $2)::int,
+  count(*) FILTER (WHERE lower(m.role) = 'assistant' AND m.created_at >= $3)::int
+FROM control_thread_messages m
+JOIN control_threads t ON t.thread_id = m.thread_id
+GROUP BY t.user_id
+`, timestamptz(since24h), timestamptz(since7d), timestamptz(since30d))
 	if err != nil {
-		return domain.RunEventRecord{}, mapPgError(err)
+		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.RunEventRecord{}, err
+	defer rows.Close()
+	stats := []domain.AdminUserMessageStats{}
+	for rows.Next() {
+		var stat domain.AdminUserMessageStats
+		if err := rows.Scan(
+			&stat.UserID,
+			&stat.Messages.Total, &stat.Messages.Last24h, &stat.Messages.Last7d, &stat.Messages.Last30d,
+			&stat.UserMessages.Total, &stat.UserMessages.Last24h, &stat.UserMessages.Last7d, &stat.UserMessages.Last30d,
+			&stat.AssistantMessages.Total, &stat.AssistantMessages.Last24h, &stat.AssistantMessages.Last7d, &stat.AssistantMessages.Last30d,
+		); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
 	}
-	return runEventFromRow(row), nil
+	return stats, rows.Err()
+}
+
+// AdminUserEventStats aggregates per-user tool-call/artifact event activity
+// in one grouped query (backed by a partial index on those event kinds),
+// replacing a full ListRunEvents scan per run.
+func (s *PostgresStore) AdminUserEventStats(ctx context.Context, since24h, since7d, since30d time.Time) ([]domain.AdminUserEventStats, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT r.user_id,
+  count(*) FILTER (WHERE e.event_kind = 'tool_call.started')::int,
+  count(*) FILTER (WHERE e.event_kind = 'tool_call.started' AND e.ts >= $1)::int,
+  count(*) FILTER (WHERE e.event_kind = 'tool_call.started' AND e.ts >= $2)::int,
+  count(*) FILTER (WHERE e.event_kind = 'tool_call.started' AND e.ts >= $3)::int,
+  count(*) FILTER (WHERE e.event_kind = 'artifact.created')::int,
+  count(*) FILTER (WHERE e.event_kind = 'artifact.created' AND e.ts >= $1)::int,
+  count(*) FILTER (WHERE e.event_kind = 'artifact.created' AND e.ts >= $2)::int,
+  count(*) FILTER (WHERE e.event_kind = 'artifact.created' AND e.ts >= $3)::int
+FROM control_run_events e
+JOIN control_runs r ON r.run_id = e.run_id
+WHERE e.event_kind IN ('tool_call.started', 'artifact.created')
+GROUP BY r.user_id
+`, timestamptz(since24h), timestamptz(since7d), timestamptz(since30d))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := []domain.AdminUserEventStats{}
+	for rows.Next() {
+		var stat domain.AdminUserEventStats
+		if err := rows.Scan(
+			&stat.UserID,
+			&stat.ToolCalls.Total, &stat.ToolCalls.Last24h, &stat.ToolCalls.Last7d, &stat.ToolCalls.Last30d,
+			&stat.Artifacts.Total, &stat.Artifacts.Last24h, &stat.Artifacts.Last7d, &stat.Artifacts.Last30d,
+		); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
+	}
+	return stats, rows.Err()
+}
+
+// AdminResourceStats aggregates resource-catalog accounting in the store,
+// replacing a 100k-row ListResources scan per admin request.
+func (s *PostgresStore) AdminResourceStats(ctx context.Context) (domain.AdminResourceStats, error) {
+	stats := domain.AdminResourceStats{}
+	err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE status = 'active')::int,
+  count(*) FILTER (WHERE status = 'deleted')::int,
+  COALESCE(sum(size_bytes) FILTER (WHERE status = 'active'), 0)::bigint
+FROM control_resources
+`).Scan(&stats.ActiveResources, &stats.SoftDeletedResources, &stats.ActiveBytes)
+	if err != nil {
+		return domain.AdminResourceStats{}, err
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT 'user' AS dimension, COALESCE(NULLIF(trim(owner_user_id), ''), 'local-user') AS owner, count(*)::int, COALESCE(sum(size_bytes), 0)::bigint
+FROM control_resources WHERE status = 'active' GROUP BY 2
+UNION ALL
+SELECT 'org', trim(owner_org_id), count(*)::int, COALESCE(sum(size_bytes), 0)::bigint
+FROM control_resources WHERE status = 'active' AND trim(COALESCE(owner_org_id, '')) <> '' GROUP BY 2
+UNION ALL
+SELECT 'project', trim(project_id), count(*)::int, COALESCE(sum(size_bytes), 0)::bigint
+FROM control_resources WHERE status = 'active' AND trim(COALESCE(project_id, '')) <> '' GROUP BY 2
+`)
+	if err != nil {
+		return domain.AdminResourceStats{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var dimension string
+		var owner domain.AdminResourceOwnerStats
+		if err := rows.Scan(&dimension, &owner.Owner, &owner.Uploads, &owner.StorageBytes); err != nil {
+			return domain.AdminResourceStats{}, err
+		}
+		switch dimension {
+		case "user":
+			stats.Users = append(stats.Users, owner)
+		case "org":
+			stats.Orgs = append(stats.Orgs, owner)
+		case "project":
+			stats.Projects = append(stats.Projects, owner)
+		}
+	}
+	return stats, rows.Err()
 }
 
 func (s *PostgresStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
@@ -1582,6 +2275,107 @@ func (s *PostgresStore) GetUploadSessionByIdempotencyKeyForUser(ctx context.Cont
 		return domain.UploadSessionRecord{}, mapPgError(err)
 	}
 	return uploadSessionFromRow(row), nil
+}
+
+// RetentionBacklog aggregates soft-deleted resources past their undelete window — the
+// storage a retention GC can reclaim. Read-only.
+func (s *PostgresStore) RetentionBacklog(ctx context.Context, now time.Time) (domain.ResourceRetentionBacklog, error) {
+	var backlog domain.ResourceRetentionBacklog
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(sum(size_bytes), 0) FROM control_resources
+		 WHERE status = 'deleted' AND retention_expires_at IS NOT NULL AND retention_expires_at < $1`,
+		now.UTC(),
+	).Scan(&backlog.Count, &backlog.Bytes)
+	if err != nil {
+		return domain.ResourceRetentionBacklog{}, mapPgError(err)
+	}
+	return backlog, nil
+}
+
+// ListResourcesPastRetention returns soft-deleted resources whose undelete window has
+// elapsed, oldest first, up to limit. Only the fields a reclaim needs are populated.
+func (s *PostgresStore) ListResourcesPastRetention(ctx context.Context, now time.Time, limit int) ([]domain.ResourceRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT resource_id, COALESCE(storage_path, ''), COALESCE(original_name, ''), size_bytes
+		 FROM control_resources
+		 WHERE status = 'deleted' AND retention_expires_at IS NOT NULL AND retention_expires_at < $1
+		 ORDER BY retention_expires_at ASC LIMIT $2`,
+		now.UTC(), limit,
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	out := []domain.ResourceRecord{}
+	for rows.Next() {
+		var r domain.ResourceRecord
+		if err := rows.Scan(&r.ResourceID, &r.StoragePath, &r.OriginalName, &r.SizeBytes); err != nil {
+			return nil, mapPgError(err)
+		}
+		r.Status = "deleted"
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return out, nil
+}
+
+// PurgeResource permanently deletes a resource row; FK cascades drop its search docs,
+// collection memberships, share grants, events, and job links. Caller deletes the files.
+func (s *PostgresStore) PurgeResource(ctx context.Context, resourceID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM control_resources WHERE resource_id = $1`, strings.TrimSpace(resourceID))
+	if err != nil {
+		return mapPgError(err)
+	}
+	return nil
+}
+
+// resourceUsageWhere aggregates active-resource count + bytes for one ownership column.
+// A server-side aggregate so a quota check costs one indexed scan instead of shipping the
+// whole catalog to the app and capping it.
+func (s *PostgresStore) resourceUsageWhere(ctx context.Context, column, value string) (int, int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, nil
+	}
+	var count int64
+	var bytes int64
+	// column is a fixed identifier chosen by the typed callers below, never user input.
+	query := `SELECT count(*), COALESCE(sum(size_bytes), 0) FROM control_resources WHERE status = 'active' AND ` + column + ` = $1`
+	if err := s.pool.QueryRow(ctx, query, value).Scan(&count, &bytes); err != nil {
+		return 0, 0, mapPgError(err)
+	}
+	return int(count), bytes, nil
+}
+
+func (s *PostgresStore) ResourceUsageForOwner(ctx context.Context, userID string) (int, int64, error) {
+	return s.resourceUsageWhere(ctx, "owner_user_id", userID)
+}
+
+func (s *PostgresStore) ResourceUsageForOrg(ctx context.Context, orgID string) (int, int64, error) {
+	return s.resourceUsageWhere(ctx, "owner_org_id", orgID)
+}
+
+func (s *PostgresStore) ResourceUsageForProject(ctx context.Context, projectID string) (int, int64, error) {
+	return s.resourceUsageWhere(ctx, "project_id", projectID)
+}
+
+// ClearUploadSessionIdempotencyKey nulls a session's idempotency_key so a re-upload of
+// the same content can claim a fresh session (the partial unique index excludes empty
+// keys). A no-op if the session does not exist.
+func (s *PostgresStore) ClearUploadSessionIdempotencyKey(ctx context.Context, sessionID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE control_upload_sessions SET idempotency_key = NULL, updated_at = now() WHERE session_id = $1`,
+		strings.TrimSpace(sessionID),
+	)
+	if err != nil {
+		return mapPgError(err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) UpdateUploadSession(ctx context.Context, input domain.UpdateUploadSessionInput) (domain.UploadSessionRecord, error) {

@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
@@ -25,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,6 +151,39 @@ func TestPublicConfigIncludesBisqueProductionLinks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeJSONRejectsTrailingValuesAndOversizedBodies(t *testing.T) {
+	t.Run("trailing json value", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(`{"title":"ok"} {"title":"smuggled"}`))
+		rec := httptest.NewRecorder()
+		var target struct {
+			Title string `json:"title"`
+		}
+
+		if decodeJSON(rec, req, &target) {
+			t.Fatalf("decodeJSON accepted multiple JSON values")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("oversized json body", func(t *testing.T) {
+		body := `{"title":"` + strings.Repeat("x", 17<<20) + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		var target struct {
+			Title string `json:"title"`
+		}
+
+		if decodeJSON(rec, req, &target) {
+			t.Fatalf("decodeJSON accepted oversized JSON body")
+		}
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413 body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestDevAuthGuestSessionLifecycle(t *testing.T) {
@@ -885,6 +920,178 @@ func TestV2ThreadAndRunCreationUsesDevPrincipalHeaders(t *testing.T) {
 	}
 }
 
+func TestV2CurrentUserProfileRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem})
+
+	// GET before any profile exists still returns the principal identity.
+	getReq := httptest.NewRequest(http.MethodGet, "/v2/me", nil)
+	getReq.Header.Set("X-Ultra-User-Id", "ada")
+	getReq.Header.Set("X-Ultra-Role", "researcher")
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET /v2/me status = %d body=%s", getRec.Code, getRec.Body.String())
+	}
+
+	// PATCH writes a profile, creating the account on demand.
+	body := `{"display_name":"Ada Lovelace","title":"Principal Investigator","institution":"Analytical Engine Lab","research_interests":"symbolic computation","bio":"Studies general-purpose computation."}`
+	patchReq := httptest.NewRequest(http.MethodPatch, "/v2/me", strings.NewReader(body))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchReq.Header.Set("X-Ultra-User-Id", "ada")
+	patchReq.Header.Set("X-Ultra-Role", "researcher")
+	patchRec := httptest.NewRecorder()
+	router.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH /v2/me status = %d body=%s", patchRec.Code, patchRec.Body.String())
+	}
+	var patched struct {
+		User struct {
+			UserID      string `json:"user_id"`
+			DisplayName string `json:"display_name"`
+		} `json:"user"`
+		Profile domain.UserProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("decode PATCH response: %v body=%s", err, patchRec.Body.String())
+	}
+	if patched.User.UserID != "ada" || patched.User.DisplayName != "Ada Lovelace" {
+		t.Fatalf("patched user = %+v, want ada / Ada Lovelace", patched.User)
+	}
+	if patched.Profile.Title != "Principal Investigator" || patched.Profile.Institution != "Analytical Engine Lab" {
+		t.Fatalf("patched profile = %+v, want PI / Analytical Engine Lab", patched.Profile)
+	}
+	if patched.Profile.ResearchInterests != "symbolic computation" {
+		t.Fatalf("patched research interests = %q", patched.Profile.ResearchInterests)
+	}
+
+	// GET now reflects the saved profile, and a partial PATCH preserves other fields.
+	partialReq := httptest.NewRequest(http.MethodPatch, "/v2/me", strings.NewReader(`{"bio":"Updated bio only."}`))
+	partialReq.Header.Set("Content-Type", "application/json")
+	partialReq.Header.Set("X-Ultra-User-Id", "ada")
+	partialRec := httptest.NewRecorder()
+	router.ServeHTTP(partialRec, partialReq)
+	if partialRec.Code != http.StatusOK {
+		t.Fatalf("partial PATCH status = %d body=%s", partialRec.Code, partialRec.Body.String())
+	}
+	var partial struct {
+		Profile domain.UserProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(partialRec.Body.Bytes(), &partial); err != nil {
+		t.Fatalf("decode partial PATCH: %v", err)
+	}
+	if partial.Profile.Bio != "Updated bio only." {
+		t.Fatalf("bio = %q, want updated", partial.Profile.Bio)
+	}
+	if partial.Profile.Title != "Principal Investigator" {
+		t.Fatalf("title = %q, want preserved across partial patch", partial.Profile.Title)
+	}
+
+	// A different principal must not see ada's profile.
+	otherReq := httptest.NewRequest(http.MethodGet, "/v2/me", nil)
+	otherReq.Header.Set("X-Ultra-User-Id", "grace")
+	otherRec := httptest.NewRecorder()
+	router.ServeHTTP(otherRec, otherReq)
+	if otherRec.Code != http.StatusOK {
+		t.Fatalf("GET /v2/me other status = %d", otherRec.Code)
+	}
+	var other struct {
+		Profile domain.UserProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(otherRec.Body.Bytes(), &other); err != nil {
+		t.Fatalf("decode other: %v", err)
+	}
+	if other.Profile.Title != "" || other.Profile.Bio != "" {
+		t.Fatalf("other principal profile = %+v, want empty", other.Profile)
+	}
+}
+
+func TestV2TokenUsageReturnsAggregatedStatsAndDailySeries(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem})
+	ctx := context.Background()
+	today := domain.Now().UTC().Truncate(24 * time.Hour)
+	yesterday := today.AddDate(0, 0, -1)
+
+	// One run yesterday, two runs today → today is the peak day and the streak
+	// spans both days.
+	for _, usage := range []domain.RecordUserTokenUsageInput{
+		{UserID: "ada", Day: yesterday, InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+		{UserID: "ada", Day: today, InputTokens: 200, OutputTokens: 40, TotalTokens: 240},
+		{UserID: "ada", Day: today, InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+		// A different user's spend must never leak into ada's totals.
+		{UserID: "grace", Day: today, InputTokens: 9000, OutputTokens: 9000, TotalTokens: 18000},
+	} {
+		if err := mem.RecordUserTokenUsage(ctx, usage); err != nil {
+			t.Fatalf("RecordUserTokenUsage: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/me/token-usage?days=30", nil)
+	req.Header.Set("X-Ultra-User-Id", "ada")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token usage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Days    int `json:"days"`
+		Summary struct {
+			LifetimeTotalTokens int64 `json:"lifetime_total_tokens"`
+			PeakDailyTotal      int64 `json:"peak_daily_total"`
+			CurrentStreakDays   int   `json:"current_streak_days"`
+			LongestStreakDays   int   `json:"longest_streak_days"`
+			ActiveDays          int   `json:"active_days"`
+		} `json:"summary"`
+		Daily []struct {
+			Day         string `json:"day"`
+			TotalTokens int64  `json:"total_tokens"`
+			RunCount    int64  `json:"run_count"`
+		} `json:"daily"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode token usage: %v body=%s", err, rec.Body.String())
+	}
+	if resp.Days != 30 {
+		t.Fatalf("days = %d, want 30", resp.Days)
+	}
+	if resp.Summary.LifetimeTotalTokens != 420 {
+		t.Fatalf("lifetime total = %d, want 420 (120+240+60)", resp.Summary.LifetimeTotalTokens)
+	}
+	if resp.Summary.PeakDailyTotal != 300 {
+		t.Fatalf("peak daily = %d, want 300 (today 240+60)", resp.Summary.PeakDailyTotal)
+	}
+	if resp.Summary.CurrentStreakDays != 2 {
+		t.Fatalf("current streak = %d, want 2", resp.Summary.CurrentStreakDays)
+	}
+	if resp.Summary.LongestStreakDays != 2 {
+		t.Fatalf("longest streak = %d, want 2", resp.Summary.LongestStreakDays)
+	}
+	if resp.Summary.ActiveDays != 2 || len(resp.Daily) != 2 {
+		t.Fatalf("active days = %d / daily rows = %d, want 2/2", resp.Summary.ActiveDays, len(resp.Daily))
+	}
+	todayKey := today.Format("2006-01-02")
+	var sawToday bool
+	for _, point := range resp.Daily {
+		if point.Day == todayKey {
+			sawToday = true
+			if point.TotalTokens != 300 || point.RunCount != 2 {
+				t.Fatalf("today point = %+v, want total 300 run_count 2", point)
+			}
+		}
+	}
+	if !sawToday {
+		t.Fatalf("daily series missing today %q: %+v", todayKey, resp.Daily)
+	}
+}
+
 func TestV2ThreadAndRunCreationDefaultsLocalDevPrincipal(t *testing.T) {
 	t.Parallel()
 
@@ -994,6 +1201,78 @@ func TestV2ThreadUpsertIsTenantScopedAndPersistsManualTitleState(t *testing.T) {
 	router.ServeHTTP(bobRec, bobReq)
 	if bobRec.Code != http.StatusNotFound {
 		t.Fatalf("bob upsert status = %d body=%s, want 404", bobRec.Code, bobRec.Body.String())
+	}
+}
+
+func TestV2ThreadDeleteSoftDeletesAndHidesFromUserHistory(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
+
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
+		UserID: "alice",
+		Title:  "Alice delete me",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread alice: %v", err)
+	}
+
+	bobDeleteReq := httptest.NewRequest(http.MethodDelete, "/v2/threads/"+thread.ThreadID, nil)
+	bobDeleteReq.Header.Set("X-Ultra-User-Id", "bob")
+	bobDeleteRec := httptest.NewRecorder()
+	router.ServeHTTP(bobDeleteRec, bobDeleteReq)
+	if bobDeleteRec.Code != http.StatusNotFound {
+		t.Fatalf("bob delete status = %d body=%s, want 404", bobDeleteRec.Code, bobDeleteRec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/threads/"+thread.ThreadID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d body=%s, want 204", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v2/threads?limit=20", nil)
+	listReq.Header.Set("X-Ultra-User-Id", "alice")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list active status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var activeList listThreadsResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &activeList); err != nil {
+		t.Fatalf("decode active list: %v", err)
+	}
+	if activeList.TotalCount != 0 || len(activeList.Threads) != 0 {
+		t.Fatalf("active threads after delete = %+v, want none", activeList.Threads)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v2/threads/"+thread.ThreadID, nil)
+	getReq.Header.Set("X-Ultra-User-Id", "alice")
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("get deleted status = %d body=%s, want 404", getRec.Code, getRec.Body.String())
+	}
+
+	deletedReq := httptest.NewRequest(http.MethodGet, "/v2/threads?status=deleted&limit=20", nil)
+	deletedReq.Header.Set("X-Ultra-User-Id", "alice")
+	deletedRec := httptest.NewRecorder()
+	router.ServeHTTP(deletedRec, deletedReq)
+	if deletedRec.Code != http.StatusOK {
+		t.Fatalf("list deleted status = %d body=%s", deletedRec.Code, deletedRec.Body.String())
+	}
+	var deletedList listThreadsResponse
+	if err := json.Unmarshal(deletedRec.Body.Bytes(), &deletedList); err != nil {
+		t.Fatalf("decode deleted list: %v", err)
+	}
+	if deletedList.TotalCount != 1 || len(deletedList.Threads) != 1 || deletedList.Threads[0].Status != domain.ThreadStatusDeleted {
+		t.Fatalf("deleted threads = %+v, want one deleted thread", deletedList.Threads)
 	}
 }
 
@@ -1788,6 +2067,79 @@ func TestV2WorkerTokenBypassesWorkOSGateForWorkerEndpoints(t *testing.T) {
 	router.ServeHTTP(heartbeatRec, heartbeat)
 	if heartbeatRec.Code != http.StatusOK {
 		t.Fatalf("worker token heartbeat under workos = %d body=%s", heartbeatRec.Code, heartbeatRec.Body.String())
+	}
+}
+
+func TestV2WorkerTokenReadsRunOwnerProfile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	if _, err := mem.CreateUser(ctx, domain.CreateUserInput{UserID: "user-1", Role: "researcher", Status: "active"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := mem.UpdateUserProfile(ctx, domain.UpdateUserProfileInput{
+		UserID: "user-1",
+		Profile: domain.UserProfile{
+			DisplayName:       "Ada Lovelace",
+			ResearchInterests: "symbolic computation",
+		},
+	}); err != nil {
+		t.Fatalf("UpdateUserProfile: %v", err)
+	}
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-1", Title: "worker profile"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "profile run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "profile run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Anonymous (no worker token) is rejected by the WorkOS gate.
+	anon := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/user-profile", nil)
+	anonRec := httptest.NewRecorder()
+	router.ServeHTTP(anonRec, anon)
+	if anonRec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous profile status = %d, want 401", anonRec.Code)
+	}
+
+	// The worker token resolves the run owner's profile without a WorkOS session.
+	req := httptest.NewRequest(http.MethodGet, "/v2/runs/"+run.RunID+"/user-profile", nil)
+	req.Header.Set("X-Ultra-Worker-Token", "trace-worker-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worker profile status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		User struct {
+			UserID string `json:"user_id"`
+		} `json:"user"`
+		Profile domain.UserProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode profile: %v body=%s", err, rec.Body.String())
+	}
+	if resp.User.UserID != "user-1" {
+		t.Fatalf("profile user = %q, want user-1", resp.User.UserID)
+	}
+	if resp.Profile.DisplayName != "Ada Lovelace" || resp.Profile.ResearchInterests != "symbolic computation" {
+		t.Fatalf("worker-read profile = %+v, want Ada / symbolic computation", resp.Profile)
 	}
 }
 
@@ -4907,6 +5259,43 @@ func TestV2UploadRejectsResourceQuotaAndCleansBlob(t *testing.T) {
 	}
 }
 
+func TestV2UploadRejectsDeclaredBodyAboveDirectUploadLimit(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "too-large.bin")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write([]byte("small body")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-User-Id", "direct-limit-user")
+	req.ContentLength = 6 << 30
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload status = %d body=%s, want 413", rec.Code, rec.Body.String())
+	}
+}
+
 func TestV2UploadSessionResumesChunkAndCommitsResource(t *testing.T) {
 	t.Parallel()
 
@@ -5809,6 +6198,108 @@ func TestV2UploadSessionCompleteFileRetryIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestV2UploadSessionCompleteFileConcurrentDoesNotDuplicate fires many simultaneous
+// /complete calls for the SAME file (a client retry / double-submit / network replay).
+// Without serialization each would mint a distinct resourceID and catalog a separate
+// resource for one upload — duplicate entry, leaked bytes on disk, double-charged quota.
+// The completion lock must make exactly one resource win and the rest observe it.
+func TestV2UploadSessionCompleteFileConcurrentDoesNotDuplicate(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	const userID, orgID = "concurrent-complete-user", "concurrent-complete-org"
+	files, body, _ := largeFolderUploadFixture(t, 1, "concurrent-complete-session")
+	created := createUploadSessionForTest(t, router, string(body), userID, orgID, http.StatusCreated)
+	f := files[0]
+	uploadChunkForTest(t, router, created.Session.SessionID, f.token, 0, 0, f.payload, f.sha, userID, orgID)
+
+	const racers = 8
+	recs := make([]*httptest.ResponseRecorder, racers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	url := fmt.Sprintf("/v2/upload-sessions/%s/files/%s/complete", created.Session.SessionID, f.token)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) { // no t.* calls in goroutines: build + serve inline
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, url, nil)
+			req.Header.Set("X-Ultra-User-Id", userID)
+			req.Header.Set("X-Ultra-Org-Id", orgID)
+			rec := httptest.NewRecorder()
+			<-start // line everyone up to maximize contention
+			router.ServeHTTP(rec, req)
+			recs[i] = rec
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	resourceIDs := map[string]struct{}{}
+	okCount := 0
+	for i, rec := range recs {
+		switch rec.Code {
+		case http.StatusOK:
+			okCount++
+			var resp uploadSessionFileCompleteResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("racer %d decode: %v", i, err)
+			}
+			if resp.Resource.FileID == "" {
+				t.Fatalf("racer %d completed with empty resource id: %s", i, rec.Body.String())
+			}
+			resourceIDs[resp.Resource.FileID] = struct{}{}
+		case http.StatusConflict:
+			// acceptable: a loser may legitimately 409 if it observes an in-progress commit
+		default:
+			t.Fatalf("racer %d status = %d body=%s, want 200 or 409", i, rec.Code, rec.Body.String())
+		}
+	}
+	if okCount == 0 {
+		t.Fatalf("no racer completed the file successfully")
+	}
+	if len(resourceIDs) != 1 {
+		t.Fatalf("concurrent completion produced %d distinct resources %v, want exactly 1", len(resourceIDs), resourceIDs)
+	}
+
+	// The catalog must hold exactly one resource — no duplicate / orphaned entry.
+	records, err := mem.ListResources(context.Background(), 100, 0)
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("catalog has %d resources after concurrent completion, want exactly 1", len(records))
+	}
+
+	// And exactly one file_completed event was recorded.
+	statusReq := httptest.NewRequest(http.MethodGet, "/v2/upload-sessions/"+created.Session.SessionID, nil)
+	statusReq.Header.Set("X-Ultra-User-Id", userID)
+	statusReq.Header.Set("X-Ultra-Org-Id", orgID)
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	var current struct {
+		Events []uploadSessionEventPayload `json:"events"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode upload session events: %v", err)
+	}
+	completedEvents := 0
+	for _, event := range current.Events {
+		if event.EventType == "upload_session.file_completed" && event.Metadata["file_token"] == f.token {
+			completedEvents++
+		}
+	}
+	if completedEvents != 1 {
+		t.Fatalf("file_completed events = %d, want exactly 1", completedEvents)
+	}
+}
+
 func TestV2UploadSessionResumesAfterHandlerRestart(t *testing.T) {
 	t.Parallel()
 
@@ -5829,7 +6320,7 @@ func TestV2UploadSessionResumesAfterHandlerRestart(t *testing.T) {
 	createBody := uploadSessionCreateBody("restart-session-1", "restart-file", "restart-paper.pdf", "application/pdf", payload, hex.EncodeToString(payloadSHA[:]))
 
 	created := createUploadSessionForTest(t, router, createBody, "restart-user", "restart-org", http.StatusCreated)
-	if created.Limits.MaxParallelChunks != 4 || created.Limits.MaxParallelFiles != 4 || created.Limits.MaxFilesPerSession < 1000 {
+	if created.Limits.MaxParallelChunks != 8 || created.Limits.MaxParallelFiles != 4 || created.Limits.MaxFilesPerSession < 1000 {
 		t.Fatalf("upload session limits = %+v, want default backpressure hints", created.Limits)
 	}
 	uploadChunkForTest(t, router, created.Session.SessionID, "restart-file", 0, 0, firstChunk, hex.EncodeToString(firstSHA[:]), "restart-user", "restart-org")
@@ -6060,6 +6551,47 @@ func TestV2UploadSessionDeduplicatesExistingResourceByChecksum(t *testing.T) {
 	}
 	if len(resources) != 1 {
 		t.Fatalf("upload root resources = %+v, want one committed blob after dedupe", resources)
+	}
+}
+
+func TestV2UploadSessionChunkRejectsBodyBeyondDeclaredFileSize(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	declaredPayload := []byte("tiny")
+	declaredSHA := sha256.Sum256(declaredPayload)
+	created := createUploadSessionForTest(
+		t,
+		router,
+		uploadSessionCreateBody("oversize-chunk-session", "oversize-file", "oversize.bin", "application/octet-stream", declaredPayload, hex.EncodeToString(declaredSHA[:])),
+		"oversize-user",
+		"oversize-org",
+		http.StatusCreated,
+	)
+
+	oversizedPayload := []byte("this payload is larger than declared")
+	chunkSHA := sha256.Sum256(oversizedPayload)
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/v2/upload-sessions/"+created.Session.SessionID+"/files/oversize-file/chunks/0",
+		bytes.NewReader(oversizedPayload),
+	)
+	req.Header.Set("X-Ultra-User-Id", "oversize-user")
+	req.Header.Set("X-Ultra-Org-Id", "oversize-org")
+	req.Header.Set("X-Upload-Offset", "0")
+	req.Header.Set("X-Upload-Chunk-Sha256", hex.EncodeToString(chunkSHA[:]))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized chunk status = %d body=%s, want 413", rec.Code, rec.Body.String())
 	}
 }
 
@@ -6350,6 +6882,49 @@ func BenchmarkV2UploadSessionManySmallFilesPostgres(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestCopyWithPooledBufferAvoidsWriterToFastPath(t *testing.T) {
+	t.Parallel()
+
+	source := &writerToProbeReader{data: []byte("microscopy tile bytes")}
+	var destination bytes.Buffer
+
+	copied, err := copyWithPooledBuffer(&destination, source)
+	if err != nil {
+		t.Fatalf("copyWithPooledBuffer: %v", err)
+	}
+	if copied != int64(len(source.data)) {
+		t.Fatalf("copied = %d, want %d", copied, len(source.data))
+	}
+	if destination.String() != string(source.data) {
+		t.Fatalf("destination = %q, want %q", destination.String(), string(source.data))
+	}
+	if source.writerToCalled {
+		t.Fatalf("copyWithPooledBuffer used WriterTo fast path instead of the pooled buffer")
+	}
+}
+
+type writerToProbeReader struct {
+	data           []byte
+	offset         int
+	writerToCalled bool
+}
+
+func (r *writerToProbeReader) Read(p []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
+func (r *writerToProbeReader) WriteTo(w io.Writer) (int64, error) {
+	r.writerToCalled = true
+	n, err := w.Write(r.data[r.offset:])
+	r.offset += n
+	return int64(n), err
 }
 
 func TestV2UploadSessionRejectsTamperedVerifiedChunkBeforeCommit(t *testing.T) {
@@ -9614,8 +10189,8 @@ func TestNiftiUploadViewerUsesCTLikeVolumeDefaults(t *testing.T) {
 		t.Fatalf("decode viewer response: %v", err)
 	}
 	defaults := viewerResponse.DisplayDefaults
-	if defaults.Enhancement != "hounsfield:350.000:1800.000" {
-		t.Fatalf("enhancement = %q, want CT volume window", defaults.Enhancement)
+	if defaults.Enhancement != "hounsfield:40.000:80.000" {
+		t.Fatalf("enhancement = %q, want CT brain window 40/80", defaults.Enhancement)
 	}
 	if defaults.FusionMethod != "a" || defaults.ScalarColormap != "grayscale" {
 		t.Fatalf("projection/color defaults = %+v, want composite grayscale", defaults)
@@ -9779,6 +10354,113 @@ func TestNiftiUploadHistogramServesSignedInt16ScalarVolume(t *testing.T) {
 	}
 }
 
+func TestNiftiUploadViewerServesSelectedScalarTimepoint(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: uploadRoot,
+	})
+	// A 2-volume series: the NIfTI 4th dimension is time, so this is two
+	// timepoints (not two channels). Each timepoint is one contiguous slab.
+	timepointValues := []uint16{
+		10, 20, 30, 40,
+		100, 200, 300, 400,
+	}
+	fileID := writeTestUploadFile(t, uploadRoot, "two-timepoint-volume.nii", testNifti1Uint16TimeBytes(t, 2, 1, 2, 2, timepointValues))
+
+	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	viewerReq.Header.Set("X-Ultra-User-Id", "test-user")
+	viewerReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	viewerRec := httptest.NewRecorder()
+	router.ServeHTTP(viewerRec, viewerReq)
+	if viewerRec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", viewerRec.Code, viewerRec.Body.String())
+	}
+	var viewerResponse struct {
+		DimsOrder      string `json:"dims_order"`
+		IsTimeseries   bool   `json:"is_timeseries"`
+		IsMultichannel bool   `json:"is_multichannel"`
+		AxisSizes      struct {
+			X int `json:"X"`
+			Y int `json:"Y"`
+			Z int `json:"Z"`
+			C int `json:"C"`
+			T int `json:"T"`
+		} `json:"axis_sizes"`
+		SelectedIndices struct {
+			T int `json:"T"`
+		} `json:"selected_indices"`
+		Metadata struct {
+			ArrayShape []int    `json:"array_shape"`
+			Warnings   []string `json:"warnings"`
+		} `json:"metadata"`
+		Viewer struct {
+			DisplayCapabilities []string `json:"display_capabilities"`
+		} `json:"viewer"`
+	}
+	if err := json.Unmarshal(viewerRec.Body.Bytes(), &viewerResponse); err != nil {
+		t.Fatalf("decode viewer response: %v", err)
+	}
+	if viewerResponse.DimsOrder != "TZYX" || !viewerResponse.IsTimeseries || viewerResponse.IsMultichannel {
+		t.Fatalf("viewer dims/timeseries/multichannel = %q/%v/%v, want TZYX true false", viewerResponse.DimsOrder, viewerResponse.IsTimeseries, viewerResponse.IsMultichannel)
+	}
+	if viewerResponse.AxisSizes.X != 2 || viewerResponse.AxisSizes.Y != 1 || viewerResponse.AxisSizes.Z != 2 || viewerResponse.AxisSizes.T != 2 || viewerResponse.AxisSizes.C != 1 {
+		t.Fatalf("axis sizes = %+v, want X=2 Y=1 Z=2 T=2 C=1", viewerResponse.AxisSizes)
+	}
+	if !sliceContains(viewerResponse.Viewer.DisplayCapabilities, "time_navigation") {
+		t.Fatalf("display capabilities = %v, want time_navigation", viewerResponse.Viewer.DisplayCapabilities)
+	}
+	if len(viewerResponse.Metadata.ArrayShape) != 4 || viewerResponse.Metadata.ArrayShape[0] != 2 || viewerResponse.Metadata.ArrayShape[1] != 2 || viewerResponse.Metadata.ArrayShape[2] != 1 || viewerResponse.Metadata.ArrayShape[3] != 2 {
+		t.Fatalf("array_shape = %v, want [2 2 1 2] (T,Z,Y,X)", viewerResponse.Metadata.ArrayShape)
+	}
+
+	volumeReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?t=1", nil)
+	volumeReq.Header.Set("X-Ultra-User-Id", "test-user")
+	volumeReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	volumeRec := httptest.NewRecorder()
+	router.ServeHTTP(volumeRec, volumeReq)
+	if volumeRec.Code != http.StatusOK {
+		t.Fatalf("scalar-volume status = %d body=%s", volumeRec.Code, volumeRec.Body.String())
+	}
+	header := volumeRec.Header()
+	if header.Get("x-volume-time") != "1" || header.Get("x-volume-time-count") != "2" {
+		t.Fatalf("time headers = idx:%q count:%q, want 1/2", header.Get("x-volume-time"), header.Get("x-volume-time-count"))
+	}
+	if header.Get("x-volume-raw-min") != "100" || header.Get("x-volume-raw-max") != "400" {
+		t.Fatalf("timepoint range headers = min:%q max:%q, want 100..400", header.Get("x-volume-raw-min"), header.Get("x-volume-raw-max"))
+	}
+	selectedValues := []uint16{100, 200, 300, 400}
+	if len(volumeRec.Body.Bytes()) != len(selectedValues)*2 {
+		t.Fatalf("scalar-volume byte length = %d, want %d", len(volumeRec.Body.Bytes()), len(selectedValues)*2)
+	}
+	for index, want := range selectedValues {
+		got := binary.LittleEndian.Uint16(volumeRec.Body.Bytes()[index*2 : index*2+2])
+		if got != want {
+			t.Fatalf("selected timepoint voxel[%d] = %d, want %d", index, got, want)
+		}
+	}
+
+	sliceReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=1&t=1&window_min=100&window_max=400", nil)
+	sliceReq.Header.Set("X-Ultra-User-Id", "test-user")
+	sliceReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	sliceRec := httptest.NewRecorder()
+	router.ServeHTTP(sliceRec, sliceReq)
+	if sliceRec.Code != http.StatusOK {
+		t.Fatalf("slice status = %d body=%s", sliceRec.Code, sliceRec.Body.String())
+	}
+	img, err := png.Decode(bytes.NewReader(sliceRec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode slice png: %v", err)
+	}
+	gotFirst := color.GrayModel.Convert(img.At(0, 0)).(color.Gray).Y
+	gotLast := color.GrayModel.Convert(img.At(1, 0)).(color.Gray).Y
+	if gotFirst != 170 || gotLast != 255 {
+		t.Fatalf("selected timepoint slice pixels = %d,%d, want 170,255", gotFirst, gotLast)
+	}
+}
+
 func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	t.Parallel()
 
@@ -9787,6 +10469,8 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 		Version:    "test-version",
 		UploadRoot: uploadRoot,
 	})
+	// A genuine multi-component volume uses the NIfTI 5th dimension for channels
+	// (dim[5]); the 4th stays singleton (T=1).
 	channelValues := []uint16{
 		10, 20, 30, 40,
 		100, 200, 300, 400,
@@ -9804,6 +10488,7 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	var viewerResponse struct {
 		DimsOrder      string `json:"dims_order"`
 		IsMultichannel bool   `json:"is_multichannel"`
+		IsTimeseries   bool   `json:"is_timeseries"`
 		AxisSizes      struct {
 			X int `json:"X"`
 			Y int `json:"Y"`
@@ -9817,8 +10502,7 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 			VolumeChannel int      `json:"volume_channel"`
 		} `json:"display_defaults"`
 		Metadata struct {
-			ArrayShape []int    `json:"array_shape"`
-			Warnings   []string `json:"warnings"`
+			ArrayShape []int `json:"array_shape"`
 		} `json:"metadata"`
 		Viewer struct {
 			DisplayCapabilities []string `json:"display_capabilities"`
@@ -9827,8 +10511,8 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	if err := json.Unmarshal(viewerRec.Body.Bytes(), &viewerResponse); err != nil {
 		t.Fatalf("decode viewer response: %v", err)
 	}
-	if viewerResponse.DimsOrder != "CZYX" || !viewerResponse.IsMultichannel {
-		t.Fatalf("viewer dims/multichannel = %q/%v, want CZYX true", viewerResponse.DimsOrder, viewerResponse.IsMultichannel)
+	if viewerResponse.DimsOrder != "CZYX" || !viewerResponse.IsMultichannel || viewerResponse.IsTimeseries {
+		t.Fatalf("viewer dims/multichannel/timeseries = %q/%v/%v, want CZYX true false", viewerResponse.DimsOrder, viewerResponse.IsMultichannel, viewerResponse.IsTimeseries)
 	}
 	if viewerResponse.AxisSizes.X != 2 || viewerResponse.AxisSizes.Y != 1 || viewerResponse.AxisSizes.Z != 2 || viewerResponse.AxisSizes.C != 2 || viewerResponse.AxisSizes.T != 1 {
 		t.Fatalf("axis sizes = %+v, want X=2 Y=1 Z=2 C=2 T=1", viewerResponse.AxisSizes)
@@ -9840,7 +10524,7 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 		t.Fatalf("display capabilities = %v, want channel_visibility", viewerResponse.Viewer.DisplayCapabilities)
 	}
 	if len(viewerResponse.Metadata.ArrayShape) != 4 || viewerResponse.Metadata.ArrayShape[0] != 2 || viewerResponse.Metadata.ArrayShape[1] != 2 || viewerResponse.Metadata.ArrayShape[2] != 1 || viewerResponse.Metadata.ArrayShape[3] != 2 {
-		t.Fatalf("array_shape = %v, want [2 2 1 2]", viewerResponse.Metadata.ArrayShape)
+		t.Fatalf("array_shape = %v, want [2 2 1 2] (C,Z,Y,X)", viewerResponse.Metadata.ArrayShape)
 	}
 
 	volumeReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?channel=1", nil)
@@ -9867,24 +10551,6 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 		if got != want {
 			t.Fatalf("selected channel voxel[%d] = %d, want %d", index, got, want)
 		}
-	}
-
-	sliceReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=1&channels=1&window_min=100&window_max=400", nil)
-	sliceReq.Header.Set("X-Ultra-User-Id", "test-user")
-	sliceReq.Header.Set("X-Ultra-Org-Id", "test-org")
-	sliceRec := httptest.NewRecorder()
-	router.ServeHTTP(sliceRec, sliceReq)
-	if sliceRec.Code != http.StatusOK {
-		t.Fatalf("slice status = %d body=%s", sliceRec.Code, sliceRec.Body.String())
-	}
-	img, err := png.Decode(bytes.NewReader(sliceRec.Body.Bytes()))
-	if err != nil {
-		t.Fatalf("decode slice png: %v", err)
-	}
-	gotFirst := color.GrayModel.Convert(img.At(0, 0)).(color.Gray).Y
-	gotLast := color.GrayModel.Convert(img.At(1, 0)).(color.Gray).Y
-	if gotFirst != 170 || gotLast != 255 {
-		t.Fatalf("selected channel slice pixels = %d,%d, want 170,255", gotFirst, gotLast)
 	}
 }
 
@@ -10572,6 +11238,196 @@ func TestV2BisqueSearchFiltersNiftiFileExtensions(t *testing.T) {
 	}
 }
 
+// ctScanFixtureXML mirrors the live BisQue view=full payload: the modality and
+// numeric age tags are serialized as child <tag> elements. Ages 7 and 100 are
+// the lexical-comparison traps ("7" > "50", "100" < "50").
+func ctScanFixtureXML(root string) string {
+	rows := []struct {
+		uniq, name, modality, age string
+	}{
+		{"chest44", "ct_chest_age44.nii.gz", "CT", "44"},
+		{"head52", "ct_head_age52.nii.gz", "CT", "52"},
+		{"abd61", "ct_abdomen_age61.nii.gz", "CT", "61"},
+		{"pelvis7", "ct_pelvis_age7.nii.gz", "CT", "7"},
+		{"spine100", "ct_spine_age100.nii.gz", "CT", "100"},
+		{"knee50", "ct_knee_age50.nii.gz", "CT", "50"},
+	}
+	var b strings.Builder
+	b.WriteString("<resource>")
+	for _, row := range rows {
+		b.WriteString(`<image uri="` + root + `/data_service/` + row.uniq + `" name="` + row.name + `" resource_uniq="` + row.uniq + `">`)
+		b.WriteString(`<tag name="modality" value="` + row.modality + `"/>`)
+		b.WriteString(`<tag name="age" type="number" value="` + row.age + `"/>`)
+		b.WriteString(`</image>`)
+	}
+	b.WriteString("</resource>")
+	return b.String()
+}
+
+func TestV2BisqueSearchNumericMetadataFilterBeatsLexicalComparison(t *testing.T) {
+	t.Parallel()
+
+	var gotView string
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotView = r.URL.Query().Get("view")
+		if r.URL.Query().Get("tag_query") != "modality:CT" {
+			t.Fatalf("tag_query = %q, want modality:CT", r.URL.Query().Get("tag_query"))
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(ctScanFixtureXML(bisque.URL)))
+	}))
+	defer bisque.Close()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	searchNames := func(payload string) []string {
+		req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode search response: %v", err)
+		}
+		results := body["results"].([]any)
+		names := make([]string, 0, len(results))
+		for _, result := range results {
+			names = append(names, result.(map[string]any)["name"].(string))
+		}
+		return names
+	}
+
+	gt50 := searchNames(`{"resource_type":"image","tag_query":"modality:CT","metadata_filters":[{"tag":"age","op":"gt","value":"50"}],"count_all":true,"limit":25}`)
+	if gotView != "full" {
+		t.Fatalf("view = %q, want full so tags are serialized for client-side filtering", gotView)
+	}
+	// Numerically correct: 52, 61, 100. NOT 7 (lexically "7">"50") and includes
+	// 100 (lexically "100"<"50"). 44 and 50 excluded.
+	if strings.Join(gt50, ",") != "ct_head_age52.nii.gz,ct_abdomen_age61.nii.gz,ct_spine_age100.nii.gz" {
+		t.Fatalf("age>50 results = %v, want {52,61,100}", gt50)
+	}
+
+	gte50 := searchNames(`{"resource_type":"image","tag_query":"modality:CT","metadata_filters":[{"tag":"age","op":"gte","value":"50"}],"count_all":true,"limit":25}`)
+	// Server-order preserved: 52, 61, 100, 50 (knee=50 now included vs the gt case).
+	if strings.Join(gte50, ",") != "ct_head_age52.nii.gz,ct_abdomen_age61.nii.gz,ct_spine_age100.nii.gz,ct_knee_age50.nii.gz" {
+		t.Fatalf("age>=50 results = %v, want {52,61,100,50}", gte50)
+	}
+
+	pediatric := searchNames(`{"resource_type":"image","tag_query":"modality:CT","metadata_filters":[{"tag":"age","op":"lt","value":"18"}],"count_all":true,"limit":25}`)
+	if strings.Join(pediatric, ",") != "ct_pelvis_age7.nii.gz" {
+		t.Fatalf("age<18 results = %v, want only age 7", pediatric)
+	}
+
+	band := searchNames(`{"resource_type":"image","tag_query":"modality:CT","metadata_filters":[{"tag":"age","op":"gte","value":"44"},{"tag":"age","op":"lte","value":"52"}],"count_all":true,"limit":25}`)
+	if strings.Join(band, ",") != "ct_chest_age44.nii.gz,ct_head_age52.nii.gz,ct_knee_age50.nii.gz" {
+		t.Fatalf("44<=age<=52 results = %v, want {44,52,50}", band)
+	}
+}
+
+func TestBisqueClientViewURLIsCanonicalUnescaped(t *testing.T) {
+	t.Parallel()
+
+	service := NewBisqueService(BisqueServiceConfig{
+		RootURL:      "https://bisque2.ece.ucsb.edu",
+		AllowedRoots: []string{"https://bisque2.ece.ucsb.edu"},
+		HTTPClient:   http.DefaultClient,
+	})
+
+	got := service.clientViewURL("https://bisque2.ece.ucsb.edu/data_service/00-LLkbXPVgwiddnNQcTSPEKk")
+	want := "https://bisque2.ece.ucsb.edu/client_service/view?resource=https://bisque2.ece.ucsb.edu/data_service/00-LLkbXPVgwiddnNQcTSPEKk"
+	if got != want {
+		t.Fatalf("clientViewURL = %q, want canonical unescaped %q", got, want)
+	}
+	if strings.Contains(got, "%3A") || strings.Contains(got, "%2F") {
+		t.Fatalf("client view URL must not percent-encode the resource reference: %q", got)
+	}
+
+	// A relative resource URI is resolved against the configured root so the
+	// viewer always receives an absolute resource reference.
+	rel := service.clientViewURL("/data_service/00-REL")
+	if rel != "https://bisque2.ece.ucsb.edu/client_service/view?resource=https://bisque2.ece.ucsb.edu/data_service/00-REL" {
+		t.Fatalf("relative resource URI not resolved to absolute view URL: %q", rel)
+	}
+}
+
+func TestV2BisqueSearchResultsCarryCanonicalViewURL(t *testing.T) {
+	t.Parallel()
+
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<resource><image uri="` + bisque.URL + `/data_service/00-abc" name="scan.png" resource_uniq="00-abc"/></resource>`))
+	}))
+	defer bisque.Close()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"image","limit":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body bisqueSearchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(body.Results) != 1 {
+		t.Fatalf("results = %+v, want one", body.Results)
+	}
+	want := bisque.URL + "/client_service/view?resource=" + bisque.URL + "/data_service/00-abc"
+	if body.Results[0].ClientViewURL != want {
+		t.Fatalf("client_view_url = %q, want canonical unescaped %q", body.Results[0].ClientViewURL, want)
+	}
+}
+
+func TestV2BisqueSearchRejectsNonNumericRelationalFilter(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       "https://bisque.example.test",
+			HTTPClient:    http.DefaultClient,
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"image","metadata_filters":[{"tag":"age","op":"gt","value":"old"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 for non-numeric relational filter", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "numeric value") {
+		t.Fatalf("error body = %s, want numeric-value guidance", rec.Body.String())
+	}
+}
+
 func TestV2BisqueSearchPrefersLinkedSessionCredentialsOverFallback(t *testing.T) {
 	t.Parallel()
 
@@ -10627,6 +11483,632 @@ func TestV2BisqueSearchPrefersLinkedSessionCredentialsOverFallback(t *testing.T)
 	}
 	if strings.Contains(gotAuth, "fallback") {
 		t.Fatalf("Authorization unexpectedly used fallback credentials: %q", gotAuth)
+	}
+}
+
+type fakeBisqueUploadServer struct {
+	mu          sync.Mutex
+	uploads     []string
+	datasetXML  []string
+	uploadCount int
+}
+
+func newFakeBisqueUploadServer(t *testing.T) (*httptest.Server, *fakeBisqueUploadServer) {
+	t.Helper()
+	state := &fakeBisqueUploadServer{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/import/transfer":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Errorf("parse multipart upload: %v", err)
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				t.Errorf("missing multipart file field: %v", err)
+				return
+			}
+			defer func() {
+				_ = file.Close()
+			}()
+			state.mu.Lock()
+			state.uploadCount++
+			uniq := fmt.Sprintf("00-PUSH%d", state.uploadCount)
+			state.uploads = append(state.uploads, header.Filename)
+			state.mu.Unlock()
+			_, _ = w.Write([]byte(`<resource type="uploaded"><image uri="` + server.URL + `/data_service/` + uniq + `" name="` + header.Filename + `" resource_uniq="` + uniq + `"/></resource>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/data_service/dataset":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read dataset body: %v", err)
+			}
+			state.mu.Lock()
+			state.datasetXML = append(state.datasetXML, string(body))
+			state.mu.Unlock()
+			var dataset bisqueDatasetXML
+			if err := xml.Unmarshal(body, &dataset); err != nil {
+				t.Errorf("decode dataset XML: %v", err)
+			}
+			_, _ = w.Write([]byte(`<dataset uri="` + server.URL + `/data_service/00-DATASET" name="` + dataset.Name + `" resource_uniq="00-DATASET"/>`))
+		case r.URL.Path == "/auth_service/session":
+			_, _ = w.Write([]byte(`<session><tag name="user" value="amil"/></session>`))
+		default:
+			_, _ = w.Write([]byte(`<resource/>`))
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, state
+}
+
+func TestV2BisqueCreateDatasetPostsMemberXML(t *testing.T) {
+	t.Parallel()
+
+	bisque, state := newFakeBisqueUploadServer(t)
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			DevUsername:   "ada",
+			DevPassword:   "secret",
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	payload := `{"name":"analysis outputs","resource_uris":["` + bisque.URL + `/data_service/00-A","` + bisque.URL + `/data_service/00-B","` + bisque.URL + `/data_service/00-A"]}`
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/datasets", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create dataset status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(state.datasetXML) != 1 {
+		t.Fatalf("dataset posts = %d, want 1", len(state.datasetXML))
+	}
+	var dataset bisqueDatasetXML
+	if err := xml.Unmarshal([]byte(state.datasetXML[0]), &dataset); err != nil {
+		t.Fatalf("decode dataset XML: %v", err)
+	}
+	if dataset.Name != "analysis outputs" {
+		t.Fatalf("dataset name = %q", dataset.Name)
+	}
+	if len(dataset.Members) != 2 {
+		t.Fatalf("dataset members = %+v, want duplicate URI removed", dataset.Members)
+	}
+	if dataset.Members[0].URI != bisque.URL+"/data_service/00-A" || dataset.Members[0].Type != "object" || dataset.Members[0].Index != 0 {
+		t.Fatalf("first member = %+v", dataset.Members[0])
+	}
+	if dataset.Members[1].URI != bisque.URL+"/data_service/00-B" || dataset.Members[1].Index != 1 {
+		t.Fatalf("second member = %+v", dataset.Members[1])
+	}
+	var response BisqueDatasetRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ResourceUniq != "00-DATASET" || response.MemberCount != 2 || response.Name != "analysis outputs" {
+		t.Fatalf("dataset response = %+v", response)
+	}
+	if response.ClientViewURL == "" {
+		t.Fatalf("dataset response missing client view URL: %+v", response)
+	}
+}
+
+func TestV2BisquePushRejectsDatasetMembersOutsideAllowedRoots(t *testing.T) {
+	t.Parallel()
+
+	bisque, _ := newFakeBisqueUploadServer(t)
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			DevUsername:   "ada",
+			DevPassword:   "secret",
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	payload := `{"name":"bad","resource_uris":["https://evil.example.com/data_service/00-A"]}`
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/datasets", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("dataset status = %d body=%s, want 400 for disallowed member root", rec.Code, rec.Body.String())
+	}
+}
+
+func TestV2BisquePushFolderCreatesDataset(t *testing.T) {
+	t.Parallel()
+
+	bisque, state := newFakeBisqueUploadServer(t)
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: uploadRoot,
+		Store:      store.NewMemoryStore(),
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			DevUsername:   "ada",
+			DevPassword:   "secret",
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    uploadRoot,
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	login := httptest.NewRequest(http.MethodPost, "/v2/auth/login", strings.NewReader(`{"username":"amil"}`))
+	login.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	router.ServeHTTP(loginRec, login)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", loginRec.Code, loginRec.Body.String())
+	}
+	sessionCookie := loginRec.Result().Cookies()[0]
+
+	fileIDs := make([]string, 0, 2)
+	for _, name := range []string{"scan-a.png", "scan-b.png"} {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := part.Write(testPNGBytes(t, 4, 3)); err != nil {
+			t.Fatalf("write multipart file: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+		uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+		uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+		uploadReq.AddCookie(sessionCookie)
+		uploadRec := httptest.NewRecorder()
+		router.ServeHTTP(uploadRec, uploadReq)
+		if uploadRec.Code != http.StatusOK {
+			t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+		}
+		var uploadResponse uploadFilesResponse
+		if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+			t.Fatalf("decode upload response: %v", err)
+		}
+		fileIDs = append(fileIDs, uploadResponse.Uploaded[0].FileID)
+	}
+
+	collectionReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections", strings.NewReader(`{"name":"NIfTI Batch","collection_type":"folder"}`))
+	collectionReq.Header.Set("Content-Type", "application/json")
+	collectionReq.AddCookie(sessionCookie)
+	collectionRec := httptest.NewRecorder()
+	router.ServeHTTP(collectionRec, collectionReq)
+	if collectionRec.Code != http.StatusOK && collectionRec.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d body=%s", collectionRec.Code, collectionRec.Body.String())
+	}
+	var collectionResponse resourceCollectionResponse
+	if err := json.Unmarshal(collectionRec.Body.Bytes(), &collectionResponse); err != nil {
+		t.Fatalf("decode collection response: %v", err)
+	}
+	collectionID := collectionResponse.Collection.CollectionID
+
+	addPayload := `{"resource_ids":["` + strings.Join(fileIDs, `","`) + `"]}`
+	addReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections/"+collectionID+"/resources", strings.NewReader(addPayload))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.AddCookie(sessionCookie)
+	addRec := httptest.NewRecorder()
+	router.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add members status = %d body=%s", addRec.Code, addRec.Body.String())
+	}
+
+	pushReq := httptest.NewRequest(http.MethodPost, "/v2/bisque/push", strings.NewReader(`{"collection_ids":["`+collectionID+`"]}`))
+	pushReq.Header.Set("Content-Type", "application/json")
+	pushReq.AddCookie(sessionCookie)
+	pushRec := httptest.NewRecorder()
+	router.ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("push status = %d body=%s, want 200", pushRec.Code, pushRec.Body.String())
+	}
+	var pushResponse bisquePushResponse
+	if err := json.Unmarshal(pushRec.Body.Bytes(), &pushResponse); err != nil {
+		t.Fatalf("decode push response: %v", err)
+	}
+	if pushResponse.Count != 2 || len(pushResponse.Uploads) != 2 {
+		t.Fatalf("push uploads = %+v, want both folder members uploaded", pushResponse)
+	}
+	if len(pushResponse.Datasets) != 1 {
+		t.Fatalf("push datasets = %+v, want one dataset", pushResponse.Datasets)
+	}
+	dataset := pushResponse.Datasets[0]
+	if dataset.Name != "NIfTI Batch" || dataset.MemberCount != 2 || dataset.CollectionID != collectionID || dataset.ResourceUniq != "00-DATASET" {
+		t.Fatalf("dataset = %+v", dataset)
+	}
+	if len(state.uploads) != 2 {
+		t.Fatalf("BisQue uploads = %v, want two transfers", state.uploads)
+	}
+	if len(state.datasetXML) != 1 {
+		t.Fatalf("dataset posts = %d, want 1", len(state.datasetXML))
+	}
+	var datasetDoc bisqueDatasetXML
+	if err := xml.Unmarshal([]byte(state.datasetXML[0]), &datasetDoc); err != nil {
+		t.Fatalf("decode dataset XML: %v", err)
+	}
+	if datasetDoc.Name != "NIfTI Batch" || len(datasetDoc.Members) != 2 {
+		t.Fatalf("dataset XML = %+v", datasetDoc)
+	}
+	for i, member := range datasetDoc.Members {
+		want := fmt.Sprintf("%s/data_service/00-PUSH%d", bisque.URL, i+1)
+		if member.URI != want || member.Type != "object" {
+			t.Fatalf("dataset member %d = %+v, want %s", i, member, want)
+		}
+	}
+}
+
+func TestV2BisquePushUploadsLooseFilesWithOptionalDataset(t *testing.T) {
+	t.Parallel()
+
+	bisque, state := newFakeBisqueUploadServer(t)
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: uploadRoot,
+		Store:      store.NewMemoryStore(),
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			DevUsername:   "ada",
+			DevPassword:   "secret",
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    uploadRoot,
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	login := httptest.NewRequest(http.MethodPost, "/v2/auth/login", strings.NewReader(`{"username":"amil"}`))
+	login.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	router.ServeHTTP(loginRec, login)
+	sessionCookie := loginRec.Result().Cookies()[0]
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "result.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 4, 3)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.AddCookie(sessionCookie)
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	fileID := uploadResponse.Uploaded[0].FileID
+
+	pushReq := httptest.NewRequest(http.MethodPost, "/v2/bisque/push", strings.NewReader(`{"file_ids":["`+fileID+`"],"dataset_name":"Loose Results"}`))
+	pushReq.Header.Set("Content-Type", "application/json")
+	pushReq.AddCookie(sessionCookie)
+	pushRec := httptest.NewRecorder()
+	router.ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("push status = %d body=%s, want 200", pushRec.Code, pushRec.Body.String())
+	}
+	var pushResponse bisquePushResponse
+	if err := json.Unmarshal(pushRec.Body.Bytes(), &pushResponse); err != nil {
+		t.Fatalf("decode push response: %v", err)
+	}
+	if pushResponse.Count != 1 || len(pushResponse.Uploads) != 1 || pushResponse.Uploads[0].FileID != fileID {
+		t.Fatalf("push response uploads = %+v", pushResponse)
+	}
+	if len(pushResponse.Datasets) != 1 || pushResponse.Datasets[0].Name != "Loose Results" || pushResponse.Datasets[0].MemberCount != 1 {
+		t.Fatalf("push response datasets = %+v", pushResponse.Datasets)
+	}
+	if len(state.uploads) != 1 || len(state.datasetXML) != 1 {
+		t.Fatalf("BisQue calls = uploads %v datasets %d", state.uploads, len(state.datasetXML))
+	}
+}
+
+func TestV2BisquePushRequiresLinkedAccount(t *testing.T) {
+	t.Parallel()
+
+	bisque, _ := newFakeBisqueUploadServer(t)
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: t.TempDir(),
+		Store:      store.NewMemoryStore(),
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	pushReq := httptest.NewRequest(http.MethodPost, "/v2/bisque/push", strings.NewReader(`{"file_ids":["file_missing"]}`))
+	pushReq.Header.Set("Content-Type", "application/json")
+	pushRec := httptest.NewRecorder()
+	router.ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusBadRequest {
+		t.Fatalf("push status = %d body=%s, want 400 when no BisQue account is linked", pushRec.Code, pushRec.Body.String())
+	}
+	if !strings.Contains(pushRec.Body.String(), "link your BisQue account") {
+		t.Fatalf("push error body = %s, want linking guidance", pushRec.Body.String())
+	}
+}
+
+func TestWorkerBisqueSearchUsesRunScopedSessionInWorkOSMode(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	gotAuths := []string{}
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuths = append(gotAuths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<resource><image uri="` + bisque.URL + `/data_service/00-abc" name="scan.png" resource_uniq="00-abc"/></resource>`))
+	}))
+	defer bisque.Close()
+
+	memory := store.NewMemoryStore()
+	thread, err := memory.CreateThread(context.Background(), domain.CreateThreadInput{Title: "worker"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	credentialStore := NewBisqueCredentialStore()
+	sessionID := credentialStore.Put(BisqueCredentials{Username: "amil", Password: "bean123"})
+	run, err := memory.CreateRun(context.Background(), domain.CreateRunInput{
+		ThreadID: thread.ThreadID,
+		UserID:   "workos:user_e2e",
+		Goal:     "bisque worker test",
+		Metadata: domain.JSONMap{"bisque_session_id": sessionID},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	router := NewRouter(ServerDeps{
+		Version:           "test-version",
+		Store:             memory,
+		WorkerToken:       "worker-secret",
+		WorkOS:            testWorkOSAuth(t, WorkOSAuthConfig{}),
+		BisqueCredentials: credentialStore,
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	makeSearch := func(workerToken string, runID string, bisqueSession string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"image","limit":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		if workerToken != "" {
+			req.Header.Set("X-Ultra-Worker-Token", workerToken)
+		}
+		if runID != "" {
+			req.Header.Set("X-Ultra-Run-Id", runID)
+		}
+		if bisqueSession != "" {
+			req.Header.Set("X-Ultra-Bisque-Session-Id", bisqueSession)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Without any credentials the protected group rejects the request.
+	if rec := makeSearch("", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous search status = %d, want 401", rec.Code)
+	}
+	// A valid worker token alone (no run) is not enough for bisque endpoints.
+	if rec := makeSearch("worker-secret", "", sessionID); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("worker search without run status = %d, want 401", rec.Code)
+	}
+	// Worker token + run whose metadata matches the session uses linked credentials.
+	if rec := makeSearch("worker-secret", run.RunID, sessionID); rec.Code != http.StatusOK {
+		t.Fatalf("worker search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("amil:bean123"))
+	mu.Lock()
+	lastAuth := gotAuths[len(gotAuths)-1]
+	mu.Unlock()
+	if lastAuth != wantAuth {
+		t.Fatalf("Authorization = %q, want linked run-scoped credentials", lastAuth)
+	}
+	// A session id that does not match the run metadata is ignored.
+	if rec := makeSearch("worker-secret", run.RunID, "bisque_session_stolen"); rec.Code != http.StatusOK {
+		t.Fatalf("mismatched session search status = %d, want 200 with anonymous upstream", rec.Code)
+	}
+	mu.Lock()
+	lastAuth = gotAuths[len(gotAuths)-1]
+	mu.Unlock()
+	if lastAuth == wantAuth {
+		t.Fatalf("mismatched session id reused linked credentials")
+	}
+	// An invalid worker token is rejected outright.
+	if rec := makeSearch("wrong-secret", run.RunID, sessionID); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid worker token status = %d, want 401", rec.Code)
+	}
+}
+
+func TestWorkerBisqueSessionRejectedWhenRunOwnerDiffers(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	gotAuths := []string{}
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuths = append(gotAuths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<resource><image uri="` + bisque.URL + `/data_service/00-abc" name="scan.png" resource_uniq="00-abc"/></resource>`))
+	}))
+	defer bisque.Close()
+
+	memory := store.NewMemoryStore()
+	cipher, err := NewBisqueCredentialCipher(bytes.Repeat([]byte{9}, 32), "test-key")
+	if err != nil {
+		t.Fatalf("NewBisqueCredentialCipher: %v", err)
+	}
+	credentialStore := NewPersistentBisqueCredentialStore(memory, cipher, bisque.URL)
+	victimSession, err := credentialStore.PutLinked(context.Background(), BisqueCredentialLinkInput{
+		Credentials: BisqueCredentials{Username: "victim", Password: "victim-secret"},
+		UserID:      "workos:user_victim",
+		OrgID:       "workos-org",
+		RootURL:     bisque.URL,
+	})
+	if err != nil {
+		t.Fatalf("PutLinked: %v", err)
+	}
+	thread, err := memory.CreateThread(context.Background(), domain.CreateThreadInput{Title: "attacker"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	attackerRun, err := memory.CreateRun(context.Background(), domain.CreateRunInput{
+		ThreadID: thread.ThreadID,
+		UserID:   "workos:user_attacker",
+		Goal:     "cross-user session use",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	victimThread, err := memory.CreateThread(context.Background(), domain.CreateThreadInput{Title: "victim"})
+	if err != nil {
+		t.Fatalf("CreateThread victim: %v", err)
+	}
+	victimRun, err := memory.CreateRun(context.Background(), domain.CreateRunInput{
+		ThreadID: victimThread.ThreadID,
+		UserID:   "workos:user_victim",
+		Goal:     "legitimate run",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun victim: %v", err)
+	}
+
+	router := NewRouter(ServerDeps{
+		Version:           "test-version",
+		Store:             memory,
+		WorkerToken:       "worker-secret",
+		WorkOS:            testWorkOSAuth(t, WorkOSAuthConfig{}),
+		BisqueCredentials: credentialStore,
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	search := func(runID string) {
+		req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"image","limit":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-Worker-Token", "worker-secret")
+		req.Header.Set("X-Ultra-Run-Id", runID)
+		req.Header.Set("X-Ultra-Bisque-Session-Id", victimSession)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+		}
+	}
+
+	victimAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("victim:victim-secret"))
+	search(attackerRun.RunID)
+	mu.Lock()
+	attackerAuth := gotAuths[len(gotAuths)-1]
+	mu.Unlock()
+	if attackerAuth == victimAuth {
+		t.Fatalf("another user's run reused the victim's linked BisQue credentials")
+	}
+	search(victimRun.RunID)
+	mu.Lock()
+	ownerAuth := gotAuths[len(gotAuths)-1]
+	mu.Unlock()
+	if ownerAuth != victimAuth {
+		t.Fatalf("run owner did not get their own linked credentials, Authorization = %q", ownerAuth)
+	}
+}
+
+func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
+	t.Parallel()
+
+	memory := store.NewMemoryStore()
+	thread, err := memory.CreateThread(context.Background(), domain.CreateThreadInput{Title: "worker uploads"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := memory.CreateRun(context.Background(), domain.CreateRunInput{
+		ThreadID: thread.ThreadID,
+		UserID:   "workos:user_e2e",
+		Goal:     "stage outputs",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Store:       memory,
+		UploadRoot:  t.TempDir(),
+		WorkerToken: "worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "overlay.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 4, 3)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-Worker-Token", "worker-secret")
+	req.Header.Set("X-Ultra-Run-Id", run.RunID)
+	req.Header.Set("X-Ultra-User-Id", "spoofed-user")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worker upload status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+	if uploadResponse.Uploaded[0].Principal.UserID != "workos:user_e2e" {
+		t.Fatalf("uploaded principal = %q, want run owner workos:user_e2e", uploadResponse.Uploaded[0].Principal.UserID)
 	}
 }
 
@@ -11570,6 +13052,41 @@ func testNifti1Uint16Bytes(t *testing.T, width int, height int, depth int, value
 	return output
 }
 
+// testNifti1Uint16TimeBytes builds a 4D NIfTI (dim[0]=4) whose 4th dimension is
+// time — the fMRI layout. Timepoint volumes are stored as consecutive slabs.
+func testNifti1Uint16TimeBytes(t *testing.T, width int, height int, depth int, timepoints int, values []uint16) []byte {
+	t.Helper()
+	if width <= 0 || height <= 0 || depth <= 0 || timepoints <= 0 {
+		t.Fatalf("invalid NIfTI dimensions %dx%dx%dx%d", width, height, depth, timepoints)
+	}
+	voxelCount := width * height * depth * timepoints
+	if len(values) != voxelCount {
+		t.Fatalf("NIfTI fixture has %d values, want %d", len(values), voxelCount)
+	}
+	const headerSize = 348
+	const voxOffset = 352
+	output := make([]byte, voxOffset+voxelCount*2)
+	binary.LittleEndian.PutUint32(output[0:4], uint32(headerSize))
+	binary.LittleEndian.PutUint16(output[40:42], 4)
+	binary.LittleEndian.PutUint16(output[42:44], uint16(width))
+	binary.LittleEndian.PutUint16(output[44:46], uint16(height))
+	binary.LittleEndian.PutUint16(output[46:48], uint16(depth))
+	binary.LittleEndian.PutUint16(output[48:50], uint16(timepoints))
+	binary.LittleEndian.PutUint16(output[70:72], 512)
+	binary.LittleEndian.PutUint16(output[72:74], 16)
+	for axis := 1; axis <= 3; axis++ {
+		binary.LittleEndian.PutUint32(output[76+axis*4:80+axis*4], math.Float32bits(1))
+	}
+	binary.LittleEndian.PutUint32(output[108:112], math.Float32bits(float32(voxOffset)))
+	copy(output[344:348], []byte{'n', '+', '1', 0})
+	for index, value := range values {
+		binary.LittleEndian.PutUint16(output[voxOffset+index*2:voxOffset+index*2+2], value)
+	}
+	return output
+}
+
+// testNifti1Uint16ChannelBytes builds a genuine multi-component NIfTI: the 4th
+// dimension is singleton time and the 5th (dim[5]) carries channels.
 func testNifti1Uint16ChannelBytes(t *testing.T, width int, height int, depth int, channels int, values []uint16) []byte {
 	t.Helper()
 	if width <= 0 || height <= 0 || depth <= 0 || channels <= 0 {
@@ -11583,11 +13100,12 @@ func testNifti1Uint16ChannelBytes(t *testing.T, width int, height int, depth int
 	const voxOffset = 352
 	output := make([]byte, voxOffset+voxelCount*2)
 	binary.LittleEndian.PutUint32(output[0:4], uint32(headerSize))
-	binary.LittleEndian.PutUint16(output[40:42], 4)
+	binary.LittleEndian.PutUint16(output[40:42], 5)
 	binary.LittleEndian.PutUint16(output[42:44], uint16(width))
 	binary.LittleEndian.PutUint16(output[44:46], uint16(height))
 	binary.LittleEndian.PutUint16(output[46:48], uint16(depth))
-	binary.LittleEndian.PutUint16(output[48:50], uint16(channels))
+	binary.LittleEndian.PutUint16(output[48:50], 1)
+	binary.LittleEndian.PutUint16(output[50:52], uint16(channels))
 	binary.LittleEndian.PutUint16(output[70:72], 512)
 	binary.LittleEndian.PutUint16(output[72:74], 16)
 	for axis := 1; axis <= 3; axis++ {

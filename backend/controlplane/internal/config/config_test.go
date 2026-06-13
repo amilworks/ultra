@@ -17,6 +17,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr == "" {
 		t.Fatalf("HTTPAddr must have default")
 	}
+	if cfg.ReadTimeout != 0 {
+		t.Fatalf("ReadTimeout = %s, want no whole-body default timeout", cfg.ReadTimeout)
+	}
+	if cfg.ReadHeaderTimeout <= 0 {
+		t.Fatalf("ReadHeaderTimeout must have a positive default")
+	}
 	if cfg.NATSRareSpotJobsSubject != "ultra.runs.rarespot.jobs" {
 		t.Fatalf("NATSRareSpotJobsSubject = %q, want RareSpot subject", cfg.NATSRareSpotJobsSubject)
 	}
@@ -131,6 +137,19 @@ func TestLoadPrefersControlDatabaseURLOverRunStorePath(t *testing.T) {
 	cfg := Load()
 	if cfg.DatabaseURL != "postgresql://postgres:postgres@127.0.0.1:55432/control" {
 		t.Fatalf("DatabaseURL = %q, want ULTRA_CONTROL_DATABASE_URL", cfg.DatabaseURL)
+	}
+}
+
+func TestLoadPostgresPoolConfig(t *testing.T) {
+	t.Setenv("ULTRA_CONTROL_DATABASE_MAX_CONNS", "12")
+	t.Setenv("ULTRA_CONTROL_DATABASE_MIN_CONNS", "3")
+
+	cfg := Load()
+	if cfg.DatabaseMaxConns != 12 {
+		t.Fatalf("DatabaseMaxConns = %d, want 12", cfg.DatabaseMaxConns)
+	}
+	if cfg.DatabaseMinConns != 3 {
+		t.Fatalf("DatabaseMinConns = %d, want 3", cfg.DatabaseMinConns)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -406,49 +408,73 @@ func TestWorkOSActiveResearcherCannotAccessAdminRoutes(t *testing.T) {
 	}
 }
 
-func TestWorkOSDisabledUltraAccountDoesNotBlockAuthKitAccess(t *testing.T) {
+func TestWorkOSNonActiveUltraAccountIsDenied(t *testing.T) {
 	t.Parallel()
 
-	mem := store.NewMemoryStore()
-	if _, err := mem.CreateUser(context.Background(), domain.CreateUserInput{
-		UserID: "workos:user_disabled",
-		Email:  "disabled@example.org",
-		Role:   "admin",
-		Status: "disabled",
-		OrgID:  "approved-org",
-	}); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-	router := NewRouter(ServerDeps{
-		Runs:  runcontrol.NewService(mem, eventbus.NewMemoryBus()),
-		Store: mem,
-		WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
-			BaseURL: "https://workos.example.test",
-		}),
-	})
-	sessionCookie := testWorkOSSessionCookie(t, "user_disabled", "disabled@example.org", "approved-org", "admin")
+	for _, tc := range []struct {
+		status      string
+		wantMessage string
+	}{
+		{status: "disabled", wantMessage: "disabled"},
+		{status: "pending", wantMessage: "pending"},
+		{status: "rejected", wantMessage: "not approved"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			t.Parallel()
 
-	sessionReq := httptest.NewRequest(http.MethodGet, "/v2/auth/session", nil)
-	sessionReq.AddCookie(sessionCookie)
-	sessionRec := httptest.NewRecorder()
-	router.ServeHTTP(sessionRec, sessionReq)
-	if sessionRec.Code != http.StatusOK {
-		t.Fatalf("session status = %d body=%s", sessionRec.Code, sessionRec.Body.String())
-	}
-	var session map[string]any
-	if err := json.Unmarshal(sessionRec.Body.Bytes(), &session); err != nil {
-		t.Fatalf("decode session: %v", err)
-	}
-	if session["authenticated"] != true || session["account_status"] != "disabled" {
-		t.Fatalf("session = %#v, want authenticated WorkOS session with stored disabled status", session)
-	}
+			mem := store.NewMemoryStore()
+			if _, err := mem.CreateUser(context.Background(), domain.CreateUserInput{
+				UserID: "workos:user_" + tc.status,
+				Email:  tc.status + "@example.org",
+				Role:   "admin",
+				Status: tc.status,
+				OrgID:  "approved-org",
+			}); err != nil {
+				t.Fatalf("CreateUser: %v", err)
+			}
+			router := NewRouter(ServerDeps{
+				Runs:  runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+				Store: mem,
+				WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
+					BaseURL: "https://workos.example.test",
+				}),
+			})
+			sessionCookie := testWorkOSSessionCookie(t, "user_"+tc.status, tc.status+"@example.org", "approved-org", "admin")
 
-	resourcesReq := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
-	resourcesReq.AddCookie(sessionCookie)
-	resourcesRec := httptest.NewRecorder()
-	router.ServeHTTP(resourcesRec, resourcesReq)
-	if resourcesRec.Code != http.StatusOK {
-		t.Fatalf("resources status = %d body=%s, want AuthKit-controlled access", resourcesRec.Code, resourcesRec.Body.String())
+			sessionReq := httptest.NewRequest(http.MethodGet, "/v2/auth/session", nil)
+			sessionReq.AddCookie(sessionCookie)
+			sessionRec := httptest.NewRecorder()
+			router.ServeHTTP(sessionRec, sessionReq)
+			if sessionRec.Code != http.StatusOK {
+				t.Fatalf("session status = %d body=%s", sessionRec.Code, sessionRec.Body.String())
+			}
+			var session map[string]any
+			if err := json.Unmarshal(sessionRec.Body.Bytes(), &session); err != nil {
+				t.Fatalf("decode session: %v", err)
+			}
+			if session["authenticated"] != false || session["account_status"] != tc.status {
+				t.Fatalf("session = %#v, want unauthenticated session with %s account status", session, tc.status)
+			}
+			message := strings.ToLower(fmt.Sprint(session["message"]))
+			if !strings.Contains(message, tc.wantMessage) {
+				t.Fatalf("session message = %q, want mention of %q", session["message"], tc.wantMessage)
+			}
+
+			resourcesReq := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+			resourcesReq.AddCookie(sessionCookie)
+			resourcesRec := httptest.NewRecorder()
+			router.ServeHTTP(resourcesRec, resourcesReq)
+			if resourcesRec.Code != http.StatusForbidden {
+				t.Fatalf("resources status = %d body=%s, want 403 for %s account", resourcesRec.Code, resourcesRec.Body.String(), tc.status)
+			}
+			var denied map[string]any
+			if err := json.Unmarshal(resourcesRec.Body.Bytes(), &denied); err != nil {
+				t.Fatalf("decode denied response: %v", err)
+			}
+			if denied["authenticated"] != false || denied["account_status"] != tc.status {
+				t.Fatalf("denied response = %#v, want account_status %s", denied, tc.status)
+			}
+		})
 	}
 }
 
@@ -593,6 +619,297 @@ func TestWorkOSAuthenticatedUserCanLinkBisqueCredentials(t *testing.T) {
 	}
 }
 
+func TestNewWorkOSAuthRejectsShortCookiePassword(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewWorkOSAuth(WorkOSAuthConfig{
+		Enabled:        true,
+		ClientID:       "client_test",
+		APIKey:         "sk_test",
+		RedirectURI:    "https://ultra.example.test/v2/auth/workos/callback",
+		CookiePassword: "too-short-password",
+	})
+	if err == nil || !strings.Contains(err.Error(), "at least 32 characters") {
+		t.Fatalf("NewWorkOSAuth error = %v, want cookie password length error", err)
+	}
+}
+
+func TestWorkOSCallbackFailuresRedirectWithAuthError(t *testing.T) {
+	t.Parallel()
+
+	newWorkOSRouter := func(t *testing.T) http.Handler {
+		return NewRouter(ServerDeps{
+			WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
+				BaseURL:              "https://workos.example.test",
+				PostLoginRedirectURI: "https://ultra.example.test/",
+			}),
+		})
+	}
+	freshStateCookie := func(t *testing.T, router http.Handler) (*http.Cookie, string) {
+		loginRec := httptest.NewRecorder()
+		router.ServeHTTP(loginRec, httptest.NewRequest(http.MethodPost, "/v2/auth/login", nil))
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d body=%s", loginRec.Code, loginRec.Body.String())
+		}
+		var loginBody map[string]any
+		if err := json.Unmarshal(loginRec.Body.Bytes(), &loginBody); err != nil {
+			t.Fatalf("decode login response: %v", err)
+		}
+		authorizationURL, err := url.Parse(fmt.Sprint(loginBody["authorization_url"]))
+		if err != nil {
+			t.Fatalf("parse authorization_url: %v", err)
+		}
+		cookie := findCookie(loginRec.Result().Cookies(), workOSStateCookieName)
+		if cookie == nil {
+			t.Fatalf("login did not set state cookie")
+		}
+		return cookie, authorizationURL.Query().Get("state")
+	}
+
+	t.Run("provider error param", func(t *testing.T) {
+		t.Parallel()
+		router := newWorkOSRouter(t)
+		req := httptest.NewRequest(http.MethodGet, "/v2/auth/workos/callback?error=access_denied&error_description=User+denied", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assertAuthErrorRedirect(t, rec, "cancelled")
+	})
+
+	t.Run("missing state cookie", func(t *testing.T) {
+		t.Parallel()
+		router := newWorkOSRouter(t)
+		req := httptest.NewRequest(http.MethodGet, "/v2/auth/workos/callback?code=code_abc&state=state_abc", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assertAuthErrorRedirect(t, rec, "expired")
+	})
+
+	t.Run("state mismatch", func(t *testing.T) {
+		t.Parallel()
+		router := newWorkOSRouter(t)
+		stateCookie, _ := freshStateCookie(t, router)
+		req := httptest.NewRequest(http.MethodGet, "/v2/auth/workos/callback?code=code_abc&state=not_the_right_state", nil)
+		req.AddCookie(stateCookie)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assertAuthErrorRedirect(t, rec, "verified")
+	})
+
+	t.Run("code exchange failure", func(t *testing.T) {
+		t.Parallel()
+		workosServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"expired code"}`))
+		}))
+		defer workosServer.Close()
+		router := NewRouter(ServerDeps{
+			WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
+				BaseURL:              workosServer.URL,
+				PostLoginRedirectURI: "https://ultra.example.test/",
+			}),
+		})
+		stateCookie, state := freshStateCookie(t, router)
+		req := httptest.NewRequest(http.MethodGet, "/v2/auth/workos/callback?code=code_abc&state="+url.QueryEscape(state), nil)
+		req.AddCookie(stateCookie)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assertAuthErrorRedirect(t, rec, "could not complete")
+	})
+}
+
+func assertAuthErrorRedirect(t *testing.T, rec *httptest.ResponseRecorder, wantFragment string) {
+	t.Helper()
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s, want 302 redirect", rec.Code, rec.Body.String())
+	}
+	location, err := url.Parse(rec.Result().Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect location: %v", err)
+	}
+	if location.Host != "ultra.example.test" || location.Path != "/" {
+		t.Fatalf("redirect location = %s, want post-login URI", location)
+	}
+	authError := location.Query().Get("auth_error")
+	if !strings.Contains(strings.ToLower(authError), wantFragment) {
+		t.Fatalf("auth_error = %q, want mention of %q", authError, wantFragment)
+	}
+	if stateCookie := findCookie(rec.Result().Cookies(), workOSStateCookieName); stateCookie == nil || stateCookie.MaxAge >= 0 {
+		t.Fatalf("callback error did not clear %s cookie", workOSStateCookieName)
+	}
+}
+
+// newRefreshCountingWorkOSServer returns a fake WorkOS endpoint that serves
+// refresh-token grants exactly once per token, mirroring WorkOS refresh token
+// rotation: any reuse of a consumed token gets 401 invalid_grant.
+func newRefreshCountingWorkOSServer(t *testing.T, orgID string, role string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var refreshCalls atomic.Int64
+	var mu sync.Mutex
+	usedTokens := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/user_management/authenticate" {
+			t.Errorf("unexpected WorkOS request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode WorkOS request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body["grant_type"] != "refresh_token" {
+			t.Errorf("grant_type = %v, want refresh_token", body["grant_type"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		token := fmt.Sprint(body["refresh_token"])
+		mu.Lock()
+		alreadyUsed := usedTokens[token]
+		usedTokens[token] = true
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if alreadyUsed {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"refresh token already used"}`))
+			return
+		}
+		call := refreshCalls.Add(1)
+		fmt.Fprintf(w, `{
+			"access_token": %q,
+			"refresh_token": %q,
+			"user": {"id": "user_123", "email": "scientist@example.org", "email_verified": true},
+			"organization_id": %q
+		}`, testWorkOSJWT("sess_refreshed", orgID, role, time.Now().Add(time.Hour)), fmt.Sprintf("refresh_rotated_%d", call), orgID)
+	}))
+	t.Cleanup(server.Close)
+	return server, &refreshCalls
+}
+
+func TestWorkOSConcurrentStaleRequestsShareOneRefresh(t *testing.T) {
+	t.Parallel()
+
+	workosServer, refreshCalls := newRefreshCountingWorkOSServer(t, "org_456", "researcher")
+
+	mem := store.NewMemoryStore()
+	if _, err := mem.CreateUser(context.Background(), domain.CreateUserInput{
+		UserID: "workos:user_123",
+		Email:  "scientist@example.org",
+		Role:   "researcher",
+		Status: "active",
+		OrgID:  "org_456",
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	router := NewRouter(ServerDeps{
+		Runs:  runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store: mem,
+		WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
+			BaseURL: workosServer.URL,
+		}),
+	})
+
+	staleSealed, err := sealWorkOSSessionWithExpiry("user_123", "scientist@example.org", "org_456", "researcher", time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("seal stale WorkOS session: %v", err)
+	}
+	staleCookie := &http.Cookie{Name: workOSSessionCookieName, Value: staleSealed, Path: "/"}
+
+	const parallelRequests = 16
+	var wg sync.WaitGroup
+	statuses := make([]int, parallelRequests)
+	newSessionCookies := make([]*http.Cookie, parallelRequests)
+	for i := range parallelRequests {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+			req.AddCookie(staleCookie)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			statuses[index] = rec.Code
+			newSessionCookies[index] = findCookie(rec.Result().Cookies(), workOSSessionCookieName)
+		}(i)
+	}
+	wg.Wait()
+
+	for index, status := range statuses {
+		if status != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200 (no request may lose the refresh race)", index, status)
+		}
+		if cookie := newSessionCookies[index]; cookie == nil || strings.TrimSpace(cookie.Value) == "" {
+			t.Fatalf("request %d did not receive a refreshed session cookie", index)
+		}
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("WorkOS refresh calls = %d, want exactly 1 shared refresh", got)
+	}
+
+	// A request that was still carrying the stale cookie after the refresh
+	// completed must reuse the refreshed session instead of retrying the
+	// consumed refresh token.
+	lateReq := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+	lateReq.AddCookie(staleCookie)
+	lateRec := httptest.NewRecorder()
+	router.ServeHTTP(lateRec, lateReq)
+	if lateRec.Code != http.StatusOK {
+		t.Fatalf("late stale-cookie request status = %d body=%s, want 200 via grace window", lateRec.Code, lateRec.Body.String())
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("WorkOS refresh calls after late request = %d, want still 1", got)
+	}
+
+	// The rotated session cookie keeps working without another refresh.
+	refreshedCookie := newSessionCookies[0]
+	followUp := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+	followUp.AddCookie(refreshedCookie)
+	followUpRec := httptest.NewRecorder()
+	router.ServeHTTP(followUpRec, followUp)
+	if followUpRec.Code != http.StatusOK {
+		t.Fatalf("refreshed-cookie request status = %d, want 200", followUpRec.Code)
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("WorkOS refresh calls after refreshed-cookie request = %d, want still 1", got)
+	}
+}
+
+func TestWorkOSRevokedRefreshTokenClearsSessionCookie(t *testing.T) {
+	t.Parallel()
+
+	workosServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Session has ended"}`))
+	}))
+	defer workosServer.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Runs:  runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store: mem,
+		WorkOS: testWorkOSAuth(t, WorkOSAuthConfig{
+			BaseURL: workosServer.URL,
+		}),
+	})
+
+	staleSealed, err := sealWorkOSSessionWithExpiry("user_123", "scientist@example.org", "org_456", "researcher", time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("seal stale WorkOS session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+	req.AddCookie(&http.Cookie{Name: workOSSessionCookieName, Value: staleSealed, Path: "/"})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401 for revoked session", rec.Code, rec.Body.String())
+	}
+	cleared := findCookie(rec.Result().Cookies(), workOSSessionCookieName)
+	if cleared == nil || cleared.MaxAge >= 0 {
+		t.Fatalf("revoked session did not clear %s cookie", workOSSessionCookieName)
+	}
+}
+
 func testWorkOSAuth(t *testing.T, overrides WorkOSAuthConfig) *WorkOSAuth {
 	t.Helper()
 	cfg := WorkOSAuthConfig{
@@ -651,8 +968,12 @@ func testWorkOSSessionCookie(t *testing.T, userID string, email string, orgID st
 }
 
 func sealWorkOSSessionForTest(userID string, email string, orgID string, role string) (string, error) {
+	return sealWorkOSSessionWithExpiry(userID, email, orgID, role, time.Now().Add(time.Hour))
+}
+
+func sealWorkOSSessionWithExpiry(userID string, email string, orgID string, role string, expiresAt time.Time) (string, error) {
 	return sealWorkOSSessionValue(
-		testWorkOSJWT("sess_"+userID, orgID, role, time.Now().Add(time.Hour)),
+		testWorkOSJWT("sess_"+userID, orgID, role, expiresAt),
 		"refresh_"+userID,
 		workOSUserSnapshot{
 			ID:    userID,

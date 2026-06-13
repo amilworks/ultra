@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -22,15 +24,23 @@ type NATSConfig struct {
 	CancelSubject        string
 	EventConsumer        string
 	ConsumerTargets      []QueueConsumerTarget
+	// EventIngestConcurrency is how many run-event ingest workers process
+	// events in parallel. Events are partitioned by run ID, so events of the
+	// same run are always processed serially and in delivery order; the
+	// parallelism applies across runs. Zero applies the default.
+	EventIngestConcurrency int
 }
 
 type NATSBus struct {
-	conn *nats.Conn
-	js   nats.JetStreamContext
-	cfg  NATSConfig
+	conn   *nats.Conn
+	js     nats.JetStreamContext
+	cfg    NATSConfig
+	closed chan struct{}
 }
 
 const natsDuplicateWindow = 24 * time.Hour
+const natsReconnectWait = 2 * time.Second
+const natsDrainTimeout = 5 * time.Second
 const runEventConsumerAckWait = 60 * time.Second
 const runEventConsumerMaxDeliver = 20
 const runEventConsumerMaxAckPending = 4096
@@ -47,10 +57,37 @@ func NewNATSBus(ctx context.Context, cfg NATSConfig) (*NATSBus, error) {
 	if cfg.CancelSubject == "" {
 		cfg.CancelSubject = "ultra.runs.cancel"
 	}
-	if cfg.DataAgentJobsSubject == "" {
-		cfg.DataAgentJobsSubject = "ultra.data_agent.jobs"
-	}
-	conn, err := nats.Connect(cfg.URL)
+	// The connection must outlive any NATS outage: the default MaxReconnects
+	// (60 attempts ~2 minutes) permanently closes the connection afterwards,
+	// which would silently stop job dispatch and event ingest until restart.
+	// Initial connect still fails fast so a misconfigured deployment surfaces
+	// at boot instead of limping along.
+	closed := make(chan struct{})
+	var closeOnce sync.Once
+	conn, err := nats.Connect(cfg.URL,
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(natsReconnectWait),
+		nats.DrainTimeout(natsDrainTimeout),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			slog.Warn("nats disconnected; reconnecting", "error", err)
+		}),
+		nats.ReconnectHandler(func(conn *nats.Conn) {
+			slog.Info("nats reconnected", "url", conn.ConnectedUrl())
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			subject := ""
+			if sub != nil {
+				subject = sub.Subject
+			}
+			slog.Error("nats async error", "subject", subject, "error", err)
+		}),
+		nats.ClosedHandler(func(conn *nats.Conn) {
+			if err := conn.LastError(); err != nil {
+				slog.Error("nats connection closed", "error", err)
+			}
+			closeOnce.Do(func() { close(closed) })
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -59,26 +96,12 @@ func NewNATSBus(ctx context.Context, cfg NATSConfig) (*NATSBus, error) {
 		conn.Close()
 		return nil, err
 	}
-	subjects := []string{cfg.JobsSubject, cfg.EventsSubject}
-	if cfg.CancelSubject != "" {
-		subjects = append(subjects, cfg.CancelSubject)
-	}
-	if cfg.RareSpotJobsSubject != "" {
-		subjects = append(subjects, cfg.RareSpotJobsSubject)
-	}
-	if cfg.DataAgentJobsSubject != "" {
-		subjects = append(subjects, cfg.DataAgentJobsSubject)
-	}
-	streamConfig := natsStreamConfig(cfg.Stream, subjects)
-	_, err = js.AddStream(&streamConfig)
-	if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+	streamConfig := natsStreamConfig(cfg.Stream, natsStreamSubjects(cfg))
+	if err := ensureNATSStream(ctx, js, streamConfig); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	if errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-		_, _ = js.UpdateStream(&streamConfig)
-	}
-	return &NATSBus{conn: conn, js: js, cfg: cfg}, nil
+	return &NATSBus{conn: conn, js: js, cfg: cfg, closed: closed}, nil
 }
 
 func natsStreamConfig(name string, subjects []string) nats.StreamConfig {
@@ -88,6 +111,50 @@ func natsStreamConfig(name string, subjects []string) nats.StreamConfig {
 		Storage:    nats.FileStorage,
 		Duplicates: natsDuplicateWindow,
 	}
+}
+
+func natsStreamSubjects(cfg NATSConfig) []string {
+	subjects := make([]string, 0, 5)
+	for _, subject := range []string{
+		cfg.JobsSubject,
+		cfg.EventsSubject,
+		cfg.CancelSubject,
+		cfg.RareSpotJobsSubject,
+		cfg.DataAgentJobsSubject,
+	} {
+		if strings.TrimSpace(subject) != "" {
+			subjects = append(subjects, subject)
+		}
+	}
+	return subjects
+}
+
+type natsStreamManager interface {
+	AddStream(*nats.StreamConfig, ...nats.JSOpt) (*nats.StreamInfo, error)
+	StreamInfo(string, ...nats.JSOpt) (*nats.StreamInfo, error)
+	UpdateStream(*nats.StreamConfig, ...nats.JSOpt) (*nats.StreamInfo, error)
+}
+
+func ensureNATSStream(ctx context.Context, manager natsStreamManager, stream nats.StreamConfig) error {
+	if _, err := manager.AddStream(&stream, nats.Context(ctx)); err != nil {
+		switch {
+		case errors.Is(err, nats.ErrStreamNameAlreadyInUse):
+		case natsStreamSubjectOverlapError(err):
+			if _, infoErr := manager.StreamInfo(stream.Name, nats.Context(ctx)); infoErr != nil {
+				return err
+			}
+		default:
+			return err
+		}
+		if _, updateErr := manager.UpdateStream(&stream, nats.Context(ctx)); updateErr != nil {
+			return updateErr
+		}
+	}
+	return nil
+}
+
+func natsStreamSubjectOverlapError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "subjects overlap with an existing stream")
 }
 
 func (b *NATSBus) PublishJob(ctx context.Context, job Job) error {
@@ -101,7 +168,7 @@ func (b *NATSBus) PublishJob(ctx context.Context, job Job) error {
 func (b *NATSBus) PublishDataAgentJob(ctx context.Context, job DataAgentJob) error {
 	subject := strings.TrimSpace(b.cfg.DataAgentJobsSubject)
 	if subject == "" {
-		subject = "ultra.data_agent.jobs"
+		return errors.New("nats data-agent jobs subject is not configured")
 	}
 	return b.publish(ctx, subject, job, natsMessageIDForDataAgentJob(job))
 }
@@ -218,6 +285,29 @@ func (b *NATSBus) PublishRunEvent(ctx context.Context, event domain.RunEventReco
 	return b.publish(ctx, b.cfg.EventsSubject, event, natsMessageIDForRunEvent(event))
 }
 
+const defaultRunEventIngestConcurrency = 4
+const maxRunEventIngestConcurrency = 64
+
+// runEventIngestNakDelay spaces out redeliveries of events whose ingest
+// failed (e.g. the store is briefly down). A bare Nak would redeliver at
+// full speed and burn through the consumer's MaxDeliver budget in seconds.
+const runEventIngestNakDelay = 5 * time.Second
+
+// runEventIngestWorkerQueueDepth bounds how many decoded events may sit in
+// front of one worker. With AckWait at 60s a queued message must not wait
+// longer than that, so the queue is kept shallow; a full queue blocks the
+// subscription dispatcher, which is the desired backpressure.
+const runEventIngestWorkerQueueDepth = 64
+
+type queuedRunEventMessage struct {
+	msg   *nats.Msg
+	input domain.AppendRunEventInput
+}
+
+// SubscribeAllRunEvents consumes the durable run-event stream and hands each
+// event to handler. Events are decoded once, partitioned by run ID onto a
+// fixed pool of workers (per-run order preserved, cross-run parallelism),
+// and acked only after the handler finishes so redeliveries cover crashes.
 func (b *NATSBus) SubscribeAllRunEvents(ctx context.Context, handler func(context.Context, domain.AppendRunEventInput) error) error {
 	consumer := b.cfg.EventConsumer
 	if consumer == "" {
@@ -226,12 +316,30 @@ func (b *NATSBus) SubscribeAllRunEvents(ctx context.Context, handler func(contex
 	if err := b.reconcileRunEventConsumer(ctx, consumer); err != nil {
 		return err
 	}
+	concurrency := b.cfg.EventIngestConcurrency
+	if concurrency <= 0 {
+		concurrency = defaultRunEventIngestConcurrency
+	}
+	if concurrency > maxRunEventIngestConcurrency {
+		concurrency = maxRunEventIngestConcurrency
+	}
+	queues := make([]chan queuedRunEventMessage, concurrency)
+	for index := range queues {
+		queues[index] = make(chan queuedRunEventMessage, runEventIngestWorkerQueueDepth)
+		go runEventIngestWorker(ctx, queues[index], handler)
+	}
 	sub, err := b.conn.QueueSubscribe(runEventSubscribeSubject(b.cfg, consumer), consumer, func(msg *nats.Msg) {
-		switch runEventMessageDisposition(ctx, msg.Data, handler) {
-		case runEventMessageNak:
-			_ = msg.Nak()
-		default:
+		var input domain.AppendRunEventInput
+		if err := json.Unmarshal(msg.Data, &input); err != nil {
+			// Poison message: acking drops it instead of redelivering forever.
 			_ = msg.Ack()
+			return
+		}
+		queue := queues[runEventIngestPartition(input.RunID, len(queues))]
+		select {
+		case queue <- queuedRunEventMessage{msg: msg, input: input}:
+		case <-ctx.Done():
+			_ = msg.NakWithDelay(runEventIngestNakDelay)
 		}
 	})
 	if err != nil {
@@ -242,6 +350,33 @@ func (b *NATSBus) SubscribeAllRunEvents(ctx context.Context, handler func(contex
 		_ = sub.Unsubscribe()
 	}()
 	return nil
+}
+
+func runEventIngestWorker(ctx context.Context, queue <-chan queuedRunEventMessage, handler func(context.Context, domain.AppendRunEventInput) error) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Queued messages stay unacked and redeliver after AckWait;
+			// ingest deduplicates them by event ID.
+			return
+		case item := <-queue:
+			switch runEventInputDisposition(ctx, item.input, handler) {
+			case runEventMessageNak:
+				_ = item.msg.NakWithDelay(runEventIngestNakDelay)
+			default:
+				_ = item.msg.Ack()
+			}
+		}
+	}
+}
+
+func runEventIngestPartition(runID string, partitions int) int {
+	if partitions <= 1 {
+		return 0
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(runID))
+	return int(hash.Sum32() % uint32(partitions))
 }
 
 func runEventSubscribeSubject(cfg NATSConfig, consumer string) string {
@@ -317,6 +452,10 @@ func runEventMessageDisposition(ctx context.Context, data []byte, handler func(c
 	if err := json.Unmarshal(data, &input); err != nil {
 		return runEventMessageAck
 	}
+	return runEventInputDisposition(ctx, input, handler)
+}
+
+func runEventInputDisposition(ctx context.Context, input domain.AppendRunEventInput, handler func(context.Context, domain.AppendRunEventInput) error) runEventMessageAction {
 	if err := handler(ctx, input); err != nil {
 		return runEventMessageNak
 	}
@@ -380,19 +519,50 @@ func natsMessageIDForCancel(cancel CancelSignal) string {
 	return "cancel:" + runID + ":" + reason
 }
 
+// Close drains the connection (letting in-flight subscription callbacks and
+// pending messages finish) and waits for the close to complete. The previous
+// Drain-then-immediate-Close aborted the drain before it did anything.
 func (b *NATSBus) Close() {
-	b.conn.Drain()
-	b.conn.Close()
+	if err := b.conn.Drain(); err != nil {
+		b.conn.Close()
+	}
+	select {
+	case <-b.closed:
+	case <-time.After(natsDrainTimeout + time.Second):
+		b.conn.Close()
+		select {
+		case <-b.closed:
+		case <-time.After(time.Second):
+			slog.Warn("nats connection did not confirm close before shutdown")
+		}
+	}
 }
 
 func (b *NATSBus) SubscribeRunEvents(ctx context.Context, runID string) (<-chan domain.RunEventRecord, func()) {
 	ch := make(chan domain.RunEventRecord, 128)
+	// The NATS message callback runs on the client's dispatcher goroutine,
+	// independently of unsubscribe(). Without synchronization, a message dispatched
+	// just as a client disconnects (ctx-cancel -> unsubscribe -> close(ch)) would race
+	// the callback's send and panic with "send on closed channel" — crashing the whole
+	// process, not just one stream. Guard the send and the close with a mutex + flag so
+	// the callback never sends after the channel is closed. (sub.Unsubscribe() does not
+	// wait for an in-flight callback, so the flag, not Unsubscribe alone, is what makes
+	// this safe.)
+	var (
+		mu     sync.Mutex
+		closed bool
+	)
 	sub, err := b.conn.Subscribe(b.cfg.EventsSubject, func(msg *nats.Msg) {
 		var event domain.RunEventRecord
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			return
 		}
 		if event.RunID != runID {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
 			return
 		}
 		select {
@@ -409,7 +579,10 @@ func (b *NATSBus) SubscribeRunEvents(ctx context.Context, runID string) (<-chan 
 	unsubscribe := func() {
 		once.Do(func() {
 			_ = sub.Unsubscribe()
+			mu.Lock()
+			closed = true
 			close(ch)
+			mu.Unlock()
 		})
 	}
 	go func() {

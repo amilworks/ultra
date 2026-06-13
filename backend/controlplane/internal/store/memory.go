@@ -30,73 +30,81 @@ type uploadSessionStats struct {
 }
 
 type MemoryStore struct {
-	mu                    sync.RWMutex
-	threads               map[string]domain.ThreadRecord
-	messages              map[string][]domain.ThreadMessage
-	runs                  map[string]domain.RunRecord
-	events                map[string][]domain.RunEventRecord
-	artifacts             map[string]domain.ArtifactRecord
-	resources             map[string]domain.ResourceRecord
-	resourceEvents        []domain.ResourceEventRecord
-	resourceGrants        map[string]domain.ResourceShareGrantRecord
-	collections           map[string]domain.ResourceCollectionRecord
-	collectionMembers     map[string]domain.ResourceCollectionMembershipRecord
-	collectionGrants      map[string]domain.ResourceCollectionShareGrantRecord
-	datasetSnapshots      map[string]domain.DatasetSnapshotRecord
-	datasetEntries        map[string][]domain.DatasetSnapshotResourceRecord
-	datasetGrants         map[string]domain.DatasetSnapshotShareGrantRecord
-	datasetEvents         []domain.DatasetSnapshotEventRecord
-	dataAgentJobs         map[string]domain.DataAgentJobRecord
-	dataAgentEvents       map[string][]domain.DataAgentJobEventRecord
-	dataAgentLeases       map[string]domain.DataAgentJobLeaseRecord
-	uploadSessions        map[string]domain.UploadSessionRecord
-	uploadFiles           map[string]domain.UploadSessionFileRecord
-	uploadChunks          map[string]domain.UploadChunkRecord
-	uploadFilesBySession  map[string]map[string]struct{}
-	uploadChunksByFile    map[string]map[string]struct{}
-	uploadChunksBySession map[string]map[string]struct{}
-	uploadSessionStats    map[string]uploadSessionStats
-	uploadEvents          []domain.UploadSessionEventRecord
-	users                 map[string]domain.UserAccount
-	orgs                  map[string]domain.Organization
-	bisque                map[string]domain.BisqueCredentialRecord
-	leases                map[string]domain.RunLeaseRecord
-	workers               map[string]domain.WorkerHeartbeatRecord
+	mu                     sync.RWMutex
+	threads                map[string]domain.ThreadRecord
+	messages               map[string][]domain.ThreadMessage
+	runs                   map[string]domain.RunRecord
+	events                 map[string][]domain.RunEventRecord
+	artifacts              map[string]domain.ArtifactRecord
+	resources              map[string]domain.ResourceRecord
+	resourceEvents         []domain.ResourceEventRecord
+	resourceGrants         map[string]domain.ResourceShareGrantRecord
+	collections            map[string]domain.ResourceCollectionRecord
+	collectionMembers      map[string]domain.ResourceCollectionMembershipRecord
+	collectionGrants       map[string]domain.ResourceCollectionShareGrantRecord
+	datasetSnapshots       map[string]domain.DatasetSnapshotRecord
+	datasetEntries         map[string][]domain.DatasetSnapshotResourceRecord
+	datasetGrants          map[string]domain.DatasetSnapshotShareGrantRecord
+	datasetEvents          []domain.DatasetSnapshotEventRecord
+	dataAgentJobs          map[string]domain.DataAgentJobRecord
+	dataAgentEvents        map[string][]domain.DataAgentJobEventRecord
+	dataAgentLeases        map[string]domain.DataAgentJobLeaseRecord
+	uploadSessions         map[string]domain.UploadSessionRecord
+	uploadFiles            map[string]domain.UploadSessionFileRecord
+	uploadChunks           map[string]domain.UploadChunkRecord
+	uploadFilesBySession   map[string]map[string]struct{}
+	uploadChunksByFile     map[string]map[string]struct{}
+	uploadChunksBySession  map[string]map[string]struct{}
+	uploadSessionStats     map[string]uploadSessionStats
+	uploadEvents           []domain.UploadSessionEventRecord
+	users                  map[string]domain.UserAccount
+	runTokenUsage          map[string]domain.RunTokenUsageRecord
+	runTokenUsageFinalized map[string]bool
+	tokenUsageDaily        map[string]map[string]*domain.UserTokenUsageDaily
+	tokenUsageLifetime     map[string]domain.UserTokenUsageStats
+	orgs                   map[string]domain.Organization
+	bisque                 map[string]domain.BisqueCredentialRecord
+	leases                 map[string]domain.RunLeaseRecord
+	workers                map[string]domain.WorkerHeartbeatRecord
 }
 
 func NewMemoryStore() *MemoryStore {
 	store := &MemoryStore{
-		threads:               map[string]domain.ThreadRecord{},
-		messages:              map[string][]domain.ThreadMessage{},
-		runs:                  map[string]domain.RunRecord{},
-		events:                map[string][]domain.RunEventRecord{},
-		artifacts:             map[string]domain.ArtifactRecord{},
-		resources:             map[string]domain.ResourceRecord{},
-		resourceEvents:        []domain.ResourceEventRecord{},
-		resourceGrants:        map[string]domain.ResourceShareGrantRecord{},
-		collections:           map[string]domain.ResourceCollectionRecord{},
-		collectionMembers:     map[string]domain.ResourceCollectionMembershipRecord{},
-		collectionGrants:      map[string]domain.ResourceCollectionShareGrantRecord{},
-		datasetSnapshots:      map[string]domain.DatasetSnapshotRecord{},
-		datasetEntries:        map[string][]domain.DatasetSnapshotResourceRecord{},
-		datasetGrants:         map[string]domain.DatasetSnapshotShareGrantRecord{},
-		datasetEvents:         []domain.DatasetSnapshotEventRecord{},
-		dataAgentJobs:         map[string]domain.DataAgentJobRecord{},
-		dataAgentEvents:       map[string][]domain.DataAgentJobEventRecord{},
-		dataAgentLeases:       map[string]domain.DataAgentJobLeaseRecord{},
-		uploadSessions:        map[string]domain.UploadSessionRecord{},
-		uploadFiles:           map[string]domain.UploadSessionFileRecord{},
-		uploadChunks:          map[string]domain.UploadChunkRecord{},
-		uploadFilesBySession:  map[string]map[string]struct{}{},
-		uploadChunksByFile:    map[string]map[string]struct{}{},
-		uploadChunksBySession: map[string]map[string]struct{}{},
-		uploadSessionStats:    map[string]uploadSessionStats{},
-		uploadEvents:          []domain.UploadSessionEventRecord{},
-		users:                 map[string]domain.UserAccount{},
-		orgs:                  map[string]domain.Organization{},
-		bisque:                map[string]domain.BisqueCredentialRecord{},
-		leases:                map[string]domain.RunLeaseRecord{},
-		workers:               map[string]domain.WorkerHeartbeatRecord{},
+		threads:                map[string]domain.ThreadRecord{},
+		messages:               map[string][]domain.ThreadMessage{},
+		runs:                   map[string]domain.RunRecord{},
+		events:                 map[string][]domain.RunEventRecord{},
+		artifacts:              map[string]domain.ArtifactRecord{},
+		resources:              map[string]domain.ResourceRecord{},
+		resourceEvents:         []domain.ResourceEventRecord{},
+		resourceGrants:         map[string]domain.ResourceShareGrantRecord{},
+		collections:            map[string]domain.ResourceCollectionRecord{},
+		collectionMembers:      map[string]domain.ResourceCollectionMembershipRecord{},
+		collectionGrants:       map[string]domain.ResourceCollectionShareGrantRecord{},
+		datasetSnapshots:       map[string]domain.DatasetSnapshotRecord{},
+		datasetEntries:         map[string][]domain.DatasetSnapshotResourceRecord{},
+		datasetGrants:          map[string]domain.DatasetSnapshotShareGrantRecord{},
+		datasetEvents:          []domain.DatasetSnapshotEventRecord{},
+		dataAgentJobs:          map[string]domain.DataAgentJobRecord{},
+		dataAgentEvents:        map[string][]domain.DataAgentJobEventRecord{},
+		dataAgentLeases:        map[string]domain.DataAgentJobLeaseRecord{},
+		uploadSessions:         map[string]domain.UploadSessionRecord{},
+		uploadFiles:            map[string]domain.UploadSessionFileRecord{},
+		uploadChunks:           map[string]domain.UploadChunkRecord{},
+		uploadFilesBySession:   map[string]map[string]struct{}{},
+		uploadChunksByFile:     map[string]map[string]struct{}{},
+		uploadChunksBySession:  map[string]map[string]struct{}{},
+		uploadSessionStats:     map[string]uploadSessionStats{},
+		uploadEvents:           []domain.UploadSessionEventRecord{},
+		users:                  map[string]domain.UserAccount{},
+		runTokenUsage:          map[string]domain.RunTokenUsageRecord{},
+		runTokenUsageFinalized: map[string]bool{},
+		tokenUsageDaily:        map[string]map[string]*domain.UserTokenUsageDaily{},
+		tokenUsageLifetime:     map[string]domain.UserTokenUsageStats{},
+		orgs:                   map[string]domain.Organization{},
+		bisque:                 map[string]domain.BisqueCredentialRecord{},
+		leases:                 map[string]domain.RunLeaseRecord{},
+		workers:                map[string]domain.WorkerHeartbeatRecord{},
 	}
 	store.orgs["local-org"] = defaultLocalOrganization(domain.Now())
 	return store
@@ -398,6 +406,257 @@ func (s *MemoryStore) UpdateUserStatus(ctx context.Context, userID string, statu
 	return user, nil
 }
 
+func (s *MemoryStore) UpdateUserProfile(ctx context.Context, input domain.UpdateUserProfileInput) (domain.UserAccount, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	userID := strings.TrimSpace(input.UserID)
+	user, ok := s.users[userID]
+	if !ok {
+		return domain.UserAccount{}, ErrNotFound
+	}
+	now := domain.Now()
+	if !now.After(user.UpdatedAt) {
+		now = user.UpdatedAt.Add(time.Nanosecond)
+	}
+	metadata := domain.JSONMap{}
+	for key, value := range user.Metadata {
+		metadata[key] = value
+	}
+	metadata["profile"] = profileToJSONMap(input.Profile)
+	user.Metadata = metadata
+	if displayName := strings.TrimSpace(input.Profile.DisplayName); displayName != "" {
+		user.DisplayName = displayName
+	}
+	user.UpdatedAt = now
+	s.users[user.UserID] = user
+	return user, nil
+}
+
+func profileToJSONMap(profile domain.UserProfile) domain.JSONMap {
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return domain.JSONMap{}
+	}
+	out := domain.JSONMap{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return domain.JSONMap{}
+	}
+	return out
+}
+
+func (s *MemoryStore) RecordUserTokenUsage(ctx context.Context, input domain.RecordUserTokenUsageInput) error {
+	_ = ctx
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		return nil
+	}
+	now := input.OccurredAt
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	day := tokenUsageBucketDay(input.Day, now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addUserTokenUsageLocked(userID, day, input.InputTokens, input.OutputTokens, input.TotalTokens, 1, now)
+	return nil
+}
+
+func (s *MemoryStore) RecordRunTokenUsage(ctx context.Context, input domain.RecordRunTokenUsageInput) (domain.RunTokenUsageRecord, bool, error) {
+	_ = ctx
+	runID := strings.TrimSpace(input.RunID)
+	usageEventID := strings.TrimSpace(input.UsageEventID)
+	userID := strings.TrimSpace(input.UserID)
+	if runID == "" || usageEventID == "" || userID == "" {
+		return domain.RunTokenUsageRecord{}, false, nil
+	}
+	totalTokens := input.TotalTokens
+	if totalTokens <= 0 {
+		totalTokens = input.InputTokens + input.OutputTokens
+	}
+	if totalTokens <= 0 && input.InputTokens <= 0 && input.OutputTokens <= 0 {
+		return domain.RunTokenUsageRecord{}, false, nil
+	}
+	now := input.OccurredAt
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	day := tokenUsageBucketDay(input.Day, now)
+	key := runTokenUsageKey(runID, usageEventID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.runTokenUsage[key]; ok {
+		return existing, false, nil
+	}
+	record := domain.RunTokenUsageRecord{
+		RunID:        runID,
+		UsageEventID: usageEventID,
+		UserID:       userID,
+		Model:        strings.TrimSpace(input.Model),
+		Day:          day,
+		InputTokens:  input.InputTokens,
+		OutputTokens: input.OutputTokens,
+		TotalTokens:  totalTokens,
+		OccurredAt:   now,
+		CreatedAt:    now,
+	}
+	s.runTokenUsage[key] = record
+	s.addUserTokenUsageLocked(userID, day, input.InputTokens, input.OutputTokens, totalTokens, 0, now)
+	return record, true, nil
+}
+
+func (s *MemoryStore) FinalizeRunTokenUsage(ctx context.Context, input domain.FinalizeRunTokenUsageInput) (domain.RunTokenUsageSummary, bool, error) {
+	_ = ctx
+	runID := strings.TrimSpace(input.RunID)
+	if runID == "" {
+		return domain.RunTokenUsageSummary{}, false, nil
+	}
+	completedAt := input.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = domain.Now()
+	}
+	day := completedAt.UTC().Truncate(24 * time.Hour)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	summary := domain.RunTokenUsageSummary{RunID: runID, Day: day}
+	for _, record := range s.runTokenUsage {
+		if record.RunID != runID {
+			continue
+		}
+		if summary.UserID == "" {
+			summary.UserID = record.UserID
+		}
+		if summary.Model == "" {
+			summary.Model = record.Model
+		}
+		summary.InputTokens += record.InputTokens
+		summary.OutputTokens += record.OutputTokens
+		summary.TotalTokens += record.TotalTokens
+	}
+	if summary.UserID == "" || (summary.TotalTokens <= 0 && summary.InputTokens <= 0 && summary.OutputTokens <= 0) {
+		return summary, false, nil
+	}
+	if s.runTokenUsageFinalized[runID] {
+		summary.Finalized = true
+		return summary, false, nil
+	}
+	s.runTokenUsageFinalized[runID] = true
+	s.addUserTokenUsageLocked(summary.UserID, day, 0, 0, 0, 1, completedAt)
+	summary.Finalized = true
+	return summary, true, nil
+}
+
+func runTokenUsageKey(runID string, usageEventID string) string {
+	return runID + "\x00" + usageEventID
+}
+
+func tokenUsageBucketDay(day time.Time, occurredAt time.Time) time.Time {
+	if day.IsZero() {
+		if occurredAt.IsZero() {
+			occurredAt = domain.Now()
+		}
+		return occurredAt.UTC().Truncate(24 * time.Hour)
+	}
+	return day.UTC().Truncate(24 * time.Hour)
+}
+
+func (s *MemoryStore) addUserTokenUsageLocked(userID string, day time.Time, inputTokens int64, outputTokens int64, totalTokens int64, runCount int64, now time.Time) {
+	dayKey := day.Format("2006-01-02")
+	byDay, ok := s.tokenUsageDaily[userID]
+	if !ok {
+		byDay = map[string]*domain.UserTokenUsageDaily{}
+		s.tokenUsageDaily[userID] = byDay
+	}
+	daily, ok := byDay[dayKey]
+	if !ok {
+		daily = &domain.UserTokenUsageDaily{Day: day}
+		byDay[dayKey] = daily
+	}
+	daily.InputTokens += inputTokens
+	daily.OutputTokens += outputTokens
+	daily.TotalTokens += totalTokens
+	daily.RunCount += runCount
+
+	lifetime := s.tokenUsageLifetime[userID]
+	lifetime.UserID = userID
+	lifetime.InputTokens += inputTokens
+	lifetime.OutputTokens += outputTokens
+	lifetime.TotalTokens += totalTokens
+	if daily.TotalTokens > lifetime.PeakDailyTotal {
+		lifetime.PeakDailyTotal = daily.TotalTokens
+	}
+	lastActive := day
+	lifetime.LastActiveDay = &lastActive
+	lifetime.UpdatedAt = now
+	s.tokenUsageLifetime[userID] = lifetime
+}
+
+func (s *MemoryStore) GetUserTokenUsageStats(ctx context.Context, userID string) (domain.UserTokenUsageStats, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.UserTokenUsageStats{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats, ok := s.tokenUsageLifetime[userID]
+	if !ok {
+		return domain.UserTokenUsageStats{UserID: userID}, nil
+	}
+	if stats.LastActiveDay != nil {
+		day := *stats.LastActiveDay
+		stats.LastActiveDay = &day
+	}
+	return stats, nil
+}
+
+func (s *MemoryStore) ListUserTokenUsageDaily(ctx context.Context, userID string, since time.Time) ([]domain.UserTokenUsageDaily, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []domain.UserTokenUsageDaily{}, nil
+	}
+	sinceDay := since.UTC().Truncate(24 * time.Hour)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byDay := s.tokenUsageDaily[userID]
+	daily := make([]domain.UserTokenUsageDaily, 0, len(byDay))
+	for _, record := range byDay {
+		if record.Day.Before(sinceDay) {
+			continue
+		}
+		daily = append(daily, *record)
+	}
+	sort.Slice(daily, func(i, j int) bool {
+		return daily[i].Day.Before(daily[j].Day)
+	})
+	return daily, nil
+}
+
+func (s *MemoryStore) GetUserLongestRunSeconds(ctx context.Context, userID string) (int64, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var longest int64
+	for _, run := range s.runs {
+		if run.UserID != userID || run.StartedAt == nil || run.CompletedAt == nil {
+			continue
+		}
+		if run.CompletedAt.Before(*run.StartedAt) {
+			continue
+		}
+		seconds := int64(run.CompletedAt.Sub(*run.StartedAt).Seconds())
+		if seconds > longest {
+			longest = seconds
+		}
+	}
+	return longest, nil
+}
+
 func (s *MemoryStore) UpsertWorkerHeartbeat(ctx context.Context, input domain.UpsertWorkerHeartbeatInput) (domain.WorkerHeartbeatRecord, error) {
 	_ = ctx
 	s.mu.Lock()
@@ -459,6 +718,17 @@ func (s *MemoryStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([]do
 	return take(workers, limit), nil
 }
 
+func (s *MemoryStore) GetWorkerHeartbeat(ctx context.Context, workerID string) (domain.WorkerHeartbeatRecord, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	worker, ok := s.workers[strings.TrimSpace(workerID)]
+	if !ok {
+		return domain.WorkerHeartbeatRecord{}, false, nil
+	}
+	return worker, true, nil
+}
+
 func (s *MemoryStore) CreateThread(ctx context.Context, input domain.CreateThreadInput) (domain.ThreadRecord, error) {
 	_ = ctx
 	s.mu.Lock()
@@ -501,7 +771,7 @@ func (s *MemoryStore) GetThreadForUser(ctx context.Context, threadID string, use
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	thread, ok := s.threads[threadID]
-	if !ok || thread.UserID != userID {
+	if !ok || thread.UserID != userID || !threadVisibleForUserRead(thread) {
 		return domain.ThreadRecord{}, ErrNotFound
 	}
 	return thread, nil
@@ -512,7 +782,7 @@ func (s *MemoryStore) UpdateThreadForUser(ctx context.Context, input domain.Upda
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	thread, ok := s.threads[input.ThreadID]
-	if !ok || thread.UserID != input.UserID {
+	if !ok || thread.UserID != input.UserID || !threadVisibleForUserRead(thread) {
 		return domain.ThreadRecord{}, ErrNotFound
 	}
 	if title := normalizedThreadTitle(input.Title); title != "" {
@@ -521,6 +791,23 @@ func (s *MemoryStore) UpdateThreadForUser(ctx context.Context, input domain.Upda
 	thread.Metadata = mergeThreadMetadata(thread.Metadata, mapOrEmpty(input.Metadata))
 	thread.UpdatedAt = domain.Now()
 	s.threads[input.ThreadID] = thread
+	return thread, nil
+}
+
+func (s *MemoryStore) SoftDeleteThreadForUser(ctx context.Context, threadID string, userID string, deletedAt time.Time) (domain.ThreadRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thread, ok := s.threads[threadID]
+	if !ok || thread.UserID != userID || thread.Status == domain.ThreadStatusDeleted {
+		return domain.ThreadRecord{}, ErrNotFound
+	}
+	if deletedAt.IsZero() {
+		deletedAt = domain.Now()
+	}
+	thread.Status = domain.ThreadStatusDeleted
+	thread.UpdatedAt = deletedAt.UTC()
+	s.threads[threadID] = thread
 	return thread, nil
 }
 
@@ -639,7 +926,7 @@ func (s *MemoryStore) ListThreadMessagesForUser(ctx context.Context, threadID st
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	thread, ok := s.threads[threadID]
-	if !ok || thread.UserID != userID {
+	if !ok || thread.UserID != userID || !threadVisibleForUserRead(thread) {
 		return nil, ErrNotFound
 	}
 	messages := append([]domain.ThreadMessage(nil), s.messages[threadID]...)
@@ -1065,6 +1352,54 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 	return event, nil
 }
 
+// AppendRunEventIfRunActive mirrors the Postgres fast path: a duplicate
+// event ID returns the stored record (checked before the live-run gate so
+// redelivered terminal events still replay), a missing or terminal run drops
+// the event, and otherwise the event is appended.
+func (s *MemoryStore) AppendRunEventIfRunActive(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, RunEventAppendOutcome, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if input.EventID != "" {
+		for _, existing := range s.events[input.RunID] {
+			if existing.EventID == input.EventID {
+				return existing, RunEventAppendOutcomeDuplicate, nil
+			}
+		}
+	}
+	run, ok := s.runs[input.RunID]
+	if !ok || isTerminalRunStatus(run.Status) {
+		return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, nil
+	}
+	eventID := input.EventID
+	if eventID == "" {
+		eventID = domain.NewID("event")
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	event := domain.RunEventRecord{
+		EventID:      eventID,
+		Sequence:     int64(len(s.events[input.RunID]) + 1),
+		RunID:        input.RunID,
+		ThreadID:     input.ThreadID,
+		EventKind:    input.EventKind,
+		EventType:    input.EventType,
+		NodeName:     input.NodeName,
+		TaskID:       input.TaskID,
+		CheckpointID: input.CheckpointID,
+		ScopeID:      input.ScopeID,
+		AgentRole:    input.AgentRole,
+		Level:        input.Level,
+		TS:           ts,
+		Message:      input.Message,
+		Payload:      mapOrEmpty(input.Payload),
+	}
+	s.events[input.RunID] = append(s.events[input.RunID], event)
+	return event, RunEventAppendOutcomeAppended, nil
+}
+
 func (s *MemoryStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
 	_ = ctx
 	s.mu.RLock()
@@ -1363,6 +1698,20 @@ func (s *MemoryStore) UpdateUploadSession(ctx context.Context, input domain.Upda
 	}
 	s.uploadSessions[session.SessionID] = session
 	return session, nil
+}
+
+// ClearUploadSessionIdempotencyKey frees a session's idempotency-key slot so a re-upload
+// of the same content can claim a fresh session. A no-op if the session does not exist.
+func (s *MemoryStore) ClearUploadSessionIdempotencyKey(ctx context.Context, sessionID string) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session, ok := s.uploadSessions[strings.TrimSpace(sessionID)]; ok {
+		session.IdempotencyKey = ""
+		session.UpdatedAt = domain.Now()
+		s.uploadSessions[session.SessionID] = session
+	}
+	return nil
 }
 
 func (s *MemoryStore) UpsertUploadSessionFile(ctx context.Context, input domain.UpsertUploadSessionFileInput) (domain.UploadSessionFileRecord, error) {
@@ -3631,6 +3980,90 @@ func (s *MemoryStore) ResourceStorageStats(ctx context.Context) (domain.Resource
 		stats.TotalBytes += resource.SizeBytes
 	}
 	return stats, nil
+}
+
+// resourcePastRetention reports whether a resource is soft-deleted AND its undelete
+// window has elapsed — i.e. it can no longer be restored, so it is safe to reclaim.
+func resourcePastRetention(resource domain.ResourceRecord, now time.Time) bool {
+	return strings.TrimSpace(resource.Status) == "deleted" &&
+		!resource.RetentionExpiresAt.IsZero() &&
+		resource.RetentionExpiresAt.Before(now)
+}
+
+func (s *MemoryStore) RetentionBacklog(ctx context.Context, now time.Time) (domain.ResourceRetentionBacklog, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var backlog domain.ResourceRetentionBacklog
+	for _, resource := range s.resources {
+		if resourcePastRetention(resource, now) {
+			backlog.Count++
+			backlog.Bytes += resource.SizeBytes
+		}
+	}
+	return backlog, nil
+}
+
+func (s *MemoryStore) ListResourcesPastRetention(ctx context.Context, now time.Time, limit int) ([]domain.ResourceRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.ResourceRecord{}
+	for _, resource := range s.resources {
+		if !resourcePastRetention(resource, now) {
+			continue
+		}
+		out = append(out, resource)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) PurgeResource(ctx context.Context, resourceID string) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.resources, strings.TrimSpace(resourceID))
+	return nil
+}
+
+// resourceUsageBy aggregates active-resource count + bytes for resources matching key(r).
+// An aggregate so quota checks never load the whole catalog into memory.
+func (s *MemoryStore) resourceUsageBy(want string, key func(domain.ResourceRecord) string) (int, int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if strings.TrimSpace(want) == "" {
+		return 0, 0
+	}
+	var count int
+	var bytes int64
+	for _, resource := range s.resources {
+		if strings.TrimSpace(resource.Status) == "active" && strings.TrimSpace(key(resource)) == want {
+			count++
+			bytes += resource.SizeBytes
+		}
+	}
+	return count, bytes
+}
+
+func (s *MemoryStore) ResourceUsageForOwner(ctx context.Context, userID string) (int, int64, error) {
+	_ = ctx
+	count, bytes := s.resourceUsageBy(strings.TrimSpace(userID), func(r domain.ResourceRecord) string { return r.OwnerUserID })
+	return count, bytes, nil
+}
+
+func (s *MemoryStore) ResourceUsageForOrg(ctx context.Context, orgID string) (int, int64, error) {
+	_ = ctx
+	count, bytes := s.resourceUsageBy(strings.TrimSpace(orgID), func(r domain.ResourceRecord) string { return r.OwnerOrgID })
+	return count, bytes, nil
+}
+
+func (s *MemoryStore) ResourceUsageForProject(ctx context.Context, projectID string) (int, int64, error) {
+	_ = ctx
+	count, bytes := s.resourceUsageBy(strings.TrimSpace(projectID), func(r domain.ResourceRecord) string { return r.ProjectID })
+	return count, bytes, nil
 }
 
 func (s *MemoryStore) CreateResourceEvent(ctx context.Context, input domain.AppendResourceEventInput) (domain.ResourceEventRecord, error) {

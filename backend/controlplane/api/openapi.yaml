@@ -241,6 +241,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ThreadRecord"
+    delete:
+      operationId: deleteThread
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      responses:
+        "204":
+          description: Thread deleted
   /v2/threads/{thread_id}/messages:
     get:
       operationId: listThreadMessages
@@ -1382,6 +1389,22 @@ paths:
                   type: array
                   items: { type: string }
                   description: Alias for extensions.
+                metadata_filters:
+                  type: array
+                  description: >-
+                    Tag comparisons evaluated client-side against view=full tags. Numeric
+                    ops (gt/gte/lt/lte) are compared numerically, avoiding BisQue's lexical
+                    tag comparison which mis-ranks numbers (e.g. age 7 > age 50).
+                  items:
+                    type: object
+                    required: [tag]
+                    properties:
+                      tag: { type: string }
+                      op:
+                        type: string
+                        enum: [eq, ne, gt, gte, lt, lte, contains]
+                        default: eq
+                      value: { type: string }
                 scope:
                   type: string
                   default: owner,shared
@@ -1466,6 +1489,64 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/datasets:
+    post:
+      operationId: createBisqueDataset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, resource_uris]
+              properties:
+                name: { type: string }
+                resource_uris:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Created a BisQue dataset grouping already-uploaded BisQue resources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueDatasetRecord"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/push:
+    post:
+      operationId: pushResourcesToBisque
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_ids:
+                  type: array
+                  items: { type: string }
+                collection_ids:
+                  type: array
+                  items: { type: string }
+                dataset_name: { type: string }
+      responses:
+        "200":
+          description: Pushed catalog resources to the linked BisQue account; folders are uploaded member-by-member and grouped into a BisQue dataset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisquePushResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/bisque/unlink:
     post:
       operationId: unlinkBisqueAccount
@@ -1476,6 +1557,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthSessionResponse"
+  /v2/me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Account and profile details for the authenticated principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2MeResponse"
+    patch:
+      operationId: updateCurrentUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, nullable: true }
+                title: { type: string, nullable: true }
+                institution: { type: string, nullable: true }
+                research_interests: { type: string, nullable: true }
+                bio: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Updated account profile for the authenticated principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2MeResponse"
+  /v2/me/token-usage:
+    get:
+      operationId: getCurrentUserTokenUsage
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 730, default: 365 }
+      responses:
+        "200":
+          description: Lifetime and daily token usage statistics for the authenticated principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TokenUsageResponse"
   /v2/resources:
     get:
       operationId: listResources
@@ -3735,6 +3861,7 @@ components:
         resource_uri: { type: string }
         name: { type: string, nullable: true }
         resource_uniq: { type: string, nullable: true }
+        client_view_url: { type: string, nullable: true }
     V2BisqueUploadResponse:
       type: object
       required: [count, uploads]
@@ -3744,6 +3871,77 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2BisqueUploadRecord"
+    V2BisqueDatasetRecord:
+      type: object
+      required: [name, resource_uri, member_count]
+      properties:
+        collection_id: { type: string, nullable: true }
+        name: { type: string }
+        resource_uri: { type: string }
+        resource_uniq: { type: string, nullable: true }
+        member_count: { type: integer }
+        client_view_url: { type: string, nullable: true }
+    V2BisquePushResponse:
+      type: object
+      required: [count, uploads, datasets]
+      properties:
+        count: { type: integer }
+        uploads:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueUploadRecord"
+        datasets:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueDatasetRecord"
+    V2MeResponse:
+      type: object
+      required: [user, profile]
+      properties:
+        user:
+          type: object
+          required: [user_id]
+          properties:
+            user_id: { type: string }
+            email: { type: string, nullable: true }
+            display_name: { type: string, nullable: true }
+            role: { type: string, nullable: true }
+            org_id: { type: string, nullable: true }
+        profile:
+          type: object
+          properties:
+            display_name: { type: string, nullable: true }
+            title: { type: string, nullable: true }
+            institution: { type: string, nullable: true }
+            research_interests: { type: string, nullable: true }
+            bio: { type: string, nullable: true }
+    V2TokenUsageResponse:
+      type: object
+      required: [days, summary, daily]
+      properties:
+        days: { type: integer }
+        summary:
+          type: object
+          properties:
+            lifetime_input_tokens: { type: integer, format: int64 }
+            lifetime_output_tokens: { type: integer, format: int64 }
+            lifetime_total_tokens: { type: integer, format: int64 }
+            peak_daily_total: { type: integer, format: int64 }
+            longest_task_seconds: { type: integer, format: int64 }
+            current_streak_days: { type: integer }
+            longest_streak_days: { type: integer }
+            active_days: { type: integer }
+            last_active_day: { type: string, nullable: true }
+        daily:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string }
+              input_tokens: { type: integer, format: int64 }
+              output_tokens: { type: integer, format: int64 }
+              total_tokens: { type: integer, format: int64 }
+              run_count: { type: integer, format: int64 }
     V2ResourceRecord:
       type: object
       required: [file_id, original_name, size_bytes, sha256, created_at, status, source_type, resource_kind, has_thumbnail]

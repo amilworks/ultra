@@ -142,6 +142,27 @@ class LibBioImageEngine:
     def meta(self, path: str) -> dict[str, Any]:
         return dict(self._bim.meta(path, self._cache))
 
+    def _display_out_depth(self, path: str) -> str:
+        """Pick the display ``-depth`` for a non-fused (RGB/grayscale) read. An 8-bit
+        RGB(A) PHOTO (orthomosaic, slide) uses FULL-range so true colors show and the
+        alpha survives — data-range collapses a constant (fully-opaque) alpha channel
+        to 0, which renders a native tile blank (see DEPTH_DISPLAY_8U_FULLRANGE).
+        Scientific scalar data (>8-bit / float / single-channel) keeps data-range so
+        its values map into the 8-bit display. Best-effort: any meta failure keeps the
+        historic data-range default."""
+        try:
+            meta = self._bim.meta(path, self._cache)
+        except Exception:  # noqa: BLE001
+            return pipelines.DEPTH_DISPLAY_8U
+        pf = str(meta.get("image_pixel_format", "")).lower()
+        depth = int(meta.get("image_pixel_depth", 8) or 8)
+        c = int(meta.get("image_num_c", 1) or 1)
+        mode = str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "").strip().lower()
+        names = [str(meta.get(f"channels/channel:{i}/name", "")).strip().lower() for i in range(3)]
+        rgb_named = names == ["red", "green", "blue"]
+        is_photo = ("unsigned" in pf or pf == "") and depth <= 8 and c in (3, 4) and (mode.startswith("rgb") or rgb_named)
+        return pipelines.DEPTH_DISPLAY_8U_FULLRANGE if is_photo else pipelines.DEPTH_DISPLAY_8U
+
     def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
         if colors:
             return self._render_fused(
@@ -150,7 +171,10 @@ class LibBioImageEngine:
                 colors,
                 windows,
             )
-        return self._render(path, pipelines.tile(tile_size, col, row, level, channels=channels))
+        return self._render(
+            path,
+            pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
+        )
 
     def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
         if colors:
@@ -164,7 +188,11 @@ class LibBioImageEngine:
                 windows,
             )
         return self._render(
-            path, pipelines.region(x1, y1, x2, y2, region_scale=region_scale, channels=channels)
+            path,
+            pipelines.region(
+                x1, y1, x2, y2, region_scale=region_scale, channels=channels,
+                out_depth=self._display_out_depth(path),
+            ),
         )
 
     def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
@@ -180,7 +208,7 @@ class LibBioImageEngine:
                 level = _thumbnail_level_for_meta(dict(meta), SCRUB_MAX_DIMENSION)
             except Exception:  # noqa: BLE001 - level selection is best-effort; native is the safe fallback
                 level = None
-        out_depth = pipelines.DEPTH_SCALAR_F32 if colors else pipelines.DEPTH_DISPLAY_8U
+        out_depth = pipelines.DEPTH_SCALAR_F32 if colors else self._display_out_depth(path)
         # A paged z-stack (plain multi-page TIFF, etc.) addresses planes by page,
         # not by -slice z:N (which would return the first plane every time). When a
         # bare z is requested and the file is page-based, read that page directly.
@@ -216,7 +244,8 @@ class LibBioImageEngine:
                         windows,
                     )
                 return self._render(
-                    path, pipelines.thumbnail(max_size, z=z, level=lv, channels=channels)
+                    path,
+                    pipelines.thumbnail(max_size, z=z, level=lv, channels=channels, out_depth=self._display_out_depth(path)),
                 )
             except ValueError as exc:
                 if "empty region" not in str(exc):

@@ -30,6 +30,7 @@ from collections.abc import Iterable, Sequence
 
 __all__ = [
     "DEPTH_DISPLAY_8U",
+    "DEPTH_DISPLAY_8U_FULLRANGE",
     "DEPTH_SCALAR_F32",
     "build",
     "depth",
@@ -48,8 +49,16 @@ __all__ = [
 ]
 
 # Common -depth presets.
-#: 8-bit unsigned, linear data-range mapping — display tiles for the browser.
+#: 8-bit unsigned, linear data-range mapping — display tiles for SCALAR/scientific
+#: data (>8-bit, float): maps the actual value range into the 8-bit display.
 DEPTH_DISPLAY_8U = "8,D,U"
+#: 8-bit unsigned, FULL type-range (identity for 8-bit) — display tiles for an 8-bit
+#: RGB(A) PHOTO (orthomosaic, slide). Two reasons over data-range ("D"): (1) data-range
+#: normalization collapses a CONSTANT channel to 0, so the alpha of a fully-opaque
+#: native tile becomes 0 and the tile renders fully transparent (blank at max zoom);
+#: (2) an 8-bit photo is already display-ready, so a per-tile contrast stretch is both
+#: unwanted (alters true colors) and inconsistent across tiles.
+DEPTH_DISPLAY_8U_FULLRANGE = "8,F,U"
 #: 32-bit float, data-range — raw scalar values for client-side windowing/MPR.
 DEPTH_SCALAR_F32 = "32,D,F"
 

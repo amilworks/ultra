@@ -303,3 +303,58 @@ def test_libbioimage_histogram_auto_selects_bounded_level_for_large_pyramid():
     assert hist["bins"] == 16
     assert len(hist["channels"]) == 4
     assert seen == {"path": "/huge.tif", "pipeline": "-res-level 6"}
+
+
+def _engine_with_meta(meta):
+    class FakeBim:
+        def meta(self, path, cache):
+            return meta
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+    return engine
+
+
+def test_display_out_depth_full_range_for_rgba_photo():
+    # An 8-bit RGBA orthomosaic/slide is a display photo: full-range ("8,F,U") so true
+    # colors show AND the (constant) alpha survives — data-range would zero a fully-
+    # opaque alpha and render native tiles blank.
+    photo = {
+        "image_pixel_format": "unsigned integer", "image_pixel_depth": 8,
+        "image_num_c": 4, "image_mode": "RGBA",
+    }
+    assert _engine_with_meta(photo)._display_out_depth("/x.tif") == "8,F,U"
+
+    # RGB photo recognized by channel names too (no explicit mode).
+    rgb_named = {
+        "image_pixel_format": "unsigned integer", "image_pixel_depth": 8, "image_num_c": 3,
+        "channels/channel:0/name": "Red", "channels/channel:1/name": "Green", "channels/channel:2/name": "Blue",
+    }
+    assert _engine_with_meta(rgb_named)._display_out_depth("/x.tif") == "8,F,U"
+
+
+def test_display_out_depth_data_range_for_scientific():
+    # 16-bit microscopy, float, and single-channel 8-bit keep data-range ("8,D,U") so
+    # their values map into the 8-bit display (full-range would render them near-black).
+    for meta in (
+        {"image_pixel_format": "unsigned integer", "image_pixel_depth": 16, "image_num_c": 2},
+        {"image_pixel_format": "float", "image_pixel_depth": 32, "image_num_c": 1},
+        {"image_pixel_format": "unsigned integer", "image_pixel_depth": 8, "image_num_c": 1},
+    ):
+        assert _engine_with_meta(meta)._display_out_depth("/x.tif") == "8,D,U"
+
+
+def test_tile_uses_full_range_depth_for_photo():
+    # The deep-zoom fix: a photo's tile read carries the full-range depth into the pipeline.
+    photo = {"image_pixel_format": "unsigned integer", "image_pixel_depth": 8, "image_num_c": 4, "image_mode": "RGBA"}
+    engine = _engine_with_meta(photo)
+    seen = {}
+
+    def fake_render(self, path, pipeline):
+        seen["pipeline"] = pipeline
+        return b"\x89PNG"
+
+    engine._render = types.MethodType(fake_render, engine)
+    engine.tile("/x.tif", level=0, col=93, row=89, tile_size=512)
+    assert "8,F,U" in seen["pipeline"] and "-tile 512,93,89,0" in seen["pipeline"]

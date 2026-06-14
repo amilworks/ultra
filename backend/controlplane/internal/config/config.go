@@ -13,10 +13,14 @@ type Config struct {
 	AppVersion                 string
 	Environment                string
 	HTTPAddr                   string
+	ReadHeaderTimeout          time.Duration
 	ReadTimeout                time.Duration
 	WriteTimeout               time.Duration
 	IdleTimeout                time.Duration
 	DatabaseURL                string
+	DatabaseMaxConns           int
+	DatabaseMinConns           int
+	DatabaseStatementTimeout   time.Duration
 	NATSURL                    string
 	NATSStream                 string
 	NATSJobsSubject            string
@@ -25,11 +29,13 @@ type Config struct {
 	NATSEventsSubject          string
 	NATSCancelSubject          string
 	NATSEventConsumer          string
+	NATSEventIngestConcurrency int
 	NATSWorkerDurable          string
 	NATSRareSpotWorkerDurable  string
 	NATSDataAgentWorkerDurable string
 	ArtifactRoot               string
 	UploadRoot                 string
+	ImageServiceURL            string
 	BisqueRootURL              string
 	BisqueUsername             string
 	BisquePassword             string
@@ -50,6 +56,9 @@ type Config struct {
 	RunRecoveryEnabled         bool
 	RunRecoveryInterval        time.Duration
 	RunRecoveryBatchLimit      int
+	RetentionGCEnabled         bool
+	RetentionGCInterval        time.Duration
+	RetentionGCBatch           int
 	WorkerToken                string
 }
 
@@ -59,10 +68,18 @@ func Load() Config {
 		AppVersion:                 envString("ULTRA_CONTROL_APP_VERSION", "dev"),
 		Environment:                strings.ToLower(envString("ULTRA_CONTROL_ENVIRONMENT", envString("ENVIRONMENT", "development"))),
 		HTTPAddr:                   envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
-		ReadTimeout:                envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 10),
+		ReadHeaderTimeout:          envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
+		ReadTimeout:                envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
 		WriteTimeout:               envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
 		IdleTimeout:                envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
 		DatabaseURL:                envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
+		DatabaseMaxConns:           envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
+		DatabaseMinConns:           envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
+		// Per-query server-side timeout for the SERVING pool so one stuck/runaway query
+		// can't hold a connection from the small pool forever. Off by default (0), like
+		// ReadTimeout/WriteTimeout — operators opt in per their workload. Migrations are
+		// exempt (slow DDL is legitimate).
+		DatabaseStatementTimeout: envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
 		NATSURL:                    envString("ULTRA_CONTROL_NATS_URL", ""),
 		NATSStream:                 envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
 		NATSJobsSubject:            envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),
@@ -71,11 +88,13 @@ func Load() Config {
 		NATSEventsSubject:          envString("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
 		NATSCancelSubject:          envString("ULTRA_CONTROL_NATS_CANCEL_SUBJECT", "ultra.runs.cancel"),
 		NATSEventConsumer:          envString("ULTRA_CONTROL_NATS_EVENT_CONSUMER", "ultra-control-event-ingest"),
+		NATSEventIngestConcurrency: envInt("ULTRA_CONTROL_NATS_EVENT_INGEST_CONCURRENCY", 4),
 		NATSWorkerDurable:          envString("ULTRA_CONTROL_NATS_WORKER_DURABLE", "ultra-deepagents-worker"),
 		NATSRareSpotWorkerDurable:  envString("ULTRA_CONTROL_NATS_RARESPOT_WORKER_DURABLE", "rarespot-ecology-worker"),
 		NATSDataAgentWorkerDurable: envString("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),
 		UploadRoot:                 envString("ULTRA_CONTROL_UPLOAD_ROOT", envString("ULTRA_RESOURCE_ROOT", envString("UPLOAD_STORE_ROOT", "data/uploads"))),
+		ImageServiceURL:            envString("ULTRA_CONTROL_IMAGE_SERVICE_URL", ""),
 		BisqueRootURL:              envString("ULTRA_CONTROL_BISQUE_ROOT_URL", envString("BISQUE_ROOT", envString("BISQUE_SERVER", ""))),
 		BisqueUsername:             envString("ULTRA_CONTROL_BISQUE_USERNAME", envString("BISQUE_USERNAME", envString("BISQUE_USER", ""))),
 		BisquePassword:             envString("ULTRA_CONTROL_BISQUE_PASSWORD", envString("BISQUE_PASSWORD", "")),
@@ -96,7 +115,11 @@ func Load() Config {
 		RunRecoveryEnabled:         envBool("ULTRA_CONTROL_RUN_RECOVERY_ENABLED", true),
 		RunRecoveryInterval:        envDurationSeconds("ULTRA_CONTROL_RUN_RECOVERY_INTERVAL_SECONDS", 30),
 		RunRecoveryBatchLimit:      envInt("ULTRA_CONTROL_RUN_RECOVERY_BATCH_LIMIT", 1000),
-		WorkerToken:                envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
+		// Off by default — it permanently deletes resources past their 30-day undelete window.
+		RetentionGCEnabled:  envBool("ULTRA_CONTROL_RETENTION_GC_ENABLED", false),
+		RetentionGCInterval: envDurationSeconds("ULTRA_CONTROL_RETENTION_GC_INTERVAL_SECONDS", 3600),
+		RetentionGCBatch:    envInt("ULTRA_CONTROL_RETENTION_GC_BATCH", 100),
+		WorkerToken:         envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
 	}
 }
 

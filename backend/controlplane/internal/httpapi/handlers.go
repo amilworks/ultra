@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -39,6 +38,7 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/image/tiff"
+	"golang.org/x/sync/singleflight"
 )
 
 type ServerDeps struct {
@@ -48,6 +48,7 @@ type ServerDeps struct {
 	Bus               runEventSource
 	ArtifactRoot      string
 	UploadRoot        string
+	ImageServiceURL   string
 	DevAdminEnabled   bool
 	Runtime           RuntimeSummary
 	QueueDiagnostics  eventbus.QueueDiagnosticsProvider
@@ -59,6 +60,13 @@ type ServerDeps struct {
 	// run-status, run-events, run-lease, and worker-heartbeat endpoints. Empty
 	// disables worker-token auth.
 	WorkerToken string
+	// adminSnapshots collapses concurrent admin snapshot computations into
+	// one; set by NewRouter.
+	adminSnapshots *singleflight.Group
+	// imageCache serves repeatable image reads (tile/atlas/thumbnail/slice) from a
+	// bounded LRU so pan/zoom + 3D re-loads skip the engine. Set by NewRouter from
+	// ULTRA_CONTROL_IMAGE_CACHE_BYTES; nil disables (plain streaming proxy).
+	imageCache *imageResponseCache
 }
 
 type workerAuthState int
@@ -69,10 +77,13 @@ const (
 	workerAuthInvalid
 )
 
+const maxJSONBodyBytes int64 = 16 << 20
+
 var (
-	workerRunPathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
-	workerRunEventsPathPattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
-	workerLeasePathPattern     = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+	workerRunPathPattern        = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
+	workerRunEventsPathPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
+	workerLeasePathPattern      = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+	workerRunUserProfilePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -113,12 +124,29 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodGet && workerRunEventsPathPattern.MatchString(path):
 		return true
+	case r.Method == http.MethodGet && workerRunUserProfilePattern.MatchString(path):
+		return true
 	case workerLeasePathPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && (path == "/v1/workers/heartbeat" || path == "/v2/workers/heartbeat"):
 		return true
+	case r.Method == http.MethodPost && isWorkerBisqueEndpointPath(path):
+		// Deep Agents workers proxy BisQue tool calls for a run; the bisque
+		// session header is validated against that run's metadata before any
+		// linked credentials are used.
+		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
 	}
 	return false
+}
+
+func isWorkerBisqueEndpointPath(path string) bool {
+	switch path {
+	case "/v2/bisque/search", "/v2/bisque/download", "/v2/bisque/upload",
+		"/v2/bisque/datasets", "/v2/bisque/push", "/v2/uploads":
+		return true
+	default:
+		return false
+	}
 }
 
 // runForWorkerOrUser resolves a run for worker-token requests without user
@@ -157,6 +185,13 @@ type accountStore interface {
 	GetUserByEmail(context.Context, string) (domain.UserAccount, bool, error)
 	ListUsers(context.Context, int, string) ([]domain.UserAccount, error)
 	UpdateUserStatus(context.Context, string, string) (domain.UserAccount, error)
+	UpdateUserProfile(context.Context, domain.UpdateUserProfileInput) (domain.UserAccount, error)
+}
+
+type usageStatsStore interface {
+	GetUserTokenUsageStats(context.Context, string) (domain.UserTokenUsageStats, error)
+	ListUserTokenUsageDaily(context.Context, string, time.Time) ([]domain.UserTokenUsageDaily, error)
+	GetUserLongestRunSeconds(context.Context, string) (int64, error)
 }
 
 type localBootstrapAccount struct {
@@ -242,6 +277,14 @@ type resourceCatalogAdminStore interface {
 	ListResources(context.Context, int, int) ([]domain.ResourceRecord, error)
 }
 
+// resourceQuotaUsageStore returns active-resource usage scoped to one owner/project so a
+// quota check is an indexed aggregate instead of loading (and capping) the whole catalog.
+type resourceQuotaUsageStore interface {
+	ResourceUsageForOwner(context.Context, string) (int, int64, error)
+	ResourceUsageForOrg(context.Context, string) (int, int64, error)
+	ResourceUsageForProject(context.Context, string) (int, int64, error)
+}
+
 type resourceEventStore interface {
 	CreateResourceEvent(context.Context, domain.AppendResourceEventInput) (domain.ResourceEventRecord, error)
 }
@@ -291,6 +334,10 @@ type uploadSessionStore interface {
 	CreateUploadSession(context.Context, domain.CreateUploadSessionInput) (domain.UploadSessionRecord, error)
 	GetUploadSessionForUser(context.Context, string, string, string) (domain.UploadSessionRecord, error)
 	GetUploadSessionByIdempotencyKeyForUser(context.Context, string, string, string) (domain.UploadSessionRecord, error)
+	// ClearUploadSessionIdempotencyKey frees a session's idempotency-key slot (set to
+	// NULL/empty) so a re-upload of the same content can take a fresh session. Used to
+	// supersede a terminal session whose committed result is no longer live.
+	ClearUploadSessionIdempotencyKey(context.Context, string) error
 	UpdateUploadSession(context.Context, domain.UpdateUploadSessionInput) (domain.UploadSessionRecord, error)
 	UpsertUploadSessionFile(context.Context, domain.UpsertUploadSessionFileInput) (domain.UploadSessionFileRecord, error)
 	ListUploadSessionFiles(context.Context, string) ([]domain.UploadSessionFileRecord, error)
@@ -338,13 +385,17 @@ const (
 	runEventStreamHeartbeatEvery   = 15 * time.Second
 	runEventStreamCatchupEvery     = time.Second
 	uploadSessionMaxParallelFiles  = 4
-	uploadSessionMaxParallelChunks = 4
+	uploadSessionMaxParallelChunks = 8 // more in-flight chunks better saturate the link for large files
 	uploadSessionMaxFilesPerBatch  = 10_000
+	directUploadMaxBodyBytes       = int64(5) << 30
 )
 
+// 512KiB buffers cut syscall count ~16x versus 32KiB on the upload hot paths — chunk
+// receipt and the multi-GB /complete reassembly each stream the whole file through this.
+// Pooled, so memory stays bounded by upload concurrency.
 var uploadCopyBufferPool = sync.Pool{
 	New: func() any {
-		buffer := make([]byte, 32*1024)
+		buffer := make([]byte, 512*1024)
 		return &buffer
 	},
 }
@@ -353,10 +404,19 @@ func NewRouter(deps ServerDeps) http.Handler {
 	if deps.BisqueCredentials == nil {
 		deps.BisqueCredentials = NewBisqueCredentialStore()
 	}
+	if deps.adminSnapshots == nil {
+		deps.adminSnapshots = &singleflight.Group{}
+	}
+	if deps.imageCache == nil {
+		deps.imageCache = newImageResponseCacheFromEnv()
+	}
 	if !deps.WorkOS.Enabled() {
 		_ = deps.ensureLocalBootstrapAccounts(context.Background())
 	}
 	r := chi.NewRouter()
+	// Outermost middleware: a handler panic becomes a clean 500 for that one request
+	// (structured-logged), never a dropped connection or a stderr stack-trace dump.
+	r.Use(recoverPanics)
 	r.Get("/v1/health", handleHealth)
 	r.Get("/v1/config/public", handlePublicConfig(deps))
 	r.Get("/v1/auth/session", handleAuthSession(deps))
@@ -377,10 +437,14 @@ func NewRouter(deps ServerDeps) http.Handler {
 			if deps.WorkOS.Enabled() {
 				r.Use(deps.requireWorkOSAccount)
 			}
+			r.Get("/me", deps.handleGetCurrentUser)
+			r.Patch("/me", deps.handleUpdateCurrentUser)
+			r.Get("/me/token-usage", deps.handleGetTokenUsage)
 			r.Get("/threads", deps.handleListThreads)
 			r.Post("/threads", deps.handleCreateThread)
 			r.Get("/threads/{thread_id}", deps.handleGetThread)
 			r.Put("/threads/{thread_id}", deps.handleUpsertThread)
+			r.Delete("/threads/{thread_id}", deps.handleDeleteThread)
 			r.Get("/threads/{thread_id}/messages", deps.handleListThreadMessages)
 			r.Post("/threads/{thread_id}/runs", deps.handleCreateRun)
 			r.Post("/uploads", deps.handleUploadFiles)
@@ -391,19 +455,22 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/upload-sessions/{session_id}/pause", deps.handlePauseUploadSession)
 			r.Post("/upload-sessions/{session_id}/resume", deps.handleResumeUploadSession)
 			r.Post("/upload-sessions/{session_id}/cancel", deps.handleCancelUploadSession)
-			r.Get("/uploads/{file_id}/viewer", deps.handleGetUploadViewer)
+			r.Get("/uploads/{file_id}/viewer", deps.handleGetUploadViewerService)
 			r.Get("/uploads/{file_id}/preview", deps.handleServeUpload)
 			r.Get("/uploads/{file_id}/display", deps.handleServeUpload)
-			r.Get("/uploads/{file_id}/slice", deps.handleServeUploadSlice)
-			r.Get("/uploads/{file_id}/scalar-volume", deps.handleGetUploadScalarVolume)
-			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleNotConfigured("upload tile pyramid delivery is not configured in the Go control plane yet"))
-			r.Get("/uploads/{file_id}/atlas", deps.handleNotConfigured("upload atlas delivery is not configured in the Go control plane yet"))
-			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogram)
+			r.Get("/uploads/{file_id}/slice", deps.handleServeUploadSliceService)
+			r.Get("/uploads/{file_id}/scalar-volume", deps.handleGetUploadScalarVolumeService)
+			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleServeUploadTiles)
+			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
+			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
+			r.Post("/uploads/{file_id}/derive-pyramid", deps.handleDeriveUploadPyramid)
 			r.Get("/uploads/{file_id}/caption", deps.handleGetUploadCaption)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
 			r.Post("/bisque/download", deps.handleImportBisqueResources)
 			r.Post("/bisque/upload", deps.handleBisqueUpload)
+			r.Post("/bisque/datasets", deps.handleBisqueCreateDataset)
+			r.Post("/bisque/push", deps.handleBisquePush)
 			r.Post("/bisque/unlink", deps.handleBisqueUnlink)
 			r.Get("/resource-events", deps.handleListResourceEventLog)
 			r.Get("/resources", deps.handleListResources)
@@ -417,7 +484,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
 			r.Post("/resources/{file_id}/restore", deps.handleRestoreResource)
 			r.Get("/resources/{file_id}/events", deps.handleListResourceEvents)
-			r.Get("/resources/{file_id}/thumbnail", deps.handleServeUpload)
+			r.Get("/resources/{file_id}/thumbnail", deps.handleServeResourceThumbnail)
 			r.Get("/resources/{file_id}/shares", deps.handleListResourceShareGrants)
 			r.Post("/resources/{file_id}/shares", deps.handleCreateResourceShareGrant)
 			r.Delete("/resources/{file_id}/shares/{grant_id}", deps.handleRevokeResourceShareGrant)
@@ -449,6 +516,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Delete("/data-agent/jobs/{job_id}/lease", deps.handleReleaseDataAgentJobLease)
 			r.Get("/runs", deps.handleListRuns)
 			r.Get("/runs/{run_id}", deps.handleGetRun)
+			r.Get("/runs/{run_id}/user-profile", deps.handleGetRunUserProfile)
 			r.Post("/runs/{run_id}/lease", deps.handleAcquireRunLease)
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
@@ -1100,9 +1168,12 @@ func (deps ServerDeps) workOSSessionResponseForRequest(w http.ResponseWriter, r 
 			"bisque_linked": false,
 		}, nil
 	}
-	resolvedSnapshot, _, _, err := deps.resolveWorkOSAccount(r.Context(), snapshot)
+	resolvedSnapshot, account, approved, err := deps.resolveWorkOSAccount(r.Context(), snapshot)
 	if err != nil {
 		return nil, err
+	}
+	if !approved {
+		return workOSAccountDeniedResponse(snapshot, account), nil
 	}
 	return resolvedSnapshot.sessionResponse(), nil
 }
@@ -1118,9 +1189,13 @@ func (deps ServerDeps) requireWorkOSAccount(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 			return
 		}
-		resolvedSnapshot, _, _, err := deps.resolveWorkOSAccount(r.Context(), snapshot)
+		resolvedSnapshot, account, approved, err := deps.resolveWorkOSAccount(r.Context(), snapshot)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if !approved {
+			writeJSON(w, http.StatusForbidden, workOSAccountDeniedResponse(snapshot, account))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), workOSPrincipalContextKey{}, resolvedSnapshot)))
@@ -1174,14 +1249,14 @@ func (deps ServerDeps) resolveWorkOSAccount(ctx context.Context, snapshot workOS
 					account, found, err = accounts.GetUserByEmail(ctx, snapshot.Email)
 				}
 				if err == nil && found {
-					return applyUltraAccountToWorkOSSnapshot(snapshot, account), account, true, nil
+					return applyUltraAccountToWorkOSSnapshot(snapshot, account), account, isActiveAccount(account), nil
 				}
 			}
 			return snapshot, domain.UserAccount{}, false, err
 		}
 	}
 	resolved := applyUltraAccountToWorkOSSnapshot(snapshot, account)
-	return resolved, account, true, nil
+	return resolved, account, isActiveAccount(account), nil
 }
 
 func applyUltraAccountToWorkOSSnapshot(snapshot workOSSessionSnapshot, account domain.UserAccount) workOSSessionSnapshot {
@@ -1419,6 +1494,9 @@ func principalFromRequest(r *http.Request, fallbackUserID string) requestPrincip
 }
 
 func (deps ServerDeps) principalFromRequest(r *http.Request, fallbackUserID string) requestPrincipal {
+	if principal, ok := deps.workerRunPrincipal(r); ok {
+		return principal
+	}
 	if deps.WorkOS.Enabled() {
 		if principal, ok := deps.WorkOS.principalFromRequest(r); ok {
 			return principal
@@ -1445,6 +1523,26 @@ func (deps ServerDeps) principalFromRequest(r *http.Request, fallbackUserID stri
 		OrgID:  orgID,
 		Role:   role,
 	}
+}
+
+// workerRunPrincipal anchors trusted-worker requests to the user that owns the
+// run named in X-Ultra-Run-Id, so files staged or pushed by agent tools land in
+// that user's catalog instead of an "unauthenticated" principal.
+func (deps ServerDeps) workerRunPrincipal(r *http.Request) (requestPrincipal, bool) {
+	if deps.Store == nil || deps.workerRequestAuth(r) != workerAuthValid {
+		return requestPrincipal{}, false
+	}
+	runID := strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id"))
+	if runID == "" {
+		return requestPrincipal{}, false
+	}
+	run, err := deps.Store.GetRun(r.Context(), runID)
+	if err != nil || strings.TrimSpace(run.UserID) == "" {
+		return requestPrincipal{}, false
+	}
+	orgID := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")), "local-org")
+	role := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Role")), "researcher")
+	return requestPrincipal{UserID: strings.TrimSpace(run.UserID), OrgID: orgID, Role: role}, true
 }
 
 func (deps ServerDeps) devCookiePrincipalUserID(r *http.Request) (string, bool) {
@@ -2220,10 +2318,33 @@ type adminWorkerRecord struct {
 	Metadata            domain.JSONMap `json:"metadata"`
 }
 
+type adminImageCacheStats struct {
+	Enabled  bool    `json:"enabled"`
+	Hits     uint64  `json:"hits"`
+	Misses   uint64  `json:"misses"`
+	HitRate  float64 `json:"hit_rate"`
+	Entries  int     `json:"entries"`
+	Bytes    int64   `json:"bytes"`
+	MaxBytes int64   `json:"max_bytes"`
+}
+
+// adminRetentionBacklog surfaces how much storage is held by soft-deleted resources past
+// their undelete window — the unbounded-growth backlog a retention GC reclaims.
+type adminRetentionBacklog struct {
+	ExpiredResources int64 `json:"expired_resources"`
+	ReclaimableBytes int64 `json:"reclaimable_bytes"`
+}
+
+type retentionBacklogStore interface {
+	RetentionBacklog(context.Context, time.Time) (domain.ResourceRetentionBacklog, error)
+}
+
 type adminOverviewResponse struct {
 	GeneratedAt      string                                 `json:"generated_at"`
 	Runtime          RuntimeSummary                         `json:"runtime"`
 	Queue            adminQueueDiagnostics                  `json:"queue"`
+	ImageCache       adminImageCacheStats                   `json:"image_cache"`
+	RetentionBacklog adminRetentionBacklog                  `json:"retention_backlog"`
 	KPIs             adminPlatformKPIs                      `json:"kpis"`
 	UploadSessions   domain.UploadSessionOperationalMetrics `json:"upload_sessions"`
 	Activity         []adminActivityPeriod                  `json:"activity"`
@@ -2318,6 +2439,354 @@ type trainingModelsResponse struct {
 	Models []trainingModelRecord `json:"models"`
 }
 
+type meUser struct {
+	UserID      string `json:"user_id"`
+	Email       string `json:"email,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Role        string `json:"role,omitempty"`
+	OrgID       string `json:"org_id,omitempty"`
+}
+
+type meResponse struct {
+	User    meUser             `json:"user"`
+	Profile domain.UserProfile `json:"profile"`
+}
+
+type updateProfileRequest struct {
+	DisplayName       *string `json:"display_name"`
+	Title             *string `json:"title"`
+	Institution       *string `json:"institution"`
+	ResearchInterests *string `json:"research_interests"`
+	Bio               *string `json:"bio"`
+}
+
+func (req updateProfileRequest) apply(profile *domain.UserProfile) {
+	if req.DisplayName != nil {
+		profile.DisplayName = clampProfileField(*req.DisplayName, 200)
+	}
+	if req.Title != nil {
+		profile.Title = clampProfileField(*req.Title, 200)
+	}
+	if req.Institution != nil {
+		profile.Institution = clampProfileField(*req.Institution, 200)
+	}
+	if req.ResearchInterests != nil {
+		profile.ResearchInterests = clampProfileField(*req.ResearchInterests, 1000)
+	}
+	if req.Bio != nil {
+		profile.Bio = clampProfileField(*req.Bio, 4000)
+	}
+}
+
+func clampProfileField(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) > max {
+		return strings.TrimSpace(value[:max])
+	}
+	return value
+}
+
+func userProfileFromAccount(account domain.UserAccount) domain.UserProfile {
+	profile := domain.UserProfile{}
+	if account.Metadata == nil {
+		return profile
+	}
+	raw, ok := account.Metadata["profile"]
+	if !ok {
+		return profile
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return profile
+	}
+	_ = json.Unmarshal(data, &profile)
+	return profile
+}
+
+func buildMeResponse(account domain.UserAccount) meResponse {
+	profile := userProfileFromAccount(account)
+	if strings.TrimSpace(profile.DisplayName) == "" {
+		profile.DisplayName = account.DisplayName
+	}
+	return meResponse{
+		User: meUser{
+			UserID:      account.UserID,
+			Email:       account.Email,
+			DisplayName: firstNonEmpty(account.DisplayName, profile.DisplayName),
+			Role:        account.Role,
+			OrgID:       account.OrgID,
+		},
+		Profile: profile,
+	}
+}
+
+func (deps ServerDeps) handleGetCurrentUser(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	accounts, ok := deps.Store.(accountStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("account profiles are not supported by this store"))
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	account, found, err := accounts.GetUserByID(r.Context(), principal.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		account = domain.UserAccount{
+			UserID: principal.UserID,
+			Role:   principal.Role,
+			OrgID:  principal.OrgID,
+			Status: "active",
+		}
+	}
+	writeJSON(w, http.StatusOK, buildMeResponse(account))
+}
+
+func (deps ServerDeps) handleUpdateCurrentUser(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	accounts, ok := deps.Store.(accountStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("account profiles are not supported by this store"))
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	var req updateProfileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx := r.Context()
+	existing, found, err := accounts.GetUserByID(ctx, principal.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		created, createErr := accounts.CreateUser(ctx, domain.CreateUserInput{
+			UserID: principal.UserID,
+			Role:   principal.Role,
+			OrgID:  principal.OrgID,
+			Status: "active",
+		})
+		if createErr != nil {
+			writeError(w, http.StatusInternalServerError, createErr)
+			return
+		}
+		existing = created
+	}
+	profile := userProfileFromAccount(existing)
+	req.apply(&profile)
+	account, err := accounts.UpdateUserProfile(ctx, domain.UpdateUserProfileInput{
+		UserID:  principal.UserID,
+		Profile: profile,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildMeResponse(account))
+}
+
+// handleGetRunUserProfile lets a trusted worker fetch the profile of a run's
+// owner (derived from the run record, authorized by the worker token). This is
+// the worker-safe equivalent of GET /v2/me, which is bound to the browser's
+// WorkOS session and cannot be read with a worker token.
+func (deps ServerDeps) handleGetRunUserProfile(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	accounts, hasAccounts := deps.Store.(accountStore)
+	if !hasAccounts {
+		writeError(w, http.StatusNotImplemented, errors.New("account profiles are not supported by this store"))
+		return
+	}
+	runID := strings.TrimSpace(chi.URLParam(r, "run_id"))
+	run, resolved := deps.runForWorkerOrUser(w, r, runID)
+	if !resolved {
+		return
+	}
+	account, found, err := accounts.GetUserByID(r.Context(), run.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusOK, meResponse{
+			User:    meUser{UserID: run.UserID},
+			Profile: domain.UserProfile{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, buildMeResponse(account))
+}
+
+type tokenUsageSummaryResponse struct {
+	LifetimeInputTokens  int64  `json:"lifetime_input_tokens"`
+	LifetimeOutputTokens int64  `json:"lifetime_output_tokens"`
+	LifetimeTotalTokens  int64  `json:"lifetime_total_tokens"`
+	PeakDailyTotal       int64  `json:"peak_daily_total"`
+	LongestTaskSeconds   int64  `json:"longest_task_seconds"`
+	CurrentStreakDays    int    `json:"current_streak_days"`
+	LongestStreakDays    int    `json:"longest_streak_days"`
+	ActiveDays           int    `json:"active_days"`
+	LastActiveDay        string `json:"last_active_day,omitempty"`
+}
+
+type tokenUsageDailyPoint struct {
+	Day          string `json:"day"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RunCount     int64  `json:"run_count"`
+}
+
+type tokenUsageResponse struct {
+	Days    int                       `json:"days"`
+	Summary tokenUsageSummaryResponse `json:"summary"`
+	Daily   []tokenUsageDailyPoint    `json:"daily"`
+}
+
+func (deps ServerDeps) handleGetTokenUsage(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	usageStore, ok := deps.Store.(usageStatsStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("token usage tracking is not supported by this store"))
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	days := parseDaysQuery(r, 365, 730)
+	ctx := r.Context()
+	today := domain.Now().UTC().Truncate(24 * time.Hour)
+	since := today.AddDate(0, 0, -(days - 1))
+
+	stats, err := usageStore.GetUserTokenUsageStats(ctx, principal.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	daily, err := usageStore.ListUserTokenUsageDaily(ctx, principal.UserID, since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	longestSeconds, err := usageStore.GetUserLongestRunSeconds(ctx, principal.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildTokenUsageResponse(stats, daily, longestSeconds, days, today))
+}
+
+func parseDaysQuery(r *http.Request, fallback int, max int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("days"))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func buildTokenUsageResponse(
+	stats domain.UserTokenUsageStats,
+	daily []domain.UserTokenUsageDaily,
+	longestSeconds int64,
+	days int,
+	today time.Time,
+) tokenUsageResponse {
+	points := make([]tokenUsageDailyPoint, 0, len(daily))
+	active := make(map[string]bool, len(daily))
+	for _, record := range daily {
+		key := record.Day.UTC().Format("2006-01-02")
+		points = append(points, tokenUsageDailyPoint{
+			Day:          key,
+			InputTokens:  record.InputTokens,
+			OutputTokens: record.OutputTokens,
+			TotalTokens:  record.TotalTokens,
+			RunCount:     record.RunCount,
+		})
+		if record.TotalTokens > 0 || record.RunCount > 0 {
+			active[key] = true
+		}
+	}
+	current, longest := computeActivityStreaks(active, today)
+	summary := tokenUsageSummaryResponse{
+		LifetimeInputTokens:  stats.InputTokens,
+		LifetimeOutputTokens: stats.OutputTokens,
+		LifetimeTotalTokens:  stats.TotalTokens,
+		PeakDailyTotal:       stats.PeakDailyTotal,
+		LongestTaskSeconds:   longestSeconds,
+		CurrentStreakDays:    current,
+		LongestStreakDays:    longest,
+		ActiveDays:           len(active),
+	}
+	if stats.LastActiveDay != nil && !stats.LastActiveDay.IsZero() {
+		summary.LastActiveDay = stats.LastActiveDay.UTC().Format("2006-01-02")
+	}
+	return tokenUsageResponse{
+		Days:    days,
+		Summary: summary,
+		Daily:   points,
+	}
+}
+
+// computeActivityStreaks derives the current and longest run of consecutive
+// active days from the set of active day keys (formatted YYYY-MM-DD, UTC).
+func computeActivityStreaks(active map[string]bool, today time.Time) (current int, longest int) {
+	if len(active) == 0 {
+		return 0, 0
+	}
+	today = today.UTC().Truncate(24 * time.Hour)
+	dayKey := func(t time.Time) string { return t.Format("2006-01-02") }
+
+	// The current streak ends today, or yesterday when today has no activity yet.
+	anchor := today
+	if !active[dayKey(anchor)] {
+		anchor = anchor.AddDate(0, 0, -1)
+	}
+	for active[dayKey(anchor)] {
+		current++
+		anchor = anchor.AddDate(0, 0, -1)
+	}
+
+	parsedDays := make([]time.Time, 0, len(active))
+	for key := range active {
+		parsed, err := time.Parse("2006-01-02", key)
+		if err != nil {
+			continue
+		}
+		parsedDays = append(parsedDays, parsed)
+	}
+	sort.Slice(parsedDays, func(i, j int) bool { return parsedDays[i].Before(parsedDays[j]) })
+	run := 0
+	var prev time.Time
+	for i, day := range parsedDays {
+		if i > 0 && day.Equal(prev.AddDate(0, 0, 1)) {
+			run++
+		} else {
+			run = 1
+		}
+		if run > longest {
+			longest = run
+		}
+		prev = day
+	}
+	return current, longest
+}
+
 func (deps ServerDeps) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
@@ -2325,7 +2794,11 @@ func (deps ServerDeps) handleListThreads(w http.ResponseWriter, r *http.Request)
 	principal := deps.principalFromRequest(r, "")
 	limit := clampLimit(parseLimit(r, 100), 500)
 	offset := parseOffset(r)
-	page, err := deps.Store.ListThreadsForUser(r.Context(), principal.UserID, limit, offset, strings.TrimSpace(r.URL.Query().Get("status")))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = string(domain.ThreadStatusActive)
+	}
+	page, err := deps.Store.ListThreadsForUser(r.Context(), principal.UserID, limit, offset, status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -2397,6 +2870,18 @@ func (deps ServerDeps) handleUpsertThread(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, thread)
 }
 
+func (deps ServerDeps) handleDeleteThread(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.SoftDeleteThreadForUser(r.Context(), chi.URLParam(r, "thread_id"), principal.UserID, domain.Now()); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (deps ServerDeps) handleListThreadMessages(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return
@@ -2460,6 +2945,11 @@ func idempotencyKeyFromRequest(r *http.Request, bodyValue string) string {
 }
 
 func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > directUploadMaxBodyBytes {
+		writeDirectUploadTooLarge(w)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, directUploadMaxBodyBytes)
 	root, err := deps.resolvedUploadRoot()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -2470,6 +2960,11 @@ func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeDirectUploadTooLarge(w)
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -2581,24 +3076,36 @@ func (deps ServerDeps) handleCreateUploadSession(w http.ResponseWriter, r *http.
 	if idempotencyKey != "" {
 		existing, err := sessions.GetUploadSessionByIdempotencyKeyForUser(r.Context(), idempotencyKey, principal.UserID, principal.OrgID)
 		if err == nil {
-			existingFiles, err := sessions.ListUploadSessionFiles(r.Context(), existing.SessionID)
-			if err != nil {
+			// A still-in-flight session (active/paused) replays so the client resumes it.
+			// A TERMINAL session (completed/canceled) replays ONLY if its committed result
+			// is still live; otherwise the user is re-uploading a file they finished and
+			// then deleted (or a canceled attempt), which must start a FRESH upload — not
+			// 409 against the dead session (the reported "upload session is completed" bug).
+			if !uploadSessionTerminal(existing.Status) || deps.terminalUploadSessionReplayable(r.Context(), sessions, existing) {
+				existingFiles, err := sessions.ListUploadSessionFiles(r.Context(), existing.SessionID)
+				if err != nil {
+					writeStoreError(w, err)
+					return
+				}
+				if !uploadSessionManifestMatches(existing, existingFiles, fileInputs, totalBytes, strings.TrimSpace(req.ProjectID)) {
+					writeStoreError(w, fmt.Errorf("%w: upload session idempotency replay does not match original manifest", store.ErrConflict))
+					return
+				}
+				response, err := uploadSessionState(r.Context(), sessions, existing)
+				if err != nil {
+					writeStoreError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, response)
+				return
+			}
+			// Supersede the dead terminal session: free its idempotency-key slot so the
+			// fresh session below can claim it (the partial unique index ignores empty keys).
+			if err := sessions.ClearUploadSessionIdempotencyKey(r.Context(), existing.SessionID); err != nil {
 				writeStoreError(w, err)
 				return
 			}
-			if !uploadSessionManifestMatches(existing, existingFiles, fileInputs, totalBytes, strings.TrimSpace(req.ProjectID)) {
-				writeStoreError(w, fmt.Errorf("%w: upload session idempotency replay does not match original manifest", store.ErrConflict))
-				return
-			}
-			response, err := uploadSessionState(r.Context(), sessions, existing)
-			if err != nil {
-				writeStoreError(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, response)
-			return
-		}
-		if !errors.Is(err, store.ErrNotFound) {
+		} else if !errors.Is(err, store.ErrNotFound) {
 			writeStoreError(w, err)
 			return
 		}
@@ -2621,6 +3128,21 @@ func (deps ServerDeps) handleCreateUploadSession(w http.ResponseWriter, r *http.
 		},
 	})
 	if err != nil {
+		// Collision-tolerant: a concurrent create with the same idempotency key (two
+		// tabs, a double-submit, a retry after a lost response) may have won the partial
+		// unique-index race. Resolve to that winner and replay it instead of failing the
+		// loser with a 409 — re-uploading a file must succeed, not error.
+		if idempotencyKey != "" && errors.Is(err, store.ErrConflict) {
+			if winner, lookupErr := sessions.GetUploadSessionByIdempotencyKeyForUser(r.Context(), idempotencyKey, principal.UserID, principal.OrgID); lookupErr == nil {
+				response, stateErr := uploadSessionState(r.Context(), sessions, winner)
+				if stateErr != nil {
+					writeStoreError(w, stateErr)
+					return
+				}
+				writeJSON(w, http.StatusOK, response)
+				return
+			}
+		}
 		writeStoreError(w, err)
 		return
 	}
@@ -2718,6 +3240,15 @@ func (deps ServerDeps) handleUploadSessionChunk(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusConflict, errors.New("upload session file is already completed"))
 		return
 	}
+	remainingBytes, err := uploadSessionRemainingChunkBytes(file, offset)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if r.ContentLength > remainingBytes {
+		writeUploadChunkTooLarge(w, remainingBytes)
+		return
+	}
 
 	chunkDir := uploadSessionFileStagingDir(root, session.SessionID, fileToken)
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
@@ -2736,10 +3267,17 @@ func (deps ServerDeps) handleUploadSessionChunk(w http.ResponseWriter, r *http.R
 		return
 	}
 	hasher := sha256.New()
-	size, copyErr := copyWithPooledBuffer(io.MultiWriter(destination, hasher), r.Body)
+	chunkBody := http.MaxBytesReader(w, r.Body, remainingBytes)
+	defer chunkBody.Close()
+	size, copyErr := copyWithPooledBuffer(io.MultiWriter(destination, hasher), chunkBody)
 	closeErr := destination.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(copyErr, &maxBytesErr) {
+			writeUploadChunkTooLarge(w, remainingBytes)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, copyErr)
 		return
 	}
@@ -2842,10 +3380,6 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 		writeStoreError(w, err)
 		return
 	}
-	if uploadSessionWriteBlocked(session.Status) {
-		writeError(w, http.StatusConflict, fmt.Errorf("upload session is %s", session.Status))
-		return
-	}
 	principal := deps.principalFromRequest(r, "")
 	fileToken := safePathToken(chi.URLParam(r, "file_token"))
 	file, err := uploadSessionFileForToken(r.Context(), sessions, session.SessionID, fileToken)
@@ -2853,26 +3387,29 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 		writeStoreError(w, err)
 		return
 	}
-	if file.Status == "completed" {
-		if strings.TrimSpace(file.ResourceID) == "" {
-			writeError(w, http.StatusConflict, errors.New("upload session file is already completed without a committed resource"))
-			return
-		}
-		catalog, ok := deps.Store.(resourceCatalogStore)
-		if !ok {
-			writeError(w, http.StatusConflict, errors.New("upload session file is already completed"))
-			return
-		}
-		resource, err := catalog.GetResourceForUser(r.Context(), file.ResourceID, principal.UserID, principal.OrgID)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, uploadSessionFileCompleteResponse{
-			Session:  session,
-			File:     file,
-			Resource: deps.uploadedFileRecordFromCatalog(root, resource),
-		})
+	// A genuinely-completed file returns its committed resource (idempotent re-complete),
+	// checked BEFORE the write-block — otherwise completing an already-completed file in a
+	// completed session would 409 instead of returning the resource the client asked for.
+	if deps.respondUploadFileAlreadyCompleted(w, r, root, session, file, principal) {
+		return
+	}
+	if uploadSessionWriteBlocked(session.Status) {
+		writeError(w, http.StatusConflict, fmt.Errorf("upload session is %s", session.Status))
+		return
+	}
+	// Serialize concurrent completions of the SAME (session, file). A client retry or
+	// double-submit would otherwise both pass the not-completed check above and each mint
+	// a distinct resourceID for one upload — duplicate catalog entry, leaked bytes on disk,
+	// and double-charged quota. The lock is held across the whole commit, so the loser
+	// observes the winner's committed state below and returns that resource (idempotent
+	// completion) instead of duplicating it. Per-file key: distinct files never contend.
+	unlock := uploadCompletionLocks.Lock(session.SessionID + "\x00" + fileToken)
+	defer unlock()
+	if file, err = uploadSessionFileForToken(r.Context(), sessions, session.SessionID, fileToken); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if deps.respondUploadFileAlreadyCompleted(w, r, root, session, file, principal) {
 		return
 	}
 	chunks, err := sessions.ListUploadChunks(r.Context(), session.SessionID, file.FileToken)
@@ -2965,6 +3502,12 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 		writeError(w, http.StatusBadRequest, errors.New("completed file size mismatch"))
 		return
 	}
+	// Serialize the dedup-check-then-commit for identical content across DIFFERENT
+	// sessions. The per-(session,file) lock above does not cover this: two re-uploads of
+	// the same bytes use different session IDs, so without a content lock both could miss
+	// dedup and mint duplicate resources. Keyed on owner+sha+size, held through catalog.
+	contentUnlock := uploadContentLocks.Lock(principal.UserID + "\x00" + principal.OrgID + "\x00" + computedSHA + "\x00" + strconv.FormatInt(file.SizeBytes, 10))
+	defer contentUnlock()
 	if dedupe, ok := deps.Store.(resourceDedupeStore); ok {
 		existing, err := dedupe.FindActiveResourceByShaForUser(r.Context(), principal.UserID, principal.OrgID, computedSHA, file.SizeBytes)
 		if err == nil {
@@ -3034,6 +3577,86 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 	}
 	deps.recordUploadSessionFileCompleted(r.Context(), session, completedFile, principal)
 	writeJSON(w, http.StatusOK, uploadSessionFileCompleteResponse{Session: session, File: completedFile, Resource: record})
+}
+
+// keyedMutex is a set of mutexes addressed by string key, used to serialize work on
+// the same logical resource without serializing unrelated resources. Map entries are
+// reference-counted and removed when idle, so a high-cardinality key space (one per
+// upload file) does not leak memory.
+type keyedMutex struct {
+	mu sync.Mutex
+	m  map[string]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// Lock blocks until the mutex for key is held and returns the unlock function. The
+// returned func must be called exactly once (typically via defer).
+func (k *keyedMutex) Lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = make(map[string]*keyedMutexEntry)
+	}
+	e := k.m[key]
+	if e == nil {
+		e = &keyedMutexEntry{}
+		k.m[key] = e
+	}
+	e.refs++
+	k.mu.Unlock()
+
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		k.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
+}
+
+// uploadCompletionLocks serializes /complete calls per (session, file) so a client
+// retry or double-submit can't mint two resources for one uploaded file.
+var uploadCompletionLocks keyedMutex
+
+// uploadContentLocks serializes the dedup-check-then-commit for identical content
+// (owner+sha+size) across different upload sessions, so two concurrent re-uploads of the
+// same bytes cannot both miss dedup and create duplicate resources.
+var uploadContentLocks keyedMutex
+
+// respondUploadFileAlreadyCompleted writes the already-committed resource for a
+// completed upload file and reports whether it handled the response. Used both on
+// the lock-free fast path (a client polling a finished file) and again under the
+// completion lock (the loser of a completion race observes the committed state).
+func (deps ServerDeps) respondUploadFileAlreadyCompleted(w http.ResponseWriter, r *http.Request, root string, session domain.UploadSessionRecord, file domain.UploadSessionFileRecord, principal requestPrincipal) bool {
+	if file.Status != "completed" {
+		return false
+	}
+	if strings.TrimSpace(file.ResourceID) == "" {
+		writeError(w, http.StatusConflict, errors.New("upload session file is already completed without a committed resource"))
+		return true
+	}
+	catalog, ok := deps.Store.(resourceCatalogStore)
+	if !ok {
+		writeError(w, http.StatusConflict, errors.New("upload session file is already completed"))
+		return true
+	}
+	resource, err := catalog.GetResourceForUser(r.Context(), file.ResourceID, principal.UserID, principal.OrgID)
+	if err != nil {
+		writeStoreError(w, err)
+		return true
+	}
+	writeJSON(w, http.StatusOK, uploadSessionFileCompleteResponse{
+		Session:  session,
+		File:     file,
+		Resource: deps.uploadedFileRecordFromCatalog(root, resource),
+	})
+	return true
 }
 
 func (deps ServerDeps) handleCancelUploadSession(w http.ResponseWriter, r *http.Request) {
@@ -3156,6 +3779,45 @@ func uploadSessionWriteBlocked(status string) bool {
 	}
 }
 
+// uploadSessionTerminal reports whether a session has reached a final state. Paused is
+// NOT terminal — it is resumable, so its idempotency key must stay findable for resume.
+func uploadSessionTerminal(status string) bool {
+	switch status {
+	case "completed", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+// terminalUploadSessionReplayable reports whether a terminal session's committed result
+// is still live, so an idempotency-key replay should return it (idempotent retry / dedup)
+// rather than start a fresh upload. True only for a fully-completed session whose every
+// committed file still resolves to an active resource; a canceled session, or one whose
+// resource was soft-deleted, is NOT replayable and must be superseded by a fresh upload.
+func (deps ServerDeps) terminalUploadSessionReplayable(ctx context.Context, sessions uploadSessionStore, session domain.UploadSessionRecord) bool {
+	if session.Status != "completed" {
+		return false // canceled has no committed result to replay
+	}
+	catalog, ok := deps.Store.(resourceCatalogStore)
+	if !ok {
+		return false
+	}
+	files, err := sessions.ListUploadSessionFiles(ctx, session.SessionID)
+	if err != nil || len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		if file.Status != "completed" || strings.TrimSpace(file.ResourceID) == "" {
+			return false
+		}
+		if _, err := catalog.GetResourceForUser(ctx, file.ResourceID, session.OwnerUserID, session.OwnerOrgID); err != nil {
+			return false // the committed resource is gone / soft-deleted -> supersede
+		}
+	}
+	return true
+}
+
 func (deps ServerDeps) uploadSessionForRequest(r *http.Request, sessions uploadSessionStore) (domain.UploadSessionRecord, error) {
 	principal := deps.principalFromRequest(r, "")
 	return sessions.GetUploadSessionForUser(r.Context(), chi.URLParam(r, "session_id"), principal.UserID, principal.OrgID)
@@ -3236,7 +3898,15 @@ func sortUploadChunks(chunks []domain.UploadChunkRecord) {
 func copyWithPooledBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	bufferPtr := uploadCopyBufferPool.Get().(*[]byte)
 	defer uploadCopyBufferPool.Put(bufferPtr)
-	return io.CopyBuffer(dst, src, *bufferPtr)
+	return io.CopyBuffer(pooledCopyWriter{Writer: dst}, pooledCopyReader{Reader: src}, *bufferPtr)
+}
+
+type pooledCopyReader struct {
+	io.Reader
+}
+
+type pooledCopyWriter struct {
+	io.Writer
 }
 
 func uploadSessionFileByToken(files []domain.UploadSessionFileRecord, fileToken string) (domain.UploadSessionFileRecord, bool) {
@@ -3290,6 +3960,21 @@ func uploadSessionManifestMatches(session domain.UploadSessionRecord, existingFi
 		}
 	}
 	return true
+}
+
+func uploadSessionRemainingChunkBytes(file domain.UploadSessionFileRecord, offset int64) (int64, error) {
+	if offset > file.SizeBytes {
+		return 0, errors.New("chunk offset exceeds declared file size")
+	}
+	return file.SizeBytes - offset, nil
+}
+
+func writeUploadChunkTooLarge(w http.ResponseWriter, remainingBytes int64) {
+	writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("upload chunk exceeds remaining declared file size of %d bytes", remainingBytes))
+}
+
+func writeDirectUploadTooLarge(w http.ResponseWriter) {
+	writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("direct upload body exceeds %d bytes; use resumable upload sessions for larger files", directUploadMaxBodyBytes))
 }
 
 func recordFailedUploadChunk(ctx context.Context, sessions uploadSessionStore, session domain.UploadSessionRecord, file domain.UploadSessionFileRecord, chunkIndex int, offset int64, size int64, actualSHA string, message string) error {
@@ -3563,7 +4248,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 			ProcessingStatus: processingStatus,
 			Status:           status,
 			Offset:           parseOffset(r),
-			Limit:            parseLimit(r, 200),
+			Limit:            clampLimit(parseLimit(r, 200), 1000),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -3623,7 +4308,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 		filtered = append(filtered, resource)
 	}
 	offset := parseOffset(r)
-	limit := parseLimit(r, 200)
+	limit := clampLimit(parseLimit(r, 200), 1000)
 	paged := []resourceRecord{}
 	if offset < len(filtered) {
 		end := offset + limit
@@ -3697,7 +4382,7 @@ func (deps ServerDeps) handleListResourceCollections(w http.ResponseWriter, r *h
 		Type:      strings.ToLower(strings.TrimSpace(r.URL.Query().Get("collection_type"))),
 		ProjectID: strings.TrimSpace(r.URL.Query().Get("project_id")),
 		Status:    status,
-		Limit:     parseLimit(r, 200),
+		Limit:     clampLimit(parseLimit(r, 200), 1000),
 		Offset:    parseOffset(r),
 	})
 	if err != nil {
@@ -4114,7 +4799,7 @@ func (deps ServerDeps) handleListResourceCollectionResources(w http.ResponseWrit
 		CreatedAfter:     createdAfter,
 		CreatedBefore:    createdBefore,
 		ProcessingStatus: processingStatus,
-		Limit:            parseLimit(r, 200),
+		Limit:            clampLimit(parseLimit(r, 200), 1000),
 		Offset:           parseOffset(r),
 	})
 	if err != nil {
@@ -4227,7 +4912,7 @@ func (deps ServerDeps) handleListDatasetSnapshots(w http.ResponseWriter, r *http
 		ProjectID:          strings.TrimSpace(r.URL.Query().Get("project_id")),
 		SourceCollectionID: strings.TrimSpace(r.URL.Query().Get("source_collection_id")),
 		Status:             status,
-		Limit:              parseLimit(r, 200),
+		Limit:              clampLimit(parseLimit(r, 200), 1000),
 		Offset:             parseOffset(r),
 	})
 	if err != nil {
@@ -4422,7 +5107,7 @@ func (deps ServerDeps) handleListDatasetSnapshotShareGrants(w http.ResponseWrite
 		OwnerUserID: principal.UserID,
 		OwnerOrgID:  principal.OrgID,
 		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
-		Limit:       parseLimit(r, 200),
+		Limit:       clampLimit(parseLimit(r, 200), 1000),
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -5961,7 +6646,7 @@ func (deps ServerDeps) handleListResourceShareGrants(w http.ResponseWriter, r *h
 		OwnerUserID: principal.UserID,
 		OwnerOrgID:  principal.OrgID,
 		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
-		Limit:       parseLimit(r, 200),
+		Limit:       clampLimit(parseLimit(r, 200), 1000),
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -6053,13 +6738,16 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusUnsupportedMediaType, errors.New("upload scalar volume is only available for NIfTI resources"))
 		return
 	}
-	volume, err := loadNiftiScalarVolume(path, parseUploadScalarChannelIndex(r))
+	volume, err := loadNiftiScalarVolumeAt(path, parseUploadScalarTimeIndex(r), parseUploadScalarChannelIndex(r))
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
 	}
+	maybeDecompressNiftiSidecar(path, volume.TimeCount)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("x-volume-time", strconv.Itoa(volume.TimeIndex))
+	w.Header().Set("x-volume-time-count", strconv.Itoa(volume.TimeCount))
 	w.Header().Set("x-volume-width", strconv.Itoa(volume.Width))
 	w.Header().Set("x-volume-height", strconv.Itoa(volume.Height))
 	w.Header().Set("x-volume-depth", strconv.Itoa(volume.Depth))
@@ -6068,6 +6756,10 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-raw-min", formatScalarHeaderFloat(volume.RawMin))
 	w.Header().Set("x-volume-raw-max", formatScalarHeaderFloat(volume.RawMax))
 	w.Header().Set("x-volume-channel", strconv.Itoa(volume.ChannelIndex))
+	// Rescale to physical units (HU/SUV) so the client can window in true
+	// intensities: physical = slope*code + inter.
+	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))
+	w.Header().Set("x-volume-scl-inter", formatScalarHeaderFloat(volume.SclInter))
 	_, _ = w.Write(volume.Data)
 }
 
@@ -6389,6 +7081,9 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
 	}
+	// Warm the random-access sidecar for 4D series so the first time-scrub is
+	// already fast; no-op for single-timepoint or uncompressed volumes.
+	maybeDecompressNiftiSidecar(path, volume.TimeCount)
 	dimsOrder := niftiScalarDimsOrder(volume)
 	arrayShape := niftiScalarArrayShape(volume)
 	channelColors := niftiDefaultChannelColors(volume.ChannelCount)
@@ -6397,6 +7092,10 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 	if volume.ChannelCount > 1 {
 		displayCapabilities = append(displayCapabilities, "channel_visibility")
 		viewerCapabilities = append(viewerCapabilities, "channel_selection")
+	}
+	if volume.TimeCount > 1 {
+		displayCapabilities = append(displayCapabilities, "time_navigation")
+		viewerCapabilities = append(viewerCapabilities, "time_series_delivery")
 	}
 	fileIDSegment := url.PathEscape(record.FileID)
 	serviceURLs := map[string]any{
@@ -6410,6 +7109,39 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 		"y": volume.SpacingY,
 		"z": volume.SpacingZ,
 	}
+	orientationCode, axisEnds, planeAxis := niftiOrientation(volume.Affine)
+	orientationKnown := volume.AffineCode > 0
+	spaceUnit := volume.SpaceUnit
+	if spaceUnit == "" {
+		spaceUnit = "mm" // NIfTI's default spatial unit when xyzt_units is unset
+	}
+	effectiveSlope := volume.SclSlope
+	if effectiveSlope == 0 {
+		effectiveSlope = 1
+	}
+	orientation := map[string]any{
+		"frame":         "patient",
+		"convention":    "neurological", // on-screen left = patient left
+		"code":          orientationCode,
+		"known":         orientationKnown,
+		"affine_method": niftiAffineMethodName(volume.AffineCode),
+		"axis_labels": map[string]any{
+			"x": map[string]string{"negative": axisEnds[0][0], "positive": axisEnds[0][1]},
+			"y": map[string]string{"negative": axisEnds[1][0], "positive": axisEnds[1][1]},
+			"z": map[string]string{"negative": axisEnds[2][0], "positive": axisEnds[2][1]},
+		},
+		"plane_axis": planeAxis,
+	}
+	affineRows := [][]float64{
+		{volume.Affine[0], volume.Affine[1], volume.Affine[2], volume.Affine[3]},
+		{volume.Affine[4], volume.Affine[5], volume.Affine[6], volume.Affine[7]},
+		{volume.Affine[8], volume.Affine[9], volume.Affine[10], volume.Affine[11]},
+		{0, 0, 0, 1},
+	}
+	if orientationKnown {
+		displayCapabilities = append(displayCapabilities, "orientation_markers")
+		viewerCapabilities = append(viewerCapabilities, "anatomical_orientation")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind":          "image",
 		"file_id":       record.FileID,
@@ -6418,52 +7150,60 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 		"backend_mode":  "scalar",
 		"dims_order":    dimsOrder,
 		"axis_sizes": map[string]int{
-			"T": 1,
+			"T": volume.TimeCount,
 			"C": volume.ChannelCount,
 			"Z": volume.Depth,
 			"Y": volume.Height,
 			"X": volume.Width,
 		},
-		"selected_indices": map[string]int{"T": 0, "C": 0, "Z": volume.Depth / 2},
+		"selected_indices": map[string]int{"T": volume.TimeIndex, "C": volume.ChannelIndex, "Z": volume.Depth / 2},
 		"is_volume":        volume.Depth > 1,
-		"is_timeseries":    false,
+		"is_timeseries":    volume.TimeCount > 1,
 		"is_multichannel":  volume.ChannelCount > 1,
 		"service_urls":     serviceURLs,
 		"display_defaults": niftiScalarDisplayDefaults(volume, channelColors),
 		"metadata": map[string]any{
-			"reader":           "nifti-1",
-			"dims_order":       dimsOrder,
-			"array_shape":      arrayShape,
-			"array_dtype":      volume.DType,
-			"array_min":        volume.RawMin,
-			"array_max":        volume.RawMax,
-			"intensity_stats":  map[string]float64{"min": volume.RawMin, "max": volume.RawMax},
-			"physical_spacing": spacing,
-			"scene_count":      1,
-			"warnings":         volume.Warnings,
-			"content_type":     record.ContentType,
-			"size_bytes":       record.SizeBytes,
-			"sha256":           record.SHA256,
+			"reader":                   "nifti-1",
+			"dims_order":               dimsOrder,
+			"array_shape":              arrayShape,
+			"array_dtype":              volume.DType,
+			"array_min":                volume.RawMin,
+			"array_max":                volume.RawMax,
+			"intensity_stats":          map[string]float64{"min": volume.RawMin, "max": volume.RawMax},
+			"intensity_stats_physical": map[string]float64{"min": volume.physical(volume.RawMin), "max": volume.physical(volume.RawMax)},
+			"rescale_slope":            effectiveSlope,
+			"rescale_intercept":        volume.SclInter,
+			"physical_spacing":         spacing,
+			"physical_spacing_unit":    spaceUnit,
+			"affine":                   affineRows,
+			"orientation_code":         orientationCode,
+			"scene_count":              1,
+			"warnings":                 volume.Warnings,
+			"content_type":             record.ContentType,
+			"size_bytes":               record.SizeBytes,
+			"sha256":                   record.SHA256,
 		},
 		"viewer": map[string]any{
-			"status":               "ready",
-			"warmup_mode":          "lazy",
-			"backend_mode":         "scalar",
-			"default_surface":      "volume",
-			"available_surfaces":   []string{"2d", "mpr", "volume", "metadata"},
-			"default_axis":         "z",
-			"slice_axes":           []string{"z", "y", "x"},
-			"channel_mode":         "single",
-			"volume_mode":          "scalar",
-			"render_policy":        "scalar",
-			"delivery_mode":        "scalar",
-			"diagnostic_surface":   "mpr",
-			"first_paint_mode":     "webgl",
-			"measurement_policy":   "spacing-aware",
-			"texture_policy":       "linear",
-			"display_capabilities": displayCapabilities,
-			"viewer_capabilities":  viewerCapabilities,
-			"service_urls":         serviceURLs,
+			"status":                "ready",
+			"warmup_mode":           "lazy",
+			"backend_mode":          "scalar",
+			"default_surface":       "volume",
+			"available_surfaces":    []string{"2d", "mpr", "volume", "metadata"},
+			"default_axis":          "z",
+			"slice_axes":            []string{"z", "y", "x"},
+			"orientation":           orientation,
+			"physical_spacing_unit": spaceUnit,
+			"channel_mode":          "single",
+			"volume_mode":           "scalar",
+			"render_policy":         "scalar",
+			"delivery_mode":         "scalar",
+			"diagnostic_surface":    "mpr",
+			"first_paint_mode":      "webgl",
+			"measurement_policy":    "spacing-aware",
+			"texture_policy":        "linear",
+			"display_capabilities":  displayCapabilities,
+			"viewer_capabilities":   viewerCapabilities,
+			"service_urls":          serviceURLs,
 			"asset_preparation": map[string]any{
 				"status":                "ready",
 				"native_supported":      true,
@@ -6515,6 +7255,8 @@ func (deps ServerDeps) handleAdminOverview(w http.ResponseWriter, r *http.Reques
 		GeneratedAt:      data.GeneratedAt,
 		Runtime:          deps.adminRuntimeSummary(),
 		Queue:            deps.adminQueueDiagnostics(r.Context()),
+		ImageCache:       deps.adminImageCacheStats(),
+		RetentionBacklog: deps.adminRetentionBacklog(r.Context()),
 		KPIs:             data.KPIs,
 		UploadSessions:   data.UploadSessions,
 		Activity:         data.Activity,
@@ -6708,6 +7450,44 @@ func (deps ServerDeps) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, worker)
+}
+
+// adminImageCacheStats surfaces the image response cache's hit rate and saturation
+// so an operator can see whether the viewer's hot path is being served from memory
+// (hits) or hammering the decode engine (misses), and how full the cache is.
+func (deps ServerDeps) adminImageCacheStats() adminImageCacheStats {
+	if deps.imageCache == nil {
+		return adminImageCacheStats{Enabled: false}
+	}
+	hits, misses, entries, bytes := deps.imageCache.stats()
+	rate := 0.0
+	if total := hits + misses; total > 0 {
+		rate = float64(hits) / float64(total)
+	}
+	return adminImageCacheStats{
+		Enabled:  true,
+		Hits:     hits,
+		Misses:   misses,
+		HitRate:  rate,
+		Entries:  entries,
+		Bytes:    bytes,
+		MaxBytes: deps.imageCache.maxBytes,
+	}
+}
+
+// adminRetentionBacklog reports the storage held by soft-deleted resources past their
+// undelete window — the reclaimable backlog an operator watches to decide whether to
+// enable the retention GC. Read-only; never deletes.
+func (deps ServerDeps) adminRetentionBacklog(ctx context.Context) adminRetentionBacklog {
+	store, ok := deps.Store.(retentionBacklogStore)
+	if !ok {
+		return adminRetentionBacklog{}
+	}
+	backlog, err := store.RetentionBacklog(ctx, time.Now())
+	if err != nil {
+		return adminRetentionBacklog{}
+	}
+	return adminRetentionBacklog{ExpiredResources: backlog.Count, ReclaimableBytes: backlog.Bytes}
 }
 
 func (deps ServerDeps) adminQueueDiagnostics(ctx context.Context) adminQueueDiagnostics {
@@ -7177,6 +7957,53 @@ func (a *adminActivityAccumulator) addArtifact(ts time.Time, userID string) {
 	}
 }
 
+// addUserMessageStats and addUserEventStats fold pre-aggregated per-user
+// window counts into the accumulator. They depend on the counter order
+// established in newAdminActivityAccumulator: Daily, Weekly, Monthly, Total.
+func (a *adminActivityAccumulator) addUserMessageStats(stat domain.AdminUserMessageStats) {
+	buckets := []struct {
+		index             int
+		messages          int
+		userMessages      int
+		assistantMessages int
+	}{
+		{0, stat.Messages.Last24h, stat.UserMessages.Last24h, stat.AssistantMessages.Last24h},
+		{1, stat.Messages.Last7d, stat.UserMessages.Last7d, stat.AssistantMessages.Last7d},
+		{2, stat.Messages.Last30d, stat.UserMessages.Last30d, stat.AssistantMessages.Last30d},
+		{3, stat.Messages.Total, stat.UserMessages.Total, stat.AssistantMessages.Total},
+	}
+	for _, bucket := range buckets {
+		counter := a.counters[bucket.index]
+		counter.messages += bucket.messages
+		counter.userMessages += bucket.userMessages
+		counter.assistantMessages += bucket.assistantMessages
+		if bucket.messages > 0 {
+			counter.addActiveUser(stat.UserID)
+		}
+	}
+}
+
+func (a *adminActivityAccumulator) addUserEventStats(stat domain.AdminUserEventStats) {
+	buckets := []struct {
+		index     int
+		toolCalls int
+		artifacts int
+	}{
+		{0, stat.ToolCalls.Last24h, stat.Artifacts.Last24h},
+		{1, stat.ToolCalls.Last7d, stat.Artifacts.Last7d},
+		{2, stat.ToolCalls.Last30d, stat.Artifacts.Last30d},
+		{3, stat.ToolCalls.Total, stat.Artifacts.Total},
+	}
+	for _, bucket := range buckets {
+		counter := a.counters[bucket.index]
+		counter.toolCalls += bucket.toolCalls
+		counter.artifacts += bucket.artifacts
+		if bucket.toolCalls > 0 || bucket.artifacts > 0 {
+			counter.addActiveUser(stat.UserID)
+		}
+	}
+}
+
 func (a *adminActivityAccumulator) matchingCounters(ts time.Time) []*adminActivityCounter {
 	if ts.IsZero() {
 		return a.counters
@@ -7216,8 +8043,303 @@ func (a *adminActivityAccumulator) periods() []adminActivityPeriod {
 	return periods
 }
 
+// adminAggregateStore is the store capability that lets the admin snapshot
+// be computed from grouped queries instead of per-thread and per-run fetch
+// loops. Stores without it (the in-memory dev store, test fakes) fall back
+// to the legacy loop.
+type adminAggregateStore interface {
+	AdminUserMessageStats(ctx context.Context, since24h, since7d, since30d time.Time) ([]domain.AdminUserMessageStats, error)
+	AdminUserEventStats(ctx context.Context, since24h, since7d, since30d time.Time) ([]domain.AdminUserEventStats, error)
+	AdminResourceStats(ctx context.Context) (domain.AdminResourceStats, error)
+}
+
 func (deps ServerDeps) loadAdminSnapshot(ctx context.Context) (adminSnapshot, error) {
-	now := domain.Now()
+	if deps.adminSnapshots == nil {
+		return deps.computeAdminSnapshot(ctx)
+	}
+	// Concurrent admin requests share one computation; a stampede of
+	// dashboard tabs costs one snapshot. The shared call is detached from
+	// the first caller's context so its cancellation does not fail the rest.
+	result, err, _ := deps.adminSnapshots.Do("admin_snapshot", func() (any, error) {
+		computeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return deps.computeAdminSnapshot(computeCtx)
+	})
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	return result.(adminSnapshot), nil
+}
+
+func (deps ServerDeps) computeAdminSnapshot(ctx context.Context) (adminSnapshot, error) {
+	if aggregates, ok := deps.Store.(adminAggregateStore); ok {
+		return deps.loadAdminSnapshotAggregate(ctx, aggregates, domain.Now())
+	}
+	return deps.loadAdminSnapshotLegacy(ctx, domain.Now())
+}
+
+// loadAdminSnapshotAggregate mirrors loadAdminSnapshotLegacy exactly (the
+// equivalence is covered by TestAdminSnapshotAggregateMatchesLegacy) but
+// sources message totals, tool/artifact activity, and resource accounting
+// from grouped store queries, and only checks staleness on watchable runs
+// from their latest event, instead of fetching every thread's messages and
+// every run's events.
+func (deps ServerDeps) loadAdminSnapshotAggregate(ctx context.Context, aggregates adminAggregateStore, now time.Time) (adminSnapshot, error) {
+	since := now.Add(-24 * time.Hour)
+	since7d := now.Add(-7 * 24 * time.Hour)
+	since30d := now.Add(-30 * 24 * time.Hour)
+	activity := newAdminActivityAccumulator(now)
+	threadPage, err := deps.Store.ListThreads(ctx, 10000, 0, "")
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	threads := threadPage.Threads
+	runs, err := deps.Store.ListRuns(ctx, "", "", 10000, 0)
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	resourceStats, err := aggregates.AdminResourceStats(ctx)
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	messageStats, err := aggregates.AdminUserMessageStats(ctx, since, since7d, since30d)
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	eventStats, err := aggregates.AdminUserEventStats(ctx, since, since7d, since30d)
+	if err != nil {
+		return adminSnapshot{}, err
+	}
+	uploadSessionMetrics := domain.UploadSessionOperationalMetrics{}
+	if metricsStore, ok := deps.Store.(uploadSessionOperationalMetricsStore); ok {
+		uploadSessionMetrics, err = metricsStore.UploadSessionOperationalMetrics(ctx)
+		if err != nil {
+			return adminSnapshot{}, err
+		}
+	}
+	workers := []adminWorkerRecord{}
+	if workerStore, ok := deps.Store.(workerHeartbeatStore); ok {
+		records, err := workerStore.ListWorkerHeartbeats(ctx, 250)
+		if err != nil {
+			return adminSnapshot{}, err
+		}
+		workers = adminWorkerRecords(records, now)
+	}
+
+	users := map[string]*adminUserSummary{}
+	if accounts, ok := deps.Store.(accountStore); ok {
+		records, err := accounts.ListUsers(ctx, 10000, "")
+		if err != nil {
+			return adminSnapshot{}, err
+		}
+		for _, record := range records {
+			summary := adminUser(users, record.UserID)
+			applyAccountToAdminUser(summary, record)
+		}
+	}
+	userSeen24h := map[string]bool{}
+	totalMessages := 0
+	messages24h := 0
+	userMessages24h := 0
+	assistantMessages24h := 0
+	conversationsStarted24h := 0
+	for _, thread := range threads {
+		user := adminUser(users, thread.UserID)
+		user.Conversations++
+		updateLastActivity(user, thread.UpdatedAt)
+		if thread.CreatedAt.After(since) {
+			conversationsStarted24h++
+			userSeen24h[user.UserID] = true
+		}
+	}
+	for _, stat := range messageStats {
+		user := adminUser(users, stat.UserID)
+		user.Messages += stat.Messages.Total
+		totalMessages += stat.Messages.Total
+		messages24h += stat.Messages.Last24h
+		userMessages24h += stat.UserMessages.Last24h
+		assistantMessages24h += stat.AssistantMessages.Last24h
+		if stat.Messages.Last24h > 0 {
+			userSeen24h[user.UserID] = true
+		}
+		activity.addUserMessageStats(stat)
+	}
+	for _, stat := range eventStats {
+		adminUser(users, stat.UserID)
+		activity.addUserEventStats(stat)
+	}
+
+	runs24h := 0
+	runsSucceeded24h := 0
+	runsFailed24h := 0
+	runningRuns := 0
+	staleRunningRuns := 0
+	toolUsage := map[string]*adminToolUsageRecord{}
+	issues := []adminIssueRecord{}
+	for _, run := range runs {
+		user := adminUser(users, run.UserID)
+		user.RunsTotal++
+		updateLastActivity(user, run.UpdatedAt)
+		activity.addRun(run.CreatedAt, user.UserID, run.Status)
+		if run.UpdatedAt.After(since) {
+			userSeen24h[user.UserID] = true
+		}
+		switch run.Status {
+		case domain.RunStatusRunning, domain.RunStatusQueued, domain.RunStatusWaitingForInput, domain.RunStatusWaitingForTask:
+			diagnostic, err := deps.adminRunStaleCheck(ctx, run, now)
+			if err != nil {
+				return adminSnapshot{}, err
+			}
+			user.RunsRunning++
+			runningRuns++
+			if diagnostic.Stale {
+				staleRunningRuns++
+				leaseWorkerID, leaseExpiresAt, _ := leaseTimeFields(diagnostic.Lease)
+				issues = append(issues, adminIssueRecord{
+					IssueType:      "stalled_run",
+					Severity:       "high",
+					UserID:         run.UserID,
+					RunID:          run.RunID,
+					ConversationID: run.ThreadID,
+					Message:        firstNonEmpty(diagnostic.StaleReason, "Run has not emitted worker progress recently."),
+					OccurredAt:     diagnostic.LastActivityAt.UTC().Format(time.RFC3339Nano),
+					Metadata: domain.JSONMap{
+						"status":                    string(run.Status),
+						"last_event_kind":           valueOrEmpty(diagnostic.LastEventKind),
+						"last_event_at":             timePtrString(diagnostic.LastEventAt),
+						"last_event_sequence":       int64PtrValue(diagnostic.LastEventSequence),
+						"last_activity_age_seconds": diagnostic.LastActivityAgeSeconds,
+						"stale_after_seconds":       adminStaleRunThreshold.Seconds(),
+						"lease_worker_id":           valueOrEmpty(leaseWorkerID),
+						"lease_expires_at":          valueOrEmpty(leaseExpiresAt),
+						"lease_active":              diagnostic.LeaseActive,
+						"lease_expired":             diagnostic.LeaseExpired,
+					},
+				})
+			}
+		case domain.RunStatusFailed:
+			user.RunsFailed++
+		case domain.RunStatusSucceeded:
+			user.RunsSucceeded++
+		}
+		if run.CreatedAt.After(since) {
+			runs24h++
+			if run.Status == domain.RunStatusSucceeded {
+				runsSucceeded24h++
+			}
+			if run.Status == domain.RunStatusFailed {
+				runsFailed24h++
+			}
+		}
+		if run.Status == domain.RunStatusFailed {
+			issues = append(issues, adminIssueRecord{
+				IssueType:      "failed_run",
+				Severity:       "high",
+				UserID:         run.UserID,
+				RunID:          run.RunID,
+				ConversationID: run.ThreadID,
+				Message:        firstNonEmpty(run.Error, "Run failed."),
+				OccurredAt:     run.UpdatedAt.UTC().Format(time.RFC3339Nano),
+				Metadata:       domain.JSONMap{"status": string(run.Status)},
+			})
+		}
+		for _, toolName := range metadataStringSlice(run.Metadata["selected_tool_names"]) {
+			record := toolUsage[toolName]
+			if record == nil {
+				record = &adminToolUsageRecord{ToolName: toolName}
+				toolUsage[toolName] = record
+			}
+			record.Count++
+			if run.Status == domain.RunStatusSucceeded {
+				record.Succeeded++
+			}
+			if run.Status == domain.RunStatusFailed {
+				record.Failed++
+			}
+		}
+	}
+
+	resourceUsers := map[string]resourceOwnerAccounting{}
+	for _, owner := range resourceStats.Users {
+		resourceUsers[owner.Owner] = resourceOwnerAccounting{Uploads: owner.Uploads, StorageBytes: owner.StorageBytes}
+	}
+	resourceProjectUsage := map[string]resourceOwnerAccounting{}
+	for _, owner := range resourceStats.Projects {
+		resourceProjectUsage[owner.Owner] = resourceOwnerAccounting{Uploads: owner.Uploads, StorageBytes: owner.StorageBytes}
+	}
+	for userID, usage := range resourceUsers {
+		user := adminUser(users, userID)
+		user.Uploads += usage.Uploads
+		user.StorageBytes += usage.StorageBytes
+	}
+	resourceProjects := resourceOwnerSummaries(resourceProjectUsage)
+	userList := make([]adminUserSummary, 0, len(users))
+	for _, user := range users {
+		userList = append(userList, *user)
+	}
+	sort.Slice(userList, func(i, j int) bool {
+		return userList[i].RunsTotal > userList[j].RunsTotal
+	})
+	issueList := issues
+	sort.Slice(issueList, func(i, j int) bool {
+		return issueList[i].OccurredAt > issueList[j].OccurredAt
+	})
+	toolList := make([]adminToolUsageRecord, 0, len(toolUsage))
+	for _, record := range toolUsage {
+		toolList = append(toolList, *record)
+	}
+	sort.Slice(toolList, func(i, j int) bool {
+		return toolList[i].Count > toolList[j].Count
+	})
+	successRate := 0.0
+	if runs24h > 0 {
+		successRate = float64(runsSucceeded24h) / float64(runs24h)
+	}
+	avgMessages := 0.0
+	if len(threads) > 0 {
+		avgMessages = float64(totalMessages) / float64(len(threads))
+	}
+	return adminSnapshot{
+		GeneratedAt: now.UTC().Format(time.RFC3339Nano),
+		KPIs: adminPlatformKPIs{
+			TotalUsers:                 len(users),
+			ActiveUsers24h:             len(userSeen24h),
+			TotalConversations:         len(threads),
+			ConversationsStarted24h:    conversationsStarted24h,
+			TotalMessages:              totalMessages,
+			MessagesLast24h:            messages24h,
+			UserMessagesLast24h:        userMessages24h,
+			AssistantMessagesLast24h:   assistantMessages24h,
+			TotalRuns:                  len(runs),
+			RunsLast24h:                runs24h,
+			SuccessRateLast24h:         successRate,
+			RunningRuns:                runningRuns,
+			StaleRunningRuns:           staleRunningRuns,
+			FailedRuns24h:              runsFailed24h,
+			TotalUploads:               resourceStats.ActiveResources,
+			SoftDeletedUploads:         resourceStats.SoftDeletedResources,
+			TotalStorageBytes:          resourceStats.ActiveBytes,
+			AvgMessagesPerConversation: avgMessages,
+		},
+		UploadSessions: uploadSessionMetrics,
+		Activity:       activity.periods(),
+		UsageLast24h: []adminUsageBucket{{
+			BucketStart:   since.UTC().Format(time.RFC3339Nano),
+			RunsTotal:     runs24h,
+			RunsSucceeded: runsSucceeded24h,
+			RunsFailed:    runsFailed24h,
+			Uploads:       resourceStats.ActiveResources,
+			NewUsers:      len(userSeen24h),
+		}},
+		ToolUsage7d:      toolList,
+		Workers:          workers,
+		Users:            userList,
+		ResourceProjects: resourceProjects,
+		Issues:           issueList,
+	}, nil
+}
+
+func (deps ServerDeps) loadAdminSnapshotLegacy(ctx context.Context, now time.Time) (adminSnapshot, error) {
 	since := now.Add(-24 * time.Hour)
 	activity := newAdminActivityAccumulator(now)
 	threadPage, err := deps.Store.ListThreads(ctx, 10000, 0, "")
@@ -7613,10 +8735,50 @@ func (deps ServerDeps) adminRunDiagnostic(ctx context.Context, run domain.RunRec
 	if diagnostic.LastActivityAt.IsZero() {
 		diagnostic.LastActivityAt = now
 	}
+	if err := deps.applyAdminRunLeaseAndStaleness(ctx, run, now, &diagnostic); err != nil {
+		return adminRunDiagnostic{}, err
+	}
+	return diagnostic, nil
+}
+
+// adminRunStaleCheck computes the lease and staleness portion of the run
+// diagnostic from the run's latest event only. The admin snapshot uses it
+// for watchable (non-terminal) runs, where staleness matters, instead of
+// fetching every event of every run.
+func (deps ServerDeps) adminRunStaleCheck(ctx context.Context, run domain.RunRecord, now time.Time) (adminRunDiagnostic, error) {
+	events, err := deps.Store.ListRunEvents(ctx, run.RunID, 1)
+	if err != nil {
+		return adminRunDiagnostic{}, err
+	}
+	diagnostic := adminRunDiagnostic{LastActivityAt: run.UpdatedAt}
+	if diagnostic.LastActivityAt.IsZero() {
+		diagnostic.LastActivityAt = run.CreatedAt
+	}
+	if len(events) > 0 {
+		latest := events[len(events)-1]
+		latestTS := latest.TS
+		if latestTS.IsZero() {
+			latestTS = diagnostic.LastActivityAt
+		}
+		diagnostic.LastEventKind = stringPtr(latest.EventKind)
+		diagnostic.LastEventAt = &latestTS
+		diagnostic.LastEventSequence = int64Ptr(latest.Sequence)
+		diagnostic.LastActivityAt = latestTS
+	}
+	if diagnostic.LastActivityAt.IsZero() {
+		diagnostic.LastActivityAt = now
+	}
+	if err := deps.applyAdminRunLeaseAndStaleness(ctx, run, now, &diagnostic); err != nil {
+		return adminRunDiagnostic{}, err
+	}
+	return diagnostic, nil
+}
+
+func (deps ServerDeps) applyAdminRunLeaseAndStaleness(ctx context.Context, run domain.RunRecord, now time.Time, diagnostic *adminRunDiagnostic) error {
 	if leases, ok := deps.Store.(runLeaseReader); ok {
 		lease, found, err := leases.GetRunLease(ctx, run.RunID)
 		if err != nil {
-			return adminRunDiagnostic{}, err
+			return err
 		}
 		if found {
 			diagnostic.Lease = &lease
@@ -7658,7 +8820,7 @@ func (deps ServerDeps) adminRunDiagnostic(ctx context.Context, run domain.RunRec
 			}
 		}
 	}
-	return diagnostic, nil
+	return nil
 }
 
 func leaseTimeFields(lease *domain.RunLeaseRecord) (workerID *string, expiresAt *string, lastRenewedAt *string) {
@@ -7945,6 +9107,9 @@ func (deps ServerDeps) enforceResourceQuota(ctx context.Context, principal reque
 		userID = "local-user"
 	}
 	projectID = strings.TrimSpace(projectID)
+	// Lazy full-catalog accounting is the fallback for stores without scoped aggregates;
+	// the real stores implement resourceQuotaUsageStore so a quota check stays O(indexed
+	// aggregate) instead of loading (and capping at 100k) the whole catalog per upload.
 	var accounting *resourceAccountingSummary
 	loadAccounting := func() resourceAccountingSummary {
 		if accounting == nil {
@@ -7953,19 +9118,52 @@ func (deps ServerDeps) enforceResourceQuota(ctx context.Context, principal reque
 		}
 		return *accounting
 	}
+	usageFor := func(scope, id string) (resourceOwnerAccounting, error) {
+		usageStore, ok := deps.Store.(resourceQuotaUsageStore)
+		if !ok {
+			switch scope {
+			case "user":
+				return loadAccounting().Users[id], nil
+			case "org":
+				return loadAccounting().Orgs[id], nil
+			default:
+				return loadAccounting().Projects[id], nil
+			}
+		}
+		var count int
+		var bytes int64
+		var err error
+		switch scope {
+		case "user":
+			count, bytes, err = usageStore.ResourceUsageForOwner(ctx, id)
+		case "org":
+			count, bytes, err = usageStore.ResourceUsageForOrg(ctx, id)
+		default:
+			count, bytes, err = usageStore.ResourceUsageForProject(ctx, id)
+		}
+		if err != nil {
+			return resourceOwnerAccounting{}, err
+		}
+		return resourceOwnerAccounting{Uploads: count, StorageBytes: bytes}, nil
+	}
+	checkScope := func(scope, scopeID string, quota resourceQuotaLimits) error {
+		usage, err := usageFor(scope, scopeID)
+		if err != nil {
+			return err
+		}
+		return checkResourceQuota(scope, scopeID, projectID, quota, usage, requestedBytes)
+	}
 	if accounts, ok := deps.Store.(accountStore); ok {
 		if account, found, err := accounts.GetUserByID(ctx, userID); err != nil {
 			return err
 		} else if found {
 			if quota := resourceQuotaFromMetadata(account.Metadata); resourceQuotaConfigured(quota) {
-				usage := loadAccounting().Users[userID]
-				if err := checkResourceQuota("user", userID, projectID, quota, usage, requestedBytes); err != nil {
+				if err := checkScope("user", userID, quota); err != nil {
 					return err
 				}
 			}
 			if quota, ok := projectResourceQuotaFromMetadata(account.Metadata, projectID); ok && resourceQuotaConfigured(quota) {
-				usage := loadAccounting().Projects[projectID]
-				if err := checkResourceQuota("project", projectID, projectID, quota, usage, requestedBytes); err != nil {
+				if err := checkScope("project", projectID, quota); err != nil {
 					return err
 				}
 			}
@@ -7977,14 +9175,12 @@ func (deps ServerDeps) enforceResourceQuota(ctx context.Context, principal reque
 			return err
 		} else if found {
 			if quota := resourceQuotaFromMetadata(org.Metadata); resourceQuotaConfigured(quota) {
-				usage := loadAccounting().Orgs[orgID]
-				if err := checkResourceQuota("org", orgID, projectID, quota, usage, requestedBytes); err != nil {
+				if err := checkScope("org", orgID, quota); err != nil {
 					return err
 				}
 			}
 			if quota, ok := projectResourceQuotaFromMetadata(org.Metadata, projectID); ok && resourceQuotaConfigured(quota) {
-				usage := loadAccounting().Projects[projectID]
-				if err := checkResourceQuota("project", projectID, projectID, quota, usage, requestedBytes); err != nil {
+				if err := checkScope("project", projectID, quota); err != nil {
 					return err
 				}
 			}
@@ -9247,6 +10443,9 @@ func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.
 		OrgID:  record.Principal.OrgID,
 		Role:   record.Principal.Role,
 	}, eventType, catalogResourceEventMetadata(record, eventMetadata))
+	// Convert-on-upload: kick off a tiled-pyramid derivation so the Scientific
+	// Viewer can serve bounded tiles for large images (best-effort).
+	deps.maybeEnqueuePyramidDerivation(ctx, root, record, path, eventType)
 	return nil
 }
 
@@ -10721,9 +11920,13 @@ func clampInt(value int, minValue int, maxValue int) int {
 }
 
 type uploadPreviewTransform struct {
-	WindowMin         float64
-	WindowMax         float64
-	WindowActive      bool
+	WindowMin    float64
+	WindowMax    float64
+	WindowActive bool
+	// WindowIsPhysical marks the window as expressed in physical units (e.g.
+	// Hounsfield from a "hounsfield:WC:WW" preset); it is converted back to stored
+	// codes before comparison against raw voxel samples.
+	WindowIsPhysical  bool
 	Gamma             float64
 	Negative          bool
 	FullRange         bool
@@ -10780,6 +11983,8 @@ type niftiScalarVolume struct {
 	Width         int
 	Height        int
 	Depth         int
+	TimeCount     int
+	TimeIndex     int
 	ChannelCount  int
 	ChannelIndex  int
 	DType         string
@@ -10790,7 +11995,34 @@ type niftiScalarVolume struct {
 	SpacingX      float64
 	SpacingY      float64
 	SpacingZ      float64
-	Warnings      []string
+	// SclSlope/SclInter rescale stored codes to physical units (HU/SUV):
+	// physical = SclSlope*code + SclInter. RawMin/RawMax stay in code space so
+	// the raw 3D payload normalizes consistently; physical values are derived.
+	SclSlope   float64
+	SclInter   float64
+	Affine     [12]float64
+	AffineCode int
+	SpaceUnit  string
+	Warnings   []string
+}
+
+// physical converts a stored code value to physical units (Hounsfield/SUV/etc.).
+func (v niftiScalarVolume) physical(code float64) float64 {
+	slope := v.SclSlope
+	if slope == 0 {
+		slope = 1
+	}
+	return slope*code + v.SclInter
+}
+
+// codeFromPhysical inverts the rescale: physical -> stored code, so a physical
+// (e.g. Hounsfield) window can be compared against raw code samples.
+func (v niftiScalarVolume) codeFromPhysical(physical float64) float64 {
+	slope := v.SclSlope
+	if slope == 0 {
+		slope = 1
+	}
+	return (physical - v.SclInter) / slope
 }
 
 func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string) map[string]any {
@@ -10811,7 +12043,11 @@ func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string
 		"volume_view_preset": "iso",
 	}
 	if niftiScalarRangeLooksCTLike(volume) {
-		defaults["enhancement"] = "hounsfield:350.000:1800.000"
+		// Default head CT to the diagnostic brain window (WC 40 / WW 80 HU). The
+		// previous 350/1800 (= window [-550, 1250] HU) is not a clinical window —
+		// it washed brain soft tissue into a flat gray. Bone/soft-tissue/lung
+		// windows are available as explicit presets.
+		defaults["enhancement"] = "hounsfield:40.000:80.000"
 		defaults["volume_signal_floor"] = 0.12
 		defaults["volume_density"] = 1.75
 		defaults["volume_lighting"] = true
@@ -10821,96 +12057,635 @@ func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string
 	return defaults
 }
 
+// niftiScalarRangeLooksCTLike detects Hounsfield-scaled CT from the PHYSICAL
+// (rescaled) intensity range, so a CT stored as unsigned codes with
+// scl_inter=-1024 is still recognized. The window spans air (~-1000 HU) to
+// soft-tissue/bone (>=300 HU).
 func niftiScalarRangeLooksCTLike(volume niftiScalarVolume) bool {
-	return volume.RawMin <= -900 && volume.RawMax >= 500
+	physMin := volume.physical(volume.RawMin)
+	physMax := volume.physical(volume.RawMax)
+	return physMin <= -300 && physMin >= -1100 && physMax >= 300
 }
 
-func loadNiftiScalarVolume(path string, requestedChannel ...int) (niftiScalarVolume, error) {
-	data, err := readPossiblyGzippedFile(path)
+const (
+	// A NIfTI-1 header is 348 bytes; voxel data starts at vox_offset, which the
+	// single-file (n+1) format requires to be >= 352. Reading exactly this many
+	// bytes is enough to parse every geometry field without touching voxels.
+	niftiHeaderReadSize = 352
+	// A single 3D scalar volume (one timepoint, one channel) larger than this is
+	// rejected rather than risking an OOM from a malformed or hostile header. A
+	// 91x109x91 fMRI timepoint is ~3.6 MB; even a 1024^3 float32 anatomical is
+	// 4 GiB and is refused on purpose.
+	niftiMaxSingleVolumeBytes = int64(1) << 31 // 2 GiB
+)
+
+// niftiGeometry is the dimensional shape parsed from a NIfTI-1 header. The 4th
+// dimension is time and the 5th is per-voxel channels/components, per the
+// NIfTI-1 spec — so a 1200-volume fMRI BOLD series is 1200 timepoints, not 1200
+// "channels". Voxels are stored column-major (dim[1]/X fastest), which makes
+// each 3D volume a single contiguous slab.
+type niftiGeometry struct {
+	order         binary.ByteOrder
+	width         int
+	height        int
+	depth         int
+	timeCount     int
+	channelCount  int
+	dtype         string
+	bytesPerVoxel int
+	voxOffset     int64
+	spacingX      float64
+	spacingY      float64
+	spacingZ      float64
+	// affine is the row-major 3x4 voxel->world (RAS+ mm) transform: rows
+	// [0..3]=x, [4..7]=y, [8..11]=z; the implicit 4th row is [0 0 0 1]. affineCode
+	// is the NIfTI method that produced it (3=sform, 2=qform, 0=pixdim-only).
+	affine     [12]float64
+	affineCode int
+	// sclSlope/sclInter rescale stored codes to physical units (Hounsfield, SUV,
+	// etc.): physical = sclSlope*code + sclInter. sclSlope==0 means no scaling.
+	sclSlope  float64
+	sclInter  float64
+	spaceUnit string // "m" | "mm" | "um" | "" (from xyzt_units)
+}
+
+// volumeBytes is the byte length of one 3D scalar volume (one timepoint, one
+// channel). int64 throughout so a 4 GB+ dataset can't overflow the arithmetic.
+func (g niftiGeometry) volumeBytes() int64 {
+	return int64(g.width) * int64(g.height) * int64(g.depth) * int64(g.bytesPerVoxel)
+}
+
+// volumeOffset is the byte offset of the (timeIndex, channelIndex) 3D volume
+// within the file. Column-major layout means time varies before channel:
+// flat plane index = timeIndex + timeCount*channelIndex.
+func (g niftiGeometry) volumeOffset(timeIndex, channelIndex int) int64 {
+	plane := int64(timeIndex) + int64(g.timeCount)*int64(channelIndex)
+	return g.voxOffset + g.volumeBytes()*plane
+}
+
+func parseNiftiGeometry(header []byte) (niftiGeometry, error) {
+	if len(header) < niftiHeaderReadSize {
+		return niftiGeometry{}, errors.New("NIfTI file is too small")
+	}
+	order, err := niftiByteOrder(header)
 	if err != nil {
-		return niftiScalarVolume{}, err
+		return niftiGeometry{}, err
 	}
-	if len(data) < 352 {
-		return niftiScalarVolume{}, errors.New("NIfTI file is too small")
-	}
-	order, err := niftiByteOrder(data)
-	if err != nil {
-		return niftiScalarVolume{}, err
-	}
-	magic := string(data[344:348])
+	magic := string(header[344:348])
 	if magic != "n+1\x00" && magic != "ni1\x00" {
-		return niftiScalarVolume{}, fmt.Errorf("unsupported NIfTI magic %q", strings.TrimRight(magic, "\x00"))
+		return niftiGeometry{}, fmt.Errorf("unsupported NIfTI magic %q", strings.TrimRight(magic, "\x00"))
 	}
-	dim0 := niftiInt16(order, data[40:42])
+	dim0 := niftiInt16(order, header[40:42])
 	if dim0 < 2 {
-		return niftiScalarVolume{}, fmt.Errorf("unsupported NIfTI dimension count %d", dim0)
+		return niftiGeometry{}, fmt.Errorf("unsupported NIfTI dimension count %d", dim0)
 	}
-	width := niftiDimension(order, data[42:44])
-	height := niftiDimension(order, data[44:46])
+	width := niftiDimension(order, header[42:44])
+	height := niftiDimension(order, header[44:46])
 	depth := 1
 	if dim0 >= 3 {
-		depth = niftiDimension(order, data[46:48])
+		depth = niftiDimension(order, header[46:48])
+	}
+	timeCount := 1
+	if dim0 >= 4 {
+		timeCount = niftiDimension(order, header[48:50])
 	}
 	channelCount := 1
-	if dim0 >= 4 {
-		channelCount = niftiDimension(order, data[48:50])
+	if dim0 >= 5 {
+		channelCount = niftiDimension(order, header[50:52])
 	}
 	if width <= 0 || height <= 0 || depth <= 0 {
-		return niftiScalarVolume{}, fmt.Errorf("invalid NIfTI dimensions %dx%dx%d", width, height, depth)
+		return niftiGeometry{}, fmt.Errorf("invalid NIfTI dimensions %dx%dx%d", width, height, depth)
+	}
+	if timeCount <= 0 {
+		timeCount = 1
 	}
 	if channelCount <= 0 {
 		channelCount = 1
 	}
-	datatype := niftiInt16(order, data[70:72])
+	datatype := niftiInt16(order, header[70:72])
 	dtype, bytesPerVoxel, err := niftiScalarType(datatype)
 	if err != nil {
-		return niftiScalarVolume{}, err
+		return niftiGeometry{}, err
 	}
-	voxOffset := int(math.Round(float64(niftiFloat32(order, data[108:112]))))
-	if voxOffset < 352 {
-		voxOffset = 352
+	voxOffset := int64(math.Round(float64(niftiFloat32(order, header[108:112]))))
+	if voxOffset < niftiHeaderReadSize {
+		voxOffset = niftiHeaderReadSize
 	}
-	voxelCount := width * height * depth
-	channelPayloadBytes := voxelCount * bytesPerVoxel
-	totalByteCount := channelPayloadBytes * channelCount
-	if voxelCount <= 0 || totalByteCount <= 0 || voxOffset+totalByteCount > len(data) {
-		return niftiScalarVolume{}, fmt.Errorf("NIfTI voxel payload is incomplete: need %d bytes at offset %d", totalByteCount, voxOffset)
+	spacingX := niftiSpacing(order, header[80:84])
+	spacingY := niftiSpacing(order, header[84:88])
+	spacingZ := niftiSpacing(order, header[88:92])
+	affine, affineCode := niftiAffineFromHeader(order, header, spacingX, spacingY, spacingZ)
+	sclSlope, sclInter := niftiRescaleFromHeader(order, header)
+	return niftiGeometry{
+		order:         order,
+		width:         width,
+		height:        height,
+		depth:         depth,
+		timeCount:     timeCount,
+		channelCount:  channelCount,
+		dtype:         dtype,
+		bytesPerVoxel: bytesPerVoxel,
+		voxOffset:     voxOffset,
+		spacingX:      spacingX,
+		spacingY:      spacingY,
+		spacingZ:      spacingZ,
+		affine:        affine,
+		affineCode:    affineCode,
+		sclSlope:      sclSlope,
+		sclInter:      sclInter,
+		spaceUnit:     niftiSpaceUnitFromHeader(header),
+	}, nil
+}
+
+// niftiRescaleFromHeader reads scl_slope/scl_inter (header[112:120]). Per the
+// NIfTI-1 spec a zero (or non-finite) slope means "no rescaling".
+func niftiRescaleFromHeader(order binary.ByteOrder, header []byte) (float64, float64) {
+	slope := float64(niftiFloat32(order, header[112:116]))
+	inter := float64(niftiFloat32(order, header[116:120]))
+	if !numberIsFinite(slope) || slope == 0 {
+		return 1, 0
 	}
+	if !numberIsFinite(inter) {
+		inter = 0
+	}
+	return slope, inter
+}
+
+// niftiSpaceUnitFromHeader decodes the spatial bits (0x07) of xyzt_units
+// (header[123]): 1=meter, 2=millimeter, 3=micron.
+func niftiSpaceUnitFromHeader(header []byte) string {
+	if len(header) < 124 {
+		return ""
+	}
+	switch header[123] & 0x07 {
+	case 1:
+		return "m"
+	case 2:
+		return "mm"
+	case 3:
+		return "um"
+	default:
+		return ""
+	}
+}
+
+// niftiAffineFromHeader builds the voxel->RAS+ (mm) transform, preferring the
+// sform (method 3, an explicit 3x4) and falling back to the qform quaternion
+// (method 2) and finally to pixdim-only diagonal scaling (method 1, orientation
+// unknown). Returns the row-major 3x4 matrix and the method code.
+func niftiAffineFromHeader(order binary.ByteOrder, h []byte, sx, sy, sz float64) ([12]float64, int) {
+	var affine [12]float64
+	qformCode := int(niftiInt16(order, h[252:254]))
+	sformCode := int(niftiInt16(order, h[254:256]))
+	if sformCode > 0 {
+		nonZero := false
+		for c := 0; c < 4; c++ {
+			affine[0*4+c] = float64(niftiFloat32(order, h[280+c*4:284+c*4]))
+			affine[1*4+c] = float64(niftiFloat32(order, h[296+c*4:300+c*4]))
+			affine[2*4+c] = float64(niftiFloat32(order, h[312+c*4:316+c*4]))
+		}
+		for i := 0; i < 9; i++ {
+			if affine[(i/3)*4+(i%3)] != 0 {
+				nonZero = true
+				break
+			}
+		}
+		if nonZero {
+			return affine, 3
+		}
+		affine = [12]float64{}
+	}
+	if qformCode > 0 {
+		b := float64(niftiFloat32(order, h[256:260]))
+		c := float64(niftiFloat32(order, h[260:264]))
+		d := float64(niftiFloat32(order, h[264:268]))
+		a2 := 1.0 - (b*b + c*c + d*d)
+		a := 0.0
+		if a2 > 0 {
+			a = math.Sqrt(a2)
+		}
+		qfac := float64(niftiFloat32(order, h[76:80]))
+		if qfac >= 0 {
+			qfac = 1
+		} else {
+			qfac = -1
+		}
+		r := [3][3]float64{
+			{a*a + b*b - c*c - d*d, 2 * (b*c - a*d), 2 * (b*d + a*c)},
+			{2 * (b*c + a*d), a*a + c*c - b*b - d*d, 2 * (c*d - a*b)},
+			{2 * (b*d - a*c), 2 * (c*d + a*b), a*a + d*d - b*b - c*c},
+		}
+		off := [3]float64{
+			float64(niftiFloat32(order, h[268:272])),
+			float64(niftiFloat32(order, h[272:276])),
+			float64(niftiFloat32(order, h[276:280])),
+		}
+		scale := [3]float64{sx, sy, sz * qfac}
+		for i := 0; i < 3; i++ {
+			affine[i*4+0] = r[i][0] * scale[0]
+			affine[i*4+1] = r[i][1] * scale[1]
+			affine[i*4+2] = r[i][2] * scale[2]
+			affine[i*4+3] = off[i]
+		}
+		return affine, 2
+	}
+	// Method 1: pixdim scaling only; orientation is unknown (assumed RAS-ish).
+	affine[0] = sx
+	affine[5] = sy
+	affine[10] = sz
+	return affine, 0
+}
+
+func niftiAffineMethodName(code int) string {
+	switch code {
+	case 3:
+		return "sform"
+	case 2:
+		return "qform"
+	default:
+		return "pixdim"
+	}
+}
+
+var niftiAxisPositive = [3]string{"R", "A", "S"}
+var niftiAxisNegative = [3]string{"L", "P", "I"}
+
+// niftiOrientation classifies each voxel axis (i,j,k) to its dominant anatomical
+// direction from the affine's 3x3, mirroring nibabel's aff2axcodes. Returns the
+// 3-letter orientation code (e.g. "RAS"), the positive/negative anatomical end
+// label per voxel axis, and which voxel axis is normal to each standard plane.
+func niftiOrientation(affine [12]float64) (code string, ends [3][2]string, planeAxis map[string]int) {
+	used := [3]bool{}
+	var letters [3]byte
+	for j := 0; j < 3; j++ {
+		bestRow, bestAbs := -1, -1.0
+		for i := 0; i < 3; i++ {
+			if used[i] {
+				continue
+			}
+			v := math.Abs(affine[i*4+j])
+			if v > bestAbs {
+				bestAbs = v
+				bestRow = i
+			}
+		}
+		if bestRow < 0 {
+			for i := 0; i < 3; i++ {
+				if !used[i] {
+					bestRow = i
+					break
+				}
+			}
+		}
+		used[bestRow] = true
+		if affine[bestRow*4+j] >= 0 {
+			letters[j] = niftiAxisPositive[bestRow][0]
+			ends[j] = [2]string{niftiAxisNegative[bestRow], niftiAxisPositive[bestRow]}
+		} else {
+			letters[j] = niftiAxisNegative[bestRow][0]
+			ends[j] = [2]string{niftiAxisPositive[bestRow], niftiAxisNegative[bestRow]}
+		}
+	}
+	code = string(letters[:])
+	planeAxis = map[string]int{}
+	for axis := 0; axis < 3; axis++ {
+		switch letters[axis] {
+		case 'R', 'L':
+			planeAxis["sagittal"] = axis
+		case 'A', 'P':
+			planeAxis["coronal"] = axis
+		case 'S', 'I':
+			planeAxis["axial"] = axis
+		}
+	}
+	return code, ends, planeAxis
+}
+
+func clampNiftiIndex(index, count int) int {
+	if count <= 0 || index < 0 {
+		return 0
+	}
+	if index >= count {
+		return count - 1
+	}
+	return index
+}
+
+func guardNiftiVolumeBytes(length int64) error {
+	if length <= 0 {
+		return errors.New("invalid NIfTI volume size")
+	}
+	if length > niftiMaxSingleVolumeBytes {
+		return fmt.Errorf("NIfTI single-volume size %d bytes exceeds the %d byte limit", length, niftiMaxSingleVolumeBytes)
+	}
+	return nil
+}
+
+// loadNiftiScalarVolume reads timepoint 0 (channel 0 unless overridden) and
+// preserves the historical signature for callers that don't select time.
+func loadNiftiScalarVolume(path string, requestedChannel ...int) (niftiScalarVolume, error) {
 	channelIndex := 0
 	if len(requestedChannel) > 0 {
 		channelIndex = requestedChannel[0]
 	}
-	if channelIndex < 0 {
-		channelIndex = 0
-	} else if channelIndex >= channelCount {
-		channelIndex = channelCount - 1
+	return loadNiftiScalarVolumeAt(path, 0, channelIndex)
+}
+
+// loadNiftiScalarVolumeAt reads exactly one 3D scalar volume — the
+// timeIndex-th timepoint, channelIndex-th channel — without materializing the
+// rest of the 4D payload. For a 4D fMRI this bounds memory at a single ~MB
+// timepoint instead of the whole multi-GB series, which is what previously OOM'd
+// the control plane on every viewer request.
+func loadNiftiScalarVolumeAt(path string, timeIndex, channelIndex int) (niftiScalarVolume, error) {
+	gzipped := strings.HasSuffix(strings.ToLower(path), ".gz")
+	if gzipped {
+		// A one-time decompressed sidecar (when ready) turns every timepoint
+		// into an O(1) random read; until then, stream the gzip and stop at the
+		// requested slab.
+		if sidecar := readyDecompressedNiftiSidecar(path); sidecar != "" {
+			path = sidecar
+			gzipped = false
+		}
 	}
-	channelOffset := voxOffset + channelIndex*channelPayloadBytes
-	payload := append([]byte(nil), data[channelOffset:channelOffset+channelPayloadBytes]...)
-	if bytesPerVoxel > 1 && order != binary.LittleEndian {
-		normalizeScalarPayloadToLittleEndian(payload, bytesPerVoxel)
+	var (
+		geom niftiGeometry
+		slab []byte
+		err  error
+	)
+	if gzipped {
+		geom, slab, err = readNiftiSlabStreaming(path, timeIndex, channelIndex)
+	} else {
+		geom, slab, err = readNiftiSlabRandomAccess(path, timeIndex, channelIndex)
 	}
-	minValue, maxValue := niftiScalarRange(payload, dtype, bytesPerVoxel)
+	if err != nil {
+		return niftiScalarVolume{}, err
+	}
+	if geom.bytesPerVoxel > 1 && geom.order != binary.LittleEndian {
+		normalizeScalarPayloadToLittleEndian(slab, geom.bytesPerVoxel)
+	}
+	minValue, maxValue := niftiScalarRange(slab, geom.dtype, geom.bytesPerVoxel)
+	clampedTime := clampNiftiIndex(timeIndex, geom.timeCount)
+	clampedChannel := clampNiftiIndex(channelIndex, geom.channelCount)
 	warnings := []string{}
-	if channelCount > 1 {
-		warnings = append(warnings, "NIfTI fourth dimension is exposed as selectable scalar channels.")
+	if geom.timeCount > 1 {
+		warnings = append(warnings, fmt.Sprintf("NIfTI 4D time series with %d timepoints; serving timepoint %d.", geom.timeCount, clampedTime))
 	}
 	return niftiScalarVolume{
-		Width:         width,
-		Height:        height,
-		Depth:         depth,
-		ChannelCount:  channelCount,
-		ChannelIndex:  channelIndex,
-		DType:         dtype,
-		BytesPerVoxel: bytesPerVoxel,
-		Data:          payload,
+		Width:         geom.width,
+		Height:        geom.height,
+		Depth:         geom.depth,
+		TimeCount:     geom.timeCount,
+		TimeIndex:     clampedTime,
+		ChannelCount:  geom.channelCount,
+		ChannelIndex:  clampedChannel,
+		DType:         geom.dtype,
+		BytesPerVoxel: geom.bytesPerVoxel,
+		Data:          slab,
 		RawMin:        minValue,
 		RawMax:        maxValue,
-		SpacingX:      niftiSpacing(order, data[80:84]),
-		SpacingY:      niftiSpacing(order, data[84:88]),
-		SpacingZ:      niftiSpacing(order, data[88:92]),
+		SpacingX:      geom.spacingX,
+		SpacingY:      geom.spacingY,
+		SpacingZ:      geom.spacingZ,
+		SclSlope:      geom.sclSlope,
+		SclInter:      geom.sclInter,
+		Affine:        geom.affine,
+		AffineCode:    geom.affineCode,
+		SpaceUnit:     geom.spaceUnit,
 		Warnings:      warnings,
 	}, nil
+}
+
+// readNiftiSlabRandomAccess serves one volume from an uncompressed .nii (or a
+// decompressed sidecar) with two small reads: the header, then a single ReadAt
+// of the requested slab. Any timepoint costs one ~MB disk read, regardless of
+// series length.
+func readNiftiSlabRandomAccess(path string, timeIndex, channelIndex int) (niftiGeometry, []byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	header := make([]byte, niftiHeaderReadSize)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI header: %w", err)
+	}
+	geom, err := parseNiftiGeometry(header)
+	if err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	length := geom.volumeBytes()
+	if err := guardNiftiVolumeBytes(length); err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	offset := geom.volumeOffset(clampNiftiIndex(timeIndex, geom.timeCount), clampNiftiIndex(channelIndex, geom.channelCount))
+	if info, statErr := f.Stat(); statErr == nil && offset+length > info.Size() {
+		return niftiGeometry{}, nil, fmt.Errorf("NIfTI voxel payload is incomplete: need %d bytes at offset %d", length, offset)
+	}
+	slab := make([]byte, length)
+	if _, err := f.ReadAt(slab, offset); err != nil {
+		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI volume: %w", err)
+	}
+	return geom, slab, nil
+}
+
+// readNiftiSlabStreaming serves one volume from a .nii.gz by decompressing the
+// stream only up to the end of the requested slab and retaining just that slab.
+// Memory stays bounded to one volume; the tail of the series is never held.
+func readNiftiSlabStreaming(path string, timeIndex, channelIndex int) (niftiGeometry, []byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	defer func() { _ = zr.Close() }()
+	header := make([]byte, niftiHeaderReadSize)
+	if _, err := io.ReadFull(zr, header); err != nil {
+		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI header: %w", err)
+	}
+	geom, err := parseNiftiGeometry(header)
+	if err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	length := geom.volumeBytes()
+	if err := guardNiftiVolumeBytes(length); err != nil {
+		return niftiGeometry{}, nil, err
+	}
+	offset := geom.volumeOffset(clampNiftiIndex(timeIndex, geom.timeCount), clampNiftiIndex(channelIndex, geom.channelCount))
+	skip := offset - int64(niftiHeaderReadSize)
+	if skip < 0 {
+		return niftiGeometry{}, nil, fmt.Errorf("invalid NIfTI voxel offset %d", offset)
+	}
+	if skip > 0 {
+		if _, err := io.CopyN(io.Discard, zr, skip); err != nil {
+			return niftiGeometry{}, nil, fmt.Errorf("seek NIfTI volume: %w", err)
+		}
+	}
+	slab := make([]byte, length)
+	if _, err := io.ReadFull(zr, slab); err != nil {
+		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI volume: %w", err)
+	}
+	return geom, slab, nil
+}
+
+// --- gzip random-access: decompress a 4D .nii.gz once to a sidecar -----------
+
+var niftiDecompressInFlight sync.Map // sidecar path -> in-progress marker
+
+// niftiDecompressSem bounds how many gzip sidecar builds run at once, so a burst of
+// users opening large .nii.gz files can't saturate disk I/O / fill the disk with many
+// simultaneous multi-GB decompressions. Lazily sized from env on first use.
+var (
+	niftiDecompressSemOnce sync.Once
+	niftiDecompressSem     chan struct{}
+)
+
+func niftiDecompressSemaphore() chan struct{} {
+	niftiDecompressSemOnce.Do(func() {
+		n := 3
+		if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_NIFTI_DECOMPRESS_CONCURRENCY")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+				n = v
+			}
+		}
+		niftiDecompressSem = make(chan struct{}, n)
+	})
+	return niftiDecompressSem
+}
+
+// niftiDecompressTimeout caps a single sidecar build so a corrupt/truncated gzip (or a
+// stuck disk) can't leak a goroutine + open file handle forever. Generous (a 10GB+
+// decompress is legitimate); only a genuine hang trips it.
+func niftiDecompressTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_NIFTI_DECOMPRESS_TIMEOUT_S")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 30 * time.Minute
+}
+
+func niftiDecompressCacheEnabled() bool {
+	if raw, ok := os.LookupEnv("ULTRA_CONTROL_NIFTI_DECOMPRESS_CACHE"); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return true
+}
+
+// niftiDecompressedSidecarPath maps <root>/file_x.nii.gz to the decompressed
+// <root>/derived/file_x.nii served via random access.
+func niftiDecompressedSidecarPath(srcPath string) string {
+	base := strings.TrimSuffix(filepath.Base(srcPath), ".gz")
+	return filepath.Join(filepath.Dir(srcPath), "derived", base)
+}
+
+func readyDecompressedNiftiSidecar(srcPath string) string {
+	if !niftiDecompressCacheEnabled() {
+		return ""
+	}
+	dst := niftiDecompressedSidecarPath(srcPath)
+	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+		return dst
+	}
+	return ""
+}
+
+// maybeDecompressNiftiSidecar kicks off a one-time background decompression of a
+// gzipped time series so subsequent timepoints serve via O(1) ReadAt. It is
+// best-effort: bounded-memory streaming requests already work without it, so a
+// failure (disk full, etc.) never affects correctness. Concurrent callers
+// dedupe on the destination path.
+func maybeDecompressNiftiSidecar(srcPath string, timeCount int) {
+	if timeCount <= 1 || !niftiDecompressCacheEnabled() {
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(srcPath), ".gz") {
+		return
+	}
+	dst := niftiDecompressedSidecarPath(srcPath)
+	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+		return
+	}
+	if _, inFlight := niftiDecompressInFlight.LoadOrStore(dst, struct{}{}); inFlight {
+		return
+	}
+	go func() {
+		defer niftiDecompressInFlight.Delete(dst)
+		// Bound concurrency: if too many sidecar builds are already running, skip —
+		// the bounded streaming reader still serves correctly, and the build retries
+		// on a later request. Non-blocking so we never pile up goroutines.
+		sem := niftiDecompressSemaphore()
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		default:
+			return
+		}
+		// Best-effort + time-bounded: a failed/hung sidecar (disk full, corrupt gzip)
+		// only forgoes the random-access speedup and must not surface or leak.
+		ctx, cancel := context.WithTimeout(context.Background(), niftiDecompressTimeout())
+		defer cancel()
+		_ = buildDecompressedNiftiSidecar(ctx, srcPath, dst)
+	}()
+}
+
+func buildDecompressedNiftiSidecar(ctx context.Context, srcPath, dst string) (err error) {
+	if info, statErr := os.Stat(dst); statErr == nil && info.Size() > 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	// Abort a hung/slow decompress when ctx expires by closing the source, which
+	// surfaces as a read error in the io.Copy below (the tmp file is then cleaned up).
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = in.Close()
+		case <-stop:
+		}
+	}()
+	zr, err := gzip.NewReader(in)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = zr.Close() }()
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		_ = out.Close()
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := io.Copy(out, zr); err != nil { // streaming copy, O(1) memory
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil { // atomic publish
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func parseUploadScalarChannelIndex(r *http.Request) int {
@@ -10937,18 +12712,51 @@ func parseUploadScalarChannelIndex(r *http.Request) int {
 	return 0
 }
 
-func niftiScalarDimsOrder(volume niftiScalarVolume) string {
-	if volume.ChannelCount > 1 {
-		return "CZYX"
+// parseUploadScalarTimeIndex reads the requested 4D timepoint (the NIfTI 4th
+// dimension). Out-of-range values are clamped by the loader against the actual
+// time count.
+func parseUploadScalarTimeIndex(r *http.Request) int {
+	if r == nil {
+		return 0
 	}
-	return "ZYX"
+	query := r.URL.Query()
+	for _, key := range []string{"t", "time", "timepoint"} {
+		raw := strings.TrimSpace(query.Get(key))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err == nil && value >= 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+// niftiScalarDimsOrder and niftiScalarArrayShape describe the full logical
+// dataset (not the single served volume), outermost-first: channels, then time,
+// then the spatial Z/Y/X. A 4D fMRI is "TZYX"; a multi-component volume "CZYX";
+// both "CTZYX".
+func niftiScalarDimsOrder(volume niftiScalarVolume) string {
+	order := "ZYX"
+	if volume.TimeCount > 1 {
+		order = "T" + order
+	}
+	if volume.ChannelCount > 1 {
+		order = "C" + order
+	}
+	return order
 }
 
 func niftiScalarArrayShape(volume niftiScalarVolume) []int {
-	if volume.ChannelCount > 1 {
-		return []int{volume.ChannelCount, volume.Depth, volume.Height, volume.Width}
+	shape := []int{volume.Depth, volume.Height, volume.Width}
+	if volume.TimeCount > 1 {
+		shape = append([]int{volume.TimeCount}, shape...)
 	}
-	return []int{volume.Depth, volume.Height, volume.Width}
+	if volume.ChannelCount > 1 {
+		shape = append([]int{volume.ChannelCount}, shape...)
+	}
+	return shape
 }
 
 func niftiDefaultChannelColors(channelCount int) []string {
@@ -10961,24 +12769,6 @@ func niftiDefaultChannelColors(channelCount int) []string {
 		colors[index] = palette[index%len(palette)]
 	}
 	return colors
-}
-
-func readPossiblyGzippedFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if !strings.HasSuffix(strings.ToLower(path), ".gz") {
-		return data, nil
-	}
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = reader.Close()
-	}()
-	return io.ReadAll(reader)
 }
 
 func niftiByteOrder(data []byte) (binary.ByteOrder, error) {
@@ -11108,6 +12898,7 @@ func uploadPreviewTransformFromRequest(r *http.Request) uploadPreviewTransform {
 				transform.WindowMin = center - width/2
 				transform.WindowMax = center + width/2
 				transform.WindowActive = true
+				transform.WindowIsPhysical = true
 			}
 		}
 	} else if strings.EqualFold(enhancement, "f") || strings.EqualFold(enhancement, "full") {
@@ -11121,6 +12912,8 @@ func uploadPreviewTransformFromRequest(r *http.Request) uploadPreviewTransform {
 				transform.WindowMin = minValue
 				transform.WindowMax = maxValue
 				transform.WindowActive = true
+				// Explicit window_min/window_max are raw sample values, not HU.
+				transform.WindowIsPhysical = false
 			}
 		}
 	}
@@ -11218,7 +13011,7 @@ func channelFilteredPreviewImage(img image.Image, transform uploadPreviewTransfo
 }
 
 func serveNiftiSliceAsPNG(w http.ResponseWriter, path string, r *http.Request) error {
-	volume, err := loadNiftiScalarVolume(path, parseUploadScalarChannelIndex(r))
+	volume, err := loadNiftiScalarVolumeAt(path, parseUploadScalarTimeIndex(r), parseUploadScalarChannelIndex(r))
 	if err != nil {
 		return err
 	}
@@ -11287,9 +13080,17 @@ func serveNiftiSliceAsPNG(w http.ResponseWriter, path string, r *http.Request) e
 
 func scalarPreviewWindow(volume niftiScalarVolume, transform uploadPreviewTransform) (float64, float64) {
 	if transform.FullRange {
-		switch volume.DType {
-		case "uint8":
+		// "Full range" means the full span of the actual DATA, not the datatype.
+		// Windowing an int16 MRI (values ~0..1000) to the [-32768, 32767] datatype
+		// span rendered it near-black; the data range keeps it legible. uint8
+		// display data spans the full 0..255 byte range.
+		if volume.DType == "uint8" {
 			return 0, 255
+		}
+		if volume.RawMax > volume.RawMin {
+			return volume.RawMin, volume.RawMax
+		}
+		switch volume.DType {
 		case "int16":
 			return math.MinInt16, math.MaxInt16
 		case "uint16":
@@ -11297,6 +13098,16 @@ func scalarPreviewWindow(volume niftiScalarVolume, transform uploadPreviewTransf
 		}
 	}
 	if transform.WindowActive && transform.WindowMax > transform.WindowMin {
+		// niftiScalarValue samples raw stored codes, so a physical-unit (HU)
+		// window must be converted back to code space to compare correctly.
+		if transform.WindowIsPhysical {
+			lo := volume.codeFromPhysical(transform.WindowMin)
+			hi := volume.codeFromPhysical(transform.WindowMax)
+			if hi < lo {
+				lo, hi = hi, lo
+			}
+			return lo, hi
+		}
 		return transform.WindowMin, transform.WindowMax
 	}
 	return volume.RawMin, volume.RawMax
@@ -11817,9 +13628,25 @@ func (deps ServerDeps) ready(w http.ResponseWriter) bool {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
+	reader := http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	decoder := json.NewDecoder(reader)
 	if err := decoder.Decode(target); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("JSON request body exceeds %d bytes", maxJSONBodyBytes))
+			return false
+		}
 		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("JSON request body exceeds %d bytes", maxJSONBodyBytes))
+			return false
+		}
+		writeError(w, http.StatusBadRequest, errors.New("request body must contain a single JSON value"))
 		return false
 	}
 	return true

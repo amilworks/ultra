@@ -61,6 +61,143 @@ func TestPostgresStoreThreadRunEventArtifactFlow(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreUpdateUserProfile(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+
+	userID := "pg-prof-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if _, err := store.CreateUser(ctx, domain.CreateUserInput{
+		UserID:   userID,
+		Role:     "researcher",
+		Status:   "active",
+		Metadata: domain.JSONMap{"existing": "kept"},
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	account, err := store.UpdateUserProfile(ctx, domain.UpdateUserProfileInput{
+		UserID: userID,
+		Profile: domain.UserProfile{
+			DisplayName:       "Grace Hopper",
+			Title:             "Rear Admiral",
+			Institution:       "US Navy",
+			ResearchInterests: "compilers",
+			Bio:               "Invented the first compiler.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateUserProfile: %v", err)
+	}
+	if account.DisplayName != "Grace Hopper" {
+		t.Fatalf("display_name synced = %q, want Grace Hopper", account.DisplayName)
+	}
+
+	got, found, err := store.GetUserByID(ctx, userID)
+	if err != nil || !found {
+		t.Fatalf("GetUserByID found=%v err=%v", found, err)
+	}
+	if got.Metadata["existing"] != "kept" {
+		t.Fatalf("metadata.existing = %v, want preserved across jsonb_set", got.Metadata["existing"])
+	}
+	profile, ok := got.Metadata["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.profile = %T, want map", got.Metadata["profile"])
+	}
+	if profile["title"] != "Rear Admiral" || profile["institution"] != "US Navy" {
+		t.Fatalf("profile = %+v, want Rear Admiral / US Navy", profile)
+	}
+	if profile["research_interests"] != "compilers" {
+		t.Fatalf("profile.research_interests = %v, want compilers", profile["research_interests"])
+	}
+}
+
+func TestPostgresStoreRecordsAndReadsTokenUsage(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+
+	userID := "pg-tok-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	day1 := time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+
+	for _, in := range []domain.RecordUserTokenUsageInput{
+		{UserID: userID, Day: day1, InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+		{UserID: userID, Day: day2, InputTokens: 200, OutputTokens: 40, TotalTokens: 240},
+		{UserID: userID, Day: day2, InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+	} {
+		if err := store.RecordUserTokenUsage(ctx, in); err != nil {
+			t.Fatalf("RecordUserTokenUsage: %v", err)
+		}
+	}
+
+	stats, err := store.GetUserTokenUsageStats(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserTokenUsageStats: %v", err)
+	}
+	if stats.InputTokens != 350 || stats.OutputTokens != 70 || stats.TotalTokens != 420 {
+		t.Fatalf("lifetime = %+v, want 350/70/420", stats)
+	}
+	if stats.PeakDailyTotal != 300 {
+		t.Fatalf("peak daily = %d, want 300 (day2 240+60)", stats.PeakDailyTotal)
+	}
+	if stats.LastActiveDay == nil || !stats.LastActiveDay.UTC().Equal(day2) {
+		t.Fatalf("last active day = %v, want %v", stats.LastActiveDay, day2)
+	}
+
+	daily, err := store.ListUserTokenUsageDaily(ctx, userID, day1)
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily: %v", err)
+	}
+	if len(daily) != 2 {
+		t.Fatalf("daily rows = %d, want 2: %+v", len(daily), daily)
+	}
+	if !daily[0].Day.UTC().Equal(day1) || daily[0].TotalTokens != 120 || daily[0].RunCount != 1 {
+		t.Fatalf("daily[0] = %+v, want day1 total 120 run_count 1", daily[0])
+	}
+	if !daily[1].Day.UTC().Equal(day2) || daily[1].TotalTokens != 300 || daily[1].RunCount != 2 {
+		t.Fatalf("daily[1] = %+v, want day2 total 300 run_count 2", daily[1])
+	}
+
+	recent, err := store.ListUserTokenUsageDaily(ctx, userID, day2)
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily recent: %v", err)
+	}
+	if len(recent) != 1 || !recent[0].Day.UTC().Equal(day2) {
+		t.Fatalf("recent = %+v, want only day2", recent)
+	}
+
+	longest, err := store.GetUserLongestRunSeconds(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserLongestRunSeconds: %v", err)
+	}
+	if longest != 0 {
+		t.Fatalf("longest run seconds = %d, want 0 (no completed runs for user)", longest)
+	}
+}
+
 func TestPostgresStoreRejectsDuplicateRunIdempotencyKey(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -2222,6 +2359,16 @@ func TestPostgresStoreUpsertsAndListsWorkerHeartbeats(t *testing.T) {
 	}
 	if !updated.StartedAt.Equal(started) {
 		t.Fatalf("started_at = %s, want original %s", updated.StartedAt, started)
+	}
+	fetched, heartbeatFound, err := store.GetWorkerHeartbeat(ctx, workerID)
+	if err != nil {
+		t.Fatalf("GetWorkerHeartbeat: %v", err)
+	}
+	if !heartbeatFound || fetched.WorkerID != workerID || fetched.CurrentRunID != "run_123" || fetched.Metadata["active_tasks"] != float64(1) {
+		t.Fatalf("GetWorkerHeartbeat = %+v found=%t, want updated worker", fetched, heartbeatFound)
+	}
+	if _, found, err := store.GetWorkerHeartbeat(ctx, "missing-"+workerID); err != nil || found {
+		t.Fatalf("GetWorkerHeartbeat missing found=%t err=%v, want not found without error", found, err)
 	}
 	workers, err := store.ListWorkerHeartbeats(ctx, 100)
 	if err != nil {

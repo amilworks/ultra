@@ -3,14 +3,38 @@ package eventbus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/nats-io/nats.go"
 )
+
+type fakeNATSStreamManager struct {
+	addErr      error
+	infoErr     error
+	updateErr   error
+	infoCalls   int
+	updateCalls int
+}
+
+func (m *fakeNATSStreamManager) AddStream(*nats.StreamConfig, ...nats.JSOpt) (*nats.StreamInfo, error) {
+	return nil, m.addErr
+}
+
+func (m *fakeNATSStreamManager) StreamInfo(stream string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	m.infoCalls++
+	return &nats.StreamInfo{Config: nats.StreamConfig{Name: stream}}, m.infoErr
+}
+
+func (m *fakeNATSStreamManager) UpdateStream(*nats.StreamConfig, ...nats.JSOpt) (*nats.StreamInfo, error) {
+	m.updateCalls++
+	return nil, m.updateErr
+}
 
 func TestJobJSONMatchesPythonWorkerEnvelope(t *testing.T) {
 	t.Parallel()
@@ -209,6 +233,17 @@ func TestNATSMessageIDForRetriedDataAgentJobUsesDispatchID(t *testing.T) {
 	}
 }
 
+func TestNATSBusPublishDataAgentJobRequiresConfiguredSubject(t *testing.T) {
+	t.Parallel()
+
+	bus := &NATSBus{}
+
+	err := bus.PublishDataAgentJob(context.Background(), DataAgentJob{JobID: "data_agent_job_abc"})
+	if err == nil {
+		t.Fatal("PublishDataAgentJob error = nil, want configuration error")
+	}
+}
+
 func TestNATSMessageIDForRunEventUsesEventID(t *testing.T) {
 	t.Parallel()
 
@@ -236,6 +271,79 @@ func TestNATSStreamConfigUsesLongDuplicateWindow(t *testing.T) {
 
 	if stream.Duplicates < 24*time.Hour {
 		t.Fatalf("duplicate window = %s, want at least 24h for long-run publish retries", stream.Duplicates)
+	}
+}
+
+func TestNATSStreamSubjectsDoNotInventDataAgentSubject(t *testing.T) {
+	t.Parallel()
+
+	subjects := natsStreamSubjects(NATSConfig{
+		JobsSubject:   "ultra.test.jobs",
+		EventsSubject: "ultra.test.events",
+		CancelSubject: "ultra.test.cancel",
+	})
+
+	for _, subject := range subjects {
+		if subject == "ultra.data_agent.jobs" {
+			t.Fatalf("subjects = %v, want no default data-agent subject for a bus that did not configure one", subjects)
+		}
+	}
+}
+
+func TestEnsureNATSStreamReturnsExistingStreamUpdateFailure(t *testing.T) {
+	t.Parallel()
+
+	updateErr := fmt.Errorf("update stream failed")
+	manager := fakeNATSStreamManager{
+		addErr:    nats.ErrStreamNameAlreadyInUse,
+		updateErr: updateErr,
+	}
+
+	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}))
+	if !errors.Is(err, updateErr) {
+		t.Fatalf("ensureNATSStream error = %v, want update error %v", err, updateErr)
+	}
+	if manager.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", manager.updateCalls)
+	}
+}
+
+func TestEnsureNATSStreamUpdatesSameStreamOnSubjectOverlap(t *testing.T) {
+	t.Parallel()
+
+	manager := fakeNATSStreamManager{
+		addErr: fmt.Errorf("nats: subjects overlap with an existing stream"),
+	}
+
+	if err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"})); err != nil {
+		t.Fatalf("ensureNATSStream: %v", err)
+	}
+	if manager.infoCalls != 1 {
+		t.Fatalf("stream info calls = %d, want 1", manager.infoCalls)
+	}
+	if manager.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", manager.updateCalls)
+	}
+}
+
+func TestEnsureNATSStreamDoesNotHideForeignSubjectOverlap(t *testing.T) {
+	t.Parallel()
+
+	addErr := fmt.Errorf("nats: subjects overlap with an existing stream")
+	manager := fakeNATSStreamManager{
+		addErr:  addErr,
+		infoErr: nats.ErrStreamNotFound,
+	}
+
+	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}))
+	if !errors.Is(err, addErr) {
+		t.Fatalf("ensureNATSStream error = %v, want add error %v", err, addErr)
+	}
+	if manager.infoCalls != 1 {
+		t.Fatalf("stream info calls = %d, want 1", manager.infoCalls)
+	}
+	if manager.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", manager.updateCalls)
 	}
 }
 
@@ -394,6 +502,65 @@ func TestNATSRunEventConsumerSurvivesSubscriberShutdown(t *testing.T) {
 	if _, err := bus.js.ConsumerInfo(stream, consumer, nats.Context(ctx)); err != nil {
 		t.Fatalf("event ingest consumer was removed after subscriber shutdown: %v", err)
 	}
+}
+
+// TestNATSSubscribeRunEventsCloseRaceDoesNotPanic hammers the subscribe -> publish ->
+// disconnect cycle so a message dispatched on the NATS callback goroutine collides with
+// unsubscribe()'s close(ch). Before the mu/closed guard this raced to "send on closed
+// channel", panicking the whole process (an SSE viewer disconnecting mid-run would crash
+// the control plane for every other user). The guard must keep it crash-free.
+func TestNATSSubscribeRunEventsCloseRaceDoesNotPanic(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_EVENT_CLOSE_RACE_" + suffix
+	eventsSubject := "ultra.test." + suffix + ".events"
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        eventsSubject,
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        "ultra-test-event-close-race-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() { _ = bus.js.DeleteStream(stream) }()
+
+	const rounds = 200
+	for i := 0; i < rounds; i++ {
+		runID := fmt.Sprintf("race-run-%d", i)
+		subCtx, stopSub := context.WithCancel(ctx)
+		events, unsubscribe := bus.SubscribeRunEvents(subCtx, runID)
+		// Drain so the buffered channel can't fill (irrelevant to the race, but realistic).
+		go func() {
+			for range events { //nolint:revive // intentional drain
+			}
+		}()
+		// Publish a burst while we tear the subscription down, maximizing the odds that a
+		// callback is mid-dispatch when close(ch) runs.
+		go func() {
+			for j := 0; j < 8; j++ {
+				_ = bus.PublishRunEvent(ctx, domain.RunEventRecord{
+					EventID:   fmt.Sprintf("%s-evt-%d", runID, j),
+					RunID:     runID,
+					ThreadID:  "thread-close-race",
+					EventKind: "run.delta",
+				})
+			}
+		}()
+		stopSub()     // ctx-cancel path -> unsubscribe -> close(ch)
+		unsubscribe() // explicit path too (idempotent); both must be panic-safe
+	}
+	// Reaching here without a panic is the assertion.
 }
 
 func TestNATSRunEventConsumerReconcilesExistingUnsafeDefaults(t *testing.T) {
@@ -687,6 +854,149 @@ func TestMemoryBusSubscriberBuffersThousandEventBurst(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Fatalf("received %d/1000 burst events before timeout", i)
+		}
+	}
+}
+
+func TestNATSBusConnectionSurvivesOutagesAndDrainsOnClose(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_RESILIENCE_" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer func() {
+		_ = bus.js.DeleteStream(stream)
+	}()
+
+	// The reconnect policy is the behavioral contract that prevents the
+	// connection from dying permanently after a NATS outage longer than the
+	// default 60 attempts x 2s window.
+	opts := bus.conn.Opts
+	if opts.MaxReconnect != -1 {
+		t.Fatalf("MaxReconnect = %d, want -1 (retry forever)", opts.MaxReconnect)
+	}
+	if opts.ReconnectWait != natsReconnectWait {
+		t.Fatalf("ReconnectWait = %s, want %s", opts.ReconnectWait, natsReconnectWait)
+	}
+	if opts.ClosedCB == nil || opts.DisconnectedErrCB == nil || opts.ReconnectedCB == nil || opts.AsyncErrorCB == nil {
+		t.Fatal("connection state handlers must be installed for observability")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bus.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(natsDrainTimeout + 3*time.Second):
+		t.Fatal("Close did not complete within the drain budget")
+	}
+	if !bus.conn.IsClosed() {
+		t.Fatal("connection is not closed after Close")
+	}
+	// Close must be safe to call again after the connection is gone.
+	bus.Close()
+}
+
+func TestNATSBusPartitionedIngestPreservesPerRunOrder(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_PARTITION_" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                    url,
+		Stream:                 stream,
+		JobsSubject:            "ultra.test." + suffix + ".jobs",
+		EventsSubject:          "ultra.test." + suffix + ".events",
+		CancelSubject:          "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject:   "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:          "ingest-" + suffix,
+		EventIngestConcurrency: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() {
+		_ = bus.js.DeleteStream(stream)
+	}()
+
+	const runs = 5
+	const eventsPerRun = 40
+	var mu sync.Mutex
+	received := map[string][]int{}
+	done := make(chan struct{})
+	total := 0
+	err = bus.SubscribeAllRunEvents(ctx, func(_ context.Context, input domain.AppendRunEventInput) error {
+		index := 0
+		if _, scanErr := fmt.Sscan(input.Message, &index); scanErr != nil {
+			return scanErr
+		}
+		mu.Lock()
+		received[input.RunID] = append(received[input.RunID], index)
+		total++
+		if total == runs*eventsPerRun {
+			close(done)
+		}
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+
+	for index := 0; index < eventsPerRun; index++ {
+		for run := 0; run < runs; run++ {
+			runID := fmt.Sprintf("run-%s-%d", suffix, run)
+			event := domain.RunEventRecord{
+				EventID:   fmt.Sprintf("evt-%s-%d-%d", suffix, run, index),
+				RunID:     runID,
+				EventKind: "message.delta",
+				Message:   fmt.Sprintf("%d", index),
+			}
+			if err := bus.PublishRunEvent(ctx, event); err != nil {
+				t.Fatalf("PublishRunEvent: %v", err)
+			}
+		}
+	}
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		mu.Lock()
+		t.Fatalf("received %d/%d events before timeout", total, runs*eventsPerRun)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for runID, indexes := range received {
+		if len(indexes) != eventsPerRun {
+			t.Fatalf("run %s received %d events, want %d", runID, len(indexes), eventsPerRun)
+		}
+		for position, index := range indexes {
+			if index != position {
+				t.Fatalf("run %s event %d arrived at position %d; per-run order must be preserved (got %v)", runID, index, position, indexes)
+			}
 		}
 	}
 }

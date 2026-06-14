@@ -2869,6 +2869,17 @@ func TestMemoryStoreUpsertsAndListsWorkerHeartbeats(t *testing.T) {
 		t.Fatalf("second last heartbeat = %s, want %s", second.LastHeartbeatAt, secondBeat)
 	}
 
+	fetched, found, err := store.GetWorkerHeartbeat(ctx, "deepagents-worker-a")
+	if err != nil {
+		t.Fatalf("GetWorkerHeartbeat: %v", err)
+	}
+	if !found || fetched.WorkerID != "deepagents-worker-a" || fetched.CurrentRunID != "run_123" || fetched.Metadata["active_tasks"] != 1 {
+		t.Fatalf("GetWorkerHeartbeat = %+v found=%t, want updated worker", fetched, found)
+	}
+	if _, found, err := store.GetWorkerHeartbeat(ctx, "missing-worker"); err != nil || found {
+		t.Fatalf("GetWorkerHeartbeat missing found=%t err=%v, want not found without error", found, err)
+	}
+
 	workers, err := store.ListWorkerHeartbeats(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListWorkerHeartbeats: %v", err)
@@ -2946,6 +2957,124 @@ func TestMemoryStoreListRunEventsAfterSequenceReturnsAscendingPage(t *testing.T)
 	want := []int64{3, 4}
 	if got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("sequences = %v, want %v", got, want)
+	}
+}
+
+func TestMemoryStoreRunTokenUsageLedgerIsIdempotentAndFinalizedOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	day := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+
+	first, inserted, err := store.RecordRunTokenUsage(ctx, domain.RecordRunTokenUsageInput{
+		RunID:        "run-token-ledger",
+		UsageEventID: "model-call-1",
+		UserID:       "user-token-ledger",
+		Model:        "deepseek_v4",
+		Day:          day,
+		InputTokens:  100,
+		OutputTokens: 20,
+		TotalTokens:  120,
+		OccurredAt:   day,
+	})
+	if err != nil {
+		t.Fatalf("RecordRunTokenUsage first: %v", err)
+	}
+	if !inserted || first.TotalTokens != 120 {
+		t.Fatalf("first usage = %+v inserted=%v, want inserted total 120", first, inserted)
+	}
+	duplicate, inserted, err := store.RecordRunTokenUsage(ctx, domain.RecordRunTokenUsageInput{
+		RunID:        "run-token-ledger",
+		UsageEventID: "model-call-1",
+		UserID:       "user-token-ledger",
+		Model:        "deepseek_v4",
+		Day:          day,
+		InputTokens:  100,
+		OutputTokens: 20,
+		TotalTokens:  120,
+		OccurredAt:   day,
+	})
+	if err != nil {
+		t.Fatalf("RecordRunTokenUsage duplicate: %v", err)
+	}
+	if inserted || duplicate.TotalTokens != 120 {
+		t.Fatalf("duplicate usage = %+v inserted=%v, want existing total 120", duplicate, inserted)
+	}
+	if _, inserted, err := store.FinalizeRunTokenUsage(ctx, domain.FinalizeRunTokenUsageInput{
+		RunID:       "run-token-ledger",
+		CompletedAt: day,
+	}); err != nil {
+		t.Fatalf("FinalizeRunTokenUsage first: %v", err)
+	} else if !inserted {
+		t.Fatalf("first finalize inserted=%v, want true", inserted)
+	}
+	if _, inserted, err := store.FinalizeRunTokenUsage(ctx, domain.FinalizeRunTokenUsageInput{
+		RunID:       "run-token-ledger",
+		CompletedAt: day,
+	}); err != nil {
+		t.Fatalf("FinalizeRunTokenUsage duplicate: %v", err)
+	} else if inserted {
+		t.Fatalf("duplicate finalize inserted=%v, want false", inserted)
+	}
+
+	stats, err := store.GetUserTokenUsageStats(ctx, "user-token-ledger")
+	if err != nil {
+		t.Fatalf("GetUserTokenUsageStats: %v", err)
+	}
+	if stats.TotalTokens != 120 {
+		t.Fatalf("stats = %+v, want total 120", stats)
+	}
+	daily, err := store.ListUserTokenUsageDaily(ctx, "user-token-ledger", time.Time{})
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily: %v", err)
+	}
+	if len(daily) != 1 || daily[0].TotalTokens != 120 || daily[0].RunCount != 1 {
+		t.Fatalf("daily = %+v, want one row total 120 run_count 1", daily)
+	}
+}
+
+func TestMemoryStoreTokenUsageUsesOccurredAtWhenDayIsOmitted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	occurredAt := time.Date(2031, 4, 5, 18, 30, 0, 0, time.FixedZone("PDT", -7*60*60))
+	wantDay := time.Date(2031, 4, 6, 0, 0, 0, 0, time.UTC)
+
+	if err := store.RecordUserTokenUsage(ctx, domain.RecordUserTokenUsageInput{
+		UserID:       "user-token-day",
+		InputTokens:  7,
+		OutputTokens: 3,
+		TotalTokens:  10,
+		OccurredAt:   occurredAt,
+	}); err != nil {
+		t.Fatalf("RecordUserTokenUsage: %v", err)
+	}
+	if _, inserted, err := store.RecordRunTokenUsage(ctx, domain.RecordRunTokenUsageInput{
+		RunID:        "run-token-day",
+		UsageEventID: "usage-token-day",
+		UserID:       "user-token-day",
+		InputTokens:  11,
+		OutputTokens: 4,
+		TotalTokens:  15,
+		OccurredAt:   occurredAt,
+	}); err != nil {
+		t.Fatalf("RecordRunTokenUsage: %v", err)
+	} else if !inserted {
+		t.Fatalf("RecordRunTokenUsage inserted=%v, want true", inserted)
+	}
+
+	daily, err := store.ListUserTokenUsageDaily(ctx, "user-token-day", time.Time{})
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily: %v", err)
+	}
+	if len(daily) != 1 {
+		t.Fatalf("daily rows = %d, want 1: %+v", len(daily), daily)
+	}
+	if !daily[0].Day.Equal(wantDay) {
+		t.Fatalf("daily day = %s, want %s", daily[0].Day.Format(time.RFC3339), wantDay.Format(time.RFC3339))
+	}
+	if daily[0].TotalTokens != 25 {
+		t.Fatalf("daily total = %d, want 25", daily[0].TotalTokens)
 	}
 }
 

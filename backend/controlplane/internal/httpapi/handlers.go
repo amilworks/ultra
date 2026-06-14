@@ -4248,7 +4248,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 			ProcessingStatus: processingStatus,
 			Status:           status,
 			Offset:           parseOffset(r),
-			Limit:            parseLimit(r, 200),
+			Limit:            clampLimit(parseLimit(r, 200), 1000),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -4308,7 +4308,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 		filtered = append(filtered, resource)
 	}
 	offset := parseOffset(r)
-	limit := parseLimit(r, 200)
+	limit := clampLimit(parseLimit(r, 200), 1000)
 	paged := []resourceRecord{}
 	if offset < len(filtered) {
 		end := offset + limit
@@ -4382,7 +4382,7 @@ func (deps ServerDeps) handleListResourceCollections(w http.ResponseWriter, r *h
 		Type:      strings.ToLower(strings.TrimSpace(r.URL.Query().Get("collection_type"))),
 		ProjectID: strings.TrimSpace(r.URL.Query().Get("project_id")),
 		Status:    status,
-		Limit:     parseLimit(r, 200),
+		Limit:     clampLimit(parseLimit(r, 200), 1000),
 		Offset:    parseOffset(r),
 	})
 	if err != nil {
@@ -4799,7 +4799,7 @@ func (deps ServerDeps) handleListResourceCollectionResources(w http.ResponseWrit
 		CreatedAfter:     createdAfter,
 		CreatedBefore:    createdBefore,
 		ProcessingStatus: processingStatus,
-		Limit:            parseLimit(r, 200),
+		Limit:            clampLimit(parseLimit(r, 200), 1000),
 		Offset:           parseOffset(r),
 	})
 	if err != nil {
@@ -4912,7 +4912,7 @@ func (deps ServerDeps) handleListDatasetSnapshots(w http.ResponseWriter, r *http
 		ProjectID:          strings.TrimSpace(r.URL.Query().Get("project_id")),
 		SourceCollectionID: strings.TrimSpace(r.URL.Query().Get("source_collection_id")),
 		Status:             status,
-		Limit:              parseLimit(r, 200),
+		Limit:              clampLimit(parseLimit(r, 200), 1000),
 		Offset:             parseOffset(r),
 	})
 	if err != nil {
@@ -5107,7 +5107,7 @@ func (deps ServerDeps) handleListDatasetSnapshotShareGrants(w http.ResponseWrite
 		OwnerUserID: principal.UserID,
 		OwnerOrgID:  principal.OrgID,
 		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
-		Limit:       parseLimit(r, 200),
+		Limit:       clampLimit(parseLimit(r, 200), 1000),
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -6646,7 +6646,7 @@ func (deps ServerDeps) handleListResourceShareGrants(w http.ResponseWriter, r *h
 		OwnerUserID: principal.UserID,
 		OwnerOrgID:  principal.OrgID,
 		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
-		Limit:       parseLimit(r, 200),
+		Limit:       clampLimit(parseLimit(r, 200), 1000),
 	})
 	if err != nil {
 		writeStoreError(w, err)

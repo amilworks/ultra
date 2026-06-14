@@ -252,11 +252,17 @@ export function isVolumeInteriorInspectionActive({
 export function shouldShowVolumeSliceCursorPlanes({
   cueVisible,
   interiorInspectionActive,
+  cutawayActive = false,
 }: {
   cueVisible: boolean;
   interiorInspectionActive: boolean;
+  cutawayActive?: boolean;
 }): boolean {
-  return cueVisible && !interiorInspectionActive;
+  // Hide the flat translucent X/Y/Z cursor quads whenever the view is focused on
+  // the interior — both the legacy fly-inside and the Z-cursor cutaway. In
+  // cutaway the crisp opaque cut face IS the inspection surface, so the cursor
+  // planes only tint/occlude it (the user sees red/green washes over the slice).
+  return cueVisible && !interiorInspectionActive && !cutawayActive;
 }
 
 export function shouldShowVolumeContextEdges({
@@ -1835,6 +1841,7 @@ export function SliceStackVolumeCanvas({
         showPlanes: shouldShowVolumeSliceCursorPlanes({
           cueVisible: initialSliceCursorCue.visible,
           interiorInspectionActive: volumeInteriorInspectionActive,
+          cutawayActive: cutawayActiveRef.current,
         }),
       });
     }
@@ -1863,12 +1870,20 @@ export function SliceStackVolumeCanvas({
         vertexShader: CUTFACE_VERTEX_SHADER,
         fragmentShader: CUTFACE_FRAGMENT_SHADER,
         side: THREE.DoubleSide,
-        transparent: false,
+        // transparent:true so the cut face joins the SAME render bucket as the
+        // translucent volume + cursor planes. THREE always draws the whole opaque
+        // bucket before the transparent bucket and renderOrder only sorts within a
+        // bucket — so an opaque cut face would be painted FIRST and then hazed over
+        // by the volume and tinted by the cursor planes. In the transparent bucket
+        // with the highest renderOrder it draws LAST; its fragments output alpha=1,
+        // so it still fully occludes (src*1 + dst*0 = src) within its footprint.
+        transparent: true,
         depthTest: false,
         depthWrite: false,
       });
       const cutFaceMesh = new THREE.Mesh(cutFaceGeometry, cutFaceMaterial);
-      cutFaceMesh.renderOrder = 5;
+      // Above the volume (0), context edges (2), clip edges (3), cursor planes (4).
+      cutFaceMesh.renderOrder = 6;
       cutFaceMesh.scale.set(normalizedScale.x, normalizedScale.y, 1);
       cutFaceMesh.position.set(0, 0, (initialCutZ - 0.5) * normalizedScale.z);
       cutFaceMesh.visible = cutawayActiveRef.current;
@@ -2118,10 +2133,11 @@ export function SliceStackVolumeCanvas({
       showPlanes: shouldShowVolumeSliceCursorPlanes({
         cueVisible: sliceCursorCue.visible,
         interiorInspectionActive: volumeInteriorInspectionActive,
+        cutawayActive,
       }),
     });
     requestRenderRef.current?.();
-  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive]);
+  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (
@@ -2276,6 +2292,7 @@ export function SliceStackVolumeCanvas({
           shouldShowVolumeSliceCursorPlanes({
             cueVisible: sliceCursorCue.visible,
             interiorInspectionActive: volumeInteriorInspectionActive,
+            cutawayActive,
           })
             ? "true"
             : "false"

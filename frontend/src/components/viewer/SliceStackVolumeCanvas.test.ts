@@ -210,6 +210,19 @@ describe("volume interior inspection camera", () => {
     expect(shouldShowVolumeSliceCursorPlanes({ cueVisible: true, interiorInspectionActive: true })).toBe(false);
   });
 
+  it("removes the translucent cursor planes in the Z-cursor cutaway (the crisp cut face replaces them)", () => {
+    // Cutaway keeps the overview camera (interiorInspectionActive false), but the
+    // colored X/Y/Z cursor quads would still tint/occlude the cut face — hide them.
+    expect(
+      shouldShowVolumeSliceCursorPlanes({ cueVisible: true, interiorInspectionActive: false, cutawayActive: true })
+    ).toBe(false);
+    expect(
+      shouldShowVolumeSliceCursorPlanes({ cueVisible: true, interiorInspectionActive: false, cutawayActive: false })
+    ).toBe(true);
+    // Context edges stay — they are thin extent lines, not footprint-filling quads.
+    expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
+  });
+
   it("keeps wireframe context out of the center-inside inspection view", () => {
     expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
     expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: true })).toBe(false);

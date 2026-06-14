@@ -26,7 +26,16 @@ describe("resource browser responsive layout", () => {
 
   it("keeps active-folder context compact on mobile", () => {
     expect(stylesSource).toMatch(
-      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-active-collection\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto;[\s\S]*\.resource-browser-active-collection-actions\s*\{[^}]*flex-direction:\s*row;[\s\S]*\.resource-browser-active-collection-clear\s*\{[^}]*width:\s*auto;/s
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-active-collection\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto;[\s\S]*\.resource-browser-active-collection-actions\s*\{[^}]*flex-direction:\s*row;[\s\S]*\.resource-browser-active-collection-clear\s*\{[^}]*width:\s*2\.1rem;[\s\S]*\.resource-browser-active-collection-clear-label\s*\{[^}]*display:\s*none;/s
+    );
+  });
+
+  it("keeps active-folder context as a calm breadcrumb", () => {
+    expect(stylesSource).not.toMatch(
+      /\.resource-browser-active-collection\s*\{[^}]*border-left:/s
+    );
+    expect(stylesSource).toMatch(
+      /\.resource-browser-active-collection-current\s*\{[^}]*background:\s*transparent;/s
     );
   });
 

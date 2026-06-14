@@ -25,4 +25,26 @@ describe("WorkOS hosted auth redirect", () => {
     expect(source).toContain("hostedAuthRedirectAttemptedRef");
     expect(source).not.toContain("Account review needed");
   });
+
+  it("does not auto-redirect denied accounts back into AuthKit", () => {
+    const source = readSource("src/App.tsx");
+    const redirectEffectStart = source.indexOf("hostedAuthRedirectAttemptedRef.current = true");
+    const redirectGuard = source.slice(
+      source.lastIndexOf("useEffect", redirectEffectStart),
+      redirectEffectStart
+    );
+
+    // A pending/disabled account sets authNotice; redirecting again would
+    // bounce through AuthKit forever because WorkOS still has a live session.
+    expect(redirectGuard).toContain("authNotice");
+  });
+
+  it("surfaces account denial notices on the WorkOS redirect screen", () => {
+    const source = readSource("src/App.tsx");
+    const redirectScreenIndex = source.indexOf("<WorkOSRedirectScreen");
+    const redirectScreenBlock = source.slice(redirectScreenIndex, redirectScreenIndex + 400);
+
+    expect(redirectScreenBlock).toContain("statusMessage=");
+    expect(source).toContain("statusMessage?: string | null");
+  });
 });

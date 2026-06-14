@@ -2,6 +2,9 @@ import type {
   AccountRequestPayload,
   AccountRequestResponse,
   AdminConversationActionResponse,
+  CurrentUserProfile,
+  CurrentUserResponse,
+  TokenUsageResponse,
   AdminCreateOrganizationRequest,
   AdminCreateUserRequest,
   AdminIssueListResponse,
@@ -21,6 +24,8 @@ import type {
   BisqueAuthSessionResponse,
   BisqueGuestAuthRequest,
   BisqueImportResponse,
+  BisquePushRequest,
+  BisquePushResponse,
   BisqueSearchRequest,
   BisqueSearchResponse,
   BisqueUploadResponse,
@@ -278,7 +283,7 @@ const V2_CONVERSATION_STATE_METADATA_KEY = "frontend_state";
 const V2_TITLE_STATE_METADATA_KEY = "title_state";
 const V2_UPLOAD_CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
 const V2_UPLOAD_MAX_PARALLEL_FILES = 4;
-const V2_UPLOAD_MAX_PARALLEL_CHUNKS = 4;
+const V2_UPLOAD_MAX_PARALLEL_CHUNKS = 8; // more in-flight chunks better saturate the link
 const V2_UPLOAD_HARD_MAX_PARALLEL = 16;
 const V2_UPLOAD_CHUNK_RETRY_DELAYS_MS = [120, 420];
 
@@ -1460,6 +1465,46 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as SantaBarbaraWeatherResponse;
+  }
+
+  async getCurrentUser(): Promise<CurrentUserResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/me"), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as CurrentUserResponse;
+  }
+
+  async updateCurrentUser(profile: CurrentUserProfile): Promise<CurrentUserResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/me"), {
+      method: "PATCH",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      credentials: "include",
+      body: JSON.stringify(profile),
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as CurrentUserResponse;
+  }
+
+  async getTokenUsage(days?: number): Promise<TokenUsageResponse> {
+    const params: Record<string, string> = {};
+    const requestedDays = Math.max(1, Math.min(730, Number(days) || 365));
+    params.days = String(requestedDays);
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/me/token-usage", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as TokenUsageResponse;
   }
 
   async getAdminOverview(options?: {
@@ -3542,6 +3587,23 @@ export class ApiClient {
     return (await response.json()) as BisqueUploadResponse;
   }
 
+  async pushResourcesToBisque(options: BisquePushRequest): Promise<BisquePushResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/push"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        file_ids: options.fileIds ?? [],
+        collection_ids: options.collectionIds ?? [],
+        dataset_name: options.datasetName ?? "",
+      }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as BisquePushResponse;
+  }
+
   async listResources(options?: {
     limit?: number;
     offset?: number;
@@ -4537,14 +4599,19 @@ export class ApiClient {
     if (typeof config?.channel === "number" && Number.isFinite(config.channel)) {
       params.channel = String(Math.max(0, Math.floor(config.channel)));
     }
-    const response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scalar-volume`, params), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-      // Volume payloads are tens of MB; skip the HTTP disk cache so we neither
-      // bloat it nor fail the fetch on a cache-write error for large responses.
-      cache: "no-store",
-    });
+    const response = await this.fetchWithTimeout(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scalar-volume`, params),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        // Volume payloads are tens of MB; skip the HTTP disk cache so we neither
+        // bloat it nor fail the fetch on a cache-write error for large responses.
+        cache: "no-store",
+      },
+      120000, // generous: a large volume read is legitimately slow; only a true hang trips it
+      "Volume request",
+    );
     if (!response.ok) {
       return parseError(response);
     }
@@ -4571,6 +4638,7 @@ export class ApiClient {
       level: number;
       tileX: number;
       tileY: number;
+      size?: number | null;
       z?: number | null;
       c?: number | null;
       t?: number | null;
@@ -4582,6 +4650,13 @@ export class ApiClient {
     const safeTileX = Math.max(0, Math.floor(config.tileX));
     const safeTileY = Math.max(0, Math.floor(config.tileY));
     const params: Record<string, string> = {};
+    // The engine retiles the served file (which may be a derived pyramid with a
+    // different native tile size) at this requested size, so it MUST match the grid
+    // the canvas computes from tile_scheme.tile_size — otherwise tile (col,row) maps
+    // to the wrong region/scale and out-of-grid tiles 500.
+    if (typeof config.size === "number" && Number.isFinite(config.size) && config.size > 0) {
+      params.size = String(Math.floor(config.size));
+    }
     if (typeof config.z === "number" && Number.isFinite(config.z)) {
       params.z = String(Math.max(0, Math.floor(config.z)));
     }
@@ -4656,37 +4731,49 @@ export class ApiClient {
     if (typeof config?.bins === "number" && Number.isFinite(config.bins)) {
       params.bins = String(Math.max(8, Math.floor(config.bins)));
     }
-    const response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/histogram`, params), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
+    const response = await this.fetchWithTimeout(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/histogram`, params),
+      { method: "GET", headers: this.headers(), credentials: "include" },
+      30000,
+      "Histogram request",
+    );
     if (!response.ok) {
       return parseError(response);
     }
     return (await response.json()) as UploadViewerHistogramResponse;
   }
 
-  async getUploadViewer(fileId: string): Promise<UploadViewerInfo> {
-    const safeFileId = encodeURIComponent(fileId);
+  // Wraps fetch with an abort-based timeout so a hung image-service request surfaces a
+  // 504 the viewer can render (the viewer already has error states for these calls)
+  // instead of spinning forever. Mirrors the inline pattern getUploadViewer uses below.
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    label: string,
+  ): Promise<Response> {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
-    let response: Response;
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/viewer`), {
-        method: "GET",
-        headers: this.headers(),
-        signal: controller.signal,
-        credentials: "include",
-      });
+      return await fetch(url, { ...init, signal: controller.signal });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ApiError("Viewer metadata request timed out", 504, null);
+        throw new ApiError(`${label} timed out`, 504, null);
       }
       throw error;
     } finally {
       window.clearTimeout(timeoutId);
     }
+  }
+
+  async getUploadViewer(fileId: string): Promise<UploadViewerInfo> {
+    const safeFileId = encodeURIComponent(fileId);
+    const response = await this.fetchWithTimeout(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/viewer`),
+      { method: "GET", headers: this.headers(), credentials: "include" },
+      15000,
+      "Viewer metadata request",
+    );
     if (!response.ok) {
       return parseError(response);
     }

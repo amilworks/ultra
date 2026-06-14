@@ -46,15 +46,18 @@ import {
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
+import { VideoThumbnail } from "./viewer/VideoThumbnail";
+import { ZScrubThumbnail } from "./viewer/ZScrubThumbnail";
 import { resourceDisplayName } from "@/features/resources/presentation";
 import {
   ArrowLeft,
   ChevronDown,
+  CloudUpload,
   Download,
   Eye,
   File,
+  Folder,
   FolderMinus,
-  FolderOpen,
   Film,
   FolderPlus,
   FolderUp,
@@ -193,6 +196,12 @@ type ResourceBrowserProps = {
   onClearActiveCollection?: () => void;
   thumbnailUrlFor: (resource: ResourceRecord) => string;
   downloadUrlFor?: (resource: ResourceRecord) => string;
+  onPushResourceToBisque?: (resource: ResourceRecord) => Promise<void> | void;
+  onPushCollectionToBisque?: (collection: ResourceCollectionRecord) => Promise<void> | void;
+  zScrubThumbnail?: {
+    sliceUrlFor: (fileId: string, z: number) => string;
+    loadZCount: (fileId: string) => Promise<number>;
+  };
 };
 
 const kindFilters: Array<{ value: ResourceKindFilter; label: string }> = [
@@ -559,6 +568,10 @@ const iconForKind = (kind: string) => {
   }
 };
 
+const isVideoResource = (resource: ResourceRecord): boolean =>
+  String(resource.resource_kind || "").toLowerCase() === "video" ||
+  String(resource.content_type || "").toLowerCase().startsWith("video/");
+
 const shouldRequestThumbnail = (resource: ResourceRecord, failedThumbnailIds: Record<string, true>): boolean => {
   if (failedThumbnailIds[resource.file_id]) {
     return false;
@@ -625,7 +638,10 @@ export function ResourceBrowser({
   restoringCollectionIds = {},
   onClearActiveCollection,
   thumbnailUrlFor,
+  zScrubThumbnail,
   downloadUrlFor,
+  onPushResourceToBisque,
+  onPushCollectionToBisque,
 }: ResourceBrowserProps) {
   const isMobileView = useBreakpoint(721);
   const [resourceFiltersOpen, setResourceFiltersOpen] = useState(false);
@@ -749,6 +765,25 @@ export function ResourceBrowser({
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
   const activeCollectionName = String(activeResourceCollection?.name ?? "").trim();
+  const activeFolderName = activeCollectionName || "Untitled folder";
+  const activeParentCollectionId = String(activeResourceCollection?.parent_collection_id ?? "").trim();
+  const activeParentCollection = useMemo(
+    () =>
+      activeParentCollectionId
+        ? (resourceCollections.find(
+            (collection) => collection.collection_id === activeParentCollectionId
+          ) ?? null)
+        : null,
+    [activeParentCollectionId, resourceCollections]
+  );
+  const activeParentCollectionName = String(activeParentCollection?.name ?? "").trim();
+  const activeFolderNavigationLabel =
+    activeParentCollection && onOpenCollection
+      ? `Go up from folder ${activeFolderName}`
+      : `Leave folder ${activeFolderName}`;
+  const canNavigateFromActiveFolder = Boolean(
+    (activeParentCollection && onOpenCollection) || onClearActiveCollection
+  );
   const activeTagFilter = tagFilter.trim();
   const visibleFilterCount =
     Number(kindFilter !== "all") +
@@ -1112,6 +1147,20 @@ export function ResourceBrowser({
     setBulkShareGranteeUserId("");
     setBulkShareGranteeOrgId("");
     setBulkShareError(null);
+  };
+
+  const navigateToAllResources = (): void => {
+    clearSelection();
+    onClearActiveCollection?.();
+  };
+
+  const navigateFromActiveFolder = (): void => {
+    clearSelection();
+    if (activeParentCollection && onOpenCollection) {
+      onOpenCollection(activeParentCollection);
+      return;
+    }
+    onClearActiveCollection?.();
   };
 
   const deleteSelectedResources = async (): Promise<void> => {
@@ -1494,6 +1543,16 @@ export function ResourceBrowser({
           <Upload data-icon="inline-start" />
           Use in chat
         </ContextMenuItem>
+        {onPushResourceToBisque ? (
+          <ContextMenuItem
+            onSelect={() => {
+              void onPushResourceToBisque(resource);
+            }}
+          >
+            <CloudUpload data-icon="inline-start" />
+            Push to BisQue
+          </ContextMenuItem>
+        ) : null}
         {onRenameResource ? (
           <ContextMenuItem onSelect={() => openResourceRenameDialog(resource)}>
             <Pencil data-icon="inline-start" />
@@ -1552,8 +1611,18 @@ export function ResourceBrowser({
               onOpenCollection(collection);
             }}
           >
-            <FolderOpen data-icon="inline-start" />
+            <Folder data-icon="inline-start" />
             Open
+          </ContextMenuItem>
+        ) : null}
+        {onPushCollectionToBisque ? (
+          <ContextMenuItem
+            onSelect={() => {
+              void onPushCollectionToBisque(collection);
+            }}
+          >
+            <CloudUpload data-icon="inline-start" />
+            Push to BisQue
           </ContextMenuItem>
         ) : null}
         {onRenameCollection ? (
@@ -1991,8 +2060,62 @@ export function ResourceBrowser({
                   onKeyDown={(event) => handleCollectionKeyDown(event, activeResourceCollection)}
                 >
                   <div className="resource-browser-active-collection-copy">
-                    <span>Folder</span>
-                    <p>{activeCollectionName || "Untitled folder"}</p>
+                    <div className="resource-browser-active-collection-path" aria-label="Folder path">
+                      {onClearActiveCollection ? (
+                        <button
+                          type="button"
+                          className="resource-browser-active-collection-root"
+                          aria-label="Go to all resources"
+                          onClick={navigateToAllResources}
+                        >
+                          Resources
+                        </button>
+                      ) : (
+                        <span className="resource-browser-active-collection-root">Resources</span>
+                      )}
+                      <span className="resource-browser-active-collection-separator" aria-hidden="true">
+                        &gt;
+                      </span>
+                      {activeParentCollection && onOpenCollection ? (
+                        <>
+                          <button
+                            type="button"
+                            className="resource-browser-active-collection-parent"
+                            aria-label={`Go up to folder ${
+                              activeParentCollectionName || "Parent folder"
+                            }`}
+                            onClick={navigateFromActiveFolder}
+                          >
+                            {activeParentCollectionName || "Parent folder"}
+                          </button>
+                          <span
+                            className="resource-browser-active-collection-separator"
+                            aria-hidden="true"
+                          >
+                            &gt;
+                          </span>
+                        </>
+                      ) : null}
+                      {canNavigateFromActiveFolder ? (
+                        <button
+                          type="button"
+                          className="resource-browser-active-collection-current"
+                          aria-label={activeFolderNavigationLabel}
+                          onClick={navigateFromActiveFolder}
+                        >
+                          <Folder data-icon="inline-start" />
+                          <strong>{activeFolderName}</strong>
+                        </button>
+                      ) : (
+                        <span
+                          className="resource-browser-active-collection-current"
+                          data-static="true"
+                        >
+                          <Folder data-icon="inline-start" />
+                          <strong>{activeFolderName}</strong>
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="resource-browser-active-collection-actions">
                     {onClearActiveCollection ? (
@@ -2001,6 +2124,7 @@ export function ResourceBrowser({
                         variant="outline"
                         size="sm"
                         className="resource-browser-active-collection-clear"
+                        aria-label="All resources"
                         data-drop-active={draggedResourceId ? "true" : undefined}
                         onDragOver={(event) => {
                           if (onRemoveResourceFromCollection && draggedResourceId) {
@@ -2011,13 +2135,12 @@ export function ResourceBrowser({
                         onDrop={(event) => {
                           void handleAllResourcesDrop(event);
                         }}
-                        onClick={() => {
-                          clearSelection();
-                          onClearActiveCollection();
-                        }}
+                        onClick={navigateToAllResources}
                       >
                         <ArrowLeft data-icon="inline-start" />
-                        All resources
+                        <span className="resource-browser-active-collection-clear-label">
+                          All resources
+                        </span>
                       </Button>
                     ) : null}
                   </div>
@@ -2079,7 +2202,7 @@ export function ResourceBrowser({
                             onOpenCollection(collection);
                           }}
                         >
-                          <FolderOpen data-icon="inline-start" />
+                          <Folder data-icon="inline-start" />
                           <span className="resource-browser-collection-copy">
                             <span className="resource-browser-collection-name">{collection.name}</span>
                             <span className="resource-browser-collection-count">
@@ -2113,7 +2236,7 @@ export function ResourceBrowser({
                 const restoringCollection = Boolean(restoringCollectionIds[collection.collection_id]);
                 return (
                   <div key={collection.collection_id} className="resource-browser-collection-button">
-                    <FolderOpen data-icon="inline-start" />
+                    <Folder data-icon="inline-start" />
                     <span className="resource-browser-collection-copy">
                       <span className="resource-browser-collection-name">{collection.name}</span>
                       <span className="resource-browser-collection-count">
@@ -2355,7 +2478,7 @@ export function ResourceBrowser({
                             }}
                             disabled={!canMoveSelectionToFolder}
                           >
-                            <FolderOpen data-icon="inline-start" />
+                            <Folder data-icon="inline-start" />
                             {collection.name} ·{" "}
                             {Math.max(0, Number(collection.resource_count) || 0).toLocaleString()} resources
                           </DropdownMenuItem>
@@ -2636,11 +2759,15 @@ export function ResourceBrowser({
                               }
                             />
                           ) : null}
-                          {thumbnailReady ? (
-                            <img
-                              src={thumbnailUrlFor(resource)}
+                          {isVideoResource(resource) &&
+                          downloadUrlFor &&
+                          !failedThumbnailIds[resource.file_id] ? (
+                            // Server ffmpeg poster by default; previews on hover.
+                            <VideoThumbnail
+                              posterUrl={thumbnailUrlFor(resource)}
+                              videoUrl={downloadUrlFor(resource)}
                               alt={displayName}
-                              loading="lazy"
+                              className="resource-browser-video-thumb"
                               onError={() =>
                                 setFailedThumbnailIds((previous) => ({
                                   ...previous,
@@ -2648,6 +2775,34 @@ export function ResourceBrowser({
                                 }))
                               }
                             />
+                          ) : thumbnailReady ? (
+                            zScrubThumbnail ? (
+                              <ZScrubThumbnail
+                                fileId={resource.file_id}
+                                alt={displayName}
+                                staticThumbnailUrl={thumbnailUrlFor(resource)}
+                                sliceUrlFor={(z) => zScrubThumbnail!.sliceUrlFor(resource.file_id, z)}
+                                loadZCount={zScrubThumbnail.loadZCount}
+                                onError={() =>
+                                  setFailedThumbnailIds((previous) => ({
+                                    ...previous,
+                                    [resource.file_id]: true,
+                                  }))
+                                }
+                              />
+                            ) : (
+                              <img
+                                src={thumbnailUrlFor(resource)}
+                                alt={displayName}
+                                loading="lazy"
+                                onError={() =>
+                                  setFailedThumbnailIds((previous) => ({
+                                    ...previous,
+                                    [resource.file_id]: true,
+                                  }))
+                                }
+                              />
+                            )
                           ) : (
                             <div className="resource-browser-preview-fallback">
                               <KindIcon className="size-6" aria-hidden="true" />

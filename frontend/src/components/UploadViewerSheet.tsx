@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, FileText, Layers3, RefreshCw } from "lucide-react";
+import { ExternalLink, FileText, FileVideo, Layers3, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -203,6 +203,15 @@ const isPdfUpload = (file: UploadedFileRecord | null | undefined): boolean => {
   );
 };
 
+const isVideoUpload = (file: UploadedFileRecord | null | undefined): boolean => {
+  const contentType = String(file?.content_type ?? "").split(";")[0].trim().toLowerCase();
+  if (contentType.startsWith("video/")) {
+    return true;
+  }
+  const originalName = String(file?.original_name ?? "").trim().toLowerCase();
+  return /\.(mp4|mov|avi|mkv|webm|m4v|mpg|mpeg|wmv|flv|ogv)$/.test(originalName);
+};
+
 const formatDocumentFileSize = (bytes: number | null | undefined): string | null => {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
     return null;
@@ -264,6 +273,53 @@ function PdfViewerPanel({ file, apiClient }: { file: UploadedFileRecord; apiClie
   );
 }
 
+const buildVideoStageMeta = (file: UploadedFileRecord): string =>
+  ["Video", formatDocumentFileSize(file.size_bytes)].filter(Boolean).join(" · ");
+
+function VideoViewerPanel({ file, apiClient }: { file: UploadedFileRecord; apiClient: ApiClient }) {
+  // Raw file streamed via HTTP range (http.ServeFile) — the player only buffers
+  // what is played, so a long video never downloads in full. The poster is the
+  // server ffmpeg frame.
+  const videoUrl = apiClient.uploadDisplayUrl(file.file_id);
+  const posterUrl = apiClient.resourceThumbnailUrl(file.file_id);
+
+  return (
+    <section className="viewer-video-reader" aria-label="Video player" role="region">
+      <div className="viewer-stage-header viewer-pdf-header">
+        <div className="viewer-stage-heading">
+          <div className="viewer-pdf-title-row">
+            <FileVideo aria-hidden="true" />
+            <div className="viewer-stage-title viewer-pdf-title">{file.original_name}</div>
+            <Badge variant="secondary" className="viewer-pdf-badge">
+              Video
+            </Badge>
+          </div>
+          <div className="viewer-stage-meta">{buildVideoStageMeta(file)}</div>
+        </div>
+        <div className="viewer-pdf-actions">
+          <Button asChild type="button" size="sm" variant="outline">
+            <a href={videoUrl} target="_blank" rel="noreferrer">
+              <ExternalLink data-icon="inline-start" />
+              Open in tab
+            </a>
+          </Button>
+        </div>
+      </div>
+
+      <div className="viewer-video-shell">
+        <video
+          className="viewer-video-frame"
+          src={videoUrl}
+          poster={posterUrl}
+          controls
+          playsInline
+          preload="metadata"
+        />
+      </div>
+    </section>
+  );
+}
+
 export function UploadViewerWorkspace({
   uploadedFiles,
   bisqueLinksByFileId,
@@ -311,6 +367,7 @@ export function UploadViewerWorkspace({
     ? uploadedFiles.find((file) => file.file_id === selectedFileId) ?? null
     : null;
   const selectedFileIsPdf = isPdfUpload(selectedFile);
+  const selectedFileIsVideo = isVideoUpload(selectedFile);
   const selectedViewerInfo = selectedFileId ? viewerInfoById[selectedFileId] ?? null : null;
   const selectedViewerError = selectedFileId ? viewerErrorById[selectedFileId] ?? null : null;
 
@@ -319,6 +376,7 @@ export function UploadViewerWorkspace({
       !active ||
       !selectedFileId ||
       selectedFileIsPdf ||
+      selectedFileIsVideo ||
       selectedViewerInfo ||
       selectedViewerError ||
       loadingFileIdRef.current === selectedFileId
@@ -400,7 +458,7 @@ export function UploadViewerWorkspace({
       }
       setLoadingFileId((current) => (current === activeFileId ? null : current));
     };
-  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedViewerError, selectedViewerInfo]);
+  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedFileIsVideo, selectedViewerError, selectedViewerInfo]);
 
   const selectedIndices = selectedFileId ? viewerIndicesById[selectedFileId] ?? null : null;
 
@@ -494,7 +552,7 @@ export function UploadViewerWorkspace({
       className={cn(
         "viewer-workspace",
         !showFileStrip && "viewer-workspace-single-file",
-        selectedFileIsPdf && "viewer-workspace-document",
+        (selectedFileIsPdf || selectedFileIsVideo) && "viewer-workspace-document",
         selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
         className
       )}
@@ -530,6 +588,8 @@ export function UploadViewerWorkspace({
             <div className="viewer-empty">Select a file to start.</div>
           ) : selectedFileIsPdf && selectedFile ? (
             <PdfViewerPanel file={selectedFile} apiClient={apiClient} />
+          ) : selectedFileIsVideo && selectedFile ? (
+            <VideoViewerPanel file={selectedFile} apiClient={apiClient} />
           ) : showBisqueFrame ? (
             <>
               <div className="viewer-stage-header">

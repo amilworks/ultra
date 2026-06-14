@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from ultra_deepagents.imaging.viewerinfo import (
@@ -14,6 +16,23 @@ from ultra_deepagents.imaging.viewerinfo import (
     build_viewer_info,
     paged_depth,
 )
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"image_num_x": 0, "image_num_y": 0, "format": "TIFF"},  # both zero
+        {"image_num_x": 512, "image_num_y": 0, "format": "TIFF"},  # one zero
+        {"format": "TIFF", "image_pixel_depth": 8},  # dims missing entirely
+    ],
+)
+def test_viewer_info_fails_closed_on_degenerate_geometry(meta):
+    # A file libbioimage opens but can't characterize (0-sized canvas) must fail
+    # closed with a decode error (service.py maps the "cannot decode" marker -> 422,
+    # a clean "preview unavailable") rather than emit a 0x0 viewer that the frontend
+    # renders as a blank canvas with no message.
+    with pytest.raises(ValueError, match="cannot decode"):
+        build_viewer_info(meta)
 
 
 def test_paged_multipage_tiff_is_a_scrubbable_z_stack():

@@ -229,6 +229,14 @@ def build_viewer_info(meta: dict[str, Any]) -> dict[str, Any]:
     """Map a libbioimage ``meta`` dict to the viewer-info structure."""
     x = _int(meta, "image_num_x")
     y = _int(meta, "image_num_y")
+    # Fail closed on degenerate geometry. libbioimage will sometimes OPEN a malformed
+    # or unsupported-but-recognized container yet report a 0-sized canvas. Without this
+    # guard build_viewer_info would emit a 0x0 viewer that the frontend renders as a
+    # blank canvas with no error (a C2 "blank canvas" failure). Raise instead so the
+    # service maps it to a clean 422 "preview unavailable" — service.py keys the 422 on
+    # the "cannot decode" marker, and monitoring won't count an undecodable file as a 500.
+    if x <= 0 or y <= 0:
+        raise ValueError(f"image reports no pixel geometry ({x}x{y}); cannot decode")
     z = _int(meta, "image_num_z", 1)
     c = _int(meta, "image_num_c", 1)
     t = _int(meta, "image_num_t", 1)

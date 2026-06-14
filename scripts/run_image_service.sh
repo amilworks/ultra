@@ -14,7 +14,13 @@ NAME="${ULTRA_IMGSVC_NAME:-ultra-imgsvc}"
 IMAGE="${ULTRA_IMGSVC_IMAGE:-imgcnv:build}"
 BUILD_DIR="${ULTRA_IMGSVC_BUILD_DIR:-/tmp/bioimageconvert}"
 PORT="${ULTRA_IMGSVC_PORT:-8099}"
-WORKERS="${ULTRA_IMGSVC_WORKERS:-2}"
+# Each worker is one libbioimage engine (a global decode lock per process), so tile-burst
+# concurrency comes from worker COUNT. Default to half the node's cores (floor 2, cap 8 so a
+# dev box stays sane) — leaving headroom for the in-container convert worker + system. On a
+# dedicated powerful image node, raise it via ULTRA_IMGSVC_WORKERS.
+_cores="$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )"
+_auto_workers=$(( _cores / 2 )); [ "$_auto_workers" -lt 2 ] && _auto_workers=2; [ "$_auto_workers" -gt 8 ] && _auto_workers=8
+WORKERS="${ULTRA_IMGSVC_WORKERS:-$_auto_workers}"
 UPLOADS="${ULTRA_CONTROL_UPLOAD_ROOT:-$ROOT/data/uploads}"
 NATS_URL="${ULTRA_IMGSVC_NATS_URL:-nats://host.docker.internal:4222}"
 JOBS_SUBJECT="${ULTRA_IMGSVC_JOBS_SUBJECT:-ultra.data_agent.jobs}"

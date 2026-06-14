@@ -123,6 +123,85 @@ func TestV2UploadViewerProxiesImageService(t *testing.T) {
 	}
 }
 
+// TestV2UploadViewerPrefersDerivedPyramidTileScheme locks in the fix for the deep-zoom
+// over-fetch: when a derived pyramid exists it serves the tile PIXELS, so the viewer must
+// use the PYRAMID's tile_scheme (its tile size + level grid) even when the source
+// advertised its own. Otherwise the viewer fetches at the source geometry (e.g. 256-px /
+// fewer levels) while pixels come from the 512-tiled pyramid, decoding each tile 4x.
+func TestV2UploadViewerPrefersDerivedPyramidTileScheme(t *testing.T) {
+	t.Parallel()
+
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/viewerinfo" {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.Contains(r.URL.Query().Get("path"), "pyramid") {
+			// The derived pyramid: 512-px tiles, 3 levels — this is what serves the pixels.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"X": 4096, "Y": 4096, "Z": 1, "C": 3, "T": 1},
+				"tile_scheme": map[string]any{"tile_size": 512, "format": "png", "levels": []any{
+					map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
+					map[string]any{"level": 1, "width": 2048, "height": 2048, "downsample": 2},
+					map[string]any{"level": 2, "width": 1024, "height": 1024, "downsample": 4},
+				}},
+			})
+			return
+		}
+		// The source advertises its OWN, mismatched 256-px / 2-level scheme.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"axis_sizes": map[string]any{"X": 4096, "Y": 4096, "Z": 1, "C": 3, "T": 1},
+			"tile_scheme": map[string]any{"tile_size": 256, "format": "png", "levels": []any{
+				map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
+				map[string]any{"level": 1, "width": 2048, "height": 2048, "downsample": 2},
+			}},
+		})
+	}))
+	defer imageSvc.Close()
+
+	mem := store.NewMemoryStore()
+	root := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      root,
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "ortho.tif", testPNGBytes(t, 4, 4))
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName(fileID)), []byte("pyramid bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var vi map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &vi); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := vi["tile_scheme"].(map[string]any)
+	if ts == nil {
+		t.Fatalf("no tile_scheme served: %#v", vi["tile_scheme"])
+	}
+	if int(ts["tile_size"].(float64)) != 512 {
+		t.Fatalf("served tile_size = %v, want 512 (the pyramid's, not the source's 256)", ts["tile_size"])
+	}
+	if levels, _ := ts["levels"].([]any); len(levels) != 3 {
+		t.Fatalf("served %d levels, want 3 (the pyramid's, not the source's 2)", len(levels))
+	}
+	if vi["backend_mode"] != "pyramid" {
+		t.Fatalf("backend_mode = %v, want pyramid", vi["backend_mode"])
+	}
+}
+
 func TestV2UploadViewerFallsBackWhenImageServiceErrors(t *testing.T) {
 	t.Parallel()
 

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,10 +32,35 @@ func writeImageServiceUpstreamError(ctx context.Context, w http.ResponseWriter, 
 	writeError(w, status, fmt.Errorf("image service could not process this request (%d)", status))
 }
 
-// imageServiceHTTPClient proxies tile/atlas reads to the libbioimage image
-// service sidecar. Tiles are small and fast; the timeout guards against a hung
-// sidecar.
-var imageServiceHTTPClient = &http.Client{Timeout: 60 * time.Second}
+// imageServiceHTTPClient proxies tile/atlas reads to the libbioimage image service.
+// It is tuned for a deep-zoom tile BURST against a possibly-REMOTE node:
+//   - a warm keep-alive pool (MaxIdleConnsPerHost) so each viewport's tiles reuse
+//     connections instead of paying a TCP/TLS handshake per tile (fast comms);
+//   - a hard MaxConnsPerHost ceiling so the control plane can never flood the image
+//     service — excess tile requests block on a free connection (backpressure) rather
+//     than piling decode work onto the engine. Sized by ULTRA_CONTROL_IMAGE_SERVICE_MAX_CONNS.
+var imageServiceHTTPClient = newImageServiceHTTPClient()
+
+func newImageServiceHTTPClient() *http.Client {
+	maxConns := 32
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_IMAGE_SERVICE_MAX_CONNS")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			maxConns = v
+		}
+	}
+	return &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:        maxConns * 2,
+			MaxIdleConnsPerHost: maxConns,
+			MaxConnsPerHost:     maxConns,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 5 * time.Second,
+		},
+	}
+}
 
 // imageServiceConfigured reports whether an image-service base URL is set. When
 // it is not, the tile/atlas endpoints report "not configured" exactly as before,

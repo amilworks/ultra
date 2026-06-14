@@ -100,16 +100,21 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	// embedded -tile reader is broken (the OME wrapper); it serves 3D via /atlas
 	// and 2D via /slice, so it must NOT advertise the derived pyramid's tile_scheme
 	// (that would route the viewer to the failing deferred-multiscale tile path).
-	if core["tile_scheme"] == nil && !viewerIsSliceStackVolume(core) {
+	if !viewerIsSliceStackVolume(core) {
 		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+			// The derived pyramid serves the tile PIXELS (resolveUploadTilePathForImageService),
+			// so the viewer must use the PYRAMID's tile_scheme — its tile size and level grid —
+			// even when the source advertised its own. Otherwise the viewer fetches at the
+			// source geometry (e.g. 256-px / 8 levels) while pixels come from the pyramid
+			// (512-px / 11 levels): every pyramid tile is decoded 4x and the engine is
+			// needlessly overloaded on deep zoom. Overriding here aligns grid with data.
 			if pyramid, perr := deps.imageServiceGetJSON(r.Context(), "/viewerinfo", url.Values{"path": {dp}}); perr == nil {
 				mergePyramidTileScheme(core, pyramid)
 			}
-		} else {
-			// Self-heal: a pyramid-eligible image is being viewed without a derived
-			// pyramid (its upload-time enqueue was lost, or it predates conversion).
-			// Kick off derivation now so the viewer gets the bounded DeepZoom path on
-			// a subsequent open; meanwhile it still works via the direct/slice path.
+		} else if core["tile_scheme"] == nil {
+			// No derived pyramid and the source is not directly tile-servable: kick off
+			// derivation so a later open gets the bounded DeepZoom path; the direct/slice
+			// path still works meanwhile.
 			deps.ensurePyramidDerivation(r.Context(), root, record, path, "view")
 		}
 	}

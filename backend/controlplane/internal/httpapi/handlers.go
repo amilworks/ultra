@@ -414,6 +414,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 		_ = deps.ensureLocalBootstrapAccounts(context.Background())
 	}
 	r := chi.NewRouter()
+	// Outermost middleware: a handler panic becomes a clean 500 for that one request
+	// (structured-logged), never a dropped connection or a stderr stack-trace dump.
+	r.Use(recoverPanics)
 	r.Get("/v1/health", handleHealth)
 	r.Get("/v1/config/public", handlePublicConfig(deps))
 	r.Get("/v1/auth/session", handleAuthSession(deps))

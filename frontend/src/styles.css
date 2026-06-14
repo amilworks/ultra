@@ -6232,6 +6232,37 @@ details {
   height: 100%;
 }
 
+/* Deep-zoom scale bar: physical-distance reference, bottom-left of the canvas. */
+.viewer-scale-bar {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.viewer-scale-bar-line {
+  height: 3px;
+  border-radius: 1px;
+  background: rgba(20, 22, 26, 0.82);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.65),
+    0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.viewer-scale-bar-label {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: rgba(20, 22, 26, 0.92);
+  text-shadow:
+    0 0 2px rgba(255, 255, 255, 0.9),
+    0 1px 1px rgba(255, 255, 255, 0.7);
+}
+
 .viewer-orientation-overlay {
   position: absolute;
   inset: 0;

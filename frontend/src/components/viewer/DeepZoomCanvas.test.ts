@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAdaptiveMaxZoom, orderTileLevelsForRendering } from "./DeepZoomCanvas";
+import { classifyWheelGesture, niceScaleBar, orderTileLevelsForRendering } from "./DeepZoomCanvas";
 
 describe("orderTileLevelsForRendering", () => {
   it("puts the overview level first even when backend metadata lists full resolution first", () => {
@@ -15,26 +15,48 @@ describe("orderTileLevelsForRendering", () => {
   });
 });
 
-describe("computeAdaptiveMaxZoom", () => {
-  it("lets a huge image reach (and exceed) native resolution", () => {
-    // 95174px-wide image fit to a 1000px viewport (visible ~= worldWidth). A fixed
-    // cap of 64 could never reach 1:1 (~95x); the adaptive cap must allow it.
-    const worldWidth = 95174;
-    const maxZoom = computeAdaptiveMaxZoom(1000, worldWidth, worldWidth, worldWidth);
-    // ~2x native: 2 * 95174/1000 ~= 190
-    expect(maxZoom).toBeGreaterThan(95); // can reach native 1:1
-    expect(maxZoom).toBeCloseTo((2 * 95174) / 1000, 0);
+describe("classifyWheelGesture", () => {
+  const base = { deltaX: 0, deltaY: 0, deltaMode: 0, ctrlKey: false, metaKey: false };
+
+  it("treats a pinch (ctrlKey) as zoom", () => {
+    expect(classifyWheelGesture({ ...base, deltaY: 3.2, ctrlKey: true })).toBe("zoom");
   });
 
-  it("is robust to normalized world units (world_size != pixel_size)", () => {
-    // Same image but world normalized to ~1 unit wide; fullWidth still 95174px.
-    const maxZoom = computeAdaptiveMaxZoom(1000, 1, 1, 95174);
-    expect(maxZoom).toBeCloseTo((2 * 95174) / 1000, 0);
+  it("treats ⌘/meta + scroll as zoom", () => {
+    expect(classifyWheelGesture({ ...base, deltaY: 20, metaKey: true })).toBe("zoom");
   });
 
-  it("does not over-zoom a small image but still allows some zoom-in", () => {
-    // A 400px image already near native at fit -> modest cap, floored at 8.
-    const maxZoom = computeAdaptiveMaxZoom(800, 400, 400, 400);
-    expect(maxZoom).toBe(8);
+  it("treats a classic mouse wheel (line mode / coarse step) as zoom", () => {
+    expect(classifyWheelGesture({ ...base, deltaY: 3, deltaMode: 1 })).toBe("zoom");
+    expect(classifyWheelGesture({ ...base, deltaY: 100 })).toBe("zoom");
+    expect(classifyWheelGesture({ ...base, deltaY: -120 })).toBe("zoom");
+  });
+
+  it("treats a trackpad two-finger scroll as pan", () => {
+    expect(classifyWheelGesture({ ...base, deltaX: 12, deltaY: 0 })).toBe("pan"); // horizontal
+    expect(classifyWheelGesture({ ...base, deltaY: 8.5 })).toBe("pan"); // fine/fractional
+    expect(classifyWheelGesture({ ...base, deltaY: 12 })).toBe("pan"); // small step
+  });
+});
+
+describe("niceScaleBar", () => {
+  it("returns a round value near the target width", () => {
+    // 2 screen px per unit, target 120px => ~60 units -> rounds to 50
+    const bar = niceScaleBar(2, "m", 120);
+    expect(bar).not.toBeNull();
+    expect(bar!.label).toBe("50 m");
+    expect(bar!.widthPx).toBeCloseTo(100, 0); // 50 * 2
+  });
+
+  it("promotes µm up to mm/m for readability", () => {
+    // 0.002 screen px per µm, target 120 => 60000 µm -> promote to 50 mm
+    const bar = niceScaleBar(0.002, "um", 120);
+    expect(bar).not.toBeNull();
+    expect(bar!.label).toBe("50 mm");
+  });
+
+  it("returns null for an unusable scale", () => {
+    expect(niceScaleBar(0, "m")).toBeNull();
+    expect(niceScaleBar(Number.NaN, "m")).toBeNull();
   });
 });

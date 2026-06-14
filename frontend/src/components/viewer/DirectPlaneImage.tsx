@@ -21,6 +21,7 @@ import {
   sliceBitmapToTexture,
   type ScalarSliceSource,
 } from "./sliceImageCache";
+import { classifyWheelGesture } from "./wheelGesture";
 
 type DirectPlaneImageProps = {
   imageUrl: string;
@@ -474,12 +475,29 @@ export function DirectPlaneImage({
   );
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    if (!interactive) {
+    if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
       return;
     }
     event.preventDefault();
     event.currentTarget.focus({ preventScroll: true });
     const rect = event.currentTarget.getBoundingClientRect();
+    // Two-finger trackpad scroll pans; pinch / ⌘-scroll / mouse wheel zooms toward the
+    // cursor — consistent with the deep-zoom canvas (shared classifyWheelGesture).
+    if (classifyWheelGesture(event) === "pan") {
+      const nextLimits = computeImageScaleLimits(imageSize, viewportSize);
+      setIsFitViewport(false);
+      setViewport((previous) =>
+        panImageViewport(
+          previous,
+          { x: -event.deltaX, y: -event.deltaY },
+          imageSize,
+          viewportSize,
+          nextLimits.minScale,
+          nextLimits.maxScale
+        )
+      );
+      return;
+    }
     const factor = wheelDeltaToZoomFactor(event.deltaY, event.deltaMode, event.ctrlKey, viewportSize.height || rect.height);
     if (Math.abs(factor - 1) < VIEW_EPSILON) {
       return;

@@ -16,6 +16,7 @@ import {
   type ImageViewport,
   type ImageViewportSize,
 } from "./DirectPlaneImage";
+import { classifyWheelGesture } from "./wheelGesture";
 
 type DeepZoomCanvasProps = {
   apiClient: ApiClient;
@@ -38,36 +39,6 @@ export const orderTileLevelsForRendering = (levels: TileLevel[]): TileLevel[] =>
     }
     return left.width * left.height - right.width * right.height;
   });
-
-// classifyWheelGesture maps a wheel event to pan vs zoom, the modern image-viewer
-// convention (Figma/Maps/macOS): a trackpad PINCH and ctrl/⌘-scroll zoom; a
-// trackpad two-finger SCROLL pans; a discrete mouse wheel zooms. Trackpad scroll is
-// distinguished from a mouse wheel heuristically — it carries a horizontal component
-// or fine/fractional pixel deltas, whereas a mouse wheel sends coarse vertical steps.
-// Pure + exported for tests.
-export const classifyWheelGesture = (event: {
-  deltaX: number;
-  deltaY: number;
-  deltaMode: number;
-  ctrlKey: boolean;
-  metaKey: boolean;
-}): "zoom" | "pan" => {
-  if (event.ctrlKey || event.metaKey) {
-    return "zoom"; // pinch (macOS fires ctrlKey) or ⌘/ctrl-scroll
-  }
-  if (event.deltaMode !== 0) {
-    return "zoom"; // line/page deltas come from a classic mouse wheel
-  }
-  if (event.deltaX !== 0) {
-    return "pan"; // horizontal component → trackpad two-finger scroll
-  }
-  // Pure-vertical pixel scroll: fine/fractional steps are a trackpad pan; coarse
-  // integer steps (typical mouse wheel notch ~100px) are a zoom.
-  if (!Number.isInteger(event.deltaY) || Math.abs(event.deltaY) < 50) {
-    return "pan";
-  }
-  return "zoom";
-};
 
 // formatZoomReadout shows zoom as % of native (1 source px == 1 screen px == 100%),
 // the convention scientists expect (Photoshop/Preview). "Fit" when at the fit scale.

@@ -3,6 +3,7 @@ from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.bisque.tools import (
     control_post_json,
+    create_bisque_dataset,
     download_bisque_resources,
     search_bisque_resources,
     upload_bisque_outputs,
@@ -40,6 +41,7 @@ def test_research_agent_registers_bisque_tools_for_selected_resource_context(mon
     assert "bisque_search_resources" in tool_names
     assert "bisque_download_resource" in tool_names
     assert "bisque_upload_files" in tool_names
+    assert "bisque_create_dataset" in tool_names
     manifest_tool = next(
         tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
     )
@@ -232,6 +234,69 @@ def test_bisque_search_supports_owner_recent_extension_filters(monkeypatch):
     assert result["results"][0]["name"] == "EnrNE_recent.PNG"
 
 
+def test_bisque_search_forwards_numeric_metadata_filters(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"count": 3, "results": []}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    # Numeric value passed as an int and op upper-cased — both normalized.
+    search_bisque_resources(
+        settings,
+        resource_type="image",
+        tag_query="modality:CT",
+        metadata_filters=[{"tag": "age", "op": "GT", "value": 50}],
+        scope="owner",
+        count_all=True,
+    )
+
+    assert captured["json"]["tag_query"] == "modality:CT"
+    assert captured["json"]["metadata_filters"] == [
+        {"tag": "age", "op": "gt", "value": "50"}
+    ]
+    # The relational comparison must NOT be smuggled into tag_query, where BisQue
+    # would compare it lexically.
+    assert ">" not in captured["json"]["tag_query"]
+
+
+def test_bisque_metadata_filter_list_parses_json_string_and_single_dict():
+    from ultra_deepagents.bisque.tools import _metadata_filter_list
+
+    assert _metadata_filter_list('[{"tag":"age","op":"gte","value":"50"}]') == [
+        {"tag": "age", "op": "gte", "value": "50"}
+    ]
+    assert _metadata_filter_list({"tag": "modality", "value": "CT"}) == [
+        {"tag": "modality", "op": "eq", "value": "CT"}
+    ]
+    assert _metadata_filter_list([{"op": "gt", "value": "1"}]) == []
+    assert _metadata_filter_list(None) == []
+
+
 def test_bisque_control_call_sends_run_scoped_session_and_principal_reference(monkeypatch):
     settings = RuntimeSettings(
         openai_base_url="http://localhost:8001/v1",
@@ -342,6 +407,144 @@ def test_bisque_upload_accepts_artifact_ids_without_credentials(monkeypatch):
     assert "Authorization" not in captured["headers"]
     assert "should-not-leak" not in repr(captured)
     assert result["uploads"][0]["artifact_id"] == "artifact-report"
+
+
+def test_bisque_control_call_sends_worker_token_when_configured(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        control_worker_token="worker-secret",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-bisque",
+        goal="Use bqapi",
+        run_metadata={"bisque_session_id": "bisque_session_opaque"},
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    control_post_json(settings, "/v2/bisque/search", {"resource_type": "image"}, context=context)
+
+    assert captured["headers"]["X-Ultra-Worker-Token"] == "worker-secret"
+    assert captured["headers"]["X-Ultra-Run-Id"] == "run-bisque"
+    assert captured["headers"]["X-Ultra-Bisque-Session-Id"] == "bisque_session_opaque"
+
+
+def test_bisque_create_dataset_posts_members_to_control_plane(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        openai_api_key="should-not-leak",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-bisque",
+        goal="Group uploads into a dataset",
+        run_metadata={"bisque_session_id": "bisque_session_opaque"},
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "name": "analysis outputs",
+                "resource_uri": "https://bisque.example.org/data_service/00-DS",
+                "resource_uniq": "00-DS",
+                "member_count": 2,
+                "client_view_url": "https://bisque.example.org/client_service/view?resource=00-DS",
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    result = create_bisque_dataset(
+        settings,
+        name="analysis outputs",
+        resource_uris=[
+            "https://bisque.example.org/data_service/00-A",
+            "https://bisque.example.org/data_service/00-B",
+        ],
+        context=context,
+    )
+
+    assert captured["url"] == "http://control.test/v2/bisque/datasets"
+    assert captured["json"] == {
+        "name": "analysis outputs",
+        "resource_uris": [
+            "https://bisque.example.org/data_service/00-A",
+            "https://bisque.example.org/data_service/00-B",
+        ],
+    }
+    assert captured["headers"]["X-Ultra-Bisque-Session-Id"] == "bisque_session_opaque"
+    assert "Authorization" not in captured["headers"]
+    assert result["ok"] is True
+    assert result["resource_uniq"] == "00-DS"
+    assert result["member_count"] == 2
+
+
+def test_bisque_create_dataset_requires_name_and_members():
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+
+    missing_name = create_bisque_dataset(settings, name="  ", resource_uris=["https://x"])
+    assert missing_name == {"ok": False, "error": "dataset_name_required"}
+
+    missing_members = create_bisque_dataset(settings, name="dataset", resource_uris=[])
+    assert missing_members == {"ok": False, "error": "no_member_resource_uris"}
 
 
 def test_bisque_download_returns_structured_failure_without_tool_exception(monkeypatch):
@@ -585,6 +788,7 @@ def test_bisque_workspace_upload_stages_local_file_then_uploads_to_bisque(monkey
                             {
                                 "file_id": "file-overlay",
                                 "resource_uri": "https://bisque.example.org/data_service/image/uploaded",
+                                "client_view_url": "https://bisque.example.org/client_service/view?resource=https://bisque.example.org/data_service/image/uploaded",
                             }
                         ],
                     }
@@ -603,6 +807,211 @@ def test_bisque_workspace_upload_stages_local_file_then_uploads_to_bisque(monkey
         "http://control.test/v2/uploads",
         "http://control.test/v2/bisque/upload",
     ]
+    assert result["ok"] is True
     assert result["uploaded_file_ids"] == ["file-overlay"]
-    assert result["bisque_upload"]["uploads"][0]["resource_uri"].endswith("/uploaded")
+    assert result["bisque_upload_files"]["uploads"][0]["resource_uri"].endswith("/uploaded")
+    assert result["pushed"][0]["via"] == "workspace_file"
+    assert result["pushed"][0]["resource_uri"].endswith("/uploaded")
+    # The viewable BisQue link is surfaced so the model reports it instead of the
+    # bare data_service resource_uri.
+    assert (
+        result["pushed"][0]["client_view_url"]
+        == "https://bisque.example.org/client_service/view?resource=https://bisque.example.org/data_service/image/uploaded"
+    )
+    assert "%3A" not in result["pushed"][0]["client_view_url"]
     assert "should-not-leak" not in repr(calls)
+
+
+def test_bisque_push_prior_artifact_resolves_across_turns(monkeypatch, tmp_path):
+    # Reproduces the reported failure: a figure generated in an EARLIER run is asked
+    # to be pushed in a later turn. The later run has a fresh empty workspace; the
+    # figure exists only as a prior durable artifact under the artifact store.
+    artifact_store = tmp_path / "artifacts"
+    prior_run_dir = artifact_store / "run-prior"
+    prior_figure = prior_run_dir / "outputs" / "ct_scan_visualization.png"
+    prior_figure.parent.mkdir(parents=True)
+    prior_figure.write_bytes(b"\x89PNG\r\n\x1a\nct-figure")
+
+    current_workspace = tmp_path / "workspaces" / "run-now"
+    current_artifacts = artifact_store / "run-now"
+    current_workspace.mkdir(parents=True)
+    current_artifacts.mkdir(parents=True)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    artifact_descriptor = {
+        "type": "artifact",
+        "artifact_id": "artifact_run_prior_abc123",
+        "run_id": "run-prior",
+        "kind": "figure",
+        "path": "outputs/ct_scan_visualization.png",
+        "source_path": str(prior_figure.resolve()),
+        "storage_uri": f"file://{prior_figure.resolve()}",
+    }
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-now",
+        goal="Push these resulting images to bisque",
+        workspace_root=str(current_workspace),
+        artifact_root=str(current_artifacts),
+        resource_descriptors=(artifact_descriptor,),
+        run_metadata={"bisque_session_id": "bisque_session_opaque"},
+    )
+    calls: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "count": 1,
+                "uploads": [
+                    {
+                        "artifact_id": "artifact_run_prior_abc123",
+                        "resource_uri": "https://bisque.example.org/data_service/00-CT",
+                        "name": "ct_scan_visualization.png",
+                        "resource_uniq": "00-CT",
+                        "client_view_url": "https://bisque.example.org/client_service/view?resource=https://bisque.example.org/data_service/00-CT",
+                    }
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None, headers=None, files=None):
+            calls.append({"url": url, "json": json, "files": files})
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    # The agent passes the path from its earlier message, exactly as in the bug report.
+    result = upload_bisque_workspace_files(
+        settings,
+        paths=["/outputs/ct_scan_visualization.png"],
+        context=context,
+    )
+
+    # No multipart re-upload: the durable artifact is pushed straight by artifact_id.
+    assert [call["url"] for call in calls] == ["http://control.test/v2/bisque/upload"]
+    assert calls[0]["json"] == {"file_ids": [], "artifact_ids": ["artifact_run_prior_abc123"]}
+    assert result["ok"] is True
+    assert result["artifact_ids"] == ["artifact_run_prior_abc123"]
+    assert result["pushed"][0]["via"] == "durable_artifact"
+    assert result["pushed"][0]["resource_uri"].endswith("/00-CT")
+    assert result["pushed"][0]["client_view_url"].endswith(
+        "/client_service/view?resource=https://bisque.example.org/data_service/00-CT"
+    )
+
+
+def test_bisque_push_prior_artifact_resolves_by_basename(monkeypatch, tmp_path):
+    artifact_store = tmp_path / "artifacts"
+    prior_figure = artifact_store / "run-prior" / "outputs" / "ct_scan_visualization.png"
+    prior_figure.parent.mkdir(parents=True)
+    prior_figure.write_bytes(b"fig")
+    current_artifacts = artifact_store / "run-now"
+    current_artifacts.mkdir(parents=True)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-now",
+        goal="push it",
+        workspace_root=str(workspace),
+        artifact_root=str(current_artifacts),
+        resource_descriptors=(
+            {
+                "type": "artifact",
+                "artifact_id": "artifact_run_prior_def456",
+                "run_id": "run-prior",
+                "path": "outputs/ct_scan_visualization.png",
+                "source_path": str(prior_figure.resolve()),
+            },
+        ),
+    )
+    calls: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"count": 1, "uploads": [{"artifact_id": "artifact_run_prior_def456", "resource_uri": "https://b/00-X"}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None, headers=None, files=None):
+            calls.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    result = upload_bisque_workspace_files(settings, paths=["ct_scan_visualization.png"], context=context)
+    assert calls[0]["json"]["artifact_ids"] == ["artifact_run_prior_def456"]
+    assert result["ok"] is True
+
+
+def test_bisque_push_reports_unresolved_path_without_uploading(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    artifacts = tmp_path / "art" / "run-now"
+    workspace.mkdir(parents=True)
+    artifacts.mkdir(parents=True)
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-now",
+        goal="push missing",
+        workspace_root=str(workspace),
+        artifact_root=str(artifacts),
+    )
+
+    def fail_client(*args, **kwargs):
+        raise AssertionError("must not call control plane for unresolved paths")
+
+    monkeypatch.setattr("httpx.Client", fail_client)
+
+    result = upload_bisque_workspace_files(settings, paths=["/outputs/nope.png"], context=context)
+    assert result["ok"] is False
+    assert result["error"] == "no_resolvable_paths"
+    assert result["missing_paths"] == ["/outputs/nope.png"]

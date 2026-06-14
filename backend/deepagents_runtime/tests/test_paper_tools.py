@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from ultra_deepagents.agent import build_research_agent
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
@@ -252,4 +251,12 @@ def test_literature_reviewer_subagent_has_narrow_paper_tools(monkeypatch) -> Non
     assert "search_paper" in tool_names
     assert "rarespot_ecology_inference" not in tool_names
     assert "page-grounded" in literature["system_prompt"].lower()
+    assert literature["response_format"]["required"] == [
+        "summary",
+        "key_findings",
+        "artifacts",
+        "failures",
+        "confidence",
+        "confidence_basis",
+    ]
     assert "render_paper_page" in captured["system_prompt"]

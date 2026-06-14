@@ -187,8 +187,9 @@ describe("ApiClient V2 chat bridge", () => {
       }
       if (url.includes("/v2/runs/run_v2_123/events") && url.includes("stream=true")) {
         const body = [
+          'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"run.token_usage","level":"debug","message":"","payload":{"usage_event_id":"evt_usage_1","input_tokens":10,"output_tokens":2,"total_tokens":12,"model":"deepseek_v4"}}\n\n',
           'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"message.delta","level":"info","payload":{"delta":"Hello"}}\n\n',
-          'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"run.completed","level":"info","payload":{"response_text":"Hello","conversation_title":"Matplotlib Plot Setup","title_generation":{"strategy":"llm","model":"gpt-title"}}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_v2_123","thread_id":"thread_v2_123","event_kind":"run.completed","level":"info","payload":{"response_text":"Hello","conversation_title":"Matplotlib Plot Setup","title_generation":{"strategy":"llm","model":"gpt-title"},"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"model":"deepseek_v4"}}}\n\n',
         ].join("");
         return new Response(encoder.encode(body), {
           status: 200,
@@ -246,7 +247,13 @@ describe("ApiClient V2 chat bridge", () => {
     });
     expect(tokens).toEqual(["Hello"]);
     expect(runStarts).toEqual(["run_v2_123"]);
-    expect(runEvents).toEqual(["message.delta", "run.completed"]);
+    expect(response.metadata?.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 2,
+      total_tokens: 12,
+      model: "deepseek_v4",
+    });
+    expect(runEvents).toEqual(["run.token_usage", "message.delta", "run.completed"]);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/threads",
       "https://ultra.example.org/v2/threads/thread_v2_123/runs",
@@ -6929,5 +6936,46 @@ describe("ApiClient V2 chat bridge", () => {
       "https://ultra.example.org/v2/runs/run_long/events?limit=2&after_sequence=0",
       "https://ultra.example.org/v2/runs/run_long/events?limit=2&after_sequence=2",
     ]);
+  });
+});
+
+describe("ApiClient viewer request timeouts", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("times out a hung histogram request as a 504 instead of spinning forever", async () => {
+    // A fetch that never resolves until its AbortSignal fires — i.e. a hung image service.
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const pending = client.getUploadHistogram("file_x");
+    const expectation = expect(pending).rejects.toMatchObject({ status: 504 });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves normally when the server responds before the timeout", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ channels: [], bins: 256 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await expect(client.getUploadHistogram("file_x")).resolves.toMatchObject({ bins: 256 });
   });
 });

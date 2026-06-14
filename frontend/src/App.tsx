@@ -87,7 +87,7 @@ import {
   DEFAULT_BISQUE_BROWSER_URL,
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
-import { formatBytes } from "./lib/format";
+import { formatBytes, formatTokens } from "./lib/format";
 import {
   buildBisqueNavLinks,
   inferBisqueRootFromUrl,
@@ -185,12 +185,14 @@ import type {
   ChatResponse,
   ChatMessage,
   ConversationRecord,
+  CurrentUserProfile,
   ProgressEvent,
   ResourceComputationSuggestion,
   ResourceCollectionRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
   RunEvent,
+  RunTokenUsage,
   Sam3InteractiveRequest,
   SantaBarbaraWeatherResponse,
   SelectionContext,
@@ -334,6 +336,7 @@ type WorkOSRedirectScreenProps = {
   checking: boolean;
   loading: boolean;
   errorMessage?: string | null;
+  statusMessage?: string | null;
   onRetry: () => Promise<void> | void;
 };
 
@@ -341,17 +344,21 @@ function WorkOSRedirectScreen({
   checking,
   loading,
   errorMessage,
+  statusMessage,
   onRetry,
 }: WorkOSRedirectScreenProps) {
   const title = checking
     ? "Checking your session"
-    : errorMessage
-      ? "Unable to open WorkOS"
-      : "Opening WorkOS sign in";
+    : statusMessage
+      ? "Account not yet available"
+      : errorMessage
+        ? "Unable to open WorkOS"
+        : "Opening WorkOS sign in";
   const message =
+    statusMessage ||
     errorMessage ||
     "Taking you directly to the BisQue Ultra sign-in page.";
-  const canRetry = !checking && !loading && Boolean(errorMessage);
+  const canRetry = !checking && !loading && Boolean(errorMessage || statusMessage);
 
   return (
     <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
@@ -2606,6 +2613,7 @@ const ConversationMessageRow = memo(
       () => summaryModeLabelForMessage(message),
       [message]
     );
+    const tokenUsage = useMemo(() => extractRunTokenUsage(message), [message]);
     if (!isAssistant) {
       return (
         <Message
@@ -2695,7 +2703,7 @@ const ConversationMessageRow = memo(
                 fallbackLabel={thinkingBarText}
               />
             </Suspense>
-          ) : reasonedDurationLabel || summaryModeLabel ? (
+          ) : reasonedDurationLabel || summaryModeLabel || tokenUsage ? (
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
               {reasonedDurationLabel ? (
                 <span>{`Reasoned for ${reasonedDurationLabel}`}</span>
@@ -2703,6 +2711,16 @@ const ConversationMessageRow = memo(
               {summaryModeLabel ? (
                 <span className="text-[11px] font-medium tracking-[0.02em] text-sky-600/70 dark:text-sky-300/68">
                   {summaryModeLabel}
+                </span>
+              ) : null}
+              {tokenUsage ? (
+                <span
+                  className="tabular-nums"
+                  title={`${tokenUsage.input_tokens.toLocaleString()} input · ${tokenUsage.output_tokens.toLocaleString()} output${
+                    tokenUsage.model ? ` · ${tokenUsage.model}` : ""
+                  }`}
+                >
+                  {`${formatTokens(tokenUsage.total_tokens)} tokens`}
                 </span>
               ) : null}
             </div>
@@ -7130,6 +7148,60 @@ const formatReasoningDuration = (seconds: number | null | undefined): string | n
   return `${(value / 3600).toFixed(1)}h`;
 };
 
+const readTokenUsageRecord = (value: unknown): RunTokenUsage | null => {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const input = Number(record.input_tokens);
+  const output = Number(record.output_tokens);
+  const total = Number(record.total_tokens);
+  const safeInput = Number.isFinite(input) && input > 0 ? input : 0;
+  const safeOutput = Number.isFinite(output) && output > 0 ? output : 0;
+  const totalTokens =
+    Number.isFinite(total) && total > 0 ? total : safeInput + safeOutput;
+  if (!(totalTokens > 0)) {
+    return null;
+  }
+  return {
+    input_tokens: safeInput,
+    output_tokens: safeOutput,
+    total_tokens: totalTokens,
+    model: typeof record.model === "string" ? record.model : undefined,
+  };
+};
+
+const extractRunTokenUsage = (message: UiMessage): RunTokenUsage | null => {
+  const metadata = message.responseMetadata;
+  if (metadata && typeof metadata === "object") {
+    const fromMetadata = readTokenUsageRecord(
+      (metadata as Record<string, unknown>).usage
+    );
+    if (fromMetadata) {
+      return fromMetadata;
+    }
+  }
+  if (Array.isArray(message.runEvents)) {
+    for (let index = message.runEvents.length - 1; index >= 0; index -= 1) {
+      const event = message.runEvents[index] as unknown as Record<string, unknown>;
+      const kind = String(event?.event_kind ?? event?.event_type ?? "");
+      if (kind !== "run.completed") {
+        continue;
+      }
+      const payload = event?.payload;
+      if (payload && typeof payload === "object") {
+        const fromEvent = readTokenUsageRecord(
+          (payload as Record<string, unknown>).usage
+        );
+        if (fromEvent) {
+          return fromEvent;
+        }
+      }
+    }
+  }
+  return null;
+};
+
 const toolCardImagesFromBisqueResourceRows = (
   rows: ToolResourceRow[],
   limit: number = 6
@@ -7671,6 +7743,7 @@ export function App() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
   const hostedAuthRedirectAttemptedRef = useRef(false);
+  const sessionRevalidatedAtRef = useRef(0);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const isPhoneView = useBreakpoint(641);
 
@@ -9453,14 +9526,30 @@ export function App() {
     if (authStatus !== "unauthenticated") {
       return;
     }
-    if (authError || hostedAuthRedirectAttemptedRef.current) {
+    // A pending/disabled account notice means WorkOS sign-in succeeded but the
+    // Ultra account is not approved; auto-redirecting again would loop through
+    // AuthKit forever.
+    if (authError || authNotice || hostedAuthRedirectAttemptedRef.current) {
       return;
     }
     hostedAuthRedirectAttemptedRef.current = true;
     void startHostedAuth().catch(() => {
       // startHostedAuth stores the visible auth error state.
     });
-  }, [authError, authProvider, authStatus, startHostedAuth]);
+  }, [authError, authNotice, authProvider, authStatus, startHostedAuth]);
+
+  const loadCurrentUserProfile = useCallback(
+    () => apiClient.getCurrentUser(),
+    [apiClient]
+  );
+  const saveCurrentUserProfile = useCallback(
+    (profile: CurrentUserProfile) => apiClient.updateCurrentUser(profile),
+    [apiClient]
+  );
+  const loadCurrentUserTokenUsage = useCallback(
+    (days: number) => apiClient.getTokenUsage(days),
+    [apiClient]
+  );
 
   const linkBisqueAccountFromSettings = useCallback(
     async (payload: { username: string; password: string }): Promise<{ imageCount: number }> => {
@@ -9575,6 +9664,40 @@ export function App() {
     setAdminRunRequeueingById({});
     setAdminDeletingConversationKey(null);
   }, []);
+
+  // Re-validate the session when the user returns to a long-idle tab so an
+  // expired or revoked WorkOS session routes back to sign-in instead of
+  // surfacing as scattered request failures. Only a definitive
+  // "authenticated: false" signs the user out; network errors are ignored.
+  useEffect(() => {
+    if (authStatus !== "authenticated" || typeof document === "undefined") {
+      return;
+    }
+    const revalidateSession = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      const now = Date.now();
+      if (now - sessionRevalidatedAtRef.current < 60_000) {
+        return;
+      }
+      sessionRevalidatedAtRef.current = now;
+      void apiClient
+        .getBisqueSession()
+        .then((session) => {
+          if (session.authenticated) {
+            return;
+          }
+          clearAuthViewState();
+          setAuthNotice(accountApprovalMessageFromSession(session));
+        })
+        .catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", revalidateSession);
+    return () => {
+      document.removeEventListener("visibilitychange", revalidateSession);
+    };
+  }, [apiClient, authStatus, clearAuthViewState]);
 
   const logoutBisque = useCallback(async (): Promise<void> => {
     let logoutUrl = "";
@@ -10650,6 +10773,84 @@ export function App() {
       }
     },
     [activeResourceCollection?.collection_id, apiClient]
+  );
+
+  const pushResourceToBisque = useCallback(
+    async (resource: ResourceRecord): Promise<void> => {
+      const fileId = String(resource.file_id || "").trim();
+      if (!fileId) {
+        return;
+      }
+      if (!bisqueCredentialsLinked) {
+        setResourcesError(
+          "Link your BisQue account in Settings before pushing resources to BisQue."
+        );
+        return;
+      }
+      setResourcesError(null);
+      try {
+        const response = await apiClient.pushResourcesToBisque({ fileIds: [fileId] });
+        const uploaded = response.uploads[0];
+        const viewUrl = String(uploaded?.client_view_url ?? "").trim();
+        showSuccessToast(`Pushed "${resource.original_name}" to BisQue`, {
+          description: uploaded?.resource_uri ?? undefined,
+          action: viewUrl
+            ? {
+                label: "View in BisQue",
+                onClick: () => {
+                  window.open(viewUrl, "_blank", "noopener,noreferrer");
+                },
+              }
+            : undefined,
+        });
+      } catch (error) {
+        setResourcesError(normalizeApiError(error));
+      }
+    },
+    [apiClient, bisqueCredentialsLinked]
+  );
+
+  const pushCollectionToBisque = useCallback(
+    async (collection: ResourceCollectionRecord): Promise<void> => {
+      const collectionId = String(collection.collection_id || "").trim();
+      if (!collectionId) {
+        return;
+      }
+      if (!bisqueCredentialsLinked) {
+        setResourcesError(
+          "Link your BisQue account in Settings before pushing folders to BisQue."
+        );
+        return;
+      }
+      setResourcesError(null);
+      try {
+        const response = await apiClient.pushResourcesToBisque({
+          collectionIds: [collectionId],
+        });
+        const dataset = response.datasets[0];
+        const viewUrl = String(dataset?.client_view_url ?? "").trim();
+        const fileCount = response.uploads.length;
+        showSuccessToast(
+          `Pushed folder "${collection.name}" to BisQue as a dataset`,
+          {
+            description: `${fileCount} ${fileCount === 1 ? "file" : "files"} uploaded · dataset "${
+              dataset?.name ?? collection.name
+            }"`,
+            action: viewUrl
+              ? {
+                  label: "View in BisQue",
+                  onClick: () => {
+                    window.open(viewUrl, "_blank", "noopener,noreferrer");
+                  },
+                }
+              : undefined,
+          }
+        );
+      } catch (error) {
+        setResourcesError(normalizeApiError(error));
+      }
+    },
+    [apiClient, bisqueCredentialsLinked]
   );
 
   const loadResourceShareGrantsFromResources = useCallback(
@@ -13400,6 +13601,7 @@ export function App() {
           checking={authStatus === "checking"}
           loading={authSubmitting || authStatus === "checking"}
           errorMessage={authStatus === "checking" ? null : authError}
+          statusMessage={authStatus === "checking" ? null : authNotice}
           onRetry={retryHostedAuth}
         />
       );
@@ -13771,6 +13973,9 @@ export function App() {
             onLogout={logoutBisque}
             onUnlinkBisqueAccount={unlinkBisqueAccount}
             onLinkBisqueAccount={linkBisqueAccountFromSettings}
+            loadProfile={loadCurrentUserProfile}
+            saveProfile={saveCurrentUserProfile}
+            loadTokenUsage={loadCurrentUserTokenUsage}
             formatError={normalizeApiError}
           />
         </Suspense>
@@ -13940,9 +14145,20 @@ export function App() {
                 thumbnailUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceThumbnailUrl(resource.file_id)
                 }
+                zScrubThumbnail={{
+                  // Gallery z-scrub is a transient thumbnail (never measured), so
+                  // request bounded-resolution frames: the backend serves a small
+                  // pyramid level for large planes, keeping rapid scrub snappy.
+                  sliceUrlFor: (fileId: string, z: number) =>
+                    apiClient.uploadSliceUrl(fileId, { axis: "z", z, fullResolution: false }),
+                  loadZCount: (fileId: string) =>
+                    apiClient.getUploadViewer(fileId).then((info) => info.axis_sizes.Z),
+                }}
                 downloadUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceDownloadUrl(resource.file_id)
                 }
+                onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
+                onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
               />
             </Suspense>
           ) : activePanel === "training" ? (

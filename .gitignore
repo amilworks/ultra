@@ -45,6 +45,7 @@ bqapi/
 # Internal-only reference material
 docs/superpowers/
 platform/bisque/
+planning/
 
 # Local database / volume exports
 sqlite:/

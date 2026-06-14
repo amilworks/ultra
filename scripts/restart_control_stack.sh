@@ -54,6 +54,7 @@ ULTRA_CONTROL_NATS_URL="${ULTRA_CONTROL_NATS_URL:-nats://127.0.0.1:4222}"
 ULTRA_CONTROL_HTTP_ADDR="${ULTRA_CONTROL_HTTP_ADDR:-$API_HOST:$API_PORT}"
 ULTRA_CONTROL_ARTIFACT_ROOT="${ULTRA_CONTROL_ARTIFACT_ROOT:-$ROOT/data/artifacts}"
 ULTRA_CONTROL_UPLOAD_ROOT="${ULTRA_CONTROL_UPLOAD_ROOT:-${ULTRA_RESOURCE_ROOT:-$ROOT/data/uploads}}"
+ULTRA_CONTROL_IMAGE_SERVICE_URL="${ULTRA_CONTROL_IMAGE_SERVICE_URL:-}"
 ULTRA_CONTROL_DEV_ADMIN_ENABLED="${ULTRA_CONTROL_DEV_ADMIN_ENABLED:-true}"
 ULTRA_CONTROL_BISQUE_ROOT_URL="${ULTRA_CONTROL_BISQUE_ROOT_URL:-${BISQUE_ROOT:-${BISQUE_SERVER:-}}}"
 ULTRA_CONTROL_BISQUE_USERNAME="${ULTRA_CONTROL_BISQUE_USERNAME:-${BISQUE_USERNAME:-${BISQUE_USER:-}}}"
@@ -192,6 +193,40 @@ kill_pid_file() {
     fi
   fi
   rm -f "$pid_file"
+}
+
+kill_repo_python_module() {
+  local module="$1"
+  local label="$2"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+  local pids
+  pids="$(ps -axo pid=,command= | awk -v module="$module" 'index($0, "-m " module) > 0 { print $1 }' || true)"
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+  local pid cwd matched_pids
+  matched_pids=""
+  for pid in $pids; do
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+    case "$cwd" in
+      "$ROOT"|"$ROOT"/*)
+        matched_pids="${matched_pids:+$matched_pids }$pid"
+        ;;
+    esac
+  done
+  if [ -z "$matched_pids" ]; then
+    return 0
+  fi
+  log "Stopping stale $label process(es): $matched_pids"
+  kill $matched_pids >/dev/null 2>&1 || true
+  sleep 1
+  for pid in $matched_pids; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+  done
 }
 
 kill_port() {
@@ -348,6 +383,7 @@ start_control() {
     ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
     ULTRA_CONTROL_ARTIFACT_ROOT="$ULTRA_CONTROL_ARTIFACT_ROOT" \
     ULTRA_CONTROL_UPLOAD_ROOT="$ULTRA_CONTROL_UPLOAD_ROOT" \
+    ULTRA_CONTROL_IMAGE_SERVICE_URL="$ULTRA_CONTROL_IMAGE_SERVICE_URL" \
     ULTRA_CONTROL_DEV_ADMIN_ENABLED="$ULTRA_CONTROL_DEV_ADMIN_ENABLED" \
     ULTRA_CONTROL_BISQUE_ROOT_URL="$ULTRA_CONTROL_BISQUE_ROOT_URL" \
     ULTRA_CONTROL_BISQUE_USERNAME="$ULTRA_CONTROL_BISQUE_USERNAME" \
@@ -403,7 +439,7 @@ start_deepagents_worker() {
       ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT="${ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT:-0}" \
       ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS="${ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS:-0}" \
       ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES="${ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES:-0}" \
-      ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY="${ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-2}" \
+      ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY="${ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-64}" \
       ULTRA_DEEPAGENTS_WORKER_ACK_WAIT_SECONDS="${ULTRA_DEEPAGENTS_WORKER_ACK_WAIT_SECONDS:-600}" \
       ULTRA_DEEPAGENTS_WORKER_ACK_PROGRESS_INTERVAL_SECONDS="${ULTRA_DEEPAGENTS_WORKER_ACK_PROGRESS_INTERVAL_SECONDS:-60}" \
       ULTRA_DEEPAGENTS_WORKER_MAX_DELIVER="${ULTRA_DEEPAGENTS_WORKER_MAX_DELIVER:-5}" \
@@ -435,7 +471,7 @@ start_deepagents_worker() {
       ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT="${ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT:-0}" \
       ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS="${ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS:-0}" \
       ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES="${ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES:-0}" \
-      ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY="${ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-2}" \
+      ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY="${ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-64}" \
       ULTRA_DEEPAGENTS_WORKER_ACK_WAIT_SECONDS="${ULTRA_DEEPAGENTS_WORKER_ACK_WAIT_SECONDS:-600}" \
       ULTRA_DEEPAGENTS_WORKER_ACK_PROGRESS_INTERVAL_SECONDS="${ULTRA_DEEPAGENTS_WORKER_ACK_PROGRESS_INTERVAL_SECONDS:-60}" \
       ULTRA_DEEPAGENTS_WORKER_MAX_DELIVER="${ULTRA_DEEPAGENTS_WORKER_MAX_DELIVER:-5}" \
@@ -508,6 +544,8 @@ stop_services() {
   kill_pid_file "$WORKER_PID_FILE" "Deep Agents worker"
   kill_pid_file "$CONTROL_PID_FILE" "Go control plane"
   stop_screen_sessions
+  kill_repo_python_module "ultra_deepagents.rarespot_worker" "RareSpot worker"
+  kill_repo_python_module "ultra_deepagents.nats_worker" "Deep Agents worker"
   kill_port "$API_PORT" "Go control plane"
   if [ "$ULTRA_STACK_START_FRONTEND" = "1" ]; then
     kill_port "$FRONTEND_PORT" "frontend"

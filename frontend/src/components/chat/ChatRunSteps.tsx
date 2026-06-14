@@ -159,6 +159,16 @@ const buildStepItems = (
     const nestedPayload = toRecord(payload.payload);
     const eventType = String(event.event_type || "").trim().toLowerCase();
     const detail = cleanDetail(payload.message);
+    if (eventType === "trace.reasoning.delta") {
+      upsertStep("reasoning", {
+        id: "reasoning",
+        kind: "phase",
+        label: "Thinking",
+        detail: cleanDetail(payload.text),
+        status: toStepStatus(payload.status ?? "running"),
+      });
+      return;
+    }
     if (eventType.startsWith("tool_call.")) {
       const toolName = String(payload.tool_name ?? payload.tool ?? "").trim();
       if (!toolName) {

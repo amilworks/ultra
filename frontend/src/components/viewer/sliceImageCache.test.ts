@@ -37,6 +37,9 @@ describe("sliceImageCache", () => {
     expect(second).toBe(first);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(createBitmapMock).toHaveBeenCalledTimes(1);
+    // The vertical flip must be baked into the bitmap (WebGL ignores texture.flipY
+    // for ImageBitmap), or slices render upside-down.
+    expect(createBitmapMock).toHaveBeenCalledWith(expect.anything(), { imageOrientation: "flipY" });
   });
 
   it("deduplicates concurrent in-flight requests for the same slice", async () => {
@@ -79,6 +82,8 @@ describe("sliceImageCache", () => {
     expect(texture.colorSpace).toBe(THREE.SRGBColorSpace);
     expect(texture.minFilter).toBe(THREE.LinearFilter);
     expect(texture.generateMipmaps).toBe(false);
+    // Flip is baked into the bitmap, so the texture must not flip again.
+    expect(texture.flipY).toBe(false);
     expect(texture.image).toBeTruthy();
   });
 });

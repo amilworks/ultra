@@ -13,6 +13,7 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewAppServesHealth(t *testing.T) {
@@ -50,6 +51,70 @@ func TestNewRejectsUnreachablePostgresBeforeServing(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "postgres") {
 		t.Fatalf("New() error = %q, want Postgres context", err)
+	}
+}
+
+func TestPostgresPoolConfigAppliesConnectionLimits(t *testing.T) {
+	t.Parallel()
+
+	poolConfig, err := postgresPoolConfig(config.Config{
+		DatabaseURL:      "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		DatabaseMaxConns: 7,
+		DatabaseMinConns: 2,
+	})
+	if err != nil {
+		t.Fatalf("postgresPoolConfig: %v", err)
+	}
+	if poolConfig.MaxConns != 7 {
+		t.Fatalf("MaxConns = %d, want 7", poolConfig.MaxConns)
+	}
+	if poolConfig.MinConns != 2 {
+		t.Fatalf("MinConns = %d, want 2", poolConfig.MinConns)
+	}
+}
+
+func TestPostgresPoolConfigRejectsMinAboveMax(t *testing.T) {
+	t.Parallel()
+
+	_, err := postgresPoolConfig(config.Config{
+		DatabaseURL:      "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		DatabaseMaxConns: 4,
+		DatabaseMinConns: 5,
+	})
+	if err == nil {
+		t.Fatalf("postgresPoolConfig error = nil, want min/max validation error")
+	}
+}
+
+func TestApplyStatementTimeout(t *testing.T) {
+	t.Parallel()
+
+	newPoolConfig := func(t *testing.T) *pgxpool.Config {
+		t.Helper()
+		pc, err := postgresPoolConfig(config.Config{
+			DatabaseURL: "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		})
+		if err != nil {
+			t.Fatalf("postgresPoolConfig: %v", err)
+		}
+		return pc
+	}
+
+	// A positive timeout becomes the Postgres statement_timeout runtime param, in ms.
+	pc := newPoolConfig(t)
+	applyStatementTimeout(pc, 30*time.Second)
+	if got := pc.ConnConfig.RuntimeParams["statement_timeout"]; got != "30000" {
+		t.Fatalf("statement_timeout = %q, want %q", got, "30000")
+	}
+
+	// Disabled (0) and negative are no-ops — the param is never set, so behavior is
+	// unchanged by default and migrations (which skip this helper) are never bounded.
+	for _, d := range []time.Duration{0, -1 * time.Second} {
+		pc := newPoolConfig(t)
+		applyStatementTimeout(pc, d)
+		if _, ok := pc.ConnConfig.RuntimeParams["statement_timeout"]; ok {
+			t.Fatalf("statement_timeout set for timeout=%v, want unset", d)
+		}
 	}
 }
 

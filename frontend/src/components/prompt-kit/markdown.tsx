@@ -1,8 +1,15 @@
 import { marked } from "marked";
+import { ExternalLink } from "lucide-react";
 import { memo, type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { Button } from "@/components/ui/button";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { CodeBlock, CodeBlockCode } from "./code-block";
@@ -80,7 +87,10 @@ function shouldConstrainTableCell(children: ReactNode): boolean {
 type BisqueLinkMeta = {
   clientViewUrl: string;
   imageServiceUrl: string | null;
+  resourceId: string | null;
 };
+
+const BISQUE_LINK_FALLBACK_IMAGE_URL = "/bq-bg8.png";
 
 const decodeSafe = (value: string): string => {
   try {
@@ -140,6 +150,7 @@ const resolveBisqueLinkMeta = (href: string): BisqueLinkMeta | null => {
   return {
     clientViewUrl: `${origin}/client_service/view?resource=${normalizedResourceUri}`,
     imageServiceUrl,
+    resourceId: resourceUniq,
   };
 };
 
@@ -153,7 +164,9 @@ function BisqueMarkdownLink({
     () => (typeof href === "string" ? resolveBisqueLinkMeta(href) : null),
     [href]
   );
-  const [previewFailed, setPreviewFailed] = useState(false);
+  const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null);
+  const previewUrl = bisqueMeta?.imageServiceUrl ?? null;
+  const canShowPreviewImage = Boolean(previewUrl && failedPreviewUrl !== previewUrl);
 
   if (!href || !bisqueMeta) {
     return (
@@ -170,37 +183,68 @@ function BisqueMarkdownLink({
   }
 
   return (
-    <span className="bisque-link-wrap">
-      <a
-        href={bisqueMeta.clientViewUrl}
-        className={cn("pk-link", className)}
-        target="_blank"
-        rel="noreferrer"
-        {...props}
+    <HoverCard openDelay={120} closeDelay={120}>
+      <HoverCardTrigger asChild>
+        <span className="bisque-link-wrap">
+          <a
+            href={bisqueMeta.clientViewUrl}
+            className={cn("pk-link", className)}
+            target="_blank"
+            rel="noreferrer"
+            {...props}
+          >
+            {children}
+          </a>
+          <a
+            href={bisqueMeta.clientViewUrl}
+            className="bisque-link-open"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <ExternalLink data-icon="inline-start" />
+            Open viewer
+          </a>
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent
+        align="start"
+        sideOffset={8}
+        className="bisque-link-preview-card"
       >
-        {children}
-      </a>
-      <a
-        href={bisqueMeta.clientViewUrl}
-        className="bisque-link-open"
-        target="_blank"
-        rel="noreferrer"
-      >
-        Open viewer
-      </a>
-      <span className="bisque-link-hover-preview" role="tooltip">
-        {!previewFailed && bisqueMeta.imageServiceUrl ? (
+        {canShowPreviewImage && previewUrl ? (
           <img
-            src={bisqueMeta.imageServiceUrl}
+            src={previewUrl}
             alt="BisQue preview"
             loading="lazy"
-            onError={() => setPreviewFailed(true)}
+            className="bisque-link-preview-image"
+            onError={() => setFailedPreviewUrl(previewUrl)}
           />
         ) : (
-          <span>Preview unavailable</span>
+          <div className="bisque-link-preview-fallback">
+            <img
+              src={BISQUE_LINK_FALLBACK_IMAGE_URL}
+              alt=""
+              loading="lazy"
+              className="bisque-link-preview-image bisque-link-preview-image-fallback"
+            />
+            <div className="bisque-link-preview-copy">
+              <strong>Open this resource in BisQue</strong>
+              <p>
+                Launch the BisQue viewer for the full interactive view, tools,
+                and permissions-aware access.
+              </p>
+              {bisqueMeta.resourceId ? <span>{bisqueMeta.resourceId}</span> : null}
+            </div>
+            <Button asChild variant="outline" size="sm" className="bisque-link-preview-action">
+              <a href={bisqueMeta.clientViewUrl} target="_blank" rel="noreferrer">
+                <ExternalLink data-icon="inline-start" />
+                Open viewer
+              </a>
+            </Button>
+          </div>
         )}
-      </span>
-    </span>
+      </HoverCardContent>
+    </HoverCard>
   );
 }
 

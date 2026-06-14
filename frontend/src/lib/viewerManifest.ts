@@ -14,7 +14,9 @@ const DEFAULT_AXIS_SIZES: UploadViewerInfo["axis_sizes"] = {
 const DEFAULT_CHANNEL_COLORS = ["#ffffff", "#ff0000", "#00ff00", "#0000ff"];
 
 const CT_VOLUME_DISPLAY_DEFAULTS = {
-  enhancement: "hounsfield:350.000:1800.000",
+  // Diagnostic brain window (WC 40 / WW 80 HU); kept in sync with the backend
+  // niftiScalarDisplayDefaults. 350/1800 was not a clinical window.
+  enhancement: "hounsfield:40.000:80.000",
   fusionMethod: "a",
   volumeSignalFloor: 0.12,
   volumeDensity: 1.75,
@@ -123,14 +125,22 @@ const normalizePhysicalSpacing = (
   };
 };
 
+const positiveSpacing = (value: unknown): number => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 1;
+};
+
 const buildPlaneDescriptor = (
   axis: ViewerAxis,
   axisSizes: UploadViewerInfo["axis_sizes"],
   spacing: NonNullable<UploadViewerInfo["metadata"]["physical_spacing"]> | null
 ): UploadViewerInfo["viewer"]["default_plane"] => {
-  const zSpacing = Math.max(1, Number(spacing?.z ?? 1));
-  const ySpacing = Math.max(1, Number(spacing?.y ?? 1));
-  const xSpacing = Math.max(1, Number(spacing?.x ?? 1));
+  // Physical spacing must keep its true magnitude: clamping to >=1mm squashed
+  // sub-millimeter anisotropic CT/MRI in-plane (e.g. 0.439mm read as 1mm). Only
+  // guard against non-positive/non-finite values.
+  const zSpacing = positiveSpacing(spacing?.z);
+  const ySpacing = positiveSpacing(spacing?.y);
+  const xSpacing = positiveSpacing(spacing?.x);
 
   if (axis === "x") {
     const width = Math.max(1, axisSizes.Y);

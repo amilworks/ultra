@@ -21,6 +21,7 @@ import {
   sliceBitmapToTexture,
   type ScalarSliceSource,
 } from "./sliceImageCache";
+import { classifyWheelGesture } from "./wheelGesture";
 
 type DirectPlaneImageProps = {
   imageUrl: string;
@@ -204,6 +205,21 @@ function getLoadedImageSize(texture: THREE.Texture, descriptor: UploadViewerInfo
   return { width, height };
 }
 
+// getPlaneWorldSize returns the plane's physical extent (pixels x spacing) so the
+// mesh and viewport keep anatomically correct proportions for anisotropic voxels
+// (e.g. 0.5x0.5x5mm). Falls back to the pixel grid when spacing is absent.
+function getPlaneWorldSize(
+  descriptor: UploadViewerInfo["viewer"]["default_plane"],
+  pixelSize: ImageViewportSize
+): ImageViewportSize {
+  const worldWidth = Number(descriptor.world_size?.width);
+  const worldHeight = Number(descriptor.world_size?.height);
+  if (Number.isFinite(worldWidth) && worldWidth > 0 && Number.isFinite(worldHeight) && worldHeight > 0) {
+    return { width: worldWidth, height: worldHeight };
+  }
+  return pixelSize;
+}
+
 function formatZoomLabel(scale: number, fitScale: number) {
   if (!Number.isFinite(scale) || Math.abs(scale - fitScale) / Math.max(VIEW_EPSILON, fitScale) < 0.025) {
     return "Fit";
@@ -235,7 +251,10 @@ export function DirectPlaneImage({
   const dragRef = useRef<DragState | null>(null);
 
   const [viewportSize, setViewportSize] = useState<ImageViewportSize>({ width: 0, height: 0 });
+  // imageSize is the physical world extent (drives fit/zoom + mesh aspect);
+  // pixelSize is the voxel grid (drives the dimension readout only).
   const [imageSize, setImageSize] = useState<ImageViewportSize | null>(null);
+  const [pixelSize, setPixelSize] = useState<ImageViewportSize | null>(null);
   const [viewport, setViewport] = useState<ImageViewport>(DEFAULT_VIEWPORT);
   const [isFitViewport, setIsFitViewport] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
@@ -250,7 +269,7 @@ export function DirectPlaneImage({
     [imageSize, viewportSize]
   );
   const zoomLabel = formatZoomLabel(viewport.scale, scaleLimits.fitScale);
-  const dimensionLabel = imageSize ? `${imageSize.width} x ${imageSize.height}` : "Loading";
+  const dimensionLabel = pixelSize ? `${pixelSize.width} x ${pixelSize.height}` : "Loading";
   const primaryImageUrl = imageUrl || placeholderUrl || "";
 
   useEffect(() => {
@@ -355,14 +374,18 @@ export function DirectPlaneImage({
         }
 
         const texture = sliceBitmapToTexture(bitmap);
-        const nextImageSize = getLoadedImageSize(texture, descriptor);
+        const nextPixelSize = getLoadedImageSize(texture, descriptor);
+        const nextWorldSize = getPlaneWorldSize(descriptor, nextPixelSize);
         const previousTexture = textureRef.current;
         textureRef.current = texture;
         meshRef.current.material.map = texture;
         meshRef.current.material.needsUpdate = true;
-        meshRef.current.scale.set(nextImageSize.width, nextImageSize.height, 1);
+        // Scale the textured plane to physical extent so anisotropic voxels are
+        // not squashed; the texture (UV 0..1) stretches to match.
+        meshRef.current.scale.set(nextWorldSize.width, nextWorldSize.height, 1);
         previousTexture?.dispose();
-        setImageSize(nextImageSize);
+        setImageSize(nextWorldSize);
+        setPixelSize(nextPixelSize);
         setIsFitViewport(true);
         setHasTexture(true);
         setLoadState("ready");
@@ -452,12 +475,29 @@ export function DirectPlaneImage({
   );
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    if (!interactive) {
+    if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
       return;
     }
     event.preventDefault();
     event.currentTarget.focus({ preventScroll: true });
     const rect = event.currentTarget.getBoundingClientRect();
+    // Two-finger trackpad scroll pans; pinch / ⌘-scroll / mouse wheel zooms toward the
+    // cursor — consistent with the deep-zoom canvas (shared classifyWheelGesture).
+    if (classifyWheelGesture(event) === "pan") {
+      const nextLimits = computeImageScaleLimits(imageSize, viewportSize);
+      setIsFitViewport(false);
+      setViewport((previous) =>
+        panImageViewport(
+          previous,
+          { x: -event.deltaX, y: -event.deltaY },
+          imageSize,
+          viewportSize,
+          nextLimits.minScale,
+          nextLimits.maxScale
+        )
+      );
+      return;
+    }
     const factor = wheelDeltaToZoomFactor(event.deltaY, event.deltaMode, event.ctrlKey, viewportSize.height || rect.height);
     if (Math.abs(factor - 1) < VIEW_EPSILON) {
       return;

@@ -37,6 +37,128 @@ class ConversationTitleResult:
         return payload
 
 
+def _run_fallback_text(
+    goal: str,
+    messages: list[dict[str, Any]],
+    response_text: str,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    return "\n".join(
+        fragment
+        for fragment in [
+            goal,
+            _first_user_message(messages),
+            response_text,
+            _artifact_summary(artifact_events),
+        ]
+        if fragment.strip()
+    )
+
+
+def is_initial_conversation_turn(messages: list[dict[str, Any]] | None) -> bool:
+    """True when the transcript has no assistant turns yet.
+
+    The control plane only applies generated titles to threads whose title
+    state is still initial/auto, so once a prior run completed (an assistant
+    message exists) a new generated title would be ignored anyway.
+    """
+    for message in messages or []:
+        if isinstance(message, dict):
+            role = str(message.get("role") or "")
+        else:
+            role = str(getattr(message, "role", "") or "")
+        if role.strip().lower() == "assistant":
+            return False
+    return True
+
+
+def start_conversation_title_task(
+    *,
+    settings: RuntimeSettings,
+    goal: str,
+    messages: list[dict[str, Any]],
+    model_factory: Callable[[RuntimeSettings], Any] = build_chat_model,
+) -> asyncio.Task | None:
+    """Begin title generation concurrently with the run itself.
+
+    The sidebar title is derived from the request (goal + user messages),
+    which is fully known at run start, so the model call overlaps the run
+    instead of extending it. Returns ``None`` when no model call should be
+    made: title generation disabled, or a follow-up turn whose generated
+    title the control plane would ignore.
+    """
+    if not getattr(settings, "title_generation_enabled", True):
+        return None
+    if not is_initial_conversation_turn(messages):
+        return None
+    snapshot = [dict(message) if isinstance(message, dict) else message for message in messages or []]
+    return asyncio.create_task(
+        generate_conversation_title(
+            settings=settings,
+            goal=goal,
+            messages=snapshot,
+            response_text="",
+            artifact_events=[],
+            model_factory=model_factory,
+        )
+    )
+
+
+async def resolve_conversation_title_task(
+    task: asyncio.Task | None,
+    *,
+    settings: RuntimeSettings,
+    goal: str,
+    messages: list[dict[str, Any]],
+    response_text: str,
+    artifact_events: list[dict[str, Any]],
+    grace_seconds: float = 2.0,
+) -> ConversationTitleResult:
+    """Join the early title task at run completion.
+
+    By completion the task has had the entire run to finish, so the small
+    grace only matters for runs shorter than the title call itself. A skipped,
+    unresolved, or fallback result is recomputed from the full run outcome
+    (goal + response + artifacts) so the deterministic title keeps the same
+    quality it had when generation ran inline.
+    """
+    fallback = fallback_conversation_title(
+        _run_fallback_text(goal, messages, response_text, artifact_events)
+    )
+    if task is None:
+        reason = (
+            "disabled"
+            if not getattr(settings, "title_generation_enabled", True)
+            else "thread_already_titled"
+        )
+        return ConversationTitleResult(
+            title=fallback,
+            strategy="fallback",
+            model=settings.openai_model,
+            reason=reason,
+        )
+    try:
+        result = await asyncio.wait_for(task, timeout=max(0.0, grace_seconds))
+    except TimeoutError:
+        task.cancel()
+        return ConversationTitleResult(
+            title=fallback,
+            strategy="fallback",
+            model=settings.openai_model,
+            reason="early_title_unresolved",
+        )
+    if result.strategy == "fallback":
+        # The early task lacked the run outcome; rebuild its deterministic
+        # fallback from the richer post-run context.
+        return ConversationTitleResult(
+            title=fallback,
+            strategy="fallback",
+            model=result.model,
+            reason=result.reason,
+        )
+    return result
+
+
 async def generate_conversation_title(
     *,
     settings: RuntimeSettings,
@@ -47,16 +169,7 @@ async def generate_conversation_title(
     model_factory: Callable[[RuntimeSettings], Any] = build_chat_model,
 ) -> ConversationTitleResult:
     fallback = fallback_conversation_title(
-        "\n".join(
-            fragment
-            for fragment in [
-                goal,
-                _first_user_message(messages),
-                response_text,
-                _artifact_summary(artifact_events),
-            ]
-            if fragment.strip()
-        )
+        _run_fallback_text(goal, messages, response_text, artifact_events)
     )
     if not getattr(settings, "title_generation_enabled", True):
         return ConversationTitleResult(
@@ -143,13 +256,46 @@ def sanitize_generated_title(value: str) -> str:
     return truncated.strip() or title[:MAX_TITLE_CHARS].rstrip()
 
 
+def _build_title_model(
+    settings: RuntimeSettings,
+    model_factory: Callable[[RuntimeSettings], Any],
+) -> Any:
+    """The run model, re-bound for a cheap single-purpose title call.
+
+    Hybrid-reasoning models think for thousands of tokens before a 12-token
+    title, which is what used to eat the whole title timeout; vLLM-style chat
+    templates accept ``chat_template_kwargs.enable_thinking`` to skip that
+    phase (servers whose template lacks the variable ignore it; endpoints that
+    reject the body land in the existing fallback path). Factories used in
+    tests may return plain fakes without ``bind`` — use them as-is.
+    """
+    model = model_factory(settings)
+    bind = getattr(model, "bind", None)
+    if bind is None:
+        return model
+    bind_kwargs: dict[str, Any] = {}
+    max_tokens = int(getattr(settings, "title_max_tokens", 0) or 0)
+    if max_tokens > 0 and getattr(settings, "title_thinking_disabled", True):
+        # Only cap tokens when thinking is off: with thinking on, the cap
+        # would truncate mid-reasoning and return an empty title.
+        bind_kwargs["max_tokens"] = max_tokens
+    if getattr(settings, "title_thinking_disabled", True):
+        bind_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    if not bind_kwargs:
+        return model
+    try:
+        return bind(**bind_kwargs)
+    except Exception:
+        return model
+
+
 async def _call_title_model(
     *,
     settings: RuntimeSettings,
     model_factory: Callable[[RuntimeSettings], Any],
     prompt: str,
 ) -> str:
-    model = model_factory(settings)
+    model = _build_title_model(settings, model_factory)
     messages = [
         {"role": "system", "content": TITLE_PROMPT_SYSTEM},
         {"role": "user", "content": prompt},

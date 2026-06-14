@@ -148,6 +148,33 @@ type VolumeClipBounds = {
   max: VolumeVector;
 };
 
+/**
+ * Normalized texture-depth position [0, 1] of the cutaway cut face for a given Z
+ * slice. The volume is sliced at the live Z cursor, so scrubbing Z sweeps the
+ * cut through the stack. The `(index + 0.5) / depth` mapping samples voxel
+ * centers — identical to the backend slice extraction — so the exposed
+ * cross-section lines up with the 2D slice at the same index. Out-of-range and
+ * missing indices clamp to the volume (a null index centers the cut).
+ */
+export const resolveVolumeCutawayCutZ = (
+  zIndex: number | null | undefined,
+  depth: number
+): number => {
+  const safeDepth = Math.max(1, depth);
+  const fallback = Math.floor((safeDepth - 1) / 2);
+  const index = Math.max(0, Math.min(safeDepth - 1, Math.floor(Number(zIndex ?? fallback))));
+  return Math.min(1, Math.max(0, (index + 0.5) / safeDepth));
+};
+
+/**
+ * Clip box for the Z-cursor cutaway: keep the volume from z=0 up to the cut face
+ * so the exposed interior cross-section faces the overview camera.
+ */
+export const resolveVolumeCutawayClip = (cutZ: number): VolumeClipBounds => ({
+  min: { x: 0, y: 0, z: 0 },
+  max: { x: 1, y: 1, z: cutZ },
+});
+
 export type VolumeInteriorCameraFrame = {
   position: VolumeVector;
   target: VolumeVector;
@@ -225,11 +252,17 @@ export function isVolumeInteriorInspectionActive({
 export function shouldShowVolumeSliceCursorPlanes({
   cueVisible,
   interiorInspectionActive,
+  cutawayActive = false,
 }: {
   cueVisible: boolean;
   interiorInspectionActive: boolean;
+  cutawayActive?: boolean;
 }): boolean {
-  return cueVisible && !interiorInspectionActive;
+  // Hide the flat translucent X/Y/Z cursor quads whenever the view is focused on
+  // the interior — both the legacy fly-inside and the Z-cursor cutaway. In
+  // cutaway the crisp opaque cut face IS the inspection surface, so the cursor
+  // planes only tint/occlude it (the user sees red/green washes over the slice).
+  return cueVisible && !interiorInspectionActive && !cutawayActive;
 }
 
 export function shouldShowVolumeContextEdges({
@@ -430,7 +463,8 @@ const SCALAR_FRAGMENT_SHADER = `
   uniform bool uLightingEnabled;
   uniform float uLightingStrength;
   uniform vec3 uVoxelStep;
-  uniform vec3 uVolumeScale;
+  uniform vec3 uVolumeScale;   // per-axis world EXTENT ratio (box dimensions)
+  uniform vec3 uVoxelSpacing;  // per-axis voxel SPACING ratio (mm), max-normalized
   uniform float uEdgeStrength;
   uniform float uInteriorOpacity;
   uniform int uProjectionMode;
@@ -555,9 +589,12 @@ const SCALAR_FRAGMENT_SHADER = `
       return color;
     }
 
-    // Anisotropy correction: scale the texture-space gradient back into world
-    // space so the surface normal is not skewed by thick (e.g. 5 mm) slices.
-    vec3 worldGradient = gradient / max(vec3(0.06), uVolumeScale);
+    // Anisotropy correction: a central difference spans one voxel per axis, so
+    // the world-space gradient is the per-voxel difference divided by the voxel
+    // SPACING (mm), not the full-axis extent. Dividing by spacing makes the
+    // surface normal physically correct on thick (e.g. 5 mm) slices; using the
+    // extent (count x spacing) previously skewed normals toward the thick axis.
+    vec3 worldGradient = gradient / max(vec3(0.06), uVoxelSpacing);
     if (length(worldGradient) < 0.0001) {
       return color;
     }
@@ -621,7 +658,11 @@ const SCALAR_FRAGMENT_SHADER = `
       }
       vec3 gradient = scalarGradient(location);
       float opacity = structuredOpacity(opacityValue, gradient);
-      float alpha = alphaFromOpacity(opacity, length(delta));
+      // Optical depth must be proportional to the PHYSICAL path length per step.
+      // The ray marches in normalized cube space, so scale the step by the box
+      // extents; otherwise opacity is view-dependent on anisotropic volumes
+      // (a ray along the thick axis traverses more material per cube-step).
+      float alpha = alphaFromOpacity(opacity, length(delta * uVolumeScale));
       vec3 sampleColor = applyDepthLighting(location, scalarColor(sampleValue), gradient);
       accum.rgb += (1.0 - accum.a) * sampleColor * alpha;
       accum.a += (1.0 - accum.a) * alpha;
@@ -645,6 +686,103 @@ const SCALAR_FRAGMENT_SHADER = `
       discard;
     }
     gl_FragColor = accum;
+  }
+`;
+
+// High-resolution cut face for the Z-cursor cutaway. A flat quad placed at the
+// cut depth samples the SAME R16F volume texture as the ray-marcher, but as a
+// single crisp cross-section (one texel-accurate sample per fragment) instead of
+// an accumulated volumetric average. This is what makes the exposed interior
+// read at full slice resolution as the user scrubs through Z, while the clipped
+// volume behind it still provides 3D context.
+const CUTFACE_VERTEX_SHADER = `
+  varying vec2 vCutUv;
+
+  void main() {
+    // PlaneGeometry local position spans [-0.5, 0.5]; the volume's texcoord is
+    // (localPosition + 0.5), so uv maps 1:1 onto the volume's X/Y sampling.
+    vCutUv = position.xy + 0.5;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const CUTFACE_FRAGMENT_SHADER = `
+  precision highp float;
+  precision highp sampler3D;
+
+  uniform sampler3D uData;
+  uniform float uCutZ;
+  uniform float uWindowLow;
+  uniform float uWindowHigh;
+  uniform bool uInvert;
+  uniform int uColorMap;
+
+  varying vec2 vCutUv;
+
+  vec3 ramp5(float value, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4) {
+    float v = clamp(value, 0.0, 1.0);
+    if (v < 0.25) {
+      return mix(c0, c1, v / 0.25);
+    }
+    if (v < 0.5) {
+      return mix(c1, c2, (v - 0.25) / 0.25);
+    }
+    if (v < 0.75) {
+      return mix(c2, c3, (v - 0.5) / 0.25);
+    }
+    return mix(c3, c4, (v - 0.75) / 0.25);
+  }
+
+  vec3 scalarColor(float value) {
+    if (uColorMap == 1) {
+      return ramp5(
+        value,
+        vec3(0.267, 0.004, 0.329),
+        vec3(0.204, 0.286, 0.561),
+        vec3(0.129, 0.568, 0.551),
+        vec3(0.369, 0.789, 0.383),
+        vec3(0.993, 0.906, 0.145)
+      );
+    }
+    if (uColorMap == 2) {
+      return ramp5(
+        value,
+        vec3(0.000, 0.000, 0.016),
+        vec3(0.322, 0.071, 0.486),
+        vec3(0.714, 0.216, 0.475),
+        vec3(0.984, 0.537, 0.384),
+        vec3(0.988, 0.992, 0.749)
+      );
+    }
+    if (uColorMap == 3) {
+      return ramp5(
+        value,
+        vec3(0.000, 0.000, 0.016),
+        vec3(0.341, 0.063, 0.431),
+        vec3(0.737, 0.216, 0.329),
+        vec3(0.976, 0.557, 0.035),
+        vec3(0.988, 1.000, 0.643)
+      );
+    }
+    return vec3(value);
+  }
+
+  void main() {
+    vec3 location = vec3(
+      clamp(vCutUv.x, 0.0, 1.0),
+      clamp(vCutUv.y, 0.0, 1.0),
+      clamp(uCutZ, 0.0, 1.0)
+    );
+    float raw = texture(uData, location).r;
+    float normalized = clamp(
+      (raw - uWindowLow) / max(0.000001, uWindowHigh - uWindowLow),
+      0.0,
+      1.0
+    );
+    if (uInvert) {
+      normalized = 1.0 - normalized;
+    }
+    gl_FragColor = vec4(scalarColor(normalized), 1.0);
   }
 `;
 
@@ -982,6 +1120,7 @@ export function SliceStackVolumeCanvas({
     controls: TrackballControls;
   } | null>(null);
   const sliceCursorPlanesRef = useRef<SliceCursorPlanes | null>(null);
+  const cutFaceRef = useRef<{ mesh: THREE.Mesh; material: THREE.ShaderMaterial } | null>(null);
   const scalarRangeRef = useRef<{ rawMin: number; rawMax: number } | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
@@ -1010,6 +1149,13 @@ export function SliceStackVolumeCanvas({
     [plane.pixel_size, spacing, volumeDepth]
   );
   const normalizedScale = physicalGeometry.normalizedScale;
+  // Max-normalized voxel SPACING ratio (sx:sy:sz) for the lighting gradient —
+  // distinct from normalizedScale (the box extent = count x spacing).
+  const voxelSpacingRatio = useMemo(() => {
+    const s = physicalGeometry.voxelSpacing;
+    const maxS = Math.max(s.x, s.y, s.z, 1e-9);
+    return { x: s.x / maxS, y: s.y / maxS, z: s.z / maxS };
+  }, [physicalGeometry.voxelSpacing]);
   const volumeRadius = useMemo(
     () =>
       Math.max(
@@ -1144,6 +1290,15 @@ export function SliceStackVolumeCanvas({
   const renderPolicy = resolvedSource?.renderPolicy ?? viewerInfo?.viewer.render_policy ?? "scalar";
   const orientationCue = resolveVolumeOrientationCue(viewerInfo?.viewer.orientation);
   const modality = String(viewerInfo?.modality ?? "").trim().toLowerCase();
+  // Z-cursor cutaway: the volume is cut at the live Z slice so the interior is
+  // exposed with the camera kept in overview. The cut position is derived from
+  // the slice cursor, so scrubbing Z sweeps the cut through the volume.
+  const cutawayActive = Boolean(displayState?.volume_cutaway);
+  const cutawayZ = useMemo(() => resolveVolumeCutawayCutZ(zIndex, axisSizes.Z), [axisSizes.Z, zIndex]);
+  // Manual box clip only (the legacy "Advanced cutaway" sliders). The Z-cursor
+  // cutaway is applied separately via `effectiveClipBounds` so scrubbing Z does
+  // NOT change this memo — keeping the renderer effect (which lists clipBounds in
+  // its deps to rebuild the clip-edge box) from tearing down on every Z step.
   const clipBounds = useMemo(() => {
     const rawMin = displayState?.volume_clip_min ?? { x: 0, y: 0, z: 0 };
     const rawMax = displayState?.volume_clip_max ?? { x: 1, y: 1, z: 1 };
@@ -1175,6 +1330,22 @@ export function SliceStackVolumeCanvas({
     });
     return { min: nextMin, max: nextMax };
   }, [displayState?.volume_clip_max, displayState?.volume_clip_min]);
+  // The clip the shader actually applies: in cutaway mode the volume is sliced at
+  // the live Z (overview camera); otherwise it's the manual box clip. Updated
+  // incrementally through the clip effect, never by rebuilding the renderer.
+  const effectiveClipBounds = useMemo(() => {
+    if (cutawayActive) {
+      return resolveVolumeCutawayClip(cutawayZ);
+    }
+    return clipBounds;
+  }, [cutawayActive, cutawayZ, clipBounds]);
+  // Live cutaway state mirrored into refs so the renderer effect can seed the
+  // clip uniforms and cut-face mesh at creation WITHOUT listing them in its deps
+  // (which would rebuild the WebGL context on every Z step). The clip effect and
+  // the dedicated cut-face effect keep these in sync after creation.
+  const effectiveClipBoundsRef = useRef(effectiveClipBounds);
+  const cutawayActiveRef = useRef(cutawayActive);
+  const cutawayZRef = useRef(cutawayZ);
   const projectionMode = resolveVolumeProjectionMode({
     renderPolicy,
     modality,
@@ -1249,10 +1420,14 @@ export function SliceStackVolumeCanvas({
     clipMax: clipBounds.max,
     unit: spatialUnit,
   });
-  const volumeInteriorInspectionActive = isVolumeInteriorInspectionActive({
-    clipActive: volumeClipCue.active,
-    cameraMode: volumeCameraMode,
-  });
+  // The cutaway keeps the camera in overview — the fly-inside interior camera is
+  // only for the legacy manual box clip.
+  const volumeInteriorInspectionActive =
+    !cutawayActive &&
+    isVolumeInteriorInspectionActive({
+      clipActive: volumeClipCue.active,
+      cameraMode: volumeCameraMode,
+    });
   const volumeInteriorCameraFrame = useMemo(
     () =>
       volumeInteriorInspectionActive
@@ -1337,6 +1512,12 @@ export function SliceStackVolumeCanvas({
   );
 
   useEffect(() => {
+    effectiveClipBoundsRef.current = effectiveClipBounds;
+    cutawayActiveRef.current = cutawayActive;
+    cutawayZRef.current = cutawayZ;
+  }, [effectiveClipBounds, cutawayActive, cutawayZ]);
+
+  useEffect(() => {
     scalarRenderConfigRef.current = scalarRenderConfig;
   }, [scalarRenderConfig]);
 
@@ -1363,6 +1544,16 @@ export function SliceStackVolumeCanvas({
     scalarUniforms.uDensityScale.value = scalarRenderConfig.densityScale;
     scalarUniforms.uLightingEnabled.value = scalarRenderConfig.lightingEnabled;
     scalarUniforms.uLightingStrength.value = scalarRenderConfig.lightingStrength;
+    // Keep the cutaway cut face on the same window/level + colormap + invert as
+    // the volume so the exposed cross-section reads identically to the body.
+    const cutFace = cutFaceRef.current;
+    if (cutFace) {
+      const cutUniforms = cutFace.material.uniforms as Record<string, { value: number | boolean }>;
+      cutUniforms.uWindowLow.value = normalizedWindow.low;
+      cutUniforms.uWindowHigh.value = normalizedWindow.high;
+      cutUniforms.uInvert.value = scalarRenderConfig.negative;
+      cutUniforms.uColorMap.value = scalarRenderConfig.colorMapShaderValue;
+    }
     requestRenderRef.current?.();
   }, [scalarRenderConfig]);
 
@@ -1371,10 +1562,33 @@ export function SliceStackVolumeCanvas({
     if (!clipUniforms) {
       return;
     }
-    clipUniforms.uClipMin.value.set(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z);
-    clipUniforms.uClipMax.value.set(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z);
+    clipUniforms.uClipMin.value.set(
+      effectiveClipBounds.min.x,
+      effectiveClipBounds.min.y,
+      effectiveClipBounds.min.z
+    );
+    clipUniforms.uClipMax.value.set(
+      effectiveClipBounds.max.x,
+      effectiveClipBounds.max.y,
+      effectiveClipBounds.max.z
+    );
     requestRenderRef.current?.();
-  }, [clipBounds]);
+  }, [effectiveClipBounds]);
+
+  // Drive the high-resolution cut face: toggle visibility with the cutaway, and
+  // slide + re-sample it as the user scrubs Z so the exposed cross-section
+  // tracks the live slice cursor.
+  useEffect(() => {
+    const cutFace = cutFaceRef.current;
+    if (!cutFace) {
+      return;
+    }
+    cutFace.mesh.visible = cutawayActive;
+    cutFace.mesh.scale.set(normalizedScale.x, normalizedScale.y, 1);
+    cutFace.mesh.position.set(0, 0, (cutawayZ - 0.5) * normalizedScale.z);
+    (cutFace.material.uniforms.uCutZ as { value: number }).value = cutawayZ;
+    requestRenderRef.current?.();
+  }, [cutawayActive, cutawayZ, normalizedScale.x, normalizedScale.y, normalizedScale.z]);
 
   useEffect(() => {
     const rig = cameraRigRef.current;
@@ -1486,6 +1700,10 @@ export function SliceStackVolumeCanvas({
     });
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
+    // Seed the clip uniforms with the cutaway-aware clip so the first frame is
+    // already sliced; the clip effect keeps them live as Z scrubs without a
+    // renderer rebuild.
+    const initialClip = effectiveClipBoundsRef.current;
     const material =
       resolvedSource.kind === "scalar"
         ? new THREE.ShaderMaterial({
@@ -1503,11 +1721,12 @@ export function SliceStackVolumeCanvas({
               uLightingStrength: { value: scalarRenderConfigRef.current.lightingStrength },
               uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
               uVolumeScale: { value: new THREE.Vector3(normalizedScale.x, normalizedScale.y, normalizedScale.z) },
+              uVoxelSpacing: { value: new THREE.Vector3(voxelSpacingRatio.x, voxelSpacingRatio.y, voxelSpacingRatio.z) },
               uEdgeStrength: { value: volumeEdgeStrength },
               uInteriorOpacity: { value: volumeInteriorOpacity },
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
-              uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
-              uClipMax: { value: new THREE.Vector3(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z) },
+              uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
+              uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
               uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
               uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
@@ -1523,8 +1742,8 @@ export function SliceStackVolumeCanvas({
               uData: { value: null },
               uSteps: { value: sampleBudget.interactiveSteps },
               uDensity: { value: density },
-              uClipMin: { value: new THREE.Vector3(clipBounds.min.x, clipBounds.min.y, clipBounds.min.z) },
-              uClipMax: { value: new THREE.Vector3(clipBounds.max.x, clipBounds.max.y, clipBounds.max.z) },
+              uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
+              uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
               uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
               uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
@@ -1622,11 +1841,55 @@ export function SliceStackVolumeCanvas({
         showPlanes: shouldShowVolumeSliceCursorPlanes({
           cueVisible: initialSliceCursorCue.visible,
           interiorInspectionActive: volumeInteriorInspectionActive,
+          cutawayActive: cutawayActiveRef.current,
         }),
       });
     }
     sliceCursorPlanesRef.current = sliceCursorPlanes;
     scene.add(sliceCursorPlanes.x, sliceCursorPlanes.y, sliceCursorPlanes.z);
+
+    // High-resolution cut face for the Z-cursor cutaway (scalar volumes only).
+    // It samples the same R16F texture as the ray-marcher but renders a single
+    // crisp cross-section at the cut depth. Drawn opaque and on top (depthTest
+    // off, like the cursor planes) so the exposed interior reads at full slice
+    // resolution; the clipped volume behind it supplies 3D context.
+    let cutFaceGeometry: THREE.PlaneGeometry | null = null;
+    let cutFaceMaterial: THREE.ShaderMaterial | null = null;
+    if (resolvedSource.kind === "scalar") {
+      const initialCutZ = cutawayZRef.current;
+      cutFaceGeometry = new THREE.PlaneGeometry(1, 1);
+      cutFaceMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          uData: { value: null },
+          uCutZ: { value: initialCutZ },
+          uWindowLow: { value: 0.0 },
+          uWindowHigh: { value: 1.0 },
+          uInvert: { value: scalarRenderConfigRef.current.negative },
+          uColorMap: { value: scalarRenderConfigRef.current.colorMapShaderValue },
+        },
+        vertexShader: CUTFACE_VERTEX_SHADER,
+        fragmentShader: CUTFACE_FRAGMENT_SHADER,
+        side: THREE.DoubleSide,
+        // transparent:true so the cut face joins the SAME render bucket as the
+        // translucent volume + cursor planes. THREE always draws the whole opaque
+        // bucket before the transparent bucket and renderOrder only sorts within a
+        // bucket — so an opaque cut face would be painted FIRST and then hazed over
+        // by the volume and tinted by the cursor planes. In the transparent bucket
+        // with the highest renderOrder it draws LAST; its fragments output alpha=1,
+        // so it still fully occludes (src*1 + dst*0 = src) within its footprint.
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const cutFaceMesh = new THREE.Mesh(cutFaceGeometry, cutFaceMaterial);
+      // Above the volume (0), context edges (2), clip edges (3), cursor planes (4).
+      cutFaceMesh.renderOrder = 6;
+      cutFaceMesh.scale.set(normalizedScale.x, normalizedScale.y, 1);
+      cutFaceMesh.position.set(0, 0, (initialCutZ - 0.5) * normalizedScale.z);
+      cutFaceMesh.visible = cutawayActiveRef.current;
+      cutFaceRef.current = { mesh: cutFaceMesh, material: cutFaceMaterial };
+      scene.add(cutFaceMesh);
+    }
 
     scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 
@@ -1749,6 +2012,13 @@ export function SliceStackVolumeCanvas({
             scalarUniformsRef.current.uDensityScale.value = latestScalarRenderConfig.densityScale;
             scalarUniformsRef.current.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
             scalarUniformsRef.current.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
+            if (cutFaceMaterial) {
+              const cutUniforms = cutFaceMaterial.uniforms as Record<string, { value: number | boolean }>;
+              cutUniforms.uWindowLow.value = normalizedWindow.low;
+              cutUniforms.uWindowHigh.value = normalizedWindow.high;
+              cutUniforms.uInvert.value = latestScalarRenderConfig.negative;
+              cutUniforms.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
+            }
             return texture;
           })
         : atlasToVolumeTexture(resolvedSource.atlasUrl, resolvedSource.atlasScheme, texturePolicy);
@@ -1765,6 +2035,10 @@ export function SliceStackVolumeCanvas({
         }
         material.uniforms.uData.value = decodedTexture;
         material.needsUpdate = true;
+        if (cutFaceMaterial) {
+          cutFaceMaterial.uniforms.uData.value = decodedTexture;
+          cutFaceMaterial.needsUpdate = true;
+        }
         resize();
       })
       .catch((error: unknown) => {
@@ -1784,6 +2058,7 @@ export function SliceStackVolumeCanvas({
       clipUniformsRef.current = null;
       cameraRigRef.current = null;
       sliceCursorPlanesRef.current = null;
+      cutFaceRef.current = null;
       scalarRangeRef.current = null;
       observer.disconnect();
       if (animationFrame) {
@@ -1802,6 +2077,8 @@ export function SliceStackVolumeCanvas({
       sliceCursorPlanes.x.material.dispose();
       sliceCursorPlanes.y.material.dispose();
       sliceCursorPlanes.z.material.dispose();
+      cutFaceGeometry?.dispose();
+      cutFaceMaterial?.dispose();
       material.dispose();
       texture3D?.dispose();
       renderer.dispose();
@@ -1831,6 +2108,7 @@ export function SliceStackVolumeCanvas({
     normalizedScale.y,
     normalizedScale.z,
     normalizedScale,
+    voxelSpacingRatio,
     volumeDepth,
     volumeRadius,
     volumeCameraMode,
@@ -1855,10 +2133,11 @@ export function SliceStackVolumeCanvas({
       showPlanes: shouldShowVolumeSliceCursorPlanes({
         cueVisible: sliceCursorCue.visible,
         interiorInspectionActive: volumeInteriorInspectionActive,
+        cutawayActive,
       }),
     });
     requestRenderRef.current?.();
-  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive]);
+  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (
@@ -2013,6 +2292,7 @@ export function SliceStackVolumeCanvas({
           shouldShowVolumeSliceCursorPlanes({
             cueVisible: sliceCursorCue.visible,
             interiorInspectionActive: volumeInteriorInspectionActive,
+            cutawayActive,
           })
             ? "true"
             : "false"

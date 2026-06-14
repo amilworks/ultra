@@ -65,6 +65,12 @@ for i in "${!CHECK_LABELS[@]}"; do
       matches="$(printf '%s\n' "${matches}" | rg -v 'bisque2\.ece\.ucsb\.edu' || true)"
       [[ -z "${matches}" ]] && continue
     fi
+    if [[ "${label}" == "Internal .internal hostnames" ]]; then
+      # host.docker.internal is Docker's standard host-gateway DNS name (containers
+      # reaching the host), not a private internal host — public, portable config.
+      matches="$(printf '%s\n' "${matches}" | rg -v 'host\.docker\.internal' || true)"
+      [[ -z "${matches}" ]] && continue
+    fi
     printf '\n[%s]\n%s\n' "${label}" "${matches}"
     status=1
   fi

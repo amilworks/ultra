@@ -47,6 +47,28 @@ def normalize_message_delta(
     ).to_dict()
 
 
+def normalize_reasoning_delta(
+    context: AgentRunContext,
+    text: str,
+    *,
+    status: str = "running",
+    source: str = "coordinator",
+) -> dict[str, Any]:
+    """Coalesced model-thinking text, streamed so the UI can show progress
+    during the otherwise-silent reasoning phase. Never part of the answer."""
+    return RunEvent(
+        run_id=context.run_id,
+        thread_id=context.thread_id,
+        event_kind="trace.reasoning.delta",
+        event_type="trace",
+        node_name="reasoning",
+        agent_role="reasoning",
+        level="debug",
+        message=text,
+        payload={"text": text, "source": source, "status": status},
+    ).to_dict()
+
+
 def normalize_tool_call(
     context: AgentRunContext,
     tool_name: str,
@@ -147,12 +169,15 @@ def normalize_run_completed(
     *,
     conversation_title: str = "",
     title_generation: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {"response_text": response_text}
     if conversation_title.strip():
         payload["conversation_title"] = conversation_title.strip()
     if title_generation:
         payload["title_generation"] = _json_safe_payload(title_generation)
+    if usage:
+        payload["usage"] = _json_safe_payload(usage)
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,
@@ -162,6 +187,34 @@ def normalize_run_completed(
         agent_role="coordinator",
         level="info",
         message=response_text,
+        payload=payload,
+    ).to_dict()
+
+
+def normalize_token_usage(
+    context: AgentRunContext,
+    usage: dict[str, Any],
+    *,
+    model: str = "",
+    usage_event_id: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "usage_event_id": usage_event_id,
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    if model:
+        payload["model"] = model
+    return RunEvent(
+        run_id=context.run_id,
+        thread_id=context.thread_id,
+        event_kind="run.token_usage",
+        event_type="run",
+        node_name="coordinator",
+        agent_role="coordinator",
+        level="debug",
+        message="",
         payload=payload,
     ).to_dict()
 

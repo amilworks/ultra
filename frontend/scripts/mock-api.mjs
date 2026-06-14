@@ -237,6 +237,104 @@ const readRequestBuffer = async (request) => {
 
 const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+const mockUserProfile = {
+  display_name: "Dr. Ada Lovelace",
+  title: "Principal Investigator",
+  institution: "UCSB Vision Research Lab",
+  research_interests:
+    "Cell segmentation, multiplexed imaging, reproducible analysis pipelines",
+  bio: "I run a microscopy lab focused on quantitative cell biology. I value careful, reproducible analysis and publication-quality figures.",
+};
+
+const mockCurrentUserResponse = () => ({
+  user: {
+    user_id: "mock-user",
+    email: "ada@example.org",
+    display_name: mockUserProfile.display_name,
+    role: "researcher",
+    org_id: "mock-org",
+  },
+  profile: { ...mockUserProfile },
+});
+
+const DAY_MS = 86400000;
+const mockDayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+const buildMockTokenUsage = (days = 365) => {
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const window = Math.max(1, Math.min(730, Number(days) || 365));
+  const daily = [];
+  const activeKeys = [];
+  let lifetimeInput = 0;
+  let lifetimeOutput = 0;
+  let lifetimeTotal = 0;
+  let peak = 0;
+  for (let offset = Math.min(window, 140) - 1; offset >= 0; offset -= 1) {
+    const date = new Date(todayUTC - offset * DAY_MS);
+    const dow = date.getUTCDay();
+    const seed = (offset * 2654435761 + 97) >>> 0;
+    const active = dow !== 0 && (offset <= 4 || seed % 5 !== 0);
+    if (!active) {
+      continue;
+    }
+    const input = 1500 + (seed % 9000);
+    const output = Math.round(input * 0.35) + (seed % 800);
+    const total = input + output;
+    lifetimeInput += input;
+    lifetimeOutput += output;
+    lifetimeTotal += total;
+    if (total > peak) {
+      peak = total;
+    }
+    const key = mockDayKey(todayUTC - offset * DAY_MS);
+    activeKeys.push(key);
+    daily.push({
+      day: key,
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: total,
+      run_count: 1 + (seed % 4),
+    });
+  }
+  const activeSet = new Set(activeKeys);
+  let current = 0;
+  let cursor = todayUTC;
+  if (!activeSet.has(mockDayKey(cursor))) {
+    cursor -= DAY_MS;
+  }
+  while (activeSet.has(mockDayKey(cursor))) {
+    current += 1;
+    cursor -= DAY_MS;
+  }
+  let longest = 0;
+  let run = 0;
+  let prev = null;
+  for (const key of [...activeSet].sort()) {
+    const ms = Date.parse(`${key}T00:00:00Z`);
+    run = prev !== null && ms - prev === DAY_MS ? run + 1 : 1;
+    if (run > longest) {
+      longest = run;
+    }
+    prev = ms;
+  }
+  return {
+    days: window,
+    summary: {
+      lifetime_input_tokens: lifetimeInput,
+      lifetime_output_tokens: lifetimeOutput,
+      lifetime_total_tokens: lifetimeTotal,
+      peak_daily_total: peak,
+      longest_task_seconds: 38580,
+      current_streak_days: current,
+      longest_streak_days: longest,
+      active_days: activeKeys.length,
+      last_active_day: activeKeys[activeKeys.length - 1],
+    },
+    daily,
+  };
+};
+
 const uploadSessionLimits = () => ({
   max_parallel_files: 4,
   max_parallel_chunks: 4,
@@ -860,6 +958,34 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "POST" && url.pathname === "/v2/auth/guest") {
     sendJson(response, 200, workosSession());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/me") {
+    sendJson(response, 200, mockCurrentUserResponse());
+    return;
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/v2/me") {
+    const payload = await readJsonBody(request);
+    for (const key of [
+      "display_name",
+      "title",
+      "institution",
+      "research_interests",
+      "bio",
+    ]) {
+      if (typeof payload[key] === "string") {
+        mockUserProfile[key] = payload[key].trim();
+      }
+    }
+    sendJson(response, 200, mockCurrentUserResponse());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v2/me/token-usage") {
+    const days = Number(url.searchParams.get("days")) || 365;
+    sendJson(response, 200, buildMockTokenUsage(days));
     return;
   }
 
@@ -2066,6 +2192,48 @@ const server = http.createServer(async (request, response) => {
     sendJson(response, 200, {
       count: counts[resourceType] ?? 0,
       results: [],
+    });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/bisque/push") {
+    let body = "";
+    for await (const chunk of request) {
+      body += chunk;
+    }
+    const payload = body ? JSON.parse(body) : {};
+    const fileIds = Array.isArray(payload.file_ids) ? payload.file_ids : [];
+    const collectionIds = Array.isArray(payload.collection_ids) ? payload.collection_ids : [];
+    const uploads = fileIds.map((fileId, index) => ({
+      file_id: fileId,
+      resource_uri: `${bisqueRoot}/data_service/00-MOCKPUSH${index + 1}`,
+      name: `mock-upload-${index + 1}.png`,
+      resource_uniq: `00-MOCKPUSH${index + 1}`,
+      client_view_url: `${bisqueRoot}/client_service/view?resource=00-MOCKPUSH${index + 1}`,
+    }));
+    const datasets = collectionIds.map((collectionId, index) => ({
+      collection_id: collectionId,
+      name: String(payload.dataset_name || `Mock dataset ${index + 1}`),
+      resource_uri: `${bisqueRoot}/data_service/00-MOCKDATASET${index + 1}`,
+      resource_uniq: `00-MOCKDATASET${index + 1}`,
+      member_count: 2,
+      client_view_url: `${bisqueRoot}/client_service/view?resource=00-MOCKDATASET${index + 1}`,
+    }));
+    collectionIds.forEach((collectionId, collectionIndex) => {
+      uploads.push(
+        ...[1, 2].map((memberIndex) => ({
+          file_id: `mock-member-${collectionIndex + 1}-${memberIndex}`,
+          resource_uri: `${bisqueRoot}/data_service/00-MOCKMEMBER${collectionIndex + 1}${memberIndex}`,
+          name: `mock-member-${memberIndex}.png`,
+          resource_uniq: `00-MOCKMEMBER${collectionIndex + 1}${memberIndex}`,
+          client_view_url: `${bisqueRoot}/client_service/view?resource=00-MOCKMEMBER${collectionIndex + 1}${memberIndex}`,
+        }))
+      );
+    });
+    sendJson(response, 200, {
+      count: uploads.length,
+      uploads,
+      datasets,
     });
     return;
   }

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 )
 
 var bisqueResourceTypePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -301,6 +302,27 @@ func (store *BisqueCredentialStore) GetWithContext(ctx context.Context, sessionI
 	return credentials, true, nil
 }
 
+// OwnerUserID reports which user a linked session belongs to. Sessions held
+// only in the in-memory cache (dev logins without persistence) have no owner
+// record, so known is false and callers fall back to legacy trust.
+func (store *BisqueCredentialStore) OwnerUserID(ctx context.Context, sessionID string) (string, bool, error) {
+	if store == nil || store.persistent == nil {
+		return "", false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", false, nil
+	}
+	record, found, err := store.persistent.GetBisqueCredentialBySessionID(contextOrBackground(ctx), sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	if !found {
+		return "", false, nil
+	}
+	return strings.TrimSpace(record.UserID), true, nil
+}
+
 func (store *BisqueCredentialStore) Delete(sessionID string) {
 	if store == nil {
 		return
@@ -390,18 +412,29 @@ func NewBisqueService(config BisqueServiceConfig) *BisqueService {
 }
 
 type bisqueSearchRequest struct {
-	ResourceType   string   `json:"resource_type"`
-	TagQuery       string   `json:"tag_query"`
-	TagOrder       string   `json:"tag_order"`
-	Query          string   `json:"query"`
-	NameContains   string   `json:"name_contains"`
-	Extensions     []string `json:"extensions"`
-	FileExtensions []string `json:"file_extensions"`
-	Scope          string   `json:"scope"`
-	Sort           string   `json:"sort"`
-	Limit          int      `json:"limit"`
-	Offset         int      `json:"offset"`
-	CountAll       bool     `json:"count_all"`
+	ResourceType    string                 `json:"resource_type"`
+	TagQuery        string                 `json:"tag_query"`
+	TagOrder        string                 `json:"tag_order"`
+	Query           string                 `json:"query"`
+	NameContains    string                 `json:"name_contains"`
+	Extensions      []string               `json:"extensions"`
+	FileExtensions  []string               `json:"file_extensions"`
+	MetadataFilters []bisqueMetadataFilter `json:"metadata_filters"`
+	Scope           string                 `json:"scope"`
+	Sort            string                 `json:"sort"`
+	Limit           int                    `json:"limit"`
+	Offset          int                    `json:"offset"`
+	CountAll        bool                   `json:"count_all"`
+}
+
+// bisqueMetadataFilter compares a resource tag against a value. Numeric
+// comparisons (gt/gte/lt/lte) are evaluated client-side because BisQue's
+// tag_query compares numeric tags lexically ("7" > "50", "100" < "50"), which
+// silently returns wrong results for relational queries such as "age above 50".
+type bisqueMetadataFilter struct {
+	Tag   string `json:"tag"`
+	Op    string `json:"op"`
+	Value string `json:"value"`
 }
 
 type bisqueSearchResponse struct {
@@ -430,6 +463,23 @@ type bisqueUploadResponse struct {
 	Uploads []BisqueUploadRecord `json:"uploads"`
 }
 
+type bisqueCreateDatasetRequest struct {
+	Name         string   `json:"name"`
+	ResourceURIs []string `json:"resource_uris"`
+}
+
+type bisquePushRequest struct {
+	FileIDs       []string `json:"file_ids"`
+	CollectionIDs []string `json:"collection_ids"`
+	DatasetName   string   `json:"dataset_name"`
+}
+
+type bisquePushResponse struct {
+	Count    int                   `json:"count"`
+	Uploads  []BisqueUploadRecord  `json:"uploads"`
+	Datasets []BisqueDatasetRecord `json:"datasets"`
+}
+
 type BisqueResource struct {
 	ResourceURI     string            `json:"resource_uri"`
 	Name            string            `json:"name,omitempty"`
@@ -451,11 +501,21 @@ type BisqueImportRecord struct {
 }
 
 type BisqueUploadRecord struct {
-	FileID       string `json:"file_id,omitempty"`
-	ArtifactID   string `json:"artifact_id,omitempty"`
-	ResourceURI  string `json:"resource_uri"`
-	Name         string `json:"name,omitempty"`
-	ResourceUniq string `json:"resource_uniq,omitempty"`
+	FileID        string `json:"file_id,omitempty"`
+	ArtifactID    string `json:"artifact_id,omitempty"`
+	ResourceURI   string `json:"resource_uri"`
+	Name          string `json:"name,omitempty"`
+	ResourceUniq  string `json:"resource_uniq,omitempty"`
+	ClientViewURL string `json:"client_view_url,omitempty"`
+}
+
+type BisqueDatasetRecord struct {
+	CollectionID  string `json:"collection_id,omitempty"`
+	Name          string `json:"name"`
+	ResourceURI   string `json:"resource_uri"`
+	ResourceUniq  string `json:"resource_uniq,omitempty"`
+	MemberCount   int    `json:"member_count"`
+	ClientViewURL string `json:"client_view_url,omitempty"`
 }
 
 func (deps ServerDeps) handleBisqueSearch(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +644,185 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, bisqueUploadResponse{Count: len(uploads), Uploads: uploads})
 }
 
+func (deps ServerDeps) handleBisqueCreateDataset(w http.ResponseWriter, r *http.Request) {
+	if deps.Bisque == nil {
+		writeBisqueNotConfigured(w)
+		return
+	}
+	var req bisqueCreateDatasetRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	credentials := deps.bisqueCredentialsFromRequest(r.Context(), r)
+	dataset, err := deps.Bisque.CreateDataset(r.Context(), req.Name, req.ResourceURIs, credentials)
+	if err != nil {
+		writeBisqueError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, dataset)
+}
+
+func (deps ServerDeps) handleBisquePush(w http.ResponseWriter, r *http.Request) {
+	if deps.Bisque == nil {
+		writeBisqueNotConfigured(w)
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var req bisquePushRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	fileIDs := uniqueTrimmedStringValues(req.FileIDs)
+	collectionIDs := uniqueTrimmedStringValues(req.CollectionIDs)
+	if len(fileIDs) == 0 && len(collectionIDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("at least one file_id or collection_id is required"))
+		return
+	}
+	credentials := deps.bisqueCredentialsFromRequest(r.Context(), r)
+	if strings.TrimSpace(credentials.Username) == "" && strings.TrimSpace(deps.Bisque.username) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("link your BisQue account in Settings before pushing resources"))
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	uploads := []BisqueUploadRecord{}
+	datasets := []BisqueDatasetRecord{}
+	datasetName := strings.TrimSpace(req.DatasetName)
+
+	looseUploads, err := deps.pushBisqueFiles(r.Context(), root, principal, fileIDs, credentials)
+	if err != nil {
+		writeBisquePushError(w, err)
+		return
+	}
+	uploads = append(uploads, looseUploads...)
+	if datasetName != "" && len(collectionIDs) == 0 {
+		dataset, err := deps.Bisque.CreateDataset(r.Context(), datasetName, bisqueUploadResourceURIs(looseUploads), credentials)
+		if err != nil {
+			writeBisqueError(w, err)
+			return
+		}
+		datasets = append(datasets, dataset)
+	}
+
+	for _, collectionID := range collectionIDs {
+		collections, ok := deps.resourceCollectionStore()
+		if !ok {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource collections are not configured"})
+			return
+		}
+		collection, err := collections.GetResourceCollectionForUser(r.Context(), collectionID, principal.UserID, principal.OrgID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		page, err := collections.ListResourcesForCollectionForUser(r.Context(), domain.ResourceCollectionResourceListInput{
+			CollectionID: collectionID,
+			UserID:       principal.UserID,
+			OrgID:        principal.OrgID,
+			Limit:        uploadSessionMaxFilesPerBatch,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if page.TotalCount > len(page.Resources) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("folder %q contains too many resources to push in one request", collection.Name))
+			return
+		}
+		if len(page.Resources) == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("folder %q has no resources to push", collection.Name))
+			return
+		}
+		memberIDs := make([]string, 0, len(page.Resources))
+		for _, resource := range page.Resources {
+			memberIDs = append(memberIDs, resource.ResourceID)
+		}
+		memberUploads, err := deps.pushBisqueFiles(r.Context(), root, principal, memberIDs, credentials)
+		if err != nil {
+			writeBisquePushError(w, err)
+			return
+		}
+		uploads = append(uploads, memberUploads...)
+		name := strings.TrimSpace(collection.Name)
+		if datasetName != "" && len(collectionIDs) == 1 {
+			name = datasetName
+		}
+		if name == "" {
+			name = "ultra-folder"
+		}
+		dataset, err := deps.Bisque.CreateDataset(r.Context(), name, bisqueUploadResourceURIs(memberUploads), credentials)
+		if err != nil {
+			writeBisqueError(w, err)
+			return
+		}
+		dataset.CollectionID = collection.CollectionID
+		datasets = append(datasets, dataset)
+	}
+	writeJSON(w, http.StatusOK, bisquePushResponse{Count: len(uploads), Uploads: uploads, Datasets: datasets})
+}
+
+func (deps ServerDeps) pushBisqueFiles(ctx context.Context, root string, principal requestPrincipal, fileIDs []string, credentials BisqueCredentials) ([]BisqueUploadRecord, error) {
+	uploads := make([]BisqueUploadRecord, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		record, path, err := deps.findUploadResourceForRequest(ctx, root, principal, fileID)
+		if err != nil {
+			return nil, bisquePushFileError{fileID: fileID, name: record.OriginalName, err: err}
+		}
+		uploaded, err := deps.Bisque.UploadFile(ctx, record, path, credentials)
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, uploaded)
+	}
+	return uploads, nil
+}
+
+func bisqueUploadResourceURIs(uploads []BisqueUploadRecord) []string {
+	uris := make([]string, 0, len(uploads))
+	for _, upload := range uploads {
+		if strings.TrimSpace(upload.ResourceURI) != "" {
+			uris = append(uris, upload.ResourceURI)
+		}
+	}
+	return uris
+}
+
+type bisquePushFileError struct {
+	fileID string
+	name   string
+	err    error
+}
+
+func (err bisquePushFileError) Error() string {
+	label := strings.TrimSpace(err.name)
+	if label == "" {
+		label = err.fileID
+	}
+	return fmt.Sprintf("resource %q is not available for push: %v", label, err.err)
+}
+
+func (err bisquePushFileError) Unwrap() error {
+	return err.err
+}
+
+func writeBisquePushError(w http.ResponseWriter, err error) {
+	var pushErr bisquePushFileError
+	if errors.As(err, &pushErr) {
+		status := http.StatusInternalServerError
+		if errors.Is(pushErr.err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		} else if errors.Is(pushErr.err, store.ErrConflict) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeBisqueError(w, err)
+}
+
 func (deps ServerDeps) bisqueJobMetadataFromRequest(r *http.Request) domain.JSONMap {
 	metadata := domain.JSONMap{}
 	if deps.BisqueCredentials == nil {
@@ -607,7 +846,7 @@ func (deps ServerDeps) bisqueCredentialsFromRequest(ctx context.Context, r *http
 	if credentials, ok, _ := deps.BisqueCredentials.GetWithContext(ctx, bisqueSessionIDFromRequest(r)); ok {
 		return credentials
 	}
-	if workerSessionID := bisqueSessionIDFromWorkerHeader(r); workerSessionID != "" {
+	if workerSessionID := deps.bisqueSessionIDFromWorkerHeader(r); workerSessionID != "" {
 		if credentials, ok, _ := deps.BisqueCredentials.GetWithContext(ctx, workerSessionID); ok {
 			return credentials
 		}
@@ -622,13 +861,38 @@ func (deps ServerDeps) bisqueRootURL() string {
 	return deps.Bisque.rootURL
 }
 
-func bisqueSessionIDFromWorkerHeader(r *http.Request) string {
+// bisqueSessionIDFromWorkerHeader resolves the run-scoped BisQue session that
+// agent workers forward. The session id rides only the transient job payload
+// (never the stored run record), so the header is validated by ownership
+// instead: when the credential store knows which user the session belongs to,
+// it must be the same user that owns the run named in X-Ultra-Run-Id.
+func (deps ServerDeps) bisqueSessionIDFromWorkerHeader(r *http.Request) string {
 	runID := strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id"))
 	if runID == "" {
 		return ""
 	}
 	sessionID := strings.TrimSpace(r.Header.Get("X-Ultra-Bisque-Session-Id"))
 	if sessionID == "" {
+		return ""
+	}
+	if deps.workerRequestAuth(r) == workerAuthInvalid {
+		return ""
+	}
+	if deps.Store == nil {
+		return sessionID
+	}
+	ownerID, known, err := deps.BisqueCredentials.OwnerUserID(r.Context(), sessionID)
+	if err != nil {
+		return ""
+	}
+	if !known {
+		return sessionID
+	}
+	run, err := deps.Store.GetRun(r.Context(), runID)
+	if err != nil {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(ownerID), strings.TrimSpace(run.UserID)) {
 		return ""
 	}
 	return sessionID
@@ -678,6 +942,9 @@ func (service *BisqueService) Search(ctx context.Context, req bisqueSearchReques
 	if limit > 100 {
 		limit = 100
 	}
+	if _, err := resolveBisqueMetadataFilters(req.MetadataFilters); err != nil {
+		return bisqueSearchResponse{}, err
+	}
 	filters := bisqueSearchFiltersFromRequest(req)
 	if filters.enabled() {
 		results, total, err := service.filteredSearchResults(ctx, resourceType, req, filters, limit, credentials)
@@ -723,6 +990,11 @@ func (service *BisqueService) searchURL(resourceType string, req bisqueSearchReq
 		query.Set("query", textQuery)
 	}
 	query.Set("wpublic", bisqueWPublicScope(req.Scope))
+	if len(filters.metadata) > 0 {
+		// Tag values are only serialized at view=full; client-side metadata
+		// filtering needs them present in each resource element.
+		query.Set("view", "full")
+	}
 	query.Set("limit", strconv.Itoa(limit))
 	if offset > 0 || includeZeroOffset {
 		query.Set("offset", strconv.Itoa(offset))
@@ -795,17 +1067,20 @@ func (service *BisqueService) countAllSearchResults(ctx context.Context, resourc
 type bisqueSearchFilters struct {
 	nameContains string
 	extensions   []string
+	metadata     []bisqueResolvedMetadataFilter
 }
 
 func bisqueSearchFiltersFromRequest(req bisqueSearchRequest) bisqueSearchFilters {
+	metadata, _ := resolveBisqueMetadataFilters(req.MetadataFilters)
 	return bisqueSearchFilters{
 		nameContains: strings.ToLower(strings.TrimSpace(req.NameContains)),
 		extensions:   bisqueNormalizedExtensions(append(req.Extensions, req.FileExtensions...)),
+		metadata:     metadata,
 	}
 }
 
 func (filters bisqueSearchFilters) enabled() bool {
-	return filters.nameContains != "" || len(filters.extensions) > 0
+	return filters.nameContains != "" || len(filters.extensions) > 0 || len(filters.metadata) > 0
 }
 
 func (filters bisqueSearchFilters) matches(resource BisqueResource) bool {
@@ -817,6 +1092,11 @@ func (filters bisqueSearchFilters) matches(resource BisqueResource) bool {
 	}, " "))
 	if filters.nameContains != "" && !strings.Contains(haystack, filters.nameContains) {
 		return false
+	}
+	for _, filter := range filters.metadata {
+		if !filter.matches(resource) {
+			return false
+		}
 	}
 	if len(filters.extensions) == 0 {
 		return true
@@ -831,6 +1111,119 @@ func (filters bisqueSearchFilters) matches(resource BisqueResource) bool {
 		}
 	}
 	return false
+}
+
+var bisqueMetadataFilterOps = map[string]bool{
+	"eq": true, "ne": true, "gt": true, "gte": true, "lt": true, "lte": true, "contains": true,
+}
+
+type bisqueResolvedMetadataFilter struct {
+	tag      string
+	op       string
+	value    string
+	valueLow string
+	numeric  bool
+	numValue float64
+}
+
+// resolveBisqueMetadataFilters validates and normalizes the requested metadata
+// filters. Relational ops require a numeric value because they are evaluated
+// numerically client-side (BisQue's lexical tag comparison is the bug this
+// path exists to avoid).
+func resolveBisqueMetadataFilters(raw []bisqueMetadataFilter) ([]bisqueResolvedMetadataFilter, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	resolved := make([]bisqueResolvedMetadataFilter, 0, len(raw))
+	for _, filter := range raw {
+		tag := strings.TrimSpace(filter.Tag)
+		if tag == "" {
+			return nil, bisqueClientError("BisQue metadata filter requires a tag name")
+		}
+		op := strings.ToLower(strings.TrimSpace(filter.Op))
+		if op == "" {
+			op = "eq"
+		}
+		if !bisqueMetadataFilterOps[op] {
+			return nil, bisqueClientError("unsupported BisQue metadata filter op: " + op)
+		}
+		value := strings.TrimSpace(filter.Value)
+		resolvedFilter := bisqueResolvedMetadataFilter{
+			tag:      tag,
+			op:       op,
+			value:    value,
+			valueLow: strings.ToLower(value),
+		}
+		if num, err := strconv.ParseFloat(value, 64); err == nil {
+			resolvedFilter.numeric = true
+			resolvedFilter.numValue = num
+		}
+		switch op {
+		case "gt", "gte", "lt", "lte":
+			if !resolvedFilter.numeric {
+				return nil, bisqueClientError("BisQue metadata filter op " + op + " requires a numeric value")
+			}
+		}
+		resolved = append(resolved, resolvedFilter)
+	}
+	return resolved, nil
+}
+
+func (filter bisqueResolvedMetadataFilter) matches(resource BisqueResource) bool {
+	raw, ok := bisqueTagValue(resource, filter.tag)
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(raw)
+	switch filter.op {
+	case "contains":
+		return strings.Contains(strings.ToLower(trimmed), filter.valueLow)
+	case "eq":
+		if filter.numeric {
+			if num, err := strconv.ParseFloat(trimmed, 64); err == nil {
+				return num == filter.numValue
+			}
+		}
+		return strings.EqualFold(trimmed, filter.value)
+	case "ne":
+		if filter.numeric {
+			if num, err := strconv.ParseFloat(trimmed, 64); err == nil {
+				return num != filter.numValue
+			}
+		}
+		return !strings.EqualFold(trimmed, filter.value)
+	case "gt", "gte", "lt", "lte":
+		num, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return false
+		}
+		switch filter.op {
+		case "gt":
+			return num > filter.numValue
+		case "gte":
+			return num >= filter.numValue
+		case "lt":
+			return num < filter.numValue
+		case "lte":
+			return num <= filter.numValue
+		}
+	}
+	return false
+}
+
+func bisqueTagValue(resource BisqueResource, tag string) (string, bool) {
+	if len(resource.Tags) == 0 {
+		return "", false
+	}
+	if value, ok := resource.Tags[tag]; ok {
+		return value, true
+	}
+	for name, value := range resource.Tags {
+		if strings.EqualFold(name, tag) {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func bisqueNormalizedExtensions(rawExtensions []string) []string {
@@ -993,9 +1386,77 @@ func (service *BisqueService) UploadNamedFile(ctx context.Context, originalName 
 	}
 	uploaded := resources[0]
 	return BisqueUploadRecord{
-		ResourceURI:  uploaded.ResourceURI,
-		Name:         uploaded.Name,
-		ResourceUniq: uploaded.ResourceUniq,
+		ResourceURI:   uploaded.ResourceURI,
+		Name:          uploaded.Name,
+		ResourceUniq:  uploaded.ResourceUniq,
+		ClientViewURL: uploaded.ClientViewURL,
+	}, nil
+}
+
+type bisqueDatasetMemberXML struct {
+	XMLName xml.Name `xml:"value"`
+	Index   int      `xml:"index,attr"`
+	Type    string   `xml:"type,attr"`
+	URI     string   `xml:",chardata"`
+}
+
+type bisqueDatasetXML struct {
+	XMLName xml.Name                 `xml:"dataset"`
+	Name    string                   `xml:"name,attr"`
+	Members []bisqueDatasetMemberXML `xml:"value"`
+}
+
+func (service *BisqueService) CreateDataset(ctx context.Context, name string, memberURIs []string, credentials BisqueCredentials) (BisqueDatasetRecord, error) {
+	if service == nil {
+		return BisqueDatasetRecord{}, bisqueClientError("BisQue integration is not configured")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return BisqueDatasetRecord{}, bisqueClientError("BisQue dataset name is required")
+	}
+	members := make([]bisqueDatasetMemberXML, 0, len(memberURIs))
+	seen := map[string]bool{}
+	for _, rawURI := range memberURIs {
+		memberURI, err := service.normalizeAllowedURL(rawURI)
+		if err != nil {
+			return BisqueDatasetRecord{}, err
+		}
+		if seen[memberURI] {
+			continue
+		}
+		seen[memberURI] = true
+		members = append(members, bisqueDatasetMemberXML{
+			Index: len(members),
+			Type:  "object",
+			URI:   memberURI,
+		})
+	}
+	if len(members) == 0 {
+		return BisqueDatasetRecord{}, bisqueClientError("BisQue dataset requires at least one member resource")
+	}
+	payload, err := xml.Marshal(bisqueDatasetXML{Name: name, Members: members})
+	if err != nil {
+		return BisqueDatasetRecord{}, err
+	}
+	data, _, err := service.fetch(ctx, http.MethodPost, service.endpoint("/data_service/dataset"), bytes.NewReader(payload), "text/xml", credentials)
+	if err != nil {
+		return BisqueDatasetRecord{}, err
+	}
+	resources := service.withLinks(parseBisqueResources(data))
+	if len(resources) == 0 {
+		return BisqueDatasetRecord{}, bisqueServerError("BisQue dataset response did not include a resource")
+	}
+	created := resources[0]
+	datasetName := created.Name
+	if strings.TrimSpace(datasetName) == "" {
+		datasetName = name
+	}
+	return BisqueDatasetRecord{
+		Name:          datasetName,
+		ResourceURI:   created.ResourceURI,
+		ResourceUniq:  created.ResourceUniq,
+		MemberCount:   len(members),
+		ClientViewURL: created.ClientViewURL,
 	}, nil
 }
 
@@ -1101,13 +1562,32 @@ func (service *BisqueService) blobURL(resource BisqueResource) (string, error) {
 func (service *BisqueService) withLinks(resources []BisqueResource) []BisqueResource {
 	for i := range resources {
 		if resources[i].ResourceURI != "" {
-			resources[i].ClientViewURL = service.endpoint("/client_service/view") + "?resource=" + url.QueryEscape(resources[i].ResourceURI)
+			resources[i].ClientViewURL = service.clientViewURL(resources[i].ResourceURI)
 		}
 		if resources[i].ResourceUniq != "" {
 			resources[i].ImageServiceURL = service.endpoint("/image_service/" + url.PathEscape(resources[i].ResourceUniq))
 		}
 	}
 	return resources
+}
+
+// clientViewURL builds the canonical BisQue viewer link for a resource. The
+// BisQue web UI (bq_ui_upload.js, uploaded.html, every ResourceBrowser code
+// path) appends the full resource URI to /client_service/view?resource= without
+// percent-encoding it — ':' and '/' are legal in a URL query component, and
+// BisQue resource URIs are clean base58 paths, so the raw form is both valid and
+// the link users see in BisQue itself. This is uniform across images, tables,
+// and datasets. Relative resource URIs are resolved against the configured root
+// so the viewer always receives an absolute resource reference.
+func (service *BisqueService) clientViewURL(resourceURI string) string {
+	resourceURI = strings.TrimSpace(resourceURI)
+	if resourceURI == "" {
+		return ""
+	}
+	if !strings.HasPrefix(resourceURI, "http://") && !strings.HasPrefix(resourceURI, "https://") {
+		resourceURI = service.rootURL + "/" + strings.TrimLeft(resourceURI, "/")
+	}
+	return service.endpoint("/client_service/view") + "?resource=" + resourceURI
 }
 
 type bisqueXMLResource struct {

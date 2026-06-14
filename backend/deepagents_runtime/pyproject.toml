@@ -19,7 +19,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+# dev pulls in the imaging deps (numpy/fastapi/lxml/uvicorn) so the imaging test
+# suite collects+runs under a clean `uv run --extra dev` (as CI does) — without
+# them, test_imaging_* fail to import numpy.
+dev = ["pytest>=8.0.0", "ultra-deepagents-runtime[imaging]"]
+imaging = [
+    "numpy>=1.26.0,<3",
+    "lxml>=5.0.0,<6",
+    "fastapi>=0.110.0,<1",
+    "uvicorn>=0.29.0,<1",
+]
 rarespot = [
     "matplotlib>=3.8.0,<4",
     "ipython>=8.0.0,<10",

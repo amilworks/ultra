@@ -9,18 +9,19 @@ from urllib import error as urllib_error
 
 import nats.errors
 import pytest
-from PIL import Image
-
 import ultra_deepagents.nats_worker as nats_worker_module
+from PIL import Image
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.nats_worker import (
     ControlPlaneRunLease,
     NATSDeepAgentsWorker,
     RunLeaseConflict,
+    RunLeaseUnavailable,
     build_job_consumer_config,
-    fetch_job_messages,
     fetch_control_plane_run_max_sequence,
     fetch_control_plane_run_status,
+    fetch_control_plane_run_usage_summary,
+    fetch_job_messages,
     job_ack_extension_interval,
     post_control_plane_worker_heartbeat,
 )
@@ -119,6 +120,601 @@ class FakeV3ProtocolStreamingAgent:
         }
 
 
+class FakeV3ProtocolSubagentToolAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Analyze the staged data."
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": [],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": "Delegating"},
+                    },
+                    {"lc_agent_name": "ultra-research-agent"},
+                ],
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "task-call-1",
+                    "tool_name": "task",
+                    "input": {
+                        "subagent_type": "data-analyst",
+                        "description": "Inspect the staged data and summarize shape.",
+                    },
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": ["data-analyst"],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "execute-call-1",
+                    "tool_name": "execute",
+                    "input": {"command": "python inspect_data.py"},
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": ["data-analyst"],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": " saw 128 rows"},
+                    },
+                    {"lc_agent_name": "data-analyst"},
+                ],
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": ["data-analyst"],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "execute-call-1",
+                    "tool_name": "execute",
+                    "output": "shape=(128, 6)",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "task-call-1",
+                    "tool_name": "task",
+                    "output": "Data analyst inspected staged data: shape=(128, 6).",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": [],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": " and reconciling."},
+                    },
+                    {"lc_agent_name": "ultra-research-agent"},
+                ],
+            },
+        }
+
+
+class FakeV3ProtocolDynamicTaskNamespaceAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Compute statistics."
+        dynamic_namespace = "tools:f9fde1a0-7bf1-5231-cabb-b5815b5fbb51"
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "task-call-1",
+                    "tool_name": "task",
+                    "input": {
+                        "subagent_type": "code-runner",
+                        "description": "Compute the requested statistics.",
+                    },
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [dynamic_namespace],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "execute-call-1",
+                    "tool_name": "execute",
+                    "input": {"command": "python compute_stats.py"},
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": [dynamic_namespace],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": " computed regression"},
+                    },
+                    {"lc_agent_name": dynamic_namespace},
+                ],
+            },
+        }
+        yield {
+            "event": "on_chat_model_end",
+            "run_id": "subagent-model-call-1",
+            "namespace": [dynamic_namespace],
+            "data": {
+                "output": _FakeUsageMessage(
+                    {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16}
+                )
+            },
+            "metadata": {
+                "lc_agent_name": dynamic_namespace,
+                "langgraph_node": dynamic_namespace,
+                "ls_model_name": "deepseek_v4",
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [dynamic_namespace],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "execute-call-1",
+                    "tool_name": "execute",
+                    "output": "mean_y=4.0 slope=0.6 intercept=2.2",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "task-call-1",
+                    "tool_name": "task",
+                    "output": "code-runner computed the statistics.",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "messages",
+            "params": {
+                "namespace": [],
+                "data": [
+                    {
+                        "event": "content-block-delta",
+                        "index": 0,
+                        "delta": {"type": "text-delta", "text": " done"},
+                    },
+                    {"lc_agent_name": "ultra-research-agent"},
+                ],
+            },
+        }
+
+
+class FakeV3ProtocolAsyncDelegationAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Train a classifier in the background."
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "async-start-1",
+                    "tool_name": "start_async_task",
+                    "input": {
+                        "subagent_type": "remote-training-runner",
+                        "description": "Train the classifier and report validation metrics.",
+                    },
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-start-1",
+                    "tool_name": "start_async_task",
+                    "output": "Launched async subagent. task_id: async-thread-1",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "async-list-1",
+                    "tool_name": "list_async_tasks",
+                    "input": {"status_filter": "all"},
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-list-1",
+                    "tool_name": "list_async_tasks",
+                    "output": (
+                        "1 tracked task(s):\n"
+                        "- task_id: async-thread-1  agent: remote-training-runner  "
+                        "status: running"
+                    ),
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "async-check-1",
+                    "tool_name": "check_async_task",
+                    "input": {"task_id": "async-thread-1"},
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-check-1",
+                    "tool_name": "check_async_task",
+                    "output": json.dumps(
+                        {
+                            "status": "error",
+                            "thread_id": "async-thread-1",
+                            "error": "CUDA out of memory",
+                        }
+                    ),
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {"role": "assistant", "content": "The background worker failed."},
+                    ]
+                },
+            },
+        }
+
+
+class FakeV3ProtocolAsyncValidationFailureAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Validate async delegation failures."
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-start-blank",
+                    "tool_name": "start_async_task",
+                    "output": (
+                        "start_async_task description is required for async "
+                        "subagent delegation."
+                    ),
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-update-blank",
+                    "tool_name": "update_async_task",
+                    "input": {"task_id": "async-thread-1"},
+                    "output": (
+                        "update_async_task message is required for async "
+                        "subagent delegation."
+                    ),
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {"role": "assistant", "content": "Delegation validation failed."},
+                    ]
+                },
+            },
+        }
+
+
+class FakeV3ProtocolAsyncCancelAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Cancel the background task."
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "started",
+                    "tool_call_id": "async-cancel-1",
+                    "tool_name": "cancel_async_task",
+                    "input": {"task_id": "async-thread-1"},
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "completed",
+                    "tool_call_id": "async-cancel-1",
+                    "tool_name": "cancel_async_task",
+                    "output": "Cancelled async subagent task: async-thread-1",
+                },
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {"role": "assistant", "content": "Cancelled the background worker."},
+                    ]
+                },
+            },
+        }
+
+
+class FakeFailedTaskThenFallbackDisclosureAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.continuation_prompt = ""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "event",
+                "method": "tools",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "started",
+                        "tool_call_id": "task-call-1",
+                        "tool_name": "task",
+                        "input": {
+                            "subagent_type": "code-runner",
+                            "description": "Verify the Lyapunov estimate.",
+                        },
+                    },
+                },
+            }
+            yield {
+                "type": "event",
+                "method": "tools",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "failed",
+                        "tool_call_id": "task-call-1",
+                        "tool_name": "task",
+                        "error": "subagent stream closed",
+                    },
+                },
+            }
+            answer = (
+                "Classification table: ICs=3, seeds=2, durations=500 and 1000 periods, "
+                "step size h=T/200. lambda = 0.112 ± 0.005. Decision rule: classified "
+                "only when |lambda| > 3× spread and an independent Poincare discriminator "
+                "agrees; otherwise label the row marginal.\n\nLimitations: finite observation time.\n\n"
+                "Delegated verification confirms the chaotic classification."
+            )
+        else:
+            self.continuation_prompt = payload["messages"][-1]["content"]
+            assert "task delegation failed" in self.continuation_prompt.lower()
+            answer = (
+                "Task delegation failed, so I used local fallback verification instead. "
+                "Classification table: ICs=3, seeds=2, durations=500 and 1000 periods, "
+                "step size h=T/200. lambda = 0.112 ± 0.005. Decision rule: classified "
+                "only when |lambda| > 3× spread and an independent Poincare discriminator "
+                "agrees; otherwise label the row marginal.\n\nLimitations: finite observation time.\n\n"
+                "The local fallback verification confirms the chaotic classification."
+            )
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {"role": "assistant", "content": answer},
+                    ]
+                },
+            },
+        }
+
+
+class FakeCompletedInvalidTaskThenFallbackDisclosureAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.continuation_prompt = ""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "event",
+                "method": "tools",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "started",
+                        "tool_call_id": "task-call-invalid",
+                        "tool_name": "task",
+                        "input": {
+                            "subagent_type": "missing-agent-fallback-probe",
+                            "description": "Intentional invalid subagent probe.",
+                        },
+                    },
+                },
+            }
+            yield {
+                "type": "event",
+                "method": "tools",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "completed",
+                        "tool_call_id": "task-call-invalid",
+                        "tool_name": "task",
+                        "output": (
+                            "We cannot invoke subagent missing-agent-fallback-probe "
+                            "because it does not exist; the only allowed types are "
+                            "`code-runner`, `data-analyst`."
+                        ),
+                    },
+                },
+            }
+            answer = "Delegated verification confirms the debug workflow is safe."
+        else:
+            self.continuation_prompt = payload["messages"][-1]["content"]
+            assert "task delegation failed" in self.continuation_prompt.lower()
+            answer = (
+                "Task delegation failed, so I used local fallback verification instead. "
+                "The tool output says the requested subagent type does not exist."
+            )
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][0]["content"]},
+                        {"role": "assistant", "content": answer},
+                    ]
+                },
+            },
+        }
+
+
+class FakeMetadataOnlySubagentToolAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Analyze the staged data."
+        yield {
+            "event": "on_tool_start",
+            "name": "execute",
+            "run_id": "execute-call-1",
+            "data": {"input": {"command": "python inspect_data.py"}},
+            "metadata": {"lc_agent_name": "data-analyst"},
+        }
+        yield {
+            "event": "on_tool_end",
+            "name": "execute",
+            "run_id": "execute-call-1",
+            "data": {"output": "shape=(128, 6)"},
+            "metadata": {"lc_agent_name": "data-analyst"},
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": "Analyze the staged data."},
+                        {"role": "assistant", "content": "Analysis complete."},
+                    ]
+                },
+            },
+        }
+
+
 class FakeConfigAwareStreamingAgent:
     async def astream_events(self, payload, config=None, *, context=None, version=None):
         assert version == "v3"
@@ -149,7 +745,9 @@ class FakeConversationTitleModel:
     async def ainvoke(self, messages):
         joined = "\n".join(str(message.get("content", "")) for message in messages)
         assert "Run RareSpot on this prairie dog image" in joined
-        assert "RareSpot completed with burrow overlays." in joined
+        # The title call runs concurrently with the run, so its prompt contains
+        # only the request — never the assistant result.
+        assert "RareSpot completed with burrow overlays." not in joined
         return FakeConversationTitleResponse()
 
 
@@ -364,6 +962,14 @@ class FakeHangingAfterToolAgent:
             },
         }
         await asyncio.Event().wait()
+
+
+class FakeUnderlyingTimeoutAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        _ = payload, context
+        raise TimeoutError("upstream subagent stream timed out")
+        yield  # pragma: no cover
 
 
 class FakeIdleOnceThenRecoversAgent:
@@ -673,7 +1279,13 @@ class FakeRootOutputWritingAgent:
                 "data": {
                     "messages": [
                         {"role": "user", "content": "Create a plot."},
-                        {"role": "assistant", "content": "Created root-level deliverables."},
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "Created root-level deliverables: plot_squared.png and "
+                                "plot_squared.py."
+                            ),
+                        },
                     ]
                 },
             },
@@ -703,7 +1315,7 @@ class FakePrematureCodeOnlyThenFigureAgent:
                     "data": {
                         "messages": [
                             {"role": "user", "content": payload["messages"][0]["content"]},
-                            {"role": "assistant", "content": "Saved the script."},
+                            {"role": "assistant", "content": "Saved the script plot_x2.py."},
                         ]
                     },
                 },
@@ -725,7 +1337,10 @@ class FakePrematureCodeOnlyThenFigureAgent:
                         {"role": "user", "content": payload["messages"][-1]["content"]},
                         {
                             "role": "assistant",
-                            "content": "Executed the plotting script and saved the code and figure.",
+                            "content": (
+                                "Executed the plotting script and saved the code "
+                                "(plot_x2.py) and figure (plot_x2.png)."
+                            ),
                         },
                     ]
                 },
@@ -885,6 +1500,305 @@ def test_run_job_streams_started_delta_and_completed(tmp_path: Path):
     assert events[-1]["payload"]["response_text"] == "Hello"
 
 
+class _FakeUsageMessage:
+    """Stand-in for the aggregated AIMessage on ``on_chat_model_end``."""
+
+    def __init__(self, usage_metadata, model="deepseek_v4"):
+        self.usage_metadata = usage_metadata
+        self.response_metadata = {"model_name": model}
+
+
+class FakeTokenUsageAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        # Two model calls (e.g. coordinator turn + a post-tool turn); usage is
+        # reported per call and must be summed at the run level.
+        yield {
+            "event": "on_chat_model_end",
+            "run_id": "model-call-1",
+            "data": {
+                "output": _FakeUsageMessage(
+                    {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+                )
+            },
+            "metadata": {"langgraph_node": "coordinator", "ls_model_name": "deepseek_v4"},
+        }
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": type("Chunk", (), {"content": "Hello"})()},
+            "metadata": {"langgraph_node": "coordinator"},
+        }
+        yield {
+            "event": "on_chat_model_end",
+            "run_id": "model-call-2",
+            "data": {
+                "output": _FakeUsageMessage(
+                    {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+                )
+            },
+            "metadata": {"langgraph_node": "coordinator", "ls_model_name": "deepseek_v4"},
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": "Say hello."},
+                        {"role": "assistant", "content": "Hello from the model."},
+                    ]
+                },
+            },
+        }
+
+
+class FakeSubagentTokenUsageAgent:
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        assert payload["messages"][0]["content"] == "Analyze the staged data."
+        yield {
+            "event": "on_chat_model_end",
+            "run_id": "subagent-model-call-1",
+            "namespace": ["data-analyst"],
+            "data": {
+                "output": _FakeUsageMessage(
+                    {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42}
+                )
+            },
+            "metadata": {
+                "lc_agent_name": "data-analyst",
+                "langgraph_node": "data-analyst",
+                "ls_model_name": "deepseek_v4",
+            },
+        }
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": "Analyze the staged data."},
+                        {"role": "assistant", "content": "Analysis complete."},
+                    ]
+                },
+            },
+        }
+
+
+def test_run_job_completed_event_carries_summed_token_usage(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Say hello.",
+            messages=[{"role": "user", "content": "Say hello."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeTokenUsageAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    completed = events[-1]
+    assert completed["event_kind"] == "run.completed"
+    assert completed["payload"]["response_text"] == "Hello from the model."
+    assert completed["payload"]["usage"] == {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "total_tokens": 180,
+        "model": "deepseek_v4",
+    }
+    usage_events = [event for event in events if event["event_kind"] == "run.token_usage"]
+    assert [event["payload"]["usage_event_id"] for event in usage_events] == [
+        "run-1:model:model-call-1",
+        "run-1:model:model-call-2",
+    ]
+    assert all(
+        event["payload"]["usage_event_id"] != event["event_id"] for event in usage_events
+    )
+    assert [event["payload"]["total_tokens"] for event in usage_events] == [120, 60]
+    assert all(event["message"] == "" for event in usage_events)
+
+
+def test_run_job_scopes_subagent_token_usage_events(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Analyze the staged data.",
+            messages=[{"role": "user", "content": "Analyze the staged data."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeSubagentTokenUsageAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    usage_event = next(event for event in events if event["event_kind"] == "run.token_usage")
+    assert usage_event["agent_role"] == "data-analyst"
+    assert usage_event["node_name"] == "data-analyst:model"
+    assert usage_event["payload"]["subagent_name"] == "data-analyst"
+    assert usage_event["payload"]["namespace"] == ["data-analyst"]
+    assert usage_event["payload"]["total_tokens"] == 42
+
+
+def test_run_job_completed_usage_includes_prior_persisted_usage(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Say hello.",
+            messages=[{"role": "user", "content": "Say hello."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeTokenUsageAgent(),
+            prior_usage={
+                "input_tokens": 25,
+                "output_tokens": 5,
+                "total_tokens": 30,
+                "model": "deepseek_v4",
+            },
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    completed = events[-1]
+    assert completed["event_kind"] == "run.completed"
+    assert completed["payload"]["usage"] == {
+        "input_tokens": 175,
+        "output_tokens": 35,
+        "total_tokens": 210,
+        "model": "deepseek_v4",
+    }
+
+
+def test_seed_user_profile_memory_writes_profile_without_clobbering_preferences(tmp_path: Path):
+    from ultra_deepagents.runner import _seed_user_profile_memory
+
+    memory_root = tmp_path / "users" / "ada"
+    learned_preferences = memory_root / "preferences.md"
+    memory_root.mkdir(parents=True)
+    learned_preferences.write_text("## Learned preference\nUse concise equations.\n", encoding="utf-8")
+    _seed_user_profile_memory(
+        memory_root,
+        {
+            "display_name": "Ada Lovelace",
+            "title": "Principal Investigator",
+            "institution": "Analytical Engine Lab",
+            "research_interests": "symbolic computation",
+            "bio": "Studies general-purpose computation.",
+        },
+    )
+    profile = (memory_root / "user_profile.md").read_text()
+    assert profile.startswith("# User profile")
+    assert "Ada Lovelace" in profile
+    assert "Analytical Engine Lab" in profile
+    assert "symbolic computation" in profile
+    assert learned_preferences.read_text(encoding="utf-8") == "## Learned preference\nUse concise equations.\n"
+
+
+def test_seed_user_profile_memory_skips_empty_or_blank_profiles(tmp_path: Path):
+    from ultra_deepagents.runner import _seed_user_profile_memory
+
+    memory_root = tmp_path / "users" / "ada"
+    _seed_user_profile_memory(memory_root, None)
+    _seed_user_profile_memory(memory_root, {})
+    _seed_user_profile_memory(memory_root, {"display_name": "   ", "bio": ""})
+    assert not (memory_root / "user_profile.md").exists()
+
+
+def test_run_job_seeds_user_profile_into_per_user_memory(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            memory_root=str(tmp_path / "memory"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-7",
+            goal="Say hello.",
+            messages=[{"role": "user", "content": "Say hello."}],
+        )
+
+        async def publish(event):
+            return None
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeStreamingAgent(),
+            user_profile={
+                "display_name": "Dr. Test",
+                "research_interests": "astrobiology",
+            },
+        )
+        return settings
+
+    settings = asyncio.run(scenario())
+    profile = Path(settings.memory_root) / "users" / "researcher-7" / "user_profile.md"
+    assert profile.exists()
+    text = profile.read_text()
+    assert "Dr. Test" in text
+    assert "astrobiology" in text
+
+
 def test_run_job_streams_deepagents_v3_raw_protocol_messages(tmp_path: Path):
     async def scenario():
         settings = RuntimeSettings(
@@ -926,6 +1840,362 @@ def test_run_job_streams_deepagents_v3_raw_protocol_messages(tmp_path: Path):
     assert events[2]["payload"]["text"] == " subagent scratch"
     assert events[2]["payload"]["source"] == "general-purpose"
     assert events[-1]["payload"]["response_text"] == "Hello"
+
+
+def test_run_job_scopes_subagent_tool_events_in_stream(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Analyze the staged data.",
+            messages=[{"role": "user", "content": "Analyze the staged data."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3ProtocolSubagentToolAgent(),
+        )
+        return result, published
+
+    result, events = asyncio.run(scenario())
+
+    assert result == " and reconciling."
+    execute_started = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.started"
+        and event["payload"]["tool_name"] == "execute"
+    )
+    assert execute_started["agent_role"] == "data-analyst"
+    assert execute_started["node_name"] == "data-analyst:tool:execute"
+    assert execute_started["payload"]["subagent_name"] == "data-analyst"
+    assert execute_started["payload"]["namespace"] == ["data-analyst"]
+    assert execute_started["payload"]["tool_call_id"] == "execute-call-1"
+
+    subagent_delta = next(
+        event for event in events if event["event_kind"] == "subagent.message.delta"
+    )
+    assert subagent_delta["agent_role"] == "data-analyst"
+    assert subagent_delta["payload"]["text"] == " saw 128 rows"
+
+    task_started = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.started"
+        and event["payload"]["tool_name"] == "task"
+    )
+    assert task_started["agent_role"] == "tool"
+    assert task_started["payload"]["subagent_type"] == "data-analyst"
+    assert events[-1]["payload"]["response_text"] == " and reconciling."
+
+
+def test_run_job_maps_dynamic_task_namespace_to_parent_subagent_type(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Compute statistics.",
+            messages=[{"role": "user", "content": "Compute statistics."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3ProtocolDynamicTaskNamespaceAgent(),
+        )
+        return result, published
+
+    result, events = asyncio.run(scenario())
+
+    assert result == " done"
+    dynamic_namespace = "tools:f9fde1a0-7bf1-5231-cabb-b5815b5fbb51"
+    task_started = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.started"
+        and event["payload"]["tool_name"] == "task"
+    )
+    assert task_started["payload"]["subagent_type"] == "code-runner"
+
+    execute_started = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.started"
+        and event["payload"]["tool_name"] == "execute"
+    )
+    assert execute_started["agent_role"] == "code-runner"
+    assert execute_started["node_name"] == "code-runner:tool:execute"
+    assert execute_started["payload"]["subagent_name"] == "code-runner"
+    assert execute_started["payload"]["namespace"] == [dynamic_namespace]
+
+    subagent_delta = next(
+        event for event in events if event["event_kind"] == "subagent.message.delta"
+    )
+    assert subagent_delta["agent_role"] == "code-runner"
+    assert subagent_delta["node_name"] == "code-runner"
+    assert subagent_delta["payload"]["source"] == "code-runner"
+    assert subagent_delta["payload"]["namespace"] == [dynamic_namespace]
+
+    usage_event = next(event for event in events if event["event_kind"] == "run.token_usage")
+    assert usage_event["agent_role"] == "code-runner"
+    assert usage_event["node_name"] == "code-runner:model"
+    assert usage_event["payload"]["subagent_name"] == "code-runner"
+    assert usage_event["payload"]["namespace"] == [dynamic_namespace]
+
+
+def test_run_job_enriches_async_delegation_tool_events_with_structured_evidence(
+    tmp_path: Path,
+):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Train a classifier in the background.",
+            messages=[{"role": "user", "content": "Train a classifier in the background."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3ProtocolAsyncDelegationAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    start_started = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.started"
+        and event["payload"]["tool_name"] == "start_async_task"
+    )
+    assert start_started["payload"]["delegation_mode"] == "async_subagent"
+    assert start_started["payload"]["async_subagent_name"] == "remote-training-runner"
+
+    launch_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "start_async_task"
+    )
+    assert launch_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert launch_completed["payload"]["async_task_id"] == "async-thread-1"
+    assert launch_completed["payload"]["async_task_ids"] == ["async-thread-1"]
+
+    list_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "list_async_tasks"
+    )
+    assert list_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert list_completed["payload"]["async_task_id"] == "async-thread-1"
+    assert list_completed["payload"]["async_subagent_name"] == "remote-training-runner"
+    assert list_completed["payload"]["async_status"] == "running"
+
+    check_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "check_async_task"
+    )
+    assert check_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert check_completed["payload"]["async_task_id"] == "async-thread-1"
+    assert check_completed["payload"]["async_status"] == "error"
+    assert check_completed["payload"]["async_error"] == "CUDA out of memory"
+    assert check_completed["payload"]["async_failure"] is True
+
+
+def test_run_job_marks_async_required_instruction_errors_as_failures(
+    tmp_path: Path,
+):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Validate async delegation failures.",
+            messages=[{"role": "user", "content": "Validate async delegation failures."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3ProtocolAsyncValidationFailureAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    start_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "start_async_task"
+    )
+    assert start_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert start_completed["payload"]["async_failure"] is True
+    assert start_completed["payload"]["async_error"] == (
+        "start_async_task description is required for async subagent delegation."
+    )
+
+    update_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "update_async_task"
+    )
+    assert update_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert update_completed["payload"]["async_task_id"] == "async-thread-1"
+    assert update_completed["payload"]["async_failure"] is True
+    assert update_completed["payload"]["async_error"] == (
+        "update_async_task message is required for async subagent delegation."
+    )
+
+
+def test_run_job_marks_cancelled_async_delegation_events_as_terminal(
+    tmp_path: Path,
+):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Cancel the background task.",
+            messages=[{"role": "user", "content": "Cancel the background task."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3ProtocolAsyncCancelAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    cancel_completed = next(
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "cancel_async_task"
+    )
+    assert cancel_completed["payload"]["delegation_mode"] == "async_subagent"
+    assert cancel_completed["payload"]["async_task_id"] == "async-thread-1"
+    assert cancel_completed["payload"]["async_task_ids"] == ["async-thread-1"]
+    assert cancel_completed["payload"]["async_status"] == "cancelled"
+    assert cancel_completed["payload"]["async_statuses"] == ["cancelled"]
+
+
+def test_run_job_scopes_metadata_only_subagent_tool_events_in_stream(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Analyze the staged data.",
+            messages=[{"role": "user", "content": "Analyze the staged data."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeMetadataOnlySubagentToolAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    execute_events = [
+        event
+        for event in events
+        if event["event_kind"].startswith("tool_call.")
+        and event["payload"]["tool_name"] == "execute"
+    ]
+    assert [event["event_kind"] for event in execute_events] == [
+        "tool_call.started",
+        "tool_call.completed",
+    ]
+    assert [event["agent_role"] for event in execute_events] == [
+        "data-analyst",
+        "data-analyst",
+    ]
+    assert [event["node_name"] for event in execute_events] == [
+        "data-analyst:tool:execute",
+        "data-analyst:tool:execute",
+    ]
+    assert execute_events[0]["payload"]["subagent_name"] == "data-analyst"
+    assert execute_events[0]["payload"].get("namespace") is None
 
 
 def test_run_job_passes_configured_langgraph_recursion_limit(tmp_path: Path):
@@ -1143,6 +2413,47 @@ def test_run_job_fails_terminal_when_deepagents_stream_goes_idle(tmp_path: Path)
     assert "Deep Agents stream produced no events" in events[-1]["message"]
     lease = json.loads((tmp_path / "workspaces" / "run-1" / "lease.json").read_text())
     assert lease["status"] == "failed"
+
+
+def test_run_job_does_not_label_underlying_timeout_as_idle_recovery(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_timeout_seconds=0.0,
+            model_stream_idle_max_recoveries=2,
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Run a delegated audit.",
+            messages=[{"role": "user", "content": "Run a delegated audit."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        with pytest.raises(TimeoutError, match="upstream subagent stream timed out"):
+            await run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: FakeUnderlyingTimeoutAgent(),
+            )
+        return published
+
+    events = asyncio.run(scenario())
+
+    assert [event["event_kind"] for event in events] == ["run.started", "run.failed"]
+    assert events[-1]["payload"]["error"] == "upstream subagent stream timed out"
+    assert not any(
+        event.get("payload", {}).get("reason") == "model_stream_idle"
+        for event in events
+    )
 
 
 def test_run_job_recovers_from_one_idle_model_stream_before_failing(tmp_path: Path):
@@ -1604,7 +2915,10 @@ def test_run_job_continues_when_explicit_plot_request_only_saves_code(tmp_path: 
     result, events, fake_agent = asyncio.run(scenario())
 
     assert fake_agent.calls == 2
-    assert result == "Executed the plotting script and saved the code and figure."
+    assert result == (
+        "Executed the plotting script and saved the code (plot_x2.py) and "
+        "figure (plot_x2.png)."
+    )
     assert "figure" in fake_agent.continuation_prompt
     assert [event["event_kind"] for event in events] == [
         "run.started",
@@ -2567,9 +3881,9 @@ def test_worker_posts_control_plane_heartbeats_around_compute(tmp_path: Path):
     assert message.acked == 1
     assert [call["status"] for call in heartbeat_calls] == ["busy", "idle"]
     assert heartbeat_calls[0]["current_run_id"] == "run-1"
-    assert heartbeat_calls[0]["metadata"] == {"active_tasks": 1, "max_concurrency": 2}
+    assert heartbeat_calls[0]["metadata"] == {"active_tasks": 1, "max_concurrency": 64}
     assert heartbeat_calls[1]["current_run_id"] is None
-    assert heartbeat_calls[1]["metadata"] == {"active_tasks": 0, "max_concurrency": 2}
+    assert heartbeat_calls[1]["metadata"] == {"active_tasks": 0, "max_concurrency": 64}
 
 
 def test_control_plane_worker_heartbeat_posts_json(monkeypatch):
@@ -3523,6 +4837,109 @@ def test_control_plane_run_sequence_floor_paginates_events_with_worker_identity(
         assert headers["x-ultra-user-id"] == "bisque:researcher"
 
 
+def test_control_plane_run_usage_summary_dedupes_token_usage_events(monkeypatch):
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None):
+        _ = timeout
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            return FakeResponse(
+                {
+                    "events": [
+                        {
+                            "sequence": 1,
+                            "event_kind": "run.token_usage",
+                            "event_id": "evt-1",
+                            "payload": {
+                                "usage_event_id": "usage-1",
+                                "input_tokens": 100,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                                "model": "deepseek_v4",
+                            },
+                        },
+                        {
+                            "sequence": 2,
+                            "event_kind": "run.token_usage",
+                            "event_id": "evt-duplicate",
+                            "payload": {
+                                "usage_event_id": "usage-1",
+                                "input_tokens": 100,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                                "model": "deepseek_v4",
+                            },
+                        },
+                    ]
+                    + [
+                        {"sequence": sequence, "event_kind": "trace.message.delta", "payload": {}}
+                        for sequence in range(3, 501)
+                    ]
+                }
+            )
+        return FakeResponse(
+            {
+                "events": [
+                    {
+                        "sequence": 3,
+                        "event_kind": "run.token_usage",
+                        "event_id": "evt-2",
+                        "payload": {
+                            "usage_event_id": "usage-2",
+                            "input_tokens": 50,
+                            "output_tokens": 10,
+                            "total_tokens": 60,
+                            "model": "deepseek_v4",
+                        },
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(nats_worker_module.urllib_request, "urlopen", fake_urlopen)
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        control_worker_token="trace-worker-secret",
+    )
+
+    async def scenario() -> dict[str, object] | None:
+        token = nats_worker_module._control_plane_user_id.set("bisque:researcher")
+        try:
+            return await fetch_control_plane_run_usage_summary("run-1", settings)
+        finally:
+            nats_worker_module._control_plane_user_id.reset(token)
+
+    usage = asyncio.run(scenario())
+
+    assert usage == {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "total_tokens": 180,
+        "model": "deepseek_v4",
+    }
+    assert calls == [
+        "http://control.test/v2/runs/run-1/events?limit=500&after_sequence=0",
+        "http://control.test/v2/runs/run-1/events?limit=500&after_sequence=500",
+    ]
+
+
 def test_worker_acks_malformed_job_without_crashing_loop():
     async def scenario():
         settings = RuntimeSettings(
@@ -3538,3 +4955,532 @@ def test_worker_acks_malformed_job_without_crashing_loop():
     message = asyncio.run(scenario())
 
     assert message.acked == 1
+
+
+# --- Rigor results-contract enforcement (Intelligence: Pro) -----------------
+
+
+def _attempt(text: str):
+    from ultra_deepagents.runner import AgentAttemptResult
+
+    return AgentAttemptResult(
+        final_response_text=text,
+        streamed_response_text="",
+        post_tool_streamed_response_text="",
+    )
+
+
+def _study_job(workflow_hint: dict | None = None) -> RunJobEnvelope:
+    return RunJobEnvelope(
+        run_id="run-rigor",
+        thread_id="thread-rigor",
+        user_id="researcher-1",
+        goal="Run a simulation, analyze metrics, and plot results.",
+        messages=[{"role": "user", "content": "Run a simulation and analyze metrics."}],
+        workflow_hint=dict(workflow_hint or {}),
+    )
+
+
+def _context_for_job(job: RunJobEnvelope, tmp_path: Path):
+    from ultra_deepagents.context import AgentRunContext
+
+    return AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id=job.user_id,
+        project_id="proj-1",
+        thread_id=job.thread_id,
+        run_id=job.run_id,
+        goal=job.goal,
+        workflow_hint=dict(job.workflow_hint),
+        workspace_root=str(tmp_path / "ws"),
+        artifact_root=str(tmp_path / "art"),
+    )
+
+
+def test_missing_rigor_contract_kinds_flags_absent_markers(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+
+    missing = _missing_rigor_contract_kinds(
+        context, job, _attempt("Only A=1.5 is chaotic. Done.")
+    )
+    assert missing == [
+        "rigor:uncertainty",
+        "rigor:sampling",
+        "rigor:step_size",
+        "rigor:decision_rule",
+        "rigor:discriminator",
+        "rigor:limitations",
+    ]
+
+    satisfied = _attempt(
+        "Classification table: ICs=6, seeds=2, durations=500 and 1000 periods, "
+        "step size h=T/200. lambda = 0.112 ± 0.005. Decision rule: classified "
+        "only when |lambda| > 3× spread and an independent Poincare discriminator "
+        "agrees; otherwise label the row marginal.\n\nLimitations: finite observation time."
+    )
+    assert _missing_rigor_contract_kinds(context, job, satisfied) == []
+
+
+def test_missing_rigor_contract_kinds_rejects_keyword_only_rigor(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    keyword_only = _attempt(
+        "Classification table: ICs and seeds were considered across durations. "
+        "The step size was documented. lambda = 0.112 ± 0.005. Decision rule: "
+        "use the 3× spread threshold. Poincare section. Limitations: finite time."
+    )
+
+    assert _missing_rigor_contract_kinds(context, job, keyword_only) == [
+        "rigor:sampling",
+        "rigor:step_size",
+        "rigor:decision_rule",
+        "rigor:discriminator",
+    ]
+
+
+def test_missing_rigor_contract_kinds_accepts_structured_quantitative_summary(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    structured = _attempt(
+        "Decision rule: definitive chaotic only when |lambda| > 3× spread and "
+        "the independent Poincare discriminator agrees; otherwise marginal.\n\n"
+        "| A | ICs/seeds | durations | step size | lambda ± spread | discriminator | class |\n"
+        "| 1.50 | 3 initial conditions | 80 and 160 drive periods | h=T/200 | "
+        "0.112 ± 0.005 | Poincare section agrees | chaotic |\n\n"
+        "Artifacts: /outputs/metrics.csv and /outputs/report.md.\n\n"
+        "Limitations: finite observation time and limited IC coverage."
+    )
+    artifact_events = [{"payload": {"kind": "table", "path": "outputs/metrics.csv"}}]
+
+    assert (
+        _missing_rigor_contract_kinds(
+            context,
+            job,
+            structured,
+            artifact_events=artifact_events,
+        )
+        == []
+    )
+
+
+def test_missing_rigor_contract_kinds_accepts_markdown_sampling_table(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    answer = _attempt(
+        "Classification table:\n\n"
+        "| A | N_obs | ICs | lambda +/- spread | discriminator | class |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 1.35 | 6T | 3 | -0.241 +/- 0.004 | Poincare agrees 0/3 | marginal |\n"
+        "| 1.50 | 9T | 3 | 0.120 +/- 0.033 | Poincare agrees 3/3 | chaotic |\n\n"
+        "Step size h = T/80. Decision rule: definitive chaotic only when "
+        "|estimate| > 3× spread and an independent discriminator agrees; "
+        "otherwise label marginal.\n\n"
+        "Artifacts: /outputs/metrics.csv and /outputs/report.md.\n\n"
+        "Limitations: finite observation time and small IC coverage."
+    )
+    artifact_events = [{"payload": {"kind": "table", "path": "metrics.csv"}}]
+
+    assert (
+        _missing_rigor_contract_kinds(
+            context,
+            job,
+            answer,
+            artifact_events=artifact_events,
+        )
+        == []
+    )
+
+
+def test_missing_rigor_contract_kinds_requires_artifact_references(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    artifact_events = [{"payload": {"kind": "table", "path": "metrics.csv"}}]
+    answer = _attempt(
+        "Classification table: ICs=6, seeds=2, durations=500 and 1000 periods, "
+        "step size h=T/200. lambda = 0.112 ± 0.005. Decision rule: classified "
+        "only when |lambda| > 3× spread and an independent Poincare discriminator "
+        "agrees; otherwise label the row marginal.\n\nLimitations: finite observation time."
+    )
+
+    assert _missing_rigor_contract_kinds(
+        context,
+        job,
+        answer,
+        artifact_events=artifact_events,
+    ) == ["rigor:artifact_references"]
+
+    referenced = _attempt(answer.final_response_text + "\n\nArtifacts: /outputs/metrics.csv")
+    assert _missing_rigor_contract_kinds(
+        context,
+        job,
+        referenced,
+        artifact_events=artifact_events,
+    ) == []
+
+
+def test_missing_rigor_contract_kinds_gates_on_intelligence_and_goal(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    bare_answer = _attempt("Only A=1.5 is chaotic.")
+
+    high_job = _study_job()
+    high_context = _context_for_job(high_job, tmp_path)
+    assert _missing_rigor_contract_kinds(high_context, high_job, bare_answer) == []
+
+    chat_job = RunJobEnvelope(
+        run_id="run-chat",
+        thread_id="thread-chat",
+        user_id="researcher-1",
+        goal="Say hello.",
+        messages=[{"role": "user", "content": "Say hello."}],
+        workflow_hint={"id": "pro_mode"},
+    )
+    chat_context = _context_for_job(chat_job, tmp_path)
+    assert _missing_rigor_contract_kinds(chat_context, chat_job, bare_answer) == []
+
+    code_debug_job = RunJobEnvelope(
+        run_id="run-code-debug",
+        thread_id="thread-code-debug",
+        user_id="researcher-1",
+        goal="Analyze this Python code and debug the workflow.",
+        messages=[{"role": "user", "content": "Analyze this Python code and debug the workflow."}],
+        workflow_hint={"id": "pro_mode"},
+    )
+    code_debug_context = _context_for_job(code_debug_job, tmp_path)
+    assert _missing_rigor_contract_kinds(code_debug_context, code_debug_job, bare_answer) == []
+
+    pro_job = _study_job({"id": "pro_mode"})
+    pro_context = _context_for_job(pro_job, tmp_path)
+    assert _missing_rigor_contract_kinds(pro_context, pro_job, _attempt("")) == []
+
+
+def test_requested_artifacts_ignore_code_blocks_and_negated_plot_requests():
+    from ultra_deepagents.runner import _requested_artifact_kinds
+
+    prompt = """Pro mode debug request. Analyze this Python function for correctness.
+Do not run a numerical experiment and do not create plots or CSVs.
+
+```python
+def normalize_rows(rows):
+    totals = [sum(row) for row in rows]
+    return [[x / totals[i] for x in row] for i, row in enumerate(rows)]
+```
+
+Please answer with findings and a corrected implementation."""
+
+    assert _requested_artifact_kinds(prompt) == []
+
+
+def test_completion_continuation_prompt_renders_rigor_requirements():
+    from ultra_deepagents.runner import _completion_continuation_prompt
+
+    rigor_only = _completion_continuation_prompt(
+        missing_kinds=["rigor:uncertainty", "rigor:limitations", "rigor:step_size"],
+        artifact_events=[],
+    )
+    assert "results contract" in rigor_only
+    assert "mean ± spread" in rigor_only
+    assert "Limitations paragraph" in rigor_only
+    assert "step size" in rigor_only
+    assert "missing requested durable outputs" not in rigor_only
+
+    mixed = _completion_continuation_prompt(
+        missing_kinds=["figure", "rigor:decision_rule"],
+        artifact_events=[],
+    )
+    assert "missing artifact kinds exist: figure" in mixed
+    assert "decision rule" in mixed
+
+
+def test_collect_output_artifacts_skips_unreferenced_top_level_scripts(tmp_path: Path):
+    from ultra_deepagents.runner import (
+        _artifact_reference_text,
+        _collect_output_artifacts,
+    )
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    workspace = Path(context.workspace_root)
+    artifact_dir = Path(context.artifact_root)
+    (workspace / "outputs").mkdir(parents=True)
+    artifact_dir.mkdir(parents=True)
+    (workspace / "final_sim.py").write_text("print('final')\n")
+    (workspace / "scratch_v2.py").write_text("print('scratch')\n")
+    (workspace / "diagnostics").mkdir()
+    (workspace / "diagnostics" / "probe.py").write_text("print('probe')\n")
+    (workspace / "outputs" / "report.md").write_text(
+        "# Report\nFinal code: final_sim.py\n"
+    )
+
+    reference_text = _artifact_reference_text(
+        _attempt("Study complete; see report.md."), workspace
+    )
+    events = _collect_output_artifacts(
+        context, workspace, artifact_dir, reference_text=reference_text
+    )
+    paths = [event["payload"]["path"] for event in events]
+
+    assert "final_sim.py" in paths
+    assert "scratch_v2.py" not in paths
+    assert all("diagnostics" not in path for path in paths)
+    assert "outputs/report.md" in paths
+
+
+def test_run_job_enforces_rigor_contract_with_one_continuation(tmp_path: Path):
+    class FakeStudyThenContractAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.continuation_prompt = ""
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            if self.calls == 1:
+                answer = "Only A=1.5 is chaotic. Saved everything."
+            else:
+                self.continuation_prompt = payload["messages"][-1]["content"]
+                answer = (
+                    "Classification table: ICs=3, seeds=2, durations=500 and 1000 periods, "
+                    "step size h=T/200. lambda = 0.112 ± 0.005, classified by the "
+                    "decision rule |lambda| > 3× spread with independent Poincare "
+                    "discriminator agreement; otherwise label the row marginal.\n\n"
+                    "Limitations: finite observation window."
+                )
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": answer},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-rigor-e2e",
+            thread_id="thread-rigor-e2e",
+            user_id="researcher-1",
+            goal="Run a simulation and analyze metrics.",
+            messages=[{"role": "user", "content": "Run a simulation and analyze metrics."}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeStudyThenContractAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return agent, published
+
+    agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 2
+    assert "results contract" in agent.continuation_prompt
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert "±" in completed["payload"]["response_text"]
+    assert "Limitations" in completed["payload"]["response_text"]
+
+
+def test_run_job_does_not_force_rigor_or_artifacts_for_negated_code_debug_prompt(tmp_path: Path):
+    class FakeCodeDebugAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            answer = (
+                "Findings: the function divides by zero for empty or zero-sum rows "
+                "and has unclear input validation.\n\n"
+                "Corrected implementation:\n"
+                "```python\n"
+                "def normalize_rows(rows):\n"
+                "    out = []\n"
+                "    for row in rows:\n"
+                "        total = sum(row)\n"
+                "        if total == 0:\n"
+                "            raise ZeroDivisionError('row sum is zero')\n"
+                "        out.append([x / total for x in row])\n"
+                "    return out\n"
+                "```"
+            )
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": answer},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        prompt = """Pro mode debug request. Analyze this Python function for correctness.
+Do not run a numerical experiment and do not create plots or CSVs.
+
+```python
+def normalize_rows(rows):
+    totals = [sum(row) for row in rows]
+    return [[x / totals[i] for x in row] for i, row in enumerate(rows)]
+```
+
+Please answer with findings and a corrected implementation."""
+        job = RunJobEnvelope(
+            run_id="run-code-debug-negated",
+            thread_id="thread-code-debug-negated",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeCodeDebugAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return agent, published
+
+    agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 1
+    assert not [event for event in events if event.get("node_name") == "completion_guard"]
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert "Corrected implementation" in completed["payload"]["response_text"]
+
+
+def test_run_job_requires_failed_task_delegation_fallback_disclosure(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-delegation-fallback",
+            thread_id="thread-delegation-fallback",
+            user_id="researcher-1",
+            goal="Run a simulation and verify the classification.",
+            messages=[{"role": "user", "content": "Run a simulation and verify the classification."}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeFailedTaskThenFallbackDisclosureAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return agent, published
+
+    agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 2
+    assert "task delegation failed" in agent.continuation_prompt.lower()
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    response_text = completed["payload"]["response_text"]
+    assert "Task delegation failed" in response_text
+    assert "local fallback verification" in response_text
+
+
+def test_run_job_treats_invalid_subagent_task_output_as_failed_delegation(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-invalid-subagent-fallback",
+            thread_id="thread-invalid-subagent-fallback",
+            user_id="researcher-1",
+            goal="Analyze this debug workflow and verify the delegation handling.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Analyze this debug workflow and verify the delegation handling.",
+                }
+            ],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeCompletedInvalidTaskThenFallbackDisclosureAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return agent, published
+
+    agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 2
+    assert "task delegation failed" in agent.continuation_prompt.lower()
+    task_completed = [
+        event
+        for event in events
+        if event["event_kind"] == "tool_call.completed"
+        and event["payload"]["tool_name"] == "task"
+    ]
+    assert task_completed[0]["payload"]["delegation_failure"] is True
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    response_text = completed["payload"]["response_text"]
+    assert "Task delegation failed" in response_text
+    assert "local fallback verification" in response_text

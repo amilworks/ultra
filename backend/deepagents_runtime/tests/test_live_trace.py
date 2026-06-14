@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+import json
+
 from ultra_deepagents.live_trace import (
     ControlPlaneClient,
+    _artifact_ids_from_text,
     append_followup_messages,
     artifact_download_urls,
-    build_tool_capability_matrix,
     build_followup_messages,
+    build_tool_capability_matrix,
     evaluate_bisque_trace_quality,
+    evaluate_delegation_trace_quality,
     evaluate_paper_trace_quality,
     evaluate_rarespot_trace_quality,
     evaluate_thread_trace_quality,
-    evaluate_tool_capability_trace_quality,
     evaluate_tool_autonomy_trace_quality,
+    evaluate_tool_capability_trace_quality,
     evaluate_trace_requirements,
-    _artifact_ids_from_text,
-    summarize_thread_messages,
     summarize_run_trace,
+    summarize_thread_messages,
 )
 
 
@@ -205,6 +208,118 @@ def test_run_trace_records_visible_thread_transcript_after_completion(monkeypatc
         "assistant",
     ]
     assert result["thread_messages"]["run_ids"] == ["run-1", "run-1", "run-2", "run-2"]
+
+
+def test_run_trace_passes_operator_auth_headers_from_env(monkeypatch):
+    import argparse
+
+    from ultra_deepagents import live_trace
+
+    monkeypatch.setenv("TRACE_COOKIE", "operator-cookie-placeholder")
+    monkeypatch.setenv("TRACE_AUTHORIZATION", "Bearer operator-session")
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(
+            self,
+            base_url: str,
+            *,
+            timeout_seconds: float = 10.0,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
+            captured["base_url"] = base_url
+            captured["timeout_seconds"] = timeout_seconds
+            captured["extra_headers"] = extra_headers
+
+        def upload_files(self, paths):
+            return []
+
+        def create_thread(self, *, title: str):
+            return {"thread_id": "thread-1"}
+
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "latest_run_id": "run-1"}
+
+        def list_thread_messages(self, thread_id: str):
+            return [
+                {"role": "user", "content": "Prompt.", "run_id": "run-1"},
+                {"role": "assistant", "content": "Answer.", "run_id": "run-1"},
+            ]
+
+    def fake_trace_prompt(client, **kwargs):
+        return (
+            {"run_id": "run-1", "response_text": "Answer."},
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "response_len": 800,
+                "artifact_count": 0,
+                "artifacts": [],
+            },
+        )
+
+    monkeypatch.setattr(live_trace, "ControlPlaneClient", FakeClient)
+    monkeypatch.setattr(live_trace, "trace_prompt", fake_trace_prompt)
+
+    result = live_trace.run_trace(
+        argparse.Namespace(
+            base_url="http://control.test",
+            http_timeout=3,
+            auth_cookie_env="TRACE_COOKIE",
+            authorization_env="TRACE_AUTHORIZATION",
+            upload_file=[],
+            title="authenticated trace",
+            prompt="Prompt.",
+            followup=[],
+            timeout=300,
+            poll_interval=1,
+            verify_downloads=False,
+            bisque_username_env="",
+            bisque_password_env="",
+        )
+    )
+
+    assert result["prompt"]["status"] == "succeeded"
+    assert captured["extra_headers"] == {
+        "Authorization": "Bearer operator-session",
+        "Cookie": "operator-cookie-placeholder",
+    }
+
+
+def test_control_plane_client_sends_operator_auth_headers(monkeypatch):
+    from ultra_deepagents import live_trace
+
+    captured_headers: dict[str, str] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"ok":true}'
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            _ = timeout
+            captured_headers.update(dict(req.header_items()))
+            return FakeResponse()
+
+    client = live_trace.ControlPlaneClient(
+        "http://control.test",
+        extra_headers={
+            "Cookie": "operator-cookie-placeholder",
+            "Authorization": "Bearer operator-session",
+        },
+    )
+    client.opener = FakeOpener()
+
+    assert client._request("GET", "/v2/threads") == {"ok": True}
+    assert captured_headers["Cookie"] == "operator-cookie-placeholder"
+    assert captured_headers["Authorization"] == "Bearer operator-session"
+    assert captured_headers["X-ultra-user-id"] == "local-user"
 
 
 def test_trace_prompt_refreshes_events_after_terminal_status():
@@ -858,6 +973,972 @@ def test_summarize_run_trace_extracts_tool_capability_manifest():
     ]
 
 
+def test_summarize_run_trace_extracts_context_tool_output_hygiene():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "I staged the selected upload for analysis.",
+        },
+        events=[
+            {"event_kind": "tool_call.started", "payload": {"tool_name": "artifact_manifest"}},
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "artifact_manifest",
+                    "output_preview": (
+                        '{"workspace_root":"/workspace","artifact_root":"/outputs",'
+                        '"prior_artifacts":[{"artifact_id":"artifact-1",'
+                        '"path":"outputs/result.csv","access":"stage_artifact_for_analysis"}]}'
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "stage_uploaded_files_for_analysis",
+                    "output_preview": (
+                        '{"ok":true,"staged_files":[{"file_id":"file-1",'
+                        '"staged_path":"/workspace/staged_uploads/file-1/data.csv",'
+                        '"sandbox_path":"/workspace/staged_uploads/file-1/data.csv"}]}'
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["context_tool_hygiene"] == {
+        "checked_output_count": 2,
+        "host_path_leak_count": 0,
+        "safe": True,
+        "leaks": [],
+    }
+
+
+def test_summarize_run_trace_flags_context_tool_host_path_leak():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "I staged the prior artifact for analysis.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "stage_artifact_for_analysis",
+                    "output_preview": (
+                        '{"ok":true,"source_path":"/home/scientist/private/result.csv",'
+                        '"staged_path":"/workspace/staged_artifacts/run-1/result.csv",'
+                        '"sandbox_path":"/workspace/staged_artifacts/run-1/result.csv"}'
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    hygiene = summary["context_tool_hygiene"]
+    assert hygiene["checked_output_count"] == 1
+    assert hygiene["safe"] is False
+    assert hygiene["host_path_leak_count"] >= 1
+    assert any("stage_artifact_for_analysis" in leak for leak in hygiene["leaks"])
+
+
+def test_summarize_run_trace_extracts_delegation_evidence():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "Delegated data inspection and reconciled the result.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "agent_role": "tool",
+                "payload": {
+                    "tool_name": "task",
+                    "tool_call_id": "task-1",
+                    "subagent_type": "data-analyst",
+                },
+            },
+            {
+                "event_kind": "subagent.message.delta",
+                "agent_role": "data-analyst",
+                "payload": {
+                    "subagent_name": "data-analyst",
+                    "text": " inspected 128 rows",
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "agent_role": "data-analyst",
+                "node_name": "data-analyst:tool:execute",
+                "payload": {
+                    "tool_name": "execute",
+                    "subagent_name": "data-analyst",
+                    "namespace": ["data-analyst"],
+                },
+            },
+            {
+                "event_kind": "run.token_usage",
+                "agent_role": "data-analyst",
+                "node_name": "data-analyst:model",
+                "payload": {
+                    "subagent_name": "data-analyst",
+                    "namespace": ["data-analyst"],
+                    "input_tokens": 30,
+                    "output_tokens": 12,
+                    "total_tokens": 42,
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["delegation"] == {
+        "task_call_count": 1,
+        "subagent_names": ["data-analyst"],
+        "subagent_tool_names": ["execute"],
+        "subagent_message_delta_count": 1,
+        "scoped_tool_event_count": 1,
+        "scoped_usage_event_count": 1,
+    }
+
+
+def test_summarize_run_trace_extracts_async_delegation_evidence():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "Launched a background task and checked its result.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "subagent_type": "remote-training-runner",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "output_preview": "Launched async subagent. task_id: async-thread-1",
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {"tool_name": "list_async_tasks"},
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "list_async_tasks",
+                    "output_preview": (
+                        "1 tracked task(s):\n"
+                        "- task_id: async-thread-1  agent: remote-training-runner  status: running"
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "check_async_task",
+                    "task_id": "async-thread-1",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "check_async_task",
+                    "output_preview": (
+                        '{"status":"success","thread_id":"async-thread-1",'
+                        '"result":"finished training"}'
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"] == {
+        "start_call_count": 1,
+        "check_call_count": 1,
+        "update_call_count": 0,
+        "cancel_call_count": 0,
+        "list_call_count": 1,
+        "monitor_call_count": 2,
+        "task_ids": ["async-thread-1"],
+        "subagent_names": ["remote-training-runner"],
+        "statuses": ["running", "success"],
+        "completed_result_count": 1,
+        "failure_count": 0,
+        "errors": [],
+        "tool_names": ["check_async_task", "list_async_tasks", "start_async_task"],
+    }
+
+
+def test_summarize_run_trace_extracts_structured_async_delegation_evidence():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "Checked a background task.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "delegation_mode": "async_subagent",
+                    "async_subagent_name": "remote-training-runner",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "check_async_task",
+                    "delegation_mode": "async_subagent",
+                    "async_task_id": "async-thread-1",
+                    "async_status": "error",
+                    "async_error": "CUDA out of memory",
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["task_ids"] == ["async-thread-1"]
+    assert summary["async_delegation"]["subagent_names"] == ["remote-training-runner"]
+    assert summary["async_delegation"]["statuses"] == ["error"]
+    assert summary["async_delegation"]["failure_count"] == 1
+    assert summary["async_delegation"]["errors"] == ["CUDA out of memory"]
+
+
+def test_summarize_run_trace_extracts_async_cancel_success_text():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "Cancelled the background task.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "cancel_async_task",
+                    "output_preview": "Cancelled async subagent task: async-thread-1",
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["task_ids"] == ["async-thread-1"]
+    assert summary["async_delegation"]["statuses"] == ["cancelled"]
+    assert summary["async_delegation"]["failure_count"] == 0
+    assert summary["async_delegation"]["errors"] == []
+
+
+def test_summarize_run_trace_extracts_async_failure_evidence():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "The background launch failed.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "subagent_type": "remote-training-runner",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "output_preview": (
+                        "Failed to launch async subagent "
+                        "'remote-training-runner': 503 Service Unavailable"
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["start_call_count"] == 1
+    assert summary["async_delegation"]["subagent_names"] == ["remote-training-runner"]
+    assert summary["async_delegation"]["task_ids"] == []
+    assert summary["async_delegation"]["failure_count"] == 1
+    assert summary["async_delegation"]["errors"] == [
+        "Failed to launch async subagent 'remote-training-runner': 503 Service Unavailable"
+    ]
+
+
+def test_summarize_run_trace_deduplicates_async_failure_status_and_message():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "The background launch failed.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "subagent_type": "remote-training-runner",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "output_preview": (
+                        "Failed to launch async subagent "
+                        "'remote-training-runner': 503 Service Unavailable "
+                        "task_id: async-thread-1 status: error "
+                        "error: 503 Service Unavailable"
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["task_ids"] == ["async-thread-1"]
+    assert summary["async_delegation"]["statuses"] == ["error"]
+    assert summary["async_delegation"]["failure_count"] == 1
+    assert summary["async_delegation"]["errors"] == [
+        (
+            "Failed to launch async subagent 'remote-training-runner': "
+            "503 Service Unavailable task_id: async-thread-1 status: error "
+            "error: 503 Service Unavailable"
+        )
+    ]
+
+
+def test_summarize_run_trace_extracts_async_terminal_list_error_detail():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "The cached async task list showed the failed worker.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {"tool_name": "list_async_tasks"},
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "list_async_tasks",
+                    "output_preview": (
+                        "2 tracked task(s):\n"
+                        "- task_id: async-thread-1  agent: remote-training-runner  "
+                        "status: error  error: 503 Service Unavailable\n"
+                        "- task_id: cancelled-thread-1  agent: remote-training-runner  "
+                        "status: cancelled  error: cancelled by operator"
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["task_ids"] == [
+        "async-thread-1",
+        "cancelled-thread-1",
+    ]
+    assert summary["async_delegation"]["statuses"] == ["cancelled", "error"]
+    assert summary["async_delegation"]["failure_count"] == 1
+    assert summary["async_delegation"]["errors"] == [
+        "503 Service Unavailable",
+        "cancelled by operator",
+    ]
+
+
+def test_summarize_run_trace_flags_async_middleware_guard_failures():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "The async task could not be checked.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "subagent_type": "remote-training-runner",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "output_preview": (
+                        "AgentRunContext is required for start_async_task so Ultra "
+                        "can propagate scoped tenant, artifact, workspace, and "
+                        "authorization context to async subagents."
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "check_async_task",
+                    "task_id": "stale-task",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "check_async_task",
+                    "output_preview": (
+                        "Unknown async subagent type 'retired-runner'. "
+                        "Available async subagents: remote-training-runner"
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "cancel_async_task",
+                    "task_id": "async-thread-1",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "cancel_async_task",
+                    "output_preview": (
+                        "Async subagent 'remote-training-runner' has no url configured. "
+                        "ASGI transport (url=None) requires async invocation."
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["failure_count"] == 3
+    assert summary["async_delegation"]["errors"] == [
+        (
+            "AgentRunContext is required for start_async_task so Ultra can "
+            "propagate scoped tenant, artifact, workspace, and authorization "
+            "context to async subagents."
+        ),
+        (
+            "Async subagent 'remote-training-runner' has no url configured. "
+            "ASGI transport (url=None) requires async invocation."
+        ),
+        (
+            "Unknown async subagent type 'retired-runner'. "
+            "Available async subagents: remote-training-runner"
+        ),
+    ]
+
+
+def test_summarize_run_trace_flags_async_required_instruction_failures():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "The async delegation requests were malformed.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "start_async_task",
+                    "output_preview": (
+                        "start_async_task description is required for async "
+                        "subagent delegation."
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "update_async_task",
+                    "task_id": "async-thread-1",
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "update_async_task",
+                    "output_preview": (
+                        "update_async_task message is required for async "
+                        "subagent delegation."
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["async_delegation"]["task_ids"] == ["async-thread-1"]
+    assert summary["async_delegation"]["failure_count"] == 2
+    assert summary["async_delegation"]["errors"] == [
+        "start_async_task description is required for async subagent delegation.",
+        "update_async_task message is required for async subagent delegation.",
+    ]
+
+
+def test_evaluate_delegation_trace_quality_scores_scoped_subagent_work():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 1600,
+            "tool_names": ["tool_capability_manifest", "task"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "execute"},
+                        {"name": "task"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_subagents": [
+                        {
+                            "name": "code-runner",
+                            "description": "Runs focused code.",
+                            "tool_names": [
+                                "artifact_manifest",
+                                "stage_artifact_for_analysis",
+                                "stage_uploaded_files_for_analysis",
+                            ],
+                        },
+                        {
+                            "name": "data-analyst",
+                            "description": "Inspects data.",
+                            "tool_names": [
+                                "artifact_manifest",
+                                "stage_artifact_for_analysis",
+                                "stage_uploaded_files_for_analysis",
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "delegation": {
+                "task_call_count": 1,
+                "subagent_names": ["data-analyst"],
+                "subagent_tool_names": ["execute"],
+                "subagent_message_delta_count": 2,
+                "scoped_tool_event_count": 1,
+                "scoped_usage_event_count": 1,
+            },
+            "idle_recovery_count": 0,
+        }
+    }
+
+    quality = evaluate_delegation_trace_quality(result)
+
+    assert quality["passed"] is True
+    assert quality["score"] >= 8.5
+    assert quality["issues"] == []
+    assert quality["signals"]["task_used"] is True
+    assert quality["signals"]["subagent_tools_scoped"] is True
+    assert quality["signals"]["subagent_usage_scoped"] is True
+    assert quality["signals"]["scoped_subagent_context_tools_declared"] is True
+
+
+def test_evaluate_delegation_trace_quality_reports_missing_task_and_scoping():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 900,
+            "tool_names": ["execute"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [{"name": "execute"}],
+                    "available_subagents": [],
+                }
+            ],
+            "delegation": {
+                "task_call_count": 0,
+                "subagent_names": [],
+                "subagent_tool_names": [],
+                "subagent_message_delta_count": 0,
+                "scoped_tool_event_count": 0,
+                "scoped_usage_event_count": 0,
+            },
+            "idle_recovery_count": 1,
+        }
+    }
+
+    quality = evaluate_delegation_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert quality["score"] < 8.5
+    assert "task tool was not used" in quality["issues"]
+    assert "no scoped subagent tool events were observed" in quality["issues"]
+    assert "no scoped subagent token usage events were observed" in quality["issues"]
+    assert "no subagent message deltas were observed" in quality["issues"]
+    assert "no available subagents were declared by any captured manifest" in quality["issues"]
+    assert "run had idle recoveries" in quality["issues"]
+
+
+def test_evaluate_delegation_trace_quality_requires_scoped_subagent_context_tool_manifest():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 1600,
+            "tool_names": ["tool_capability_manifest", "task"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "execute"},
+                        {"name": "task"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_subagents": [
+                        {"name": "code-runner", "description": "Runs focused code."},
+                        {"name": "data-analyst", "description": "Inspects data."},
+                    ],
+                }
+            ],
+            "delegation": {
+                "task_call_count": 1,
+                "subagent_names": ["data-analyst"],
+                "subagent_tool_names": ["execute"],
+                "subagent_message_delta_count": 2,
+                "scoped_tool_event_count": 1,
+                "scoped_usage_event_count": 1,
+            },
+            "idle_recovery_count": 0,
+        }
+    }
+
+    quality = evaluate_delegation_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert (
+        "scoped subagent context tools were not declared by any captured manifest"
+        in quality["issues"]
+    )
+    assert quality["signals"]["scoped_subagent_context_tools_declared"] is False
+
+
+def test_evaluate_delegation_trace_quality_rejects_context_tool_host_path_leaks():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 1600,
+            "tool_names": ["tool_capability_manifest", "task", "stage_artifact_for_analysis"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "execute"},
+                        {"name": "task"},
+                    ],
+                    "registered_tools": [
+                        "artifact_manifest",
+                        "stage_artifact_for_analysis",
+                    ],
+                    "available_subagents": [
+                        {
+                            "name": "data-analyst",
+                            "description": "Inspects data.",
+                            "tool_names": [
+                                "artifact_manifest",
+                                "stage_artifact_for_analysis",
+                                "stage_uploaded_files_for_analysis",
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "delegation": {
+                "task_call_count": 1,
+                "subagent_names": ["data-analyst"],
+                "subagent_tool_names": ["stage_artifact_for_analysis"],
+                "subagent_message_delta_count": 1,
+                "scoped_tool_event_count": 1,
+                "scoped_usage_event_count": 1,
+            },
+            "context_tool_hygiene": {
+                "checked_output_count": 1,
+                "host_path_leak_count": 1,
+                "safe": False,
+                "leaks": [
+                    "stage_artifact_for_analysis: source_path=/home/scientist/private/result.csv"
+                ],
+            },
+            "idle_recovery_count": 0,
+        }
+    }
+
+    quality = evaluate_delegation_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert "context tool output leaked host paths" in quality["issues"]
+    assert quality["signals"]["context_tool_outputs_safe"] is False
+
+
+def test_evaluate_async_delegation_trace_quality_scores_background_task_flow():
+    from ultra_deepagents import live_trace
+
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 220,
+            "tool_names": ["tool_capability_manifest", "start_async_task"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "start_async_task"},
+                        {"name": "check_async_task"},
+                        {"name": "update_async_task"},
+                        {"name": "cancel_async_task"},
+                        {"name": "list_async_tasks"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_async_subagents": [
+                        {
+                            "name": "remote-training-runner",
+                            "description": "Runs long model training jobs.",
+                        }
+                    ],
+                }
+            ],
+            "async_delegation": {
+                "start_call_count": 1,
+                "check_call_count": 0,
+                "update_call_count": 0,
+                "cancel_call_count": 0,
+                "list_call_count": 0,
+                "monitor_call_count": 0,
+                "task_ids": ["async-thread-1"],
+                "subagent_names": ["remote-training-runner"],
+                "statuses": [],
+                "completed_result_count": 0,
+                "failure_count": 0,
+                "errors": [],
+                "tool_names": ["start_async_task"],
+            },
+            "idle_recovery_count": 0,
+        },
+        "followups": [
+            {
+                "run_id": "run-2",
+                "status": "succeeded",
+                "response_len": 420,
+                "tool_names": [
+                    "tool_capability_manifest",
+                    "list_async_tasks",
+                    "check_async_task",
+                ],
+                "tool_capability_manifests": [],
+                "async_delegation": {
+                    "start_call_count": 0,
+                    "check_call_count": 1,
+                    "update_call_count": 0,
+                    "cancel_call_count": 0,
+                    "list_call_count": 1,
+                    "monitor_call_count": 2,
+                    "task_ids": ["async-thread-1"],
+                    "subagent_names": ["remote-training-runner"],
+                    "statuses": ["success"],
+                    "completed_result_count": 1,
+                    "failure_count": 0,
+                    "errors": [],
+                    "tool_names": ["check_async_task", "list_async_tasks"],
+                },
+                "idle_recovery_count": 0,
+            }
+        ],
+    }
+
+    quality = live_trace.evaluate_async_delegation_trace_quality(result)
+
+    assert quality["passed"] is True
+    assert quality["score"] >= 8.5
+    assert quality["issues"] == []
+    assert quality["signals"]["async_tools_declared"] is True
+    assert quality["signals"]["async_subagents_declared"] is True
+    assert quality["signals"]["start_used"] is True
+    assert quality["signals"]["monitor_used"] is True
+    assert quality["async_delegation"]["task_ids"] == ["async-thread-1"]
+    assert quality["available_async_subagents"] == ["remote-training-runner"]
+
+
+def test_evaluate_async_delegation_trace_quality_rejects_failed_async_task():
+    from ultra_deepagents import live_trace
+
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 220,
+            "tool_names": ["tool_capability_manifest", "start_async_task", "check_async_task"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "start_async_task"},
+                        {"name": "check_async_task"},
+                        {"name": "update_async_task"},
+                        {"name": "cancel_async_task"},
+                        {"name": "list_async_tasks"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_async_subagents": [
+                        {"name": "remote-training-runner", "description": "Runs jobs."}
+                    ],
+                }
+            ],
+            "async_delegation": {
+                "start_call_count": 1,
+                "check_call_count": 1,
+                "update_call_count": 0,
+                "cancel_call_count": 0,
+                "list_call_count": 0,
+                "monitor_call_count": 1,
+                "task_ids": ["async-thread-1"],
+                "subagent_names": ["remote-training-runner"],
+                "statuses": ["error"],
+                "completed_result_count": 0,
+                "failure_count": 1,
+                "errors": ["training worker exhausted its retry budget"],
+                "tool_names": ["check_async_task", "start_async_task"],
+            },
+            "idle_recovery_count": 0,
+        }
+    }
+
+    quality = live_trace.evaluate_async_delegation_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert quality["signals"]["no_async_failures"] is False
+    assert "async subagent tool failure observed" in quality["issues"]
+    assert "async task reported terminal failure status: error" in quality["issues"]
+    assert (
+        "async subagent error: training worker exhausted its retry budget"
+        in quality["issues"]
+    )
+
+
+def test_evaluate_async_delegation_trace_quality_reports_missing_core_signals():
+    from ultra_deepagents import live_trace
+
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 25,
+            "tool_names": ["execute"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [{"name": "execute"}],
+                    "available_async_subagents": [],
+                }
+            ],
+            "async_delegation": {
+                "start_call_count": 0,
+                "check_call_count": 0,
+                "update_call_count": 0,
+                "cancel_call_count": 0,
+                "list_call_count": 0,
+                "monitor_call_count": 0,
+                "task_ids": [],
+                "subagent_names": [],
+                "statuses": [],
+                "completed_result_count": 0,
+                "failure_count": 0,
+                "errors": [],
+                "tool_names": [],
+            },
+            "idle_recovery_count": 1,
+        }
+    }
+
+    quality = live_trace.evaluate_async_delegation_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert quality["score"] < 8.5
+    assert "one or more responses are too short for async delegation trace" in quality["issues"]
+    assert "async subagent tools were not declared by any captured manifest" in quality["issues"]
+    assert "no available async subagents were declared by any captured manifest" in quality["issues"]
+    assert "start_async_task was not used" in quality["issues"]
+    assert "no async task_id was captured" in quality["issues"]
+    assert "no async task monitor tool was used" in quality["issues"]
+    assert "no async task statuses were observed" in quality["issues"]
+    assert "no async subagent names were observed" in quality["issues"]
+    assert "run had idle recoveries" in quality["issues"]
+
+
+def test_main_applies_required_async_delegation_quality(monkeypatch, capsys):
+    from ultra_deepagents import live_trace
+
+    def fake_run_trace(args):
+        return {
+            "prompt": {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "response_len": 25,
+                "tool_names": ["execute"],
+                "tool_capability_manifests": [
+                    {
+                        "deepagents_builtin_tools": [{"name": "execute"}],
+                        "available_async_subagents": [],
+                    }
+                ],
+                "async_delegation": {
+                    "start_call_count": 0,
+                    "check_call_count": 0,
+                    "update_call_count": 0,
+                    "cancel_call_count": 0,
+                    "list_call_count": 0,
+                    "monitor_call_count": 0,
+                    "task_ids": [],
+                    "subagent_names": [],
+                    "statuses": [],
+                    "completed_result_count": 0,
+                    "failure_count": 0,
+                    "errors": [],
+                    "tool_names": [],
+                },
+                "idle_recovery_count": 0,
+            }
+        }
+
+    monkeypatch.setattr(live_trace, "run_trace", fake_run_trace)
+
+    exit_code = live_trace.main(
+        ["--prompt", "Launch async work.", "--require-async-delegation-quality"]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert output["async_delegation_quality"]["passed"] is False
+    assert "async delegation quality: start_async_task was not used" in output["issues"]
+
+
 def test_evaluate_tool_capability_trace_quality_scores_known_tool_surface():
     result = {
         "prompt": {
@@ -927,6 +2008,61 @@ def test_evaluate_tool_capability_trace_quality_reports_missing_manifest_and_unk
     assert quality["score"] < 8.5
     assert "tool capability manifest was not called or captured" in quality["issues"]
     assert "used tools were not declared in any captured manifest: mystery_tool" in quality["issues"]
+
+
+def test_evaluate_tool_capability_trace_quality_rejects_context_tool_host_path_leaks():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_len": 1200,
+            "tool_names": [
+                "tool_capability_manifest",
+                "execute",
+                "artifact_manifest",
+                "stage_artifact_for_analysis",
+            ],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "execute"},
+                        {"name": "write_file"},
+                        {"name": "read_file"},
+                        {"name": "edit_file"},
+                        {"name": "ls"},
+                        {"name": "glob"},
+                        {"name": "grep"},
+                        {"name": "write_todos"},
+                    ],
+                    "registered_tools": [
+                        "artifact_manifest",
+                        "stage_artifact_for_analysis",
+                        "stage_uploaded_files_for_analysis",
+                        "tool_capability_manifest",
+                    ],
+                    "storage": {
+                        "workspace": "/workspace",
+                        "outputs": "/outputs",
+                        "memories": "/memories",
+                    },
+                }
+            ],
+            "context_tool_hygiene": {
+                "checked_output_count": 1,
+                "host_path_leak_count": 1,
+                "safe": False,
+                "leaks": [
+                    "stage_artifact_for_analysis: source_path=/home/scientist/private/result.csv"
+                ],
+            },
+        }
+    }
+
+    quality = evaluate_tool_capability_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert "context tool output leaked host paths" in quality["issues"]
+    assert quality["signals"]["context_tool_outputs_safe"] is False
 
 
 def test_build_tool_capability_matrix_summarizes_available_and_used_categories():
@@ -1003,6 +2139,162 @@ def test_build_tool_capability_matrix_summarizes_available_and_used_categories()
     assert matrix["capabilities"]["paper_review"] == {"available": False, "used": False}
     assert matrix["turns"][0]["capabilities"]["context_staging"] is True
     assert matrix["turns"][1]["capabilities"]["followup_context_reuse"] is True
+
+
+def test_build_tool_capability_matrix_summarizes_async_delegation():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "tool_names": [
+                "tool_capability_manifest",
+                "start_async_task",
+                "list_async_tasks",
+            ],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "start_async_task"},
+                        {"name": "check_async_task"},
+                        {"name": "update_async_task"},
+                        {"name": "cancel_async_task"},
+                        {"name": "list_async_tasks"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_async_subagents": [
+                        {"name": "remote-training-runner", "description": "Runs jobs."}
+                    ],
+                }
+            ],
+            "async_delegation": {
+                "start_call_count": 1,
+                "check_call_count": 0,
+                "update_call_count": 0,
+                "cancel_call_count": 0,
+                "list_call_count": 1,
+                "monitor_call_count": 1,
+                "task_ids": ["async-thread-1"],
+                "subagent_names": ["remote-training-runner"],
+                "statuses": ["running"],
+                "completed_result_count": 0,
+                "failure_count": 0,
+                "errors": [],
+                "tool_names": ["list_async_tasks", "start_async_task"],
+            },
+        }
+    }
+
+    matrix = build_tool_capability_matrix(result)
+
+    assert matrix["capabilities"]["background_delegation"] == {
+        "available": True,
+        "used": True,
+        "available_async_subagents": ["remote-training-runner"],
+        "start_call_count": 1,
+        "monitor_call_count": 1,
+        "failure_count": 0,
+        "statuses": ["running"],
+        "errors": [],
+    }
+    assert matrix["turns"][0]["available_async_subagents"] == [
+        "remote-training-runner"
+    ]
+    assert matrix["turns"][0]["capabilities"]["background_delegation"] is True
+
+
+def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "tool_names": ["tool_capability_manifest", "task"],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "execute"},
+                        {"name": "task"},
+                    ],
+                    "registered_tools": [
+                        "tool_capability_manifest",
+                        "artifact_manifest",
+                        "stage_artifact_for_analysis",
+                        "stage_uploaded_files_for_analysis",
+                    ],
+                    "available_subagents": [
+                        {
+                            "name": "code-runner",
+                            "description": "Runs focused code.",
+                            "tool_names": [
+                                "artifact_manifest",
+                                "stage_artifact_for_analysis",
+                                "stage_uploaded_files_for_analysis",
+                            ],
+                        },
+                        {
+                            "name": "data-analyst",
+                            "description": "Inspects data.",
+                            "tool_names": [
+                                "artifact_manifest",
+                                "stage_artifact_for_analysis",
+                                "stage_uploaded_files_for_analysis",
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "delegation": {
+                "task_call_count": 1,
+                "subagent_names": ["code-runner", "data-analyst"],
+                "subagent_tool_names": ["stage_artifact_for_analysis"],
+                "subagent_message_delta_count": 2,
+                "scoped_tool_event_count": 1,
+                "scoped_usage_event_count": 1,
+            },
+        }
+    }
+
+    matrix = build_tool_capability_matrix(result)
+
+    assert matrix["capabilities"]["delegation"]["available"] is True
+    assert matrix["capabilities"]["delegation"]["used"] is True
+    assert matrix["capabilities"]["delegation"]["available_subagents"] == [
+        "code-runner",
+        "data-analyst",
+    ]
+    assert (
+        matrix["capabilities"]["delegation"][
+            "scoped_subagent_context_tools_declared"
+        ]
+        is True
+    )
+    assert matrix["capabilities"]["delegation"]["scoped_subagent_context_tools"] == {
+        "code-runner": [
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        ],
+        "data-analyst": [
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        ],
+    }
+    assert matrix["turns"][0]["available_subagents"] == [
+        "code-runner",
+        "data-analyst",
+    ]
+    assert matrix["turns"][0]["scoped_subagent_context_tools"] == {
+        "code-runner": [
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        ],
+        "data-analyst": [
+            "artifact_manifest",
+            "stage_artifact_for_analysis",
+            "stage_uploaded_files_for_analysis",
+        ],
+    }
 
 
 def test_evaluate_paper_trace_quality_scores_page_grounded_multiturn_response():

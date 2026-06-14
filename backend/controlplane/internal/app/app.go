@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,16 @@ func New(cfg config.Config) (*App, error) {
 	var closeFns []func()
 	storeBackend := "memory"
 	if cfg.DatabaseURL != "" {
-		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		poolConfig, err := postgresPoolConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		// Serving pool only: bound every query server-side so one stuck/runaway query
+		// (missing index, lock wait) can't hold a connection from the small pool
+		// indefinitely and starve the service. Migrations go through postgresPoolConfig
+		// WITHOUT this, so slow DDL (index builds) isn't aborted.
+		applyStatementTimeout(poolConfig, cfg.DatabaseStatementTimeout)
+		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -95,14 +105,15 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.NATSURL != "" {
 		var err error
 		natsBus, err = eventbus.NewNATSBus(ctx, eventbus.NATSConfig{
-			URL:                  cfg.NATSURL,
-			Stream:               cfg.NATSStream,
-			JobsSubject:          cfg.NATSJobsSubject,
-			RareSpotJobsSubject:  cfg.NATSRareSpotJobsSubject,
-			DataAgentJobsSubject: cfg.NATSDataAgentJobsSubject,
-			EventsSubject:        cfg.NATSEventsSubject,
-			CancelSubject:        cfg.NATSCancelSubject,
-			EventConsumer:        cfg.NATSEventConsumer,
+			URL:                    cfg.NATSURL,
+			Stream:                 cfg.NATSStream,
+			JobsSubject:            cfg.NATSJobsSubject,
+			RareSpotJobsSubject:    cfg.NATSRareSpotJobsSubject,
+			DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
+			EventsSubject:          cfg.NATSEventsSubject,
+			CancelSubject:          cfg.NATSCancelSubject,
+			EventConsumer:          cfg.NATSEventConsumer,
+			EventIngestConcurrency: cfg.NATSEventIngestConcurrency,
 			ConsumerTargets: []eventbus.QueueConsumerTarget{
 				{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
 				{Name: cfg.NATSRareSpotWorkerDurable, Role: "rarespot", Subject: cfg.NATSRareSpotJobsSubject},
@@ -165,6 +176,17 @@ func New(cfg config.Config) (*App, error) {
 			}
 			return nil
 		})
+	}
+	// Retention GC permanently reclaims artifacts of resources past their undelete window.
+	// Off by default (it deletes data); an operator enables it after watching the
+	// retention_backlog the admin overview reports.
+	if cfg.RetentionGCEnabled {
+		if gcStore, ok := controlStore.(httpapi.RetentionGCStore); ok {
+			startFns = append(startFns, func(ctx context.Context) error {
+				go httpapi.RunRetentionGC(ctx, gcStore, cfg.UploadRoot, cfg.RetentionGCInterval, cfg.RetentionGCBatch)
+				return nil
+			})
+		}
 	}
 	bisqueService := httpapi.NewBisqueService(httpapi.BisqueServiceConfig{
 		RootURL:       cfg.BisqueRootURL,
@@ -231,6 +253,7 @@ func New(cfg config.Config) (*App, error) {
 		Bus:               runEvents,
 		ArtifactRoot:      cfg.ArtifactRoot,
 		UploadRoot:        cfg.UploadRoot,
+		ImageServiceURL:   cfg.ImageServiceURL,
 		DevAdminEnabled:   cfg.DevAdminEnabled,
 		Runtime:           runtime,
 		QueueDiagnostics:  natsBus,
@@ -420,11 +443,49 @@ func pingPostgres(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+func postgresPoolConfig(cfg config.Config) (*pgxpool.Config, error) {
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.DatabaseMaxConns > 0 {
+		poolConfig.MaxConns = int32(cfg.DatabaseMaxConns)
+	}
+	if cfg.DatabaseMinConns > 0 {
+		poolConfig.MinConns = int32(cfg.DatabaseMinConns)
+	}
+	if poolConfig.MinConns > poolConfig.MaxConns {
+		return nil, fmt.Errorf("ULTRA_CONTROL_DATABASE_MIN_CONNS (%d) cannot exceed ULTRA_CONTROL_DATABASE_MAX_CONNS (%d)", poolConfig.MinConns, poolConfig.MaxConns)
+	}
+	return poolConfig, nil
+}
+
+// applyStatementTimeout sets a server-side per-query timeout on every connection the
+// pool opens, via the standard Postgres statement_timeout runtime parameter. This
+// bounds a single stuck/runaway query so it cannot hold a pooled connection forever
+// and starve the small serving pool (MaxConns default 8) — the failure mode where a
+// handful of wedged queries take the whole service offline. A no-op when timeout<=0
+// (disabled, the default), so it never changes behavior unless an operator opts in.
+// Applied to the serving pool only; never to migrations, whose DDL is legitimately slow.
+func applyStatementTimeout(poolConfig *pgxpool.Config, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(timeout.Milliseconds(), 10)
+}
+
 func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return fmt.Errorf("ULTRA_CONTROL_DATABASE_URL or RUN_STORE_PATH is required to migrate the control-plane Postgres schema")
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	poolConfig, err := postgresPoolConfig(cfg)
+	if err != nil {
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return err
 	}

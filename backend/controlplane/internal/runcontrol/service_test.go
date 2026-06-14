@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestServiceCreateRunEmitsAcceptedAndDispatches(t *testing.T) {
@@ -541,6 +543,119 @@ func TestServiceRecoverExpiredRunLeasesRequeuesOnlyExpiredLeases(t *testing.T) {
 	}
 }
 
+func TestServiceRecoverExpiredRunLeasesRequeuesStaleLeaseOwnerHeartbeat(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 6, 11, 9, 30, 0, 0, time.UTC)
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover stale lease owner",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	staleRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "long stale worker analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long stale worker analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun stale: %v", err)
+	}
+	activeRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "long active worker analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long active worker analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun active: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	staleLease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    staleRun.RunID,
+		WorkerID: "worker-stale",
+		TTL:      20 * time.Minute,
+		Now:      now.Add(-5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease stale: %v", err)
+	}
+	activeLease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    activeRun.RunID,
+		WorkerID: "worker-active",
+		TTL:      20 * time.Minute,
+		Now:      now.Add(-30 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease active: %v", err)
+	}
+	if _, err := mem.UpsertWorkerHeartbeat(ctx, domain.UpsertWorkerHeartbeatInput{
+		WorkerID:        "worker-stale",
+		WorkerKind:      "deepagents",
+		Status:          "busy",
+		CurrentRunID:    staleRun.RunID,
+		LastHeartbeatAt: now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("UpsertWorkerHeartbeat stale: %v", err)
+	}
+	if _, err := mem.UpsertWorkerHeartbeat(ctx, domain.UpsertWorkerHeartbeatInput{
+		WorkerID:        "worker-active",
+		WorkerKind:      "deepagents",
+		Status:          "busy",
+		CurrentRunID:    activeRun.RunID,
+		LastHeartbeatAt: now.Add(-30 * time.Second),
+	}); err != nil {
+		t.Fatalf("UpsertWorkerHeartbeat active: %v", err)
+	}
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:                       now,
+		Reason:                    "automatic expired run lease recovery",
+		Limit:                     100,
+		WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 1 || result.RequeuedRuns[0].RunID != staleRun.RunID {
+		t.Fatalf("requeued runs = %+v, want only stale heartbeat run", result.RequeuedRuns)
+	}
+	if _, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID:      staleRun.RunID,
+		LeaseToken: staleLease.LeaseToken,
+		TTL:        time.Hour,
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("RenewRunLease stale old token err = %v, want ErrConflict", err)
+	}
+	if _, err := mem.RenewRunLease(ctx, domain.RenewRunLeaseInput{
+		RunID:      activeRun.RunID,
+		LeaseToken: activeLease.LeaseToken,
+		TTL:        time.Hour,
+		Now:        now,
+	}); err != nil {
+		t.Fatalf("RenewRunLease active token: %v", err)
+	}
+	events, err := mem.ListRunEvents(ctx, staleRun.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.EventKind != "run.requeued" || last.Payload["recovery"] != "stale_run_lease_worker_heartbeat" {
+		t.Fatalf("last event = %+v, want stale heartbeat requeue", last)
+	}
+	if last.Payload["lease_worker_id"] != "worker-stale" {
+		t.Fatalf("event payload = %+v, want stale lease worker id", last.Payload)
+	}
+}
+
 func TestServiceRecoverExpiredRunLeasesRedispatchesStaleQueuedRunWithoutLease(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -614,6 +729,76 @@ func TestServiceRecoverExpiredRunLeasesRedispatchesStaleQueuedRunWithoutLease(t 
 			return
 		}
 	}
+}
+
+func TestServiceRecoverExpiredRunLeasesScansRecoverableStatusesBeyondTerminalHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "recovery-user",
+		Title:  "Recovery scan",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	staleRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "recovery-user",
+		Goal:     "stale queued run",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "stale queued run"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun stale: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	if _, err := mem.MarkRunDispatched(ctx, staleRun.RunID, now.Add(-30*time.Minute)); err != nil {
+		t.Fatalf("MarkRunDispatched stale: %v", err)
+	}
+
+	for i := 0; i < 8; i++ {
+		run, err := service.CreateRun(ctx, CreateRunRequest{
+			ThreadID: thread.ThreadID,
+			UserID:   "recovery-user",
+			Goal:     fmt.Sprintf("terminal run %d", i),
+			Messages: []domain.ThreadMessage{{Role: "user", Content: "terminal run"}},
+		})
+		if err != nil {
+			t.Fatalf("CreateRun terminal %d: %v", i, err)
+		}
+		drainJobs(bus)
+		if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   fmt.Sprintf("evt-terminal-%d", i),
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "run.completed",
+			Payload:   domain.JSONMap{"response_text": "done"},
+		}); err != nil {
+			t.Fatalf("IngestRunEvent terminal %d: %v", i, err)
+		}
+	}
+	drainRunEvents(bus)
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:                   now,
+		Reason:                "automatic expired run lease recovery",
+		Limit:                 5,
+		RedispatchQueuedAfter: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	for _, run := range result.RequeuedRuns {
+		if run.RunID == staleRun.RunID {
+			return
+		}
+	}
+	t.Fatalf("requeued runs = %+v, want stale queued run %s despite newer terminal history", result.RequeuedRuns, staleRun.RunID)
 }
 
 func TestServiceRecoverExpiredRunLeasesDoesNotStormRedispatchedRun(t *testing.T) {
@@ -843,6 +1028,237 @@ func TestServiceIngestRunCompletedPersistsAssistantMessageOnce(t *testing.T) {
 	}
 	if messages[1].Role != "assistant" || messages[1].Content != "The durable report is ready." || messages[1].RunID != run.RunID {
 		t.Fatalf("assistant message = %+v, want completed response owned by run %s", messages[1], run.RunID)
+	}
+}
+
+func TestServiceIngestRunCompletedRecordsTokenUsageExactlyOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-tok", Title: "token usage"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-tok",
+		Goal:     "Analyze tokens.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze tokens."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+
+	completed := domain.AppendRunEventInput{
+		EventID:   "evt-completed-usage",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload: domain.JSONMap{
+			"response_text": "Done.",
+			// JSON-decoded payloads carry numbers as float64; mirror that here.
+			"usage": domain.JSONMap{
+				"input_tokens":  float64(1200),
+				"output_tokens": float64(300),
+				"total_tokens":  float64(1500),
+				"model":         "deepseek_v4",
+			},
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	// Redeliver the same terminal event; the increment must not double count.
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent duplicate completed: %v", err)
+	}
+
+	stats, err := mem.GetUserTokenUsageStats(ctx, "user-tok")
+	if err != nil {
+		t.Fatalf("GetUserTokenUsageStats: %v", err)
+	}
+	if stats.InputTokens != 1200 || stats.OutputTokens != 300 || stats.TotalTokens != 1500 {
+		t.Fatalf("lifetime usage = %+v, want single-count 1200/300/1500", stats)
+	}
+	if stats.PeakDailyTotal != 1500 {
+		t.Fatalf("peak daily total = %d, want 1500", stats.PeakDailyTotal)
+	}
+
+	daily, err := mem.ListUserTokenUsageDaily(ctx, "user-tok", time.Time{})
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily: %v", err)
+	}
+	if len(daily) != 1 {
+		t.Fatalf("daily rows = %d, want 1: %+v", len(daily), daily)
+	}
+	if daily[0].TotalTokens != 1500 || daily[0].RunCount != 1 {
+		t.Fatalf("daily[0] = %+v, want total 1500 run_count 1", daily[0])
+	}
+}
+
+func TestServiceIngestRunTokenUsageEventsAreDurableAndFinalizedOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-ledger", Title: "token ledger"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-ledger",
+		Goal:     "Analyze tokens.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze tokens."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+
+	firstUsage := domain.AppendRunEventInput{
+		EventID:   "evt-usage-call-1",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.token_usage",
+		EventType: "run",
+		Payload: domain.JSONMap{
+			"usage_event_id": "model-call-1",
+			"input_tokens":   float64(100),
+			"output_tokens":  float64(20),
+			"total_tokens":   float64(120),
+			"model":          "deepseek_v4",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, firstUsage); err != nil {
+		t.Fatalf("IngestRunEvent first usage: %v", err)
+	}
+	duplicateUsage := firstUsage
+	duplicateUsage.EventID = "evt-usage-call-1-redelivered"
+	if _, err := service.IngestRunEvent(ctx, duplicateUsage); err != nil {
+		t.Fatalf("IngestRunEvent duplicate usage: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-usage-call-2",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.token_usage",
+		EventType: "run",
+		Payload: domain.JSONMap{
+			"usage_event_id": "model-call-2",
+			"input_tokens":   float64(50),
+			"output_tokens":  float64(10),
+			"total_tokens":   float64(60),
+			"model":          "deepseek_v4",
+		},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent second usage: %v", err)
+	}
+	completed := domain.AppendRunEventInput{
+		EventID:   "evt-ledger-completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload: domain.JSONMap{
+			"response_text": "Done.",
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent duplicate completed: %v", err)
+	}
+
+	stats, err := mem.GetUserTokenUsageStats(ctx, "user-ledger")
+	if err != nil {
+		t.Fatalf("GetUserTokenUsageStats: %v", err)
+	}
+	if stats.InputTokens != 150 || stats.OutputTokens != 30 || stats.TotalTokens != 180 {
+		t.Fatalf("lifetime usage = %+v, want deduped ledger total 150/30/180", stats)
+	}
+	daily, err := mem.ListUserTokenUsageDaily(ctx, "user-ledger", time.Time{})
+	if err != nil {
+		t.Fatalf("ListUserTokenUsageDaily: %v", err)
+	}
+	if len(daily) != 1 {
+		t.Fatalf("daily rows = %d, want 1: %+v", len(daily), daily)
+	}
+	if daily[0].TotalTokens != 180 || daily[0].RunCount != 1 {
+		t.Fatalf("daily[0] = %+v, want total 180 run_count 1", daily[0])
+	}
+}
+
+func TestServiceIngestRunCompletedRecordsTokenUsageInPostgres(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	pg := store.NewPostgresStore(pool)
+	service := NewService(pg, eventbus.NewMemoryBus())
+
+	userID := fmt.Sprintf("rc-tok-%d", time.Now().UnixNano())
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: userID, Title: "pg token usage"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   userID,
+		Goal:     "Analyze tokens.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze tokens."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	completed := domain.AppendRunEventInput{
+		EventID:   fmt.Sprintf("evt-%s-completed", run.RunID),
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		Payload: domain.JSONMap{
+			"response_text": "Done.",
+			"usage": domain.JSONMap{
+				"input_tokens":  float64(1200),
+				"output_tokens": float64(300),
+				"total_tokens":  float64(1500),
+				"model":         "deepseek_v4",
+			},
+		},
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent completed: %v", err)
+	}
+	// Redeliver: the increment must remain single-counted through live Postgres.
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent duplicate: %v", err)
+	}
+
+	stats, err := pg.GetUserTokenUsageStats(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserTokenUsageStats: %v", err)
+	}
+	if stats.InputTokens != 1200 || stats.OutputTokens != 300 || stats.TotalTokens != 1500 {
+		t.Fatalf("postgres lifetime usage = %+v, want single-count 1200/300/1500", stats)
+	}
+	if stats.PeakDailyTotal != 1500 {
+		t.Fatalf("postgres peak daily = %d, want 1500", stats.PeakDailyTotal)
 	}
 }
 
@@ -3299,6 +3715,12 @@ type duplicateEventRaceStore struct {
 	mu       sync.Mutex
 }
 
+// AppendRunEventIfRunActive shadows the promoted fast-path method with an
+// incompatible signature so this fixture does not satisfy
+// activeRunEventAppender: the test exercises the legacy read-then-append
+// path, whose check-then-act race is what the event-ID locks guard against.
+func (s *duplicateEventRaceStore) AppendRunEventIfRunActive() {}
+
 func (s *duplicateEventRaceStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
 	if eventID != s.targetID {
 		return s.MemoryStore.GetRunEvent(ctx, eventID)
@@ -3465,4 +3887,157 @@ func (b *failingRunEventBus) PublishRunEvent(ctx context.Context, event domain.R
 	_ = ctx
 	b.events = append(b.events, event)
 	return b.eventErr
+}
+
+func TestServiceIngestRunEventFastPathDeduplicatesConcurrentDuplicates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "fast path duplicates"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "fast path duplicates",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	input := domain.AppendRunEventInput{
+		EventID:   "evt-fast-path-duplicate",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "message.delta",
+		Message:   "duplicate",
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	results := make(chan domain.RunEventRecord, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			event, err := service.IngestRunEvent(ctx, input)
+			results <- event
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("IngestRunEvent concurrent duplicate: %v", err)
+		}
+	}
+	var sequence int64
+	for event := range results {
+		if event.EventID != input.EventID {
+			t.Fatalf("event id = %q, want %q", event.EventID, input.EventID)
+		}
+		if sequence == 0 {
+			sequence = event.Sequence
+		} else if event.Sequence != sequence {
+			t.Fatalf("event sequence = %d, want every caller to observe %d", event.Sequence, sequence)
+		}
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 50)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	stored := 0
+	for _, event := range events {
+		if event.EventID == input.EventID {
+			stored++
+		}
+	}
+	if stored != 1 {
+		t.Fatalf("stored duplicate event count = %d, want exactly 1", stored)
+	}
+}
+
+type statusWriteCountingStore struct {
+	*store.MemoryStore
+	mu                sync.Mutex
+	statusWriteCounts map[string]int
+}
+
+func (s *statusWriteCountingStore) UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus, node string, errorText string) (domain.RunRecord, error) {
+	s.mu.Lock()
+	if s.statusWriteCounts == nil {
+		s.statusWriteCounts = map[string]int{}
+	}
+	s.statusWriteCounts[runID]++
+	s.mu.Unlock()
+	return s.MemoryStore.UpdateRunStatus(ctx, runID, status, node, errorText)
+}
+
+func TestServiceIngestHeartbeatsThrottleStatusWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	counting := &statusWriteCountingStore{MemoryStore: store.NewMemoryStore()}
+	bus := eventbus.NewMemoryBus()
+	service := NewService(counting, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "heartbeat throttle"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "heartbeat throttle",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	const heartbeats = 5
+	for i := 0; i < heartbeats; i++ {
+		if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   fmt.Sprintf("evt-heartbeat-throttle-%d", i),
+			RunID:     run.RunID,
+			ThreadID:  thread.ThreadID,
+			EventKind: "run.heartbeat",
+			Message:   "heartbeat",
+		}); err != nil {
+			t.Fatalf("IngestRunEvent heartbeat %d: %v", i, err)
+		}
+	}
+
+	// The first heartbeat must still transition the queued run to running.
+	updated, err := counting.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if updated.Status != domain.RunStatusRunning {
+		t.Fatalf("run status = %s, want running after first heartbeat", updated.Status)
+	}
+	counting.mu.Lock()
+	writes := counting.statusWriteCounts[run.RunID]
+	counting.mu.Unlock()
+	if writes != 1 {
+		t.Fatalf("status writes = %d, want 1 of %d heartbeats inside the throttle window", writes, heartbeats)
+	}
+
+	events, err := counting.ListRunEvents(ctx, run.RunID, 50)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	stored := 0
+	for _, event := range events {
+		if event.EventKind == "run.heartbeat" {
+			stored++
+		}
+	}
+	if stored != heartbeats {
+		t.Fatalf("stored heartbeats = %d, want all %d events persisted despite throttled status writes", stored, heartbeats)
+	}
 }

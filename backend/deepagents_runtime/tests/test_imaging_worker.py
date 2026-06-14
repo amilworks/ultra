@@ -86,6 +86,40 @@ def test_poison_job_at_cap_is_terminated_not_redelivered(monkeypatch):
     assert msg.termed and not msg.naked and not msg.acked
 
 
+def test_poison_job_writes_failure_marker(monkeypatch, tmp_path):
+    # On permanent failure, the worker drops a <fileID>__pyramid.failed sidecar so the
+    # control plane can back off re-enqueuing a doomed convert (the 707k-redelivery fix).
+    dst = tmp_path / "derived" / "res_1__pyramid.tif"
+    job = {"src_path": "/in.tif", "dst_path": str(dst), "resource_id": "res_1"}
+
+    def _boom(job, meta_fn=None):
+        raise RuntimeError("imgcnv conversion failed (exit 3): Input format is not supported")
+
+    monkeypatch.setattr(worker, "run_derive_pyramid_job", _boom)
+    msg = FakeMsg(job, num_delivered=5)
+    _run(msg, max_deliver=5)
+
+    marker = tmp_path / "derived" / "res_1__pyramid.failed"
+    assert msg.termed and marker.exists()
+    payload = json.loads(marker.read_text())
+    assert payload["resource_id"] == "res_1" and "not supported" in payload["error"]
+
+
+def test_transient_failure_does_not_write_failure_marker(monkeypatch, tmp_path):
+    # A below-cap (retryable) failure must NOT mark the resource as permanently failed.
+    dst = tmp_path / "derived" / "res_1__pyramid.tif"
+    job = {"src_path": "/in.tif", "dst_path": str(dst), "resource_id": "res_1"}
+    monkeypatch.setattr(worker, "run_derive_pyramid_job", lambda job, meta_fn=None: (_ for _ in ()).throw(RuntimeError("transient")))
+    msg = FakeMsg(job, num_delivered=1)
+    _run(msg, max_deliver=5)
+    assert msg.naked and not (tmp_path / "derived" / "res_1__pyramid.failed").exists()
+
+
+def test_failure_marker_path_swaps_tif_suffix():
+    assert worker._failure_marker_path("/a/b/res__pyramid.tif") == "/a/b/res__pyramid.failed"
+    assert worker._failure_marker_path("/a/b/res__pyramid") == "/a/b/res__pyramid.failed"
+
+
 def test_missing_delivery_metadata_defaults_to_retry(monkeypatch):
     # If the transport doesn't expose num_delivered, treat it as attempt 1 (retry),
     # never as an immediate terminate — we'd rather retry a recoverable job once more.

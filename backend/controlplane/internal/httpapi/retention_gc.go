@@ -34,6 +34,7 @@ func resourceArtifactPaths(root string, resource domain.ResourceRecord) []string
 	source := strings.TrimSpace(resource.StoragePath)
 	add(source)
 	add(filepath.Join(root, "derived", derivedPyramidName(resource.ResourceID)))
+	add(derivedPyramidFailedMarkerPath(root, resource.ResourceID))
 	if source != "" {
 		add(niftiDecompressedSidecarPath(source))
 	}

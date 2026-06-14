@@ -223,6 +223,9 @@ func (deps ServerDeps) handleDeriveUploadPyramid(w http.ResponseWriter, r *http.
 		writeStoreError(w, err)
 		return
 	}
+	// Explicit re-derive: clear any prior permanent-failure marker so this attempt is
+	// not suppressed by the backoff (the operator/caller escape hatch to retry).
+	clearPyramidFailureMarker(root, fileID)
 	jobID := domain.NewID("imgjob")
 	dst := filepath.Join(root, "derived", derivedPyramidName(fileID))
 	envelope := eventbus.DataAgentJob{

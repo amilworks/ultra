@@ -80,9 +80,40 @@ async def _safe_ack_op(msg: Any, op: str) -> None:
         pass
 
 
+def _failure_marker_path(dst_path: str) -> str:
+    """Sidecar path the control plane checks to back off a permanently-failed derive.
+    Mirrors Go's derivedPyramidFailedName: ``<fileID>__pyramid.failed`` next to the
+    would-be ``<fileID>__pyramid.tif`` pyramid."""
+    return dst_path[:-4] + ".failed" if dst_path.endswith(".tif") else dst_path + ".failed"
+
+
+def _write_failure_marker(job: dict[str, Any] | None, exc: BaseException) -> None:
+    """Best-effort: record that this resource's pyramid derivation permanently failed,
+    so the control plane stops re-enqueuing a doomed conversion on every viewer open
+    (which would keep burning the engine — the failure mode behind the 707k-redelivery
+    incident). The marker's mtime gives the control plane a backoff window; a later
+    successful derive or an explicit re-derive clears it. Never raises."""
+    try:
+        dst = (job or {}).get("dst_path")
+        if not dst:
+            return
+        marker = _failure_marker_path(str(dst))
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"resource_id": (job or {}).get("resource_id"),
+                 "src_path": (job or {}).get("src_path"),
+                 "error": str(exc)[:500]},
+                fh,
+            )
+    except Exception:  # noqa: BLE001 - a marker write must never crash the worker loop
+        pass
+
+
 async def _handle_message(
     msg: Any, *, meta_fn: Callable[[str], dict[str, Any]] | None, max_deliver: int = DEFAULT_MAX_DELIVER
 ) -> None:
+    job: dict[str, Any] | None = None
     try:
         envelope = json.loads(msg.data.decode("utf-8"))
         job = extract_derive_pyramid_payload(envelope)
@@ -110,6 +141,7 @@ async def _handle_message(
                 "derive_pyramid permanently failed after %d attempt(s); terminating (dead-letter): %r",
                 attempt, exc,
             )
+            _write_failure_marker(job, exc)  # control plane backs off re-enqueueing this doomed convert
             await _safe_ack_op(msg, "term")
         else:
             logger.warning(

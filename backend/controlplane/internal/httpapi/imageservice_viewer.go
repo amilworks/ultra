@@ -45,6 +45,53 @@ func derivedPyramidPath(root, fileID string) string {
 	return ""
 }
 
+// derivedPyramidFailedName is the sidecar the convert worker writes (see
+// imaging/worker.py _failure_marker_path) when a resource's pyramid derivation
+// PERMANENTLY fails — e.g. a source format this engine build cannot decode. Its
+// presence + mtime let the control plane back off re-enqueueing a doomed conversion.
+func derivedPyramidFailedName(fileID string) string { return fileID + "__pyramid.failed" }
+
+func derivedPyramidFailedMarkerPath(root, fileID string) string {
+	return filepath.Join(root, "derived", derivedPyramidFailedName(fileID))
+}
+
+// pyramidFailureBackoff is how long a recorded permanent-derivation-failure suppresses
+// re-enqueueing. Long enough that a poison source (which always fails) can't keep
+// burning the engine on every viewer open, short enough that a transient cause (an
+// engine deploy, a since-fixed bug) is retried within the hour. Override with
+// ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS.
+const pyramidFailureBackoff = time.Hour
+
+func pyramidFailureBackoffWindow() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS")); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return pyramidFailureBackoff
+}
+
+// recentPyramidFailure reports whether a permanent derivation failure was recorded for
+// this resource within the backoff window. Failure-isolated: any stat error falls
+// through to false (never blocks serving). A zero/disabled window never suppresses.
+func recentPyramidFailure(root, fileID string, now time.Time) bool {
+	window := pyramidFailureBackoffWindow()
+	if window <= 0 {
+		return false
+	}
+	fi, err := os.Stat(derivedPyramidFailedMarkerPath(root, fileID))
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return now.Sub(fi.ModTime()) < window
+}
+
+// clearPyramidFailureMarker removes the failure sidecar so a derivation can be retried
+// (called on an explicit re-derive request — the operator/serve-time escape hatch).
+func clearPyramidFailureMarker(root, fileID string) {
+	_ = os.Remove(derivedPyramidFailedMarkerPath(root, fileID))
+}
+
 // imageServiceGetJSON fetches and decodes a JSON object from the image service.
 func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string, query url.Values) (map[string]any, error) {
 	base := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/")
@@ -538,6 +585,14 @@ func (deps ServerDeps) ensurePyramidDerivation(ctx context.Context, root string,
 	}
 	if derivedPyramidPath(root, record.FileID) != "" {
 		return // already derived
+	}
+	if recentPyramidFailure(root, record.FileID, time.Now()) {
+		// A recent derivation PERMANENTLY failed (a source this engine build can't
+		// convert). Back off instead of re-minting a doomed convert on every viewer
+		// open — that repeated heavy imgcnv work is exactly what starved the engine
+		// in the 707k-redelivery incident. The source still serves via direct/slice;
+		// an explicit re-derive (handleDeriveUploadPyramid) clears the marker to retry.
+		return
 	}
 	if !pyramidDerivationThrottle.reserve(record.FileID, time.Now()) {
 		return // enqueued recently; assume a convert is already in flight

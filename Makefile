@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke autonomy-gate
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
@@ -228,6 +228,51 @@ autonomy-live-smoke: ## Run opt-in live two-turn tool-autonomy trace against a r
 		--min-artifacts 2 \
 		--min-response-chars 50 \
 		--require-tool-autonomy-quality \
+		--require-tool-capability-quality \
+		--capability-matrix \
+		--require-thread-quality
+
+# For WorkOS-gated stacks, export ULTRA_LIVE_TRACE_COOKIE='ultra_workos_session=...'
+# or ULTRA_LIVE_TRACE_AUTHORIZATION before running this target.
+delegation-live-smoke: ## Run opt-in live scoped subagent delegation trace against a running stack
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
+		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
+		--title "Delegation live smoke" \
+		--prompt "Start by calling tool_capability_manifest. Delegate a focused data/code inspection subtask to an available subagent: create a tiny CSV with x=0..5 and y=x^2, have the subagent inspect or compute summary statistics from it, then reconcile the subagent result into a concise final answer with durable code/report outputs." \
+		--timeout $${ULTRA_LIVE_TRACE_TIMEOUT_SECONDS:-600} \
+		--poll-interval $${ULTRA_LIVE_TRACE_POLL_INTERVAL_SECONDS:-1} \
+		--http-timeout $${ULTRA_LIVE_TRACE_HTTP_TIMEOUT_SECONDS:-15} \
+		--verify-downloads \
+		--require-downloads \
+		--min-artifacts 1 \
+		--min-response-chars 50 \
+		--require-delegation-quality \
+		--require-tool-capability-quality \
+		--capability-matrix \
+		--require-thread-quality
+
+rigor-live-smoke: ## Run opt-in live Intelligence-Pro rigor results-contract trace against a running stack
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
+		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
+		--title "Rigor live smoke" \
+		--workflow-hint-id pro_mode \
+		--prompt "Run a small computational study: integrate the logistic map x_{n+1} = r x_n (1 - x_n) for r in {2.8, 3.2, 3.5, 3.9}, estimate the Lyapunov exponent for each r, classify each regime, save a metrics CSV, a bifurcation figure at 300 DPI, the analysis code, and a short markdown report, and finish with a concise summary." \
+		--timeout $${ULTRA_LIVE_TRACE_TIMEOUT_SECONDS:-1500} \
+		--poll-interval $${ULTRA_LIVE_TRACE_POLL_INTERVAL_SECONDS:-2} \
+		--min-artifacts 4 \
+		--min-response-chars 400
+
+async-delegation-live-smoke: ## Run opt-in live async/background subagent trace against a running stack
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
+		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
+		--title "Async delegation live smoke" \
+		--prompt "Start by calling tool_capability_manifest. If available_async_subagents is non-empty, launch exactly one background task with start_async_task using an available async subagent. Ask it to run a concise scientific/code analysis and return the full task_id to me. After launching, stop and do not check status in this turn." \
+		--followup "Start by calling tool_capability_manifest. Use list_async_tasks to fetch current status for all async tasks. If a task is complete, call check_async_task once with the full task_id and summarize the status/result. If it is still running, report the full task_id and current status without polling." \
+		--timeout $${ULTRA_LIVE_TRACE_TIMEOUT_SECONDS:-600} \
+		--poll-interval $${ULTRA_LIVE_TRACE_POLL_INTERVAL_SECONDS:-1} \
+		--http-timeout $${ULTRA_LIVE_TRACE_HTTP_TIMEOUT_SECONDS:-15} \
+		--min-response-chars 30 \
+		--require-async-delegation-quality \
 		--require-tool-capability-quality \
 		--capability-matrix \
 		--require-thread-quality

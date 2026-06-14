@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,11 @@ func New(cfg config.Config) (*App, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Serving pool only: bound every query server-side so one stuck/runaway query
+		// (missing index, lock wait) can't hold a connection from the small pool
+		// indefinitely and starve the service. Migrations go through postgresPoolConfig
+		// WITHOUT this, so slow DDL (index builds) isn't aborted.
+		applyStatementTimeout(poolConfig, cfg.DatabaseStatementTimeout)
 		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 		if err != nil {
 			return nil, err
@@ -452,6 +458,23 @@ func postgresPoolConfig(cfg config.Config) (*pgxpool.Config, error) {
 		return nil, fmt.Errorf("ULTRA_CONTROL_DATABASE_MIN_CONNS (%d) cannot exceed ULTRA_CONTROL_DATABASE_MAX_CONNS (%d)", poolConfig.MinConns, poolConfig.MaxConns)
 	}
 	return poolConfig, nil
+}
+
+// applyStatementTimeout sets a server-side per-query timeout on every connection the
+// pool opens, via the standard Postgres statement_timeout runtime parameter. This
+// bounds a single stuck/runaway query so it cannot hold a pooled connection forever
+// and starve the small serving pool (MaxConns default 8) — the failure mode where a
+// handful of wedged queries take the whole service offline. A no-op when timeout<=0
+// (disabled, the default), so it never changes behavior unless an operator opts in.
+// Applied to the serving pool only; never to migrations, whose DDL is legitimately slow.
+func applyStatementTimeout(poolConfig *pgxpool.Config, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(timeout.Milliseconds(), 10)
 }
 
 func MigratePostgres(ctx context.Context, cfg config.Config) error {

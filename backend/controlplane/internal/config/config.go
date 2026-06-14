@@ -20,6 +20,7 @@ type Config struct {
 	DatabaseURL                string
 	DatabaseMaxConns           int
 	DatabaseMinConns           int
+	DatabaseStatementTimeout   time.Duration
 	NATSURL                    string
 	NATSStream                 string
 	NATSJobsSubject            string
@@ -74,6 +75,11 @@ func Load() Config {
 		DatabaseURL:                envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
 		DatabaseMaxConns:           envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
 		DatabaseMinConns:           envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
+		// Per-query server-side timeout for the SERVING pool so one stuck/runaway query
+		// can't hold a connection from the small pool forever. Off by default (0), like
+		// ReadTimeout/WriteTimeout — operators opt in per their workload. Migrations are
+		// exempt (slow DDL is legitimate).
+		DatabaseStatementTimeout: envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
 		NATSURL:                    envString("ULTRA_CONTROL_NATS_URL", ""),
 		NATSStream:                 envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
 		NATSJobsSubject:            envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),

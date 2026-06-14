@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -143,6 +144,7 @@ func TestLoadPrefersControlDatabaseURLOverRunStorePath(t *testing.T) {
 func TestLoadPostgresPoolConfig(t *testing.T) {
 	t.Setenv("ULTRA_CONTROL_DATABASE_MAX_CONNS", "12")
 	t.Setenv("ULTRA_CONTROL_DATABASE_MIN_CONNS", "3")
+	t.Setenv("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", "45")
 
 	cfg := Load()
 	if cfg.DatabaseMaxConns != 12 {
@@ -150,6 +152,18 @@ func TestLoadPostgresPoolConfig(t *testing.T) {
 	}
 	if cfg.DatabaseMinConns != 3 {
 		t.Fatalf("DatabaseMinConns = %d, want 3", cfg.DatabaseMinConns)
+	}
+	if cfg.DatabaseStatementTimeout != 45*time.Second {
+		t.Fatalf("DatabaseStatementTimeout = %v, want 45s", cfg.DatabaseStatementTimeout)
+	}
+}
+
+func TestLoadDefaultsDatabaseStatementTimeoutOff(t *testing.T) {
+	// Off by default (like ReadTimeout/WriteTimeout) so adding the knob changes no
+	// existing deployment's behavior until an operator opts in.
+	t.Setenv("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", "")
+	if got := Load().DatabaseStatementTimeout; got != 0 {
+		t.Fatalf("default DatabaseStatementTimeout = %v, want 0 (disabled)", got)
 	}
 }
 

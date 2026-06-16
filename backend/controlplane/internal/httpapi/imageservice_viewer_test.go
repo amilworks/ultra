@@ -335,6 +335,34 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 	}
 }
 
+func TestV2UploadSliceFallsBackWhenImageServiceUnreachable(t *testing.T) {
+	t.Parallel()
+
+	// A configured-but-unreachable image service (server created, then closed).
+	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	downURL := down.URL
+	down.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: downURL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "plane.png", testPNGBytes(t, 8, 8))
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	// Degrades to the legacy native path (serves the source image), not a 502.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("slice fallback status = %d, want 200 (legacy native path)", rec.Code)
+	}
+}
+
 func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 	t.Parallel()
 

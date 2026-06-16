@@ -61,6 +61,7 @@ type BisqueCredentials struct {
 type BisquePersistentCredentialStore interface {
 	UpsertBisqueCredential(context.Context, domain.UpsertBisqueCredentialInput) (domain.BisqueCredentialRecord, error)
 	GetBisqueCredentialBySessionID(context.Context, string) (domain.BisqueCredentialRecord, bool, error)
+	GetActiveBisqueCredentialForUser(context.Context, string, string) (domain.BisqueCredentialRecord, bool, error)
 	DeleteBisqueCredentialBySessionID(context.Context, string) error
 }
 
@@ -323,6 +324,38 @@ func (store *BisqueCredentialStore) OwnerUserID(ctx context.Context, sessionID s
 	return strings.TrimSpace(record.UserID), true, nil
 }
 
+// ResolveLinkedSessionForUser returns the session id and credentials of a user's
+// active linked BisQue account, looked up by account identity rather than the
+// request's session cookie. This is what makes linked-account detection (and
+// therefore agent tool registration) survive cookie expiry and cross-browser use.
+func (store *BisqueCredentialStore) ResolveLinkedSessionForUser(ctx context.Context, userID string, orgID string) (string, BisqueCredentials, bool) {
+	if store == nil || store.persistent == nil || store.cipher == nil {
+		return "", BisqueCredentials{}, false
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", BisqueCredentials{}, false
+	}
+	record, found, err := store.persistent.GetActiveBisqueCredentialForUser(contextOrBackground(ctx), userID, orgID)
+	if err != nil || !found {
+		return "", BisqueCredentials{}, false
+	}
+	sessionID := strings.TrimSpace(record.SessionID)
+	if sessionID == "" {
+		return "", BisqueCredentials{}, false
+	}
+	password, err := store.cipher.Decrypt(record.PasswordCiphertext, record.PasswordNonce)
+	if err != nil {
+		return "", BisqueCredentials{}, false
+	}
+	credentials := BisqueCredentials{Username: strings.TrimSpace(record.Username), Password: password}
+	if credentials.Username == "" {
+		return "", BisqueCredentials{}, false
+	}
+	store.cache(sessionID, credentials)
+	return sessionID, credentials, true
+}
+
 func (store *BisqueCredentialStore) Delete(sessionID string) {
 	if store == nil {
 		return
@@ -488,6 +521,26 @@ type BisqueResource struct {
 	Tags            map[string]string `json:"tags,omitempty"`
 	ClientViewURL   string            `json:"client_view_url,omitempty"`
 	ImageServiceURL string            `json:"image_service_url,omitempty"`
+	// MEX (module-execution) fields, populated only for resource_type == "mex".
+	Status     string           `json:"status,omitempty"`
+	ModuleName string           `json:"module_name,omitempty"`
+	ModuleURI  string           `json:"module_uri,omitempty"`
+	CreatedAt  string           `json:"created_at,omitempty"`
+	StartedAt  string           `json:"started_at,omitempty"`
+	Inputs     []BisqueMexParam `json:"inputs,omitempty"`
+	Outputs    []BisqueMexParam `json:"outputs,omitempty"`
+}
+
+// BisqueMexParam is one input or output of a module run. Resource-typed params
+// (image/file/table/dataset/resource/mex) carry the referenced resource URI and
+// its viewable link; scalar params (number/string/boolean) carry Value only.
+type BisqueMexParam struct {
+	Name          string `json:"name"`
+	Type          string `json:"type,omitempty"`
+	Value         string `json:"value,omitempty"`
+	ResourceURI   string `json:"resource_uri,omitempty"`
+	ResourceUniq  string `json:"resource_uniq,omitempty"`
+	ClientViewURL string `json:"client_view_url,omitempty"`
 }
 
 type BisqueImportRecord struct {
@@ -518,6 +571,12 @@ type BisqueDatasetRecord struct {
 	ClientViewURL string `json:"client_view_url,omitempty"`
 }
 
+type bisqueModuleRunRequest struct {
+	MexURI  string `json:"mex_uri"`
+	MexUniq string `json:"mex_uniq"`
+	Mex     string `json:"mex"`
+}
+
 func (deps ServerDeps) handleBisqueSearch(w http.ResponseWriter, r *http.Request) {
 	if deps.Bisque == nil {
 		writeBisqueNotConfigured(w)
@@ -533,6 +592,28 @@ func (deps ServerDeps) handleBisqueSearch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (deps ServerDeps) handleBisqueModuleRun(w http.ResponseWriter, r *http.Request) {
+	if deps.Bisque == nil {
+		writeBisqueNotConfigured(w)
+		return
+	}
+	var req bisqueModuleRunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	mexRef := firstNonEmpty(strings.TrimSpace(req.MexURI), strings.TrimSpace(req.Mex), strings.TrimSpace(req.MexUniq))
+	if mexRef == "" {
+		writeError(w, http.StatusBadRequest, errors.New("mex_uri or mex_uniq is required"))
+		return
+	}
+	run, err := deps.Bisque.GetModuleRun(r.Context(), mexRef, deps.bisqueCredentialsFromRequest(r.Context(), r))
+	if err != nil {
+		writeBisqueError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 func (deps ServerDeps) handleImportBisqueResources(w http.ResponseWriter, r *http.Request) {
@@ -828,15 +909,34 @@ func (deps ServerDeps) bisqueJobMetadataFromRequest(r *http.Request) domain.JSON
 	if deps.BisqueCredentials == nil {
 		return metadata
 	}
-	sessionID := bisqueSessionIDFromRequest(r)
-	if sessionID == "" {
-		return metadata
+	if sessionID := deps.resolveBisqueSessionForRequest(r); sessionID != "" {
+		metadata["bisque_session_id"] = sessionID
 	}
-	if _, ok, err := deps.BisqueCredentials.GetWithContext(r.Context(), sessionID); !ok || err != nil {
-		return metadata
-	}
-	metadata["bisque_session_id"] = sessionID
 	return metadata
+}
+
+// resolveBisqueSessionForRequest returns the BisQue session id to attach to a
+// run for this user: the cookie session when present, otherwise the user's
+// durably-linked account session looked up by identity. The durable fallback is
+// what lets a linked user run BisQue tools after their session cookie has
+// expired or from a different browser — the reported "tools not registered" bug.
+func (deps ServerDeps) resolveBisqueSessionForRequest(r *http.Request) string {
+	if deps.BisqueCredentials == nil {
+		return ""
+	}
+	if sessionID := bisqueSessionIDFromRequest(r); sessionID != "" {
+		if _, ok, err := deps.BisqueCredentials.GetWithContext(r.Context(), sessionID); ok && err == nil {
+			return sessionID
+		}
+	}
+	principal := deps.principalFromRequest(r, "")
+	if strings.TrimSpace(principal.UserID) == "" {
+		return ""
+	}
+	if sessionID, _, ok := deps.BisqueCredentials.ResolveLinkedSessionForUser(r.Context(), principal.UserID, principal.OrgID); ok {
+		return sessionID
+	}
+	return ""
 }
 
 func (deps ServerDeps) bisqueCredentialsFromRequest(ctx context.Context, r *http.Request) BisqueCredentials {
@@ -851,7 +951,26 @@ func (deps ServerDeps) bisqueCredentialsFromRequest(ctx context.Context, r *http
 			return credentials
 		}
 	}
+	// Durable fallback: resolve the linked account by the request/run owner so a
+	// BisQue call still authenticates after the session cookie has lapsed or when
+	// a resumed run no longer carries the transient session header.
+	if userID, orgID := deps.bisqueOwnerForRequest(r); userID != "" {
+		if _, credentials, ok := deps.BisqueCredentials.ResolveLinkedSessionForUser(ctx, userID, orgID); ok {
+			return credentials
+		}
+	}
 	return BisqueCredentials{}
+}
+
+// bisqueOwnerForRequest returns the account identity whose linked BisQue
+// credentials should serve this request: the run owner for trusted worker
+// requests, otherwise the request principal.
+func (deps ServerDeps) bisqueOwnerForRequest(r *http.Request) (string, string) {
+	if principal, ok := deps.workerRunPrincipal(r); ok {
+		return strings.TrimSpace(principal.UserID), strings.TrimSpace(principal.OrgID)
+	}
+	principal := deps.principalFromRequest(r, "")
+	return strings.TrimSpace(principal.UserID), strings.TrimSpace(principal.OrgID)
 }
 
 func (deps ServerDeps) bisqueRootURL() string {
@@ -1472,6 +1591,61 @@ func (service *BisqueService) fetchResource(ctx context.Context, resourceURI str
 	return resources[0], nil
 }
 
+// GetModuleRun fetches a single module-execution (MEX) at view=deep so its
+// nested inputs and outputs — the resulting segmentation masks, tables, files —
+// are resolved. mexRef may be a full resource URI or a bare resource_uniq.
+func (service *BisqueService) GetModuleRun(ctx context.Context, mexRef string, credentials BisqueCredentials) (BisqueResource, error) {
+	if service == nil {
+		return BisqueResource{}, bisqueClientError("BisQue integration is not configured")
+	}
+	mexRef = strings.TrimSpace(mexRef)
+	if mexRef == "" {
+		return BisqueResource{}, bisqueClientError("a BisQue module run URI or resource_uniq is required")
+	}
+	if !strings.Contains(mexRef, "/") {
+		// Bare resource_uniq such as 00-ZDLCqkxPUFZssqEtLovR9C.
+		mexRef = service.endpoint("/data_service/" + url.PathEscape(mexRef))
+	}
+	deepURL, err := service.deepViewURL(mexRef)
+	if err != nil {
+		return BisqueResource{}, err
+	}
+	data, _, err := service.fetch(ctx, http.MethodGet, deepURL, nil, "", credentials)
+	if err != nil {
+		return BisqueResource{}, err
+	}
+	resources := service.withLinks(parseBisqueResources(data))
+	mex := bisqueFirstMexResource(resources)
+	if mex == nil {
+		return BisqueResource{}, bisqueClientError("the requested BisQue resource is not a module run (mex)")
+	}
+	return *mex, nil
+}
+
+func (service *BisqueService) deepViewURL(resourceURI string) (string, error) {
+	normalized, err := service.normalizeAllowedURL(resourceURI)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	query.Set("view", "deep")
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func bisqueFirstMexResource(resources []BisqueResource) *BisqueResource {
+	for i := range resources {
+		if strings.EqualFold(resources[i].ResourceType, "mex") {
+			return &resources[i]
+		}
+	}
+	return nil
+}
+
 func (service *BisqueService) fetch(ctx context.Context, method string, rawURL string, body io.Reader, contentType string, credentials BisqueCredentials) ([]byte, string, error) {
 	return service.fetchWithClient(ctx, service.client, method, rawURL, body, contentType, credentials)
 }
@@ -1564,11 +1738,26 @@ func (service *BisqueService) withLinks(resources []BisqueResource) []BisqueReso
 		if resources[i].ResourceURI != "" {
 			resources[i].ClientViewURL = service.clientViewURL(resources[i].ResourceURI)
 		}
-		if resources[i].ResourceUniq != "" {
+		// image_service_url only makes sense for image resources; a mex or
+		// dataset has no image-service rendering, so don't fabricate one.
+		if resources[i].ResourceUniq != "" && strings.EqualFold(resources[i].ResourceType, "image") {
 			resources[i].ImageServiceURL = service.endpoint("/image_service/" + url.PathEscape(resources[i].ResourceUniq))
+		}
+		service.withParamLinks(resources[i].Inputs)
+		service.withParamLinks(resources[i].Outputs)
+		if moduleURI := strings.TrimSpace(resources[i].ModuleURI); moduleURI != "" {
+			resources[i].ModuleURI = moduleURI
 		}
 	}
 	return resources
+}
+
+func (service *BisqueService) withParamLinks(params []BisqueMexParam) {
+	for j := range params {
+		if strings.TrimSpace(params[j].ResourceURI) != "" {
+			params[j].ClientViewURL = service.clientViewURL(params[j].ResourceURI)
+		}
+	}
 }
 
 // clientViewURL builds the canonical BisQue viewer link for a resource. The
@@ -1597,14 +1786,22 @@ type bisqueXMLResource struct {
 	Type         string              `xml:"type,attr"`
 	URI          string              `xml:"uri,attr"`
 	Name         string              `xml:"name,attr"`
+	Value        string              `xml:"value,attr"`
+	Created      string              `xml:"created,attr"`
+	TS           string              `xml:"ts,attr"`
 	ResourceUniq string              `xml:"resource_uniq,attr"`
 	Tags         []bisqueXMLTag      `xml:"tag"`
 	Children     []bisqueXMLResource `xml:",any"`
 }
 
+// bisqueXMLTag is recursive so nested MEX containers — <tag name="outputs">
+// holding <tag name="Segmentation" type="image" value="...">  — are preserved
+// rather than flattened away.
 type bisqueXMLTag struct {
-	Name  string `xml:"name,attr"`
-	Value string `xml:"value,attr"`
+	Name  string         `xml:"name,attr"`
+	Type  string         `xml:"type,attr"`
+	Value string         `xml:"value,attr"`
+	Tags  []bisqueXMLTag `xml:"tag"`
 }
 
 func bisqueSessionHasAuthenticatedUser(data []byte) bool {
@@ -1662,16 +1859,80 @@ func collectBisqueResources(parsed bisqueXMLResource, resources *[]BisqueResourc
 				tags[tag.Name] = tag.Value
 			}
 		}
-		*resources = append(*resources, BisqueResource{
+		resource := BisqueResource{
 			ResourceURI:  strings.TrimSpace(parsed.URI),
 			Name:         strings.TrimSpace(parsed.Name),
 			ResourceUniq: strings.TrimSpace(parsed.ResourceUniq),
 			ResourceType: parsed.XMLName.Local,
 			Tags:         tags,
-		})
+		}
+		if strings.EqualFold(parsed.XMLName.Local, "mex") {
+			enrichBisqueMexResource(&resource, parsed)
+		}
+		*resources = append(*resources, resource)
 	}
 	for _, child := range parsed.Children {
 		collectBisqueResources(child, resources)
+	}
+}
+
+// enrichBisqueMexResource lifts a module run's status, module reference, and
+// nested input/output parameters out of the raw XML. Status is the mex element's
+// own value attribute and the module is its type attribute (a module URI) — both
+// of which the generic resource parser drops. Inputs/outputs are only present at
+// view=deep; in list (short) views they are absent and these slices stay empty.
+func enrichBisqueMexResource(resource *BisqueResource, parsed bisqueXMLResource) {
+	resource.Status = strings.TrimSpace(parsed.Value)
+	resource.ModuleName = strings.TrimSpace(parsed.Name)
+	if moduleURI := strings.TrimSpace(parsed.Type); strings.Contains(moduleURI, "/data_service/") {
+		resource.ModuleURI = moduleURI
+	}
+	resource.CreatedAt = firstNonEmpty(strings.TrimSpace(parsed.Created), strings.TrimSpace(parsed.TS))
+	for _, tag := range parsed.Tags {
+		switch strings.ToLower(strings.TrimSpace(tag.Name)) {
+		case "inputs":
+			resource.Inputs = bisqueMexParamsFromContainer(tag)
+		case "outputs":
+			resource.Outputs = bisqueMexParamsFromContainer(tag)
+		case "start-time":
+			resource.StartedAt = strings.TrimSpace(tag.Value)
+		}
+	}
+}
+
+func bisqueMexParamsFromContainer(container bisqueXMLTag) []BisqueMexParam {
+	params := make([]BisqueMexParam, 0, len(container.Tags))
+	for _, tag := range container.Tags {
+		name := strings.TrimSpace(tag.Name)
+		if name == "" {
+			continue
+		}
+		paramType := strings.TrimSpace(tag.Type)
+		value := strings.TrimSpace(tag.Value)
+		param := BisqueMexParam{Name: name, Type: paramType, Value: value}
+		if bisqueParamIsResourceReference(paramType, value) {
+			param.ResourceURI = value
+			param.ResourceUniq = pathBaseFromURL(value)
+		}
+		params = append(params, param)
+	}
+	return params
+}
+
+// bisqueParamIsResourceReference reports whether a MEX param value points at a
+// BisQue resource (so it gets a viewable link and can be downloaded) rather than
+// being a scalar like a number or threshold.
+func bisqueParamIsResourceReference(paramType string, value string) bool {
+	if !strings.Contains(value, "/data_service/") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(paramType)) {
+	case "image", "file", "table", "dataset", "resource", "mex":
+		return true
+	default:
+		// Some inputs (e.g. resource_url) are typed by the referenced resource
+		// kind; trust the data_service URI shape when the value clearly is one.
+		return true
 	}
 }
 

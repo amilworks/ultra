@@ -161,7 +161,12 @@ func (deps ServerDeps) resolveUploadTilePathForImageService(w http.ResponseWrite
 // proxyImageService forwards a GET to the internal image service and streams the
 // response back. The control plane has already authorized the request and
 // resolved the storage path; the sidecar is never reached directly.
-func (deps ServerDeps) proxyImageService(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values) {
+// proxyImageService streams an image-service GET back to the client. When the
+// sidecar is unreachable (dial/transport error, before anything is written) and a
+// fallback handler is supplied, it degrades to that legacy native handler instead
+// of a 502 — so a crashed image service doesn't break serving for formats Go can
+// still handle. Variadic so existing callers (no fallback) keep returning 502.
+func (deps ServerDeps) proxyImageService(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values, fallback ...http.HandlerFunc) {
 	base := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/")
 	target := base + endpoint
 	if encoded := query.Encode(); encoded != "" {
@@ -174,6 +179,10 @@ func (deps ServerDeps) proxyImageService(w http.ResponseWriter, r *http.Request,
 	}
 	resp, err := imageServiceHTTPClient.Do(req)
 	if err != nil {
+		if len(fallback) > 0 && fallback[0] != nil {
+			fallback[0](w, r) // image service unreachable -> legacy native path
+			return
+		}
 		writeError(w, http.StatusBadGateway, fmt.Errorf("image service request failed: %w", err))
 		return
 	}

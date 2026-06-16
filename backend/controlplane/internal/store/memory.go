@@ -238,6 +238,38 @@ func (s *MemoryStore) GetBisqueCredentialBySessionID(ctx context.Context, sessio
 	return record, true, nil
 }
 
+// GetActiveBisqueCredentialForUser resolves a user's linked BisQue credential by
+// account identity rather than session cookie, so linked-account detection
+// survives cookie expiry and works across browsers.
+func (s *MemoryStore) GetActiveBisqueCredentialForUser(ctx context.Context, userID string, orgID string) (domain.BisqueCredentialRecord, bool, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	orgID = strings.TrimSpace(orgID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best domain.BisqueCredentialRecord
+	found := false
+	for _, record := range s.bisque {
+		if !strings.EqualFold(record.UserID, userID) {
+			continue
+		}
+		if orgID != "" && record.OrgID != "" && !strings.EqualFold(record.OrgID, orgID) {
+			continue
+		}
+		if strings.TrimSpace(record.Status) != "active" {
+			continue
+		}
+		if !found || record.UpdatedAt.After(best.UpdatedAt) {
+			best = record
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
 func (s *MemoryStore) DeleteBisqueCredentialBySessionID(ctx context.Context, sessionID string) error {
 	_ = ctx
 	sessionID = strings.TrimSpace(sessionID)

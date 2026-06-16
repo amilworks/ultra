@@ -591,9 +591,10 @@ func TestImageServiceProxyErrorMatrix(t *testing.T) {
 	}
 }
 
-// TestImageServiceProxyMapsUnreachableServiceTo502 covers the dependency-down path: when
-// the image service can't be reached at all, the viewer gets a clean 502 (not a hang or a
-// raw connection error), so the frontend can show a clear "preview unavailable" state.
+// TestImageServiceProxyMapsUnreachableServiceTo502 covers a dependency-down path without
+// a native fallback: when the image service can't be reached at all, the viewer gets a
+// clean 502 (not a hang or a raw connection error), so the frontend can show a clear
+// "preview unavailable" state.
 func TestImageServiceProxyMapsUnreachableServiceTo502(t *testing.T) {
 	t.Parallel()
 	mem := store.NewMemoryStore()
@@ -604,8 +605,8 @@ func TestImageServiceProxyMapsUnreachableServiceTo502(t *testing.T) {
 		UploadRoot:      t.TempDir(),
 		ImageServiceURL: "http://127.0.0.1:1", // nothing listening
 	})
-	fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
+	fileID := uploadNamedFileForProxyTest(t, router, "stack.czi", testPNGBytes(t, 4, 4))
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

@@ -209,6 +209,7 @@ func documentedV2Paths(doc string) map[string]bool {
 }
 
 func frontendV2Paths(source string) []string {
+	source = stripTypeScriptComments(source)
 	seen := make(map[string]bool)
 	for offset := 0; ; {
 		idx := strings.Index(source[offset:], "/v2/")
@@ -238,6 +239,77 @@ func frontendV2Paths(source string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func stripTypeScriptComments(source string) string {
+	var b strings.Builder
+	b.Grow(len(source))
+	var quote byte
+	escaped := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(source); i++ {
+		ch := source[i]
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				b.WriteByte(ch)
+			} else {
+				b.WriteByte(' ')
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && i+1 < len(source) && source[i+1] == '/' {
+				inBlockComment = false
+				b.WriteString("  ")
+				i++
+			} else if ch == '\n' {
+				b.WriteByte(ch)
+			} else {
+				b.WriteByte(' ')
+			}
+			continue
+		}
+		if quote != 0 {
+			b.WriteByte(ch)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			quote = ch
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '/' && i+1 < len(source) {
+			next := source[i+1]
+			if next == '/' {
+				inLineComment = true
+				b.WriteString("  ")
+				i++
+				continue
+			}
+			if next == '*' {
+				inBlockComment = true
+				b.WriteString("  ")
+				i++
+				continue
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
 }
 
 var (

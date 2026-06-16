@@ -1,10 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Copy, Focus, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  Download,
+  Focus,
+  ImageDown,
+  Info,
+  Maximize2,
+  Minimize2,
+  RotateCcw,
+  SlidersHorizontal,
+} from "lucide-react";
 
 import { formatBytes } from "@/lib/format";
 
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -20,6 +41,14 @@ import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
 import { DeepZoomCanvas } from "./DeepZoomCanvas";
 import { DirectPlaneImage } from "./DirectPlaneImage";
+import {
+  canCopyImageToClipboard,
+  copyBlobToClipboard,
+  downloadBlob,
+  downloadFromUrl,
+  exportFileStem,
+  type ViewerCanvasHandle,
+} from "./captureView";
 import { scalarVolumePayloadValueAt } from "./scalarVolume";
 import { SlicePlaneCanvas } from "./SlicePlaneCanvas";
 import {
@@ -43,6 +72,8 @@ import { computePhysicalVolumeGeometry } from "./volumeGeometry";
 import { resolveScalarVolumeLighting } from "./volumeLighting";
 import { resolveScalarVolumeTransferFunction, type ScalarVolumeTransferFunction } from "./volumeTransferFunction";
 import { VOLUME_VIEW_PRESETS } from "./volumeViewPreset";
+import { isTypingTarget, keyToFullscreenAction } from "./fullscreenState";
+import { createChromeFadeController, prefersReducedMotionSafe } from "./chromeVisibility";
 
 type ViewerDisplayState = NonNullable<UploadViewerInfo["display_defaults"]>;
 
@@ -98,6 +129,8 @@ type MetadataDetail = {
   copyable?: boolean;
   /** A small trailing unit/format hint (e.g. "mm", the raw content type). */
   hint?: string;
+  /** A leading color swatch (channel LUT color, as a #hex) — data color, not a UI accent. */
+  swatch?: string;
 };
 
 type MetadataGroup = {
@@ -188,6 +221,13 @@ function MetadataDetailValue({ detail }: { detail: MetadataDetail }) {
   };
   return (
     <dd className={`viewer-metadata-kv-value${detail.mono ? " viewer-metadata-kv-value-mono" : ""}`}>
+      {detail.swatch ? (
+        <span
+          className="viewer-metadata-kv-swatch"
+          style={{ backgroundColor: detail.swatch }}
+          aria-hidden="true"
+        />
+      ) : null}
       <span className="viewer-metadata-kv-text">{detail.value}</span>
       {detail.hint ? <span className="viewer-metadata-kv-hint">{detail.hint}</span> : null}
       {detail.copyable ? (
@@ -608,6 +648,12 @@ const computeCursorWorldPosition = (
   return output;
 };
 
+// Cross-browser current fullscreen element (Safari uses the webkit-prefixed form).
+const currentFullscreenElement = (): Element | null =>
+  document.fullscreenElement ??
+  (document as unknown as { webkitFullscreenElement?: Element | null }).webkitFullscreenElement ??
+  null;
+
 export function ImageViewerShell({
   viewerInfo,
   apiClient,
@@ -643,6 +689,182 @@ export function ImageViewerShell({
     error: null,
   });
 
+  // --- Immersive fullscreen (native Fullscreen API on the shell wrapper) ---------
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  // Imperative handle from whichever 2D canvas is mounted (direct-plane or deep-zoom),
+  // so the canvas context menu can fit/reset and export/copy the current view.
+  const canvasHandleRef = useRef<ViewerCanvasHandle | null>(null);
+  // The context menu portals into the shell node (captured after mount) so it stays
+  // visible when the shell is in native fullscreen.
+  const [shellPortalContainer, setShellPortalContainer] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setShellPortalContainer(shellRef.current);
+  }, []);
+  const viewerHoveredRef = useRef(false);
+  const fullscreenTriggerRef = useRef<HTMLElement | null>(null);
+  const isFullscreenRef = useRef(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const exitShellFullscreen = useCallback(() => {
+    const exit =
+      document.exitFullscreen ??
+      (document as unknown as { webkitExitFullscreen?: () => void }).webkitExitFullscreen;
+    if (currentFullscreenElement()) {
+      exit?.call(document);
+    }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const shell = shellRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => void })
+      | null;
+    if (!shell) {
+      return;
+    }
+    if (currentFullscreenElement()) {
+      exitShellFullscreen();
+      return;
+    }
+    // Remember where focus was so we can restore it on exit (no focus trap).
+    fullscreenTriggerRef.current = (document.activeElement as HTMLElement | null) ?? null;
+    const request = shell.requestFullscreen ?? shell.webkitRequestFullscreen;
+    try {
+      const result = request?.call(shell) as Promise<void> | undefined;
+      if (result && typeof result.catch === "function") {
+        result.catch(() => {});
+      }
+    } catch {
+      /* fullscreen denied (e.g. without a user gesture) — leave docked */
+    }
+  }, [exitShellFullscreen]);
+
+  // Sync state from the native event (covers UA-driven Esc exit) + manage focus.
+  useEffect(() => {
+    const onChange = () => {
+      const active = currentFullscreenElement() === shellRef.current;
+      isFullscreenRef.current = active;
+      setIsFullscreen(active);
+      if (active) {
+        const focusTarget =
+          shellRef.current?.querySelector<HTMLElement>('[role="group"]') ?? shellRef.current;
+        focusTarget?.focus?.();
+      } else {
+        fullscreenTriggerRef.current?.focus?.();
+        fullscreenTriggerRef.current = null;
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange as EventListener);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange as EventListener);
+    };
+  }, []);
+
+  // F toggles, Escape exits. Capture-phase so we can stop the fullscreen-exit Esc
+  // from also closing a host sheet; ignored while typing or holding a modifier.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = keyToFullscreenAction(
+        event.key,
+        isTypingTarget(event.target),
+        event.ctrlKey || event.metaKey || event.altKey
+      );
+      if (!action) {
+        return;
+      }
+      if (action === "toggle") {
+        event.preventDefault();
+        toggleFullscreen();
+      } else if (isFullscreenRef.current || currentFullscreenElement()) {
+        event.preventDefault();
+        event.stopPropagation();
+        exitShellFullscreen();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [toggleFullscreen, exitShellFullscreen]);
+
+  // Arrow-key scrubbing on the 2D surface: Up/Down step Z, Left/Right step T (and
+  // fall back to Z when there is no time axis). Scoped to when the viewer is hovered
+  // or focused so it never hijacks page scrolling; skipped while a slider/input is
+  // focused (isTypingTarget) so the native range-input arrows still work there.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (selectedSurface !== "2d") return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (isTypingTarget(event.target)) return;
+      const scoped =
+        viewerHoveredRef.current ||
+        Boolean(shellRef.current && shellRef.current.contains(document.activeElement));
+      if (!scoped) return;
+      const hasZ = zAxisSize > 1;
+      const hasT = tAxisSize > 1;
+      const stepZ = (delta: number) =>
+        setSelectedIndex("z", Math.max(0, Math.min(zAxisSize - 1, clampedIndices.z + delta)));
+      const stepT = (delta: number) =>
+        setSelectedIndex("t", Math.max(0, Math.min(tAxisSize - 1, clampedIndices.t + delta)));
+      let handled = true;
+      switch (event.key) {
+        case "ArrowUp":
+          if (hasZ) stepZ(1); else handled = false; break;
+        case "ArrowDown":
+          if (hasZ) stepZ(-1); else handled = false; break;
+        case "ArrowRight":
+          if (hasT) stepT(1); else if (hasZ) stepZ(1); else handled = false; break;
+        case "ArrowLeft":
+          if (hasT) stepT(-1); else if (hasZ) stepZ(-1); else handled = false; break;
+        default:
+          handled = false;
+      }
+      if (handled) event.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedSurface, zAxisSize, tAxisSize, clampedIndices.z, clampedIndices.t, setSelectedIndex]);
+
+  // Immersive idle-fade for the whole viewer chrome. The in-canvas toolbar already
+  // recedes on idle, but the orientation labels, caption, and controls (which are
+  // siblings outside the canvas node) never did — so the "idle" state still framed
+  // the image with chrome on every side. A shell-scoped controller writes
+  // data-chrome-faded on the viewer-shell; CSS dims every `.viewer-chrome-fade`
+  // descendant to a faint level and snaps it back on pointer activity / keyboard
+  // focus. Opacity-only (stays tab-navigable) and pinned visible under
+  // prefers-reduced-motion. Pointer events bubble from the canvas, so canvas
+  // interaction keeps the whole frame revealed in sync with the per-canvas driver.
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) {
+      return;
+    }
+    const controller = createChromeFadeController(shell, {
+      reducedMotion: prefersReducedMotionSafe(),
+    });
+    controller.reveal();
+    const reveal = () => controller.reveal();
+    // Immediate-fade on pointer-exit is a MOUSE behavior. On touch, releasing a tap
+    // fires pointerleave, which would instantly re-fade the chrome the same tap just
+    // revealed; let touch fall through to the controller's idle timer instead.
+    const fade = (event: PointerEvent) => {
+      if (event.pointerType !== "touch") {
+        controller.fadeNow();
+      }
+    };
+    shell.addEventListener("pointermove", reveal, { passive: true });
+    shell.addEventListener("pointerdown", reveal, { passive: true });
+    shell.addEventListener("focusin", reveal);
+    shell.addEventListener("pointerleave", fade, { passive: true });
+    return () => {
+      controller.dispose();
+      shell.removeEventListener("pointermove", reveal);
+      shell.removeEventListener("pointerdown", reveal);
+      shell.removeEventListener("focusin", reveal);
+      shell.removeEventListener("pointerleave", fade);
+      delete shell.dataset.chromeFaded;
+    };
+  }, []);
+
   const metadataGroups: MetadataGroup[] = (() => {
     const groups: MetadataGroup[] = [];
     const md = viewerInfo.metadata;
@@ -651,7 +873,13 @@ export function ImageViewerShell({
 
     const fileDetails: MetadataDetail[] = [
       { label: "Name", value: viewerInfo.original_name },
-      { label: "Format", value: formatReaderName(md.reader, md.content_type), hint: md.content_type },
+      // Prefer the real container format ("OME-TIFF"/"BigTIFF"); fall back to the
+      // reader name only when the backend didn't report a format.
+      {
+        label: "Format",
+        value: md.format && md.format.trim() ? md.format : formatReaderName(md.reader, md.content_type),
+        hint: md.content_type,
+      },
     ];
     if (viewerInfo.modality) {
       fileDetails.push({ label: "Modality", value: titleCaseLabel(String(viewerInfo.modality)) });
@@ -664,6 +892,56 @@ export function ImageViewerShell({
     }
     fileDetails.push({ label: "File ID", value: viewerInfo.file_id, mono: true, copyable: true });
     groups.push({ title: "File", details: fileDetails });
+
+    // Tiled-mosaic acquisition (a multi-field stage scan). When it was saved
+    // unstitched, the assembled image shows per-field illumination seams that look
+    // like an artifact but are the raw data — surface it so it isn't mistaken for a bug.
+    const mosaic = md.mosaic;
+    if (mosaic && mosaic.tiles > 1) {
+      const mosaicDetails: MetadataDetail[] = [{ label: "Fields", value: `${mosaic.tiles} tiles` }];
+      if (typeof mosaic.overlap === "number" && Number.isFinite(mosaic.overlap)) {
+        mosaicDetails.push({ label: "Overlap", value: `${Math.round(mosaic.overlap * 100)}%` });
+      }
+      if (typeof mosaic.stitched === "boolean") {
+        mosaicDetails.push({
+          label: "Stitched",
+          value: mosaic.stitched ? "Yes" : "No — fields may show illumination seams; stitch upstream for a seamless view",
+        });
+      }
+      groups.push({ title: "Mosaic", details: mosaicDetails });
+    }
+
+    // Acquisition / provenance — software, capture date, and (for OME-TIFF) the
+    // instrument context libbioimage parses from the embedded OME-XML. Hidden when
+    // the file carries none. Fields render in a fixed, scientist-readable order.
+    const acquisition = md.acquisition;
+    if (acquisition) {
+      const acquisitionFields: Array<[string, string]> = [
+        ["software", "Software"],
+        ["acquired", "Acquired"],
+        ["acquisition_mode", "Acquisition mode"],
+        ["objective", "Objective"],
+        ["objective_medium", "Objective medium"],
+        ["refractive_index", "Refractive index"],
+        ["detector_binning", "Detector binning"],
+        ["experimenter", "Experimenter"],
+        ["source_name", "Source"],
+      ];
+      const acquisitionDetails: MetadataDetail[] = [];
+      for (const [key, label] of acquisitionFields) {
+        const value = acquisition[key];
+        if (value != null && String(value).trim()) {
+          acquisitionDetails.push({ label, value: String(value) });
+        }
+      }
+      const levels = acquisition.pyramid_levels;
+      if (typeof levels === "number" && levels > 1) {
+        acquisitionDetails.push({ label: "Pyramid levels", value: String(levels) });
+      }
+      if (acquisitionDetails.length > 0) {
+        groups.push({ title: "Acquisition", details: acquisitionDetails });
+      }
+    }
 
     const totalVoxels = md.array_shape.reduce((acc, value) => acc * Math.max(1, Math.floor(value)), 1);
     const dimensionDetails: MetadataDetail[] = [
@@ -691,12 +969,39 @@ export function ImageViewerShell({
     dimensionDetails.push({ label: "Total voxels", value: formatNumber(totalVoxels) });
     groups.push({ title: "Dimensions", details: dimensionDetails });
 
+    // Channels — names + their LUT color, for any multichannel image (works for
+    // fluorescence channel names like DAPI/EGFP as well as RGBA bands). Replaces the
+    // old comma-joined channel string and shows each channel's own color as a swatch.
+    const channelNames = viewerInfo.phys?.channel_names ?? [];
+    const channelColors = viewerInfo.phys?.channel_colors ?? [];
+    if (channelNames.length > 1) {
+      const channelDetails: MetadataDetail[] = channelNames.map((name, index) => ({
+        label: `Channel ${index + 1}`,
+        value: String(name),
+        swatch: channelColors[index]?.hex,
+      }));
+      groups.push({ title: "Channels", details: channelDetails });
+    }
+
     const dataDetails: MetadataDetail[] = [
       { label: "Pixel type", value: formatPixelType(md.array_dtype, viewerInfo.phys?.pixel_depth) },
     ];
+    const colorSpace = md.acquisition?.color_space;
+    if (typeof colorSpace === "string" && colorSpace.trim()) {
+      dataDetails.push({ label: "Color space", value: colorSpace });
+    }
     const intensityMin = md.array_min ?? md.intensity_stats?.min;
     const intensityMax = md.array_max ?? md.intensity_stats?.max;
-    if (typeof intensityMin === "number" && typeof intensityMax === "number") {
+    // Only show the intensity range when the backend actually computed it (a real,
+    // non-degenerate range). Absent stats arrive as NaN, so a meaningless "0 → 0"
+    // never renders. (typeof narrows; Number.isFinite excludes NaN.)
+    if (
+      typeof intensityMin === "number" &&
+      typeof intensityMax === "number" &&
+      Number.isFinite(intensityMin) &&
+      Number.isFinite(intensityMax) &&
+      intensityMax > intensityMin
+    ) {
       dataDetails.push({
         label: "Value range",
         value: `${formatIntensityValue(intensityMin)} → ${formatIntensityValue(intensityMax)}`,
@@ -780,24 +1085,15 @@ export function ImageViewerShell({
       }
     }
 
+    // Channels, objective, acquired, and binning now live in the Channels +
+    // Acquisition groups; only surface the stage position here when present (rare
+    // multi-position / well-plate acquisitions), so nothing is duplicated.
     const microscopy = md.microscopy;
-    if (microscopy) {
-      const microscopyDetails: MetadataDetail[] = [];
-      if (microscopy.channel_names?.length) {
-        microscopyDetails.push({ label: "Channels", value: microscopy.channel_names.join(", ") });
-      }
-      if (microscopy.objective) microscopyDetails.push({ label: "Objective", value: microscopy.objective });
-      if (microscopy.imaging_datetime) microscopyDetails.push({ label: "Acquired", value: microscopy.imaging_datetime });
-      if (microscopy.binning) microscopyDetails.push({ label: "Binning", value: microscopy.binning });
-      if (microscopy.dimensions_present) {
-        microscopyDetails.push({ label: "Dimensions", value: microscopy.dimensions_present });
-      }
-      if (microscopy.position_index != null) {
-        microscopyDetails.push({ label: "Position", value: String(microscopy.position_index) });
-      }
-      if (microscopyDetails.length > 0) {
-        groups.push({ title: "Microscopy", details: microscopyDetails });
-      }
+    if (microscopy?.position_index != null) {
+      groups.push({
+        title: "Stage position",
+        details: [{ label: "Index", value: String(microscopy.position_index) }],
+      });
     }
 
     return groups;
@@ -1149,11 +1445,11 @@ export function ImageViewerShell({
     ]
   );
   const buildDirect2dSliceUrl = useCallback(
-    (z: number) =>
+    (z: number, t: number = debouncedT) =>
       apiClient.uploadSliceUrl(viewerInfo.file_id, {
         axis: "z",
         z,
-        t: debouncedT,
+        t,
         enhancement: selectedDisplayState?.enhancement,
         fusionMethod: selectedDisplayState?.fusion_method,
         negative: selectedDisplayState?.negative,
@@ -1230,8 +1526,15 @@ export function ImageViewerShell({
     const urls: string[] = [];
     if (selectedSurface === "2d") {
       for (let step = 1; step <= SLICE_PREFETCH_RADIUS_2D; step += 1) {
+        // Warm Z neighbors at the current timepoint...
         if (debouncedZ + step < zAxisSize) urls.push(buildDirect2dSliceUrl(debouncedZ + step));
         if (debouncedZ - step >= 0) urls.push(buildDirect2dSliceUrl(debouncedZ - step));
+        // ...and T neighbors at the current plane, so time scrubbing is as smooth as
+        // Z scrubbing (the cache key includes t, so these resolve instantly on arrival).
+        if (tAxisSize > 1) {
+          if (debouncedT + step < tAxisSize) urls.push(buildDirect2dSliceUrl(debouncedZ, debouncedT + step));
+          if (debouncedT - step >= 0) urls.push(buildDirect2dSliceUrl(debouncedZ, debouncedT - step));
+        }
       }
     } else if (selectedSurface === "mpr") {
       for (let step = 1; step <= SLICE_PREFETCH_RADIUS_MPR; step += 1) {
@@ -1253,11 +1556,13 @@ export function ImageViewerShell({
     debouncedX,
     debouncedY,
     debouncedZ,
+    debouncedT,
     selectedSurface,
     viewerInfo.is_volume,
     xAxisSize,
     yAxisSize,
     zAxisSize,
+    tAxisSize,
   ]);
   const direct2dDisplayUrl =
     !viewerInfo.is_volume && viewerInfo.service_urls?.display
@@ -1397,6 +1702,37 @@ export function ImageViewerShell({
     onSurfaceChange(surface);
   };
 
+  // --- Canvas context-menu actions (right-click / long-press on the 2D surface) ---
+  const viewExportName = `${exportFileStem(viewerInfo.original_name)}-view.png`;
+  const metadataAvailable = viewerInfo.viewer.available_surfaces.includes("metadata");
+
+  const handleResetView = () => {
+    canvasHandleRef.current?.fitView();
+  };
+
+  const handleExportView = async () => {
+    const blob = await canvasHandleRef.current?.captureViewToBlob();
+    if (blob) {
+      downloadBlob(blob, viewExportName);
+    }
+  };
+
+  const handleCopyView = async () => {
+    const blob = await canvasHandleRef.current?.captureViewToBlob();
+    if (!blob) {
+      return;
+    }
+    // Fall back to a file download if the clipboard write fails (unsupported / denied).
+    const copied = await copyBlobToClipboard(blob);
+    if (!copied) {
+      downloadBlob(blob, viewExportName);
+    }
+  };
+
+  const handleDownloadOriginal = () => {
+    downloadFromUrl(apiClient.resourceDownloadUrl(viewerInfo.file_id), viewerInfo.original_name ?? "image");
+  };
+
   const renderChannelControls = () => {
     if (!selectedDisplayState || !canControlChannels || channelNames.length <= 1) {
       return null;
@@ -1405,57 +1741,81 @@ export function ImageViewerShell({
       selectedDisplayState.channel_mode ?? viewerInfo.viewer.channel_mode ?? "",
     ).toLowerCase();
     const singleChannelMode = viewerInfo.viewer.volume_mode === "scalar" || resolvedChannelMode === "single";
+    const toggleChannel = (index: number, active: boolean) => {
+      if (singleChannelMode) {
+        updateSelectedDisplay({ channels: [index], volume_channel: index });
+        return;
+      }
+      const current = new Set(selectedChannelIndices);
+      if (active && current.size > 1) {
+        current.delete(index);
+      } else if (!active) {
+        current.add(index);
+      }
+      const nextChannels = Array.from(current).sort((a, b) => a - b);
+      const patch: Partial<ViewerDisplayState> = { channels: nextChannels };
+      if (viewerInfo.viewer.volume_mode === "scalar" && nextChannels.length === 1) {
+        patch.volume_channel = nextChannels[0];
+      }
+      updateSelectedDisplay(patch);
+    };
+    const setChannelColor = (index: number, hex: string) => {
+      const nextColors = [...(selectedDisplayState.channel_colors ?? [])];
+      nextColors[index] = hex;
+      updateSelectedDisplay({ channel_colors: nextColors });
+    };
+    // Dense, calm chips: one pill per channel that toggles visibility on click. The
+    // LUT color is a small swatch; editing it opens a Popover (replacing the old
+    // always-visible full-size color rectangles that wasted space). Inactive channels
+    // recede via opacity; active ones lead. The wavelength reads as a muted suffix.
     return (
-      <div className="viewer-channel-controls" data-viewer-channel-controls="true">
+      <div className="viewer-channel-controls" data-viewer-channel-controls="true" role="group" aria-label="Channels">
         {channelNames.map((label, index) => {
           const active = selectedChannelIndices.includes(index);
+          const color = channelColors[index];
+          const dash = label.lastIndexOf(" - ");
+          const name = dash > 0 ? label.slice(0, dash) : label;
+          const meta = dash > 0 ? label.slice(dash + 3) : "";
           return (
-            <div key={`${label}-${index}`} className="viewer-channel-chip">
-              <button
-                type="button"
-                className={active ? "viewer-channel-toggle is-active" : "viewer-channel-toggle"}
-                aria-pressed={active}
-                onClick={() => {
-                  if (singleChannelMode) {
-                    updateSelectedDisplay({
-                      channels: [index],
-                      volume_channel: index,
-                    });
-                    return;
-                  }
-                  const current = new Set(selectedChannelIndices);
-                  if (active && current.size > 1) {
-                    current.delete(index);
-                  } else if (!active) {
-                    current.add(index);
-                  }
-                  const nextChannels = Array.from(current).sort((a, b) => a - b);
-                  const patch: Partial<ViewerDisplayState> = { channels: nextChannels };
-                  if (viewerInfo.viewer.volume_mode === "scalar" && nextChannels.length === 1) {
-                    patch.volume_channel = nextChannels[0];
-                  }
-                  updateSelectedDisplay(patch);
-                }}
-              >
+            <div key={`${label}-${index}`} className="viewer-channel-chip" data-active={active}>
+              {canControlChannelColor ? (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="viewer-channel-swatch-btn"
+                      aria-label={`Edit ${name} color`}
+                    >
+                      <span className="viewer-channel-swatch" style={{ backgroundColor: color }} aria-hidden="true" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" sideOffset={8} className="viewer-channel-color-popover">
+                    <span className="viewer-channel-color-popover-label">{name}</span>
+                    <input
+                      type="color"
+                      aria-label={`${name} color`}
+                      value={color}
+                      onChange={(event) => setChannelColor(index, event.target.value)}
+                    />
+                  </PopoverContent>
+                </Popover>
+              ) : (
                 <span
-                  className="viewer-channel-swatch"
-                  style={{ backgroundColor: channelColors[index] }}
+                  className="viewer-channel-swatch viewer-channel-swatch-static"
+                  style={{ backgroundColor: color }}
                   aria-hidden="true"
                 />
-                {label}
+              )}
+              <button
+                type="button"
+                className="viewer-channel-toggle"
+                aria-pressed={active}
+                title={label}
+                onClick={() => toggleChannel(index, active)}
+              >
+                <span className="viewer-channel-name">{name}</span>
+                {meta ? <span className="viewer-channel-meta">{meta}</span> : null}
               </button>
-              {canControlChannelColor ? (
-                <input
-                  type="color"
-                  aria-label={`${label} color`}
-                  value={channelColors[index]}
-                  onChange={(event) => {
-                    const nextColors = [...(selectedDisplayState.channel_colors ?? [])];
-                    nextColors[index] = event.target.value;
-                    updateSelectedDisplay({ channel_colors: nextColors });
-                  }}
-                />
-              ) : null}
             </div>
           );
         })}
@@ -1517,13 +1877,50 @@ export function ImageViewerShell({
     );
   };
 
+  // Data-first caption shown beneath the canvas (the specimen "label"): name +
+  // a concise facts line. For volumes the per-surface readout (projection/window/
+  // spacing) carries the detail; for 2D images this single line stands in.
+  const captionMeta = [
+    viewerInfo.modality ? titleCaseLabel(String(viewerInfo.modality)) : "",
+    viewerInfo.is_volume ? "Volume" : viewerInfo.axis_sizes.Z > 1 ? "Stack" : "Image",
+    `${formatNumber(viewerInfo.axis_sizes.X)} × ${formatNumber(viewerInfo.axis_sizes.Y)}${
+      viewerInfo.is_volume || viewerInfo.axis_sizes.Z > 1
+        ? ` × ${formatNumber(viewerInfo.axis_sizes.Z)}`
+        : ""
+    } vox`,
+    viewerInfo.dims_order ? `Axes ${viewerInfo.dims_order}` : "",
+  ]
+    .filter(Boolean)
+    .join("  ·  ");
+
+  // An unstitched tiled-mosaic acquisition shows per-field illumination seams that look
+  // like a render artifact but are the raw data — flag it right on the image.
+  const mosaicInfo = viewerInfo.metadata.mosaic;
+  const unstitchedMosaic = mosaicInfo && mosaicInfo.tiles > 1 && mosaicInfo.stitched === false ? mosaicInfo : null;
+  const mosaicBadgeTitle = unstitchedMosaic
+    ? `Unstitched ${unstitchedMosaic.tiles}-field mosaic${
+        typeof unstitchedMosaic.overlap === "number" ? ` (${Math.round(unstitchedMosaic.overlap * 100)}% overlap)` : ""
+      }. The seams between fields are in the source data, not a rendering error — stitch upstream (e.g. ZEN) for a seamless image.`
+    : "";
+
   const hasMprIndexControls =
     selectedSurface === "mpr" && (xAxisSize > 1 || yAxisSize > 1 || zAxisSize > 1 || tAxisSize > 1);
   const has2DIndexControls =
     selectedSurface === "2d" && !showSliceStack2DControls && (zAxisSize > 1 || tAxisSize > 1);
 
   return (
-    <>
+    <div
+      ref={shellRef}
+      className="viewer-shell"
+      tabIndex={-1}
+      onPointerEnter={() => {
+        viewerHoveredRef.current = true;
+      }}
+      onPointerLeave={() => {
+        viewerHoveredRef.current = false;
+      }}
+      data-viewer-fullscreen={isFullscreen ? "true" : "false"}
+    >
       <Tabs value={selectedSurface} onValueChange={handleSurfaceChange} className="viewer-surface-tabs">
         <div className="viewer-surface-toolbar">
           <TabsList className="viewer-surface-list">
@@ -1533,40 +1930,98 @@ export function ImageViewerShell({
               </TabsTrigger>
             ))}
           </TabsList>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon-xs"
+            className="viewer-fullscreen-toggle"
+            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            aria-pressed={isFullscreen}
+            aria-keyshortcuts="f"
+            onClick={toggleFullscreen}
+          >
+            {isFullscreen ? <Minimize2 data-icon="inline-start" /> : <Maximize2 data-icon="inline-start" />}
+          </Button>
         </div>
 
         <TabsContent value="2d" className="viewer-surface-panel">
-          <div className={viewerInfo.is_volume ? "viewer-volume-layout viewer-volume-layout-2d" : undefined}>
-            {isSliceStackVolume ? renderCompactSurfaceReadout(volumeSummaryRows, "Stack summary") : null}
+          <div
+            className={
+              viewerInfo.is_volume
+                ? "viewer-volume-layout viewer-volume-layout-2d viewer-canvas-layout-2d"
+                : "viewer-canvas-layout-2d"
+            }
+          >
             <div className="viewer-canvas-shell viewer-canvas-shell-2d">
-              <div
-                data-viewer-surface="2d"
-                data-viewer-backend={canUseDeepZoom2D ? "pyramid" : "direct"}
-                data-viewer-aspect={viewerInfo.viewer.default_plane.aspect_ratio.toFixed(4)}
-              >
-                {canUseDeepZoom2D ? (
-                  <DeepZoomCanvas
-                    apiClient={apiClient}
-                    fileId={viewerInfo.file_id}
-                    viewerInfo={viewerInfo}
-                    axis="z"
-                    zIndex={clampedIndices.z}
-                    tIndex={clampedIndices.t}
-                    className="viewer-canvas-root"
-                  />
-                ) : (
-                  <DirectPlaneImage
-                    imageUrl={direct2dImageUrl}
-                    placeholderUrl={direct2dPreviewUrl}
-                    descriptor={viewerInfo.viewer.default_plane}
-                    title="2d-plane"
-                    className="viewer-canvas-root"
-                    interactive={true}
-                    orientationLabels={getPlaneOrientationLabels(viewerInfo, "z")}
-                    scalarSlice={direct2dScalarSlice}
-                  />
-                )}
-              </div>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <div
+                    data-viewer-surface="2d"
+                    data-viewer-backend={canUseDeepZoom2D ? "pyramid" : "direct"}
+                    data-viewer-aspect={viewerInfo.viewer.default_plane.aspect_ratio.toFixed(4)}
+                    onContextMenu={(event) => {
+                      // Don't hijack right-click over the zoom toolbar's own buttons.
+                      if ((event.target as HTMLElement).closest("[data-viewer-image-control]")) {
+                        event.preventDefault();
+                      }
+                    }}
+                  >
+                    {canUseDeepZoom2D ? (
+                      <DeepZoomCanvas
+                        ref={canvasHandleRef}
+                        apiClient={apiClient}
+                        fileId={viewerInfo.file_id}
+                        viewerInfo={viewerInfo}
+                        axis="z"
+                        zIndex={clampedIndices.z}
+                        tIndex={clampedIndices.t}
+                        className="viewer-canvas-root"
+                      />
+                    ) : (
+                      <DirectPlaneImage
+                        ref={canvasHandleRef}
+                        imageUrl={direct2dImageUrl}
+                        placeholderUrl={direct2dPreviewUrl}
+                        descriptor={viewerInfo.viewer.default_plane}
+                        title="2d-plane"
+                        className="viewer-canvas-root"
+                        interactive={true}
+                        orientationLabels={getPlaneOrientationLabels(viewerInfo, "z")}
+                        scalarSlice={direct2dScalarSlice}
+                      />
+                    )}
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent container={shellPortalContainer} className="viewer-context-menu">
+                  <ContextMenuItem onSelect={handleResetView}>
+                    <RotateCcw data-icon="inline-start" />
+                    Reset view
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => void handleCopyView()} disabled={!canCopyImageToClipboard()}>
+                    <Copy data-icon="inline-start" />
+                    Copy current view
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => void handleExportView()}>
+                    <ImageDown data-icon="inline-start" />
+                    Export current view (PNG)
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={handleDownloadOriginal}>
+                    <Download data-icon="inline-start" />
+                    Download original image
+                  </ContextMenuItem>
+                  {metadataAvailable ? (
+                    <ContextMenuItem onSelect={() => handleSurfaceChange("metadata")}>
+                      <Info data-icon="inline-start" />
+                      View metadata
+                    </ContextMenuItem>
+                  ) : null}
+                  <ContextMenuItem onSelect={toggleFullscreen}>
+                    {isFullscreen ? <Minimize2 data-icon="inline-start" /> : <Maximize2 data-icon="inline-start" />}
+                    {isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             </div>
           </div>
         </TabsContent>
@@ -1624,7 +2079,18 @@ export function ImageViewerShell({
 
         <TabsContent value="volume" className="viewer-surface-panel">
           <div className="viewer-volume-layout">
-            {renderCompactSurfaceReadout(volumeSummaryRows, "Volume summary")}
+            <div className="viewer-canvas-shell viewer-canvas-shell-volume">
+              <SliceStackVolumeCanvas
+                apiClient={apiClient}
+                fileId={viewerInfo.file_id}
+                viewerInfo={viewerInfo}
+                xIndex={clampedIndices.x}
+                yIndex={clampedIndices.y}
+                zIndex={clampedIndices.z}
+                tIndex={debouncedT}
+                displayState={selectedDisplayState}
+              />
+            </div>
             {selectedDisplayState ? (
               <div
                 className="viewer-volume-inspection-toolbar"
@@ -1669,18 +2135,6 @@ export function ImageViewerShell({
                 ) : null}
               </div>
             ) : null}
-            <div className="viewer-canvas-shell viewer-canvas-shell-volume">
-              <SliceStackVolumeCanvas
-                apiClient={apiClient}
-                fileId={viewerInfo.file_id}
-                viewerInfo={viewerInfo}
-                xIndex={clampedIndices.x}
-                yIndex={clampedIndices.y}
-                zIndex={clampedIndices.z}
-                tIndex={debouncedT}
-                displayState={selectedDisplayState}
-              />
-            </div>
           </div>
         </TabsContent>
 
@@ -1753,10 +2207,48 @@ export function ImageViewerShell({
         </TabsContent>
       </Tabs>
 
+      {selectedSurface !== "metadata" ? (
+        <div className="viewer-caption viewer-chrome-fade" data-viewer-caption="true">
+          <div className="viewer-caption-name">
+            <span className="viewer-caption-filename" title={viewerInfo.original_name}>
+              {viewerInfo.original_name}
+            </span>
+            {unstitchedMosaic ? (
+              <span className="viewer-caption-badge" title={mosaicBadgeTitle}>
+                Unstitched mosaic
+              </span>
+            ) : null}
+          </div>
+          {viewerInfo.is_volume ? (
+            renderCompactSurfaceReadout(volumeSummaryRows, isSliceStackVolume ? "Stack summary" : "Volume summary")
+          ) : captionMeta ? (
+            <div className="viewer-caption-meta">{captionMeta}</div>
+          ) : null}
+        </div>
+      ) : null}
+
       {!viewerInfo.is_volume && selectedDisplayState && canControlChannels && channelNames.length > 1 ? (
         <div
           className="viewer-display-controls viewer-display-controls-direct viewer-display-controls-channels"
           data-viewer-direct-channel-controls="true"
+        >
+          {renderChannelControls()}
+        </div>
+      ) : null}
+
+      {/* Multichannel 3D volume: channel composition is the primary interaction, so
+          surface the per-channel toggle/color strip directly (not buried in the
+          Advanced panel). Toggling a channel loads/composites its full-res volume. */}
+      {viewerInfo.is_volume &&
+      selectedSurface === "volume" &&
+      Boolean(viewerInfo.is_multichannel) &&
+      viewerInfo.viewer.volume_mode !== "scalar" &&
+      selectedDisplayState &&
+      canControlChannels &&
+      channelNames.length > 1 ? (
+        <div
+          className="viewer-display-controls viewer-display-controls-direct viewer-display-controls-channels"
+          data-viewer-volume-channel-controls="true"
         >
           {renderChannelControls()}
         </div>
@@ -1768,36 +2260,38 @@ export function ImageViewerShell({
           data-viewer-stack-controls="true"
         >
           {zAxisSize > 1 ? (
-            <label className="viewer-inline-control viewer-inline-control-wide">
-              <span>Z slice</span>
-              <input
-                type="range"
+            <div className="viewer-inline-control viewer-inline-control-wide viewer-slider-field">
+              <div className="viewer-slider-field-head">
+                <span>Z slice</span>
+                <strong>
+                  {clampedIndices.z + 1}/{zAxisSize}
+                </strong>
+              </div>
+              <Slider
                 aria-label="Z slice"
                 min={0}
                 max={Math.max(0, zAxisSize - 1)}
-                value={clampedIndices.z}
-                onChange={(event) => setSelectedIndex("z", Number(event.target.value))}
+                value={[clampedIndices.z]}
+                onValueChange={(values) => setSelectedIndex("z", values[0] ?? clampedIndices.z)}
               />
-              <strong>
-                {clampedIndices.z + 1}/{zAxisSize}
-              </strong>
-            </label>
+            </div>
           ) : null}
           {tAxisSize > 1 ? (
-            <label className="viewer-inline-control viewer-inline-control-wide">
-              <span>Time</span>
-              <input
-                type="range"
+            <div className="viewer-inline-control viewer-inline-control-wide viewer-slider-field">
+              <div className="viewer-slider-field-head">
+                <span>Time</span>
+                <strong>
+                  {clampedIndices.t + 1}/{tAxisSize}
+                </strong>
+              </div>
+              <Slider
                 aria-label="Time"
                 min={0}
                 max={Math.max(0, tAxisSize - 1)}
-                value={clampedIndices.t}
-                onChange={(event) => setSelectedIndex("t", Number(event.target.value))}
+                value={[clampedIndices.t]}
+                onValueChange={(values) => setSelectedIndex("t", values[0] ?? clampedIndices.t)}
               />
-              <strong>
-                {clampedIndices.t + 1}/{tAxisSize}
-              </strong>
-            </label>
+            </div>
           ) : null}
           {renderChannelControls()}
         </div>
@@ -1825,6 +2319,11 @@ export function ImageViewerShell({
               {volumeIntensityReady ? (
                 <div className="viewer-volume-intensity-panel" data-viewer-volume-intensity-summary="true">
                   {renderIntensityHistogramPanel()}
+                </div>
+              ) : uploadHistogramError ? (
+                <div className="viewer-metadata-note" data-viewer-intensity-error="true">
+                  <strong>Histogram unavailable</strong>
+                  <span>{uploadHistogramError}</span>
                 </div>
               ) : null}
               {isScalarMpr ? (
@@ -1925,31 +2424,48 @@ export function ImageViewerShell({
               )}
               <div className="viewer-inline-control">
                 <span>{selectedSurface === "volume" ? "Projection" : "Fusion"}</span>
-                <Select
-                  value={selectedDisplayState.fusion_method}
-                  onValueChange={(value) =>
-                    updateSelectedDisplay({
-                      fusion_method: value as ViewerDisplayState["fusion_method"],
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    aria-label={selectedSurface === "volume" ? "Projection" : "Fusion"}
-                    className="viewer-select-trigger"
+                {selectedSurface === "volume" ? (
+                  // 3D ray-projection — its OWN setting, decoupled from the 2D
+                  // `fusion_method`. Defaults to Composite (MIP flattens dense
+                  // fluorescence into a cloud); MIP stays available for sparse data.
+                  <Select
+                    value={selectedDisplayState.volume_projection ?? "composite"}
+                    onValueChange={(value) =>
+                      updateSelectedDisplay({
+                        volume_projection: value as ViewerDisplayState["volume_projection"],
+                      })
+                    }
                   >
-                    <SelectValue placeholder={selectedSurface === "volume" ? "Projection" : "Fusion"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="m">
-                        {selectedSurface === "volume" ? "MIP" : "Maximum"}
-                      </SelectItem>
-                      <SelectItem value="a">
-                        {selectedSurface === "volume" ? "Composite" : "Average"}
-                      </SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
+                    <SelectTrigger aria-label="Projection" className="viewer-select-trigger">
+                      <SelectValue placeholder="Projection" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="composite">Composite</SelectItem>
+                        <SelectItem value="mip">MIP</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Select
+                    value={selectedDisplayState.fusion_method}
+                    onValueChange={(value) =>
+                      updateSelectedDisplay({
+                        fusion_method: value as ViewerDisplayState["fusion_method"],
+                      })
+                    }
+                  >
+                    <SelectTrigger aria-label="Fusion" className="viewer-select-trigger">
+                      <SelectValue placeholder="Fusion" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="m">Maximum</SelectItem>
+                        <SelectItem value="a">Average</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
               {selectedSurface === "volume" ? (
                 <div className="viewer-inline-control" data-viewer-volume-view-control="true">
@@ -2096,6 +2612,28 @@ export function ImageViewerShell({
                     />
                     <strong>{scalarVolumeTransfer.densityLabel}</strong>
                   </label>
+                  {selectedSurface === "volume" &&
+                  viewerInfo.is_volume &&
+                  viewerInfo.viewer.volume_mode !== "scalar" ? (
+                    <label className="viewer-inline-control viewer-inline-control-wide" data-viewer-volume-gamma-control="true">
+                      <span>Gamma</span>
+                      <input
+                        type="range"
+                        aria-label="Gamma"
+                        min={0.3}
+                        max={3}
+                        step={0.05}
+                        value={Number(selectedDisplayState?.volume_gamma) > 0 ? Number(selectedDisplayState.volume_gamma) : 1}
+                        onChange={(event) => updateSelectedDisplay({ volume_gamma: Number(event.target.value) })}
+                      />
+                      <strong>
+                        {(Number(selectedDisplayState?.volume_gamma) > 0
+                          ? Number(selectedDisplayState.volume_gamma)
+                          : 1
+                        ).toFixed(2)}
+                      </strong>
+                    </label>
+                  ) : null}
                   <label
                     className="viewer-inline-control viewer-inline-control-switch"
                     data-viewer-depth-lighting-control="true"
@@ -2349,6 +2887,6 @@ export function ImageViewerShell({
           ) : null}
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

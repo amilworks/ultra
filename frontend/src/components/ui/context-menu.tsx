@@ -24,10 +24,13 @@ function ContextMenuPortal({
 
 function ContextMenuContent({
   className,
+  container,
   ...props
-}: React.ComponentProps<typeof ContextMenuPrimitive.Content>) {
+}: React.ComponentProps<typeof ContextMenuPrimitive.Content> & {
+  container?: HTMLElement | null
+}) {
   return (
-    <ContextMenuPortal>
+    <ContextMenuPortal container={container ?? undefined}>
       <ContextMenuPrimitive.Content
         data-slot="context-menu-content"
         className={cn(

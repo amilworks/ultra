@@ -1,18 +1,16 @@
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent,
   type PointerEvent,
-  type WheelEvent,
 } from "react";
-import { Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import * as THREE from "three";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import type { UploadViewerInfo } from "@/types";
 
 import {
@@ -21,6 +19,14 @@ import {
   sliceBitmapToTexture,
   type ScalarSliceSource,
 } from "./sliceImageCache";
+import {
+  createChromeFadeController,
+  prefersReducedMotionSafe,
+  type ChromeFadeController,
+} from "./chromeVisibility";
+import { composeViewBlob, type ViewerCanvasHandle } from "./captureView";
+import { ViewerZoomToolbar } from "./ViewerZoomToolbar";
+import { ZOOM_STEP, formatZoomReadout, isAtFitScale, nativeZoomLevel } from "./viewerZoom";
 import { classifyWheelGesture } from "./wheelGesture";
 
 type DirectPlaneImageProps = {
@@ -69,7 +75,6 @@ type DragState = {
 const DEFAULT_VIEWPORT: ImageViewport = { centerX: 0, centerY: 0, scale: 1 };
 const DEVICE_PIXEL_RATIO_LIMIT = 2;
 const VIEW_EPSILON = 1e-6;
-const ZOOM_STEP = 1.22;
 const WHEEL_LINE_HEIGHT_PX = 16;
 const WHEEL_ZOOM_DELTA_LIMIT = 240;
 const WHEEL_ZOOM_SENSITIVITY = 0.00115;
@@ -220,26 +225,10 @@ function getPlaneWorldSize(
   return pixelSize;
 }
 
-function formatZoomLabel(scale: number, fitScale: number) {
-  if (!Number.isFinite(scale) || Math.abs(scale - fitScale) / Math.max(VIEW_EPSILON, fitScale) < 0.025) {
-    return "Fit";
-  }
-  if (scale >= 1) {
-    return `${scale >= 10 ? scale.toFixed(0) : scale.toFixed(2)}x`;
-  }
-  return `${Math.max(1, Math.round(scale * 100))}%`;
-}
-
-export function DirectPlaneImage({
-  imageUrl,
-  placeholderUrl,
-  descriptor,
-  title,
-  className,
-  interactive = true,
-  orientationLabels,
-  scalarSlice,
-}: DirectPlaneImageProps) {
+export const DirectPlaneImage = forwardRef<ViewerCanvasHandle, DirectPlaneImageProps>(function DirectPlaneImage(
+  { imageUrl, placeholderUrl, descriptor, title, className, interactive = true, orientationLabels, scalarSlice },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -249,6 +238,12 @@ export function DirectPlaneImage({
   const textureRef = useRef<THREE.Texture | null>(null);
   const loadTokenRef = useRef(0);
   const dragRef = useRef<DragState | null>(null);
+  // Active touch/pen pointers for pinch-zoom (phones emit no wheel events, so pinch
+  // is the only way to zoom on touch). Keyed by pointerId; pinchRef holds the last
+  // two-finger distance so each move applies an incremental zoom factor.
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ dist: number } | null>(null);
+  const chromeFadeRef = useRef<ChromeFadeController | null>(null);
 
   const [viewportSize, setViewportSize] = useState<ImageViewportSize>({ width: 0, height: 0 });
   // imageSize is the physical world extent (drives fit/zoom + mesh aspect);
@@ -268,7 +263,14 @@ export function DirectPlaneImage({
     () => computeImageScaleLimits(imageSize ?? { width: 1, height: 1 }, viewportSize),
     [imageSize, viewportSize]
   );
-  const zoomLabel = formatZoomLabel(viewport.scale, scaleLimits.fitScale);
+  // viewport.scale is screen-px per WORLD unit; convert to screen-px per SOURCE px so
+  // the readout reads true "% of native" — identical semantics to the deep-zoom
+  // surface, even when an image's physical spacing differs from its pixel grid.
+  const nativeZoom =
+    imageSize && pixelSize
+      ? nativeZoomLevel(viewport.scale, imageSize.width, pixelSize.width)
+      : viewport.scale;
+  const zoomReadout = formatZoomReadout(nativeZoom, isAtFitScale(viewport.scale, scaleLimits.fitScale));
   const dimensionLabel = pixelSize ? `${pixelSize.width} x ${pixelSize.height}` : "Loading";
   const primaryImageUrl = imageUrl || placeholderUrl || "";
 
@@ -355,6 +357,26 @@ export function DirectPlaneImage({
     observer.observe(canvasHost);
     return () => observer.disconnect();
   }, []);
+
+  // Receding chrome: reveal on pointer activity / focus, fade after idle. Disabled
+  // (chrome stays fully visible) when the panel is non-interactive, since there is
+  // then no pointer affordance to bring it back.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !interactive) {
+      return;
+    }
+    const controller = createChromeFadeController(container, {
+      reducedMotion: prefersReducedMotionSafe(),
+    });
+    chromeFadeRef.current = controller;
+    controller.reveal();
+    return () => {
+      controller.dispose();
+      chromeFadeRef.current = null;
+      delete container.dataset.chromeFaded;
+    };
+  }, [interactive]);
 
   useEffect(() => {
     if ((!scalarSlice && !primaryImageUrl) || !meshRef.current) {
@@ -451,6 +473,37 @@ export function DirectPlaneImage({
     setViewport({ centerX: 0, centerY: 0, scale: nextLimits.fitScale });
   }, [imageSize, viewportSize]);
 
+  // Expose fit + "export the current view" to the host shell (context menu). The
+  // renderer has no preserveDrawingBuffer, so we re-render the current frustum and
+  // hand composeViewBlob the fresh frame, which snapshots it synchronously before the
+  // unpreserved backbuffer clears. Orientation labels are composited in for slides.
+  useImperativeHandle(
+    ref,
+    (): ViewerCanvasHandle => ({
+      fitView: resetViewport,
+      captureViewToBlob: () => {
+        const renderer = rendererRef.current;
+        const scene = sceneRef.current;
+        const camera = cameraRef.current;
+        const host = canvasHostRef.current;
+        if (!renderer || !scene || !camera || !host || !imageSize || !isUsableSize(viewportSize)) {
+          return Promise.resolve(null);
+        }
+        const scale = Math.max(VIEW_EPSILON, viewport.scale);
+        const halfViewWidth = viewportSize.width / (2 * scale);
+        const halfViewHeight = viewportSize.height / (2 * scale);
+        camera.left = viewport.centerX - halfViewWidth;
+        camera.right = viewport.centerX + halfViewWidth;
+        camera.top = viewport.centerY + halfViewHeight;
+        camera.bottom = viewport.centerY - halfViewHeight;
+        camera.updateProjectionMatrix();
+        renderer.render(scene, camera);
+        return composeViewBlob(host, renderer.domElement, [".viewer-orientation-label"], "#05070a");
+      },
+    }),
+    [resetViewport, imageSize, viewport, viewportSize]
+  );
+
   const zoomBy = useCallback(
     (factor: number, point?: ImageViewportPoint) => {
       if (!imageSize || !isUsableSize(viewportSize)) {
@@ -474,46 +527,94 @@ export function DirectPlaneImage({
     [imageSize, viewportSize]
   );
 
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
-      return;
+  // Distance + midpoint of the first two active pointers, for pinch-zoom.
+  const readPinchGeometry = () => {
+    const points = Array.from(pointersRef.current.values());
+    if (points.length < 2) {
+      return null;
     }
-    event.preventDefault();
-    event.currentTarget.focus({ preventScroll: true });
-    const rect = event.currentTarget.getBoundingClientRect();
-    // Two-finger trackpad scroll pans; pinch / ⌘-scroll / mouse wheel zooms toward the
-    // cursor — consistent with the deep-zoom canvas (shared classifyWheelGesture).
-    if (classifyWheelGesture(event) === "pan") {
-      const nextLimits = computeImageScaleLimits(imageSize, viewportSize);
-      setIsFitViewport(false);
-      setViewport((previous) =>
-        panImageViewport(
-          previous,
-          { x: -event.deltaX, y: -event.deltaY },
-          imageSize,
-          viewportSize,
-          nextLimits.minScale,
-          nextLimits.maxScale
-        )
-      );
-      return;
-    }
-    const factor = wheelDeltaToZoomFactor(event.deltaY, event.deltaMode, event.ctrlKey, viewportSize.height || rect.height);
-    if (Math.abs(factor - 1) < VIEW_EPSILON) {
-      return;
-    }
-    zoomBy(factor, {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-    });
+    const [a, b] = points;
+    return {
+      dist: Math.hypot(b.x - a.x, b.y - a.y),
+      midX: (a.x + b.x) / 2,
+      midY: (a.y + b.y) / 2,
+    };
   };
 
+  // React attaches onWheel as a PASSIVE listener, so its preventDefault() is a no-op —
+  // a Mac trackpad pinch (which fires ctrl+wheel) would zoom the whole PAGE instead of
+  // the image, and a mouse wheel would scroll the page. We attach a NATIVE non-passive
+  // wheel listener (matching the deep-zoom canvas) so preventDefault works and the
+  // gesture reliably zooms/pans the image. The handler is kept in a ref so it always
+  // sees the latest state without re-attaching the listener.
+  const wheelHandlerRef = useRef<(event: WheelEvent) => void>(() => {});
+  useEffect(() => {
+    wheelHandlerRef.current = (event: WheelEvent) => {
+      chromeFadeRef.current?.reveal();
+      if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
+        return;
+      }
+      event.preventDefault();
+      const target = (event.currentTarget as HTMLElement | null) ?? containerRef.current;
+      target?.focus({ preventScroll: true });
+      const rect = target?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      // Two-finger trackpad scroll pans; pinch / ⌘-scroll / mouse wheel zooms toward the
+      // cursor — consistent with the deep-zoom canvas (shared classifyWheelGesture).
+      if (classifyWheelGesture(event) === "pan") {
+        const nextLimits = computeImageScaleLimits(imageSize, viewportSize);
+        setIsFitViewport(false);
+        setViewport((previous) =>
+          panImageViewport(
+            previous,
+            { x: -event.deltaX, y: -event.deltaY },
+            imageSize,
+            viewportSize,
+            nextLimits.minScale,
+            nextLimits.maxScale
+          )
+        );
+        return;
+      }
+      const factor = wheelDeltaToZoomFactor(event.deltaY, event.deltaMode, event.ctrlKey, viewportSize.height || rect.height);
+      if (Math.abs(factor - 1) < VIEW_EPSILON) {
+        return;
+      }
+      zoomBy(factor, { x: event.clientX - rect.left, y: event.clientY - rect.top });
+    };
+  });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) {
+      return;
+    }
+    const onWheel = (event: WheelEvent) => wheelHandlerRef.current(event);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    chromeFadeRef.current?.reveal();
     if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
       return;
     }
     const target = event.target as HTMLElement | null;
     if (target?.closest("[data-viewer-image-control]")) {
+      return;
+    }
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.focus({ preventScroll: true });
+    if (pointersRef.current.size >= 2) {
+      // Second finger down → switch from pan to pinch-zoom. Drop the in-flight
+      // single-finger drag so the image doesn't lurch, and seed the pinch distance.
+      dragRef.current = null;
+      setIsDragging(false);
+      const pinch = readPinchGeometry();
+      pinchRef.current = pinch ? { dist: pinch.dist } : null;
       return;
     }
     dragRef.current = {
@@ -523,13 +624,32 @@ export function DirectPlaneImage({
       origin: viewport,
     };
     setIsDragging(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.currentTarget.focus({ preventScroll: true });
   };
 
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    chromeFadeRef.current?.reveal();
+    if (!interactive || !imageSize || !isUsableSize(viewportSize)) {
+      return;
+    }
+    if (pointersRef.current.has(event.pointerId)) {
+      pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    // Two fingers down → pinch-zoom toward the midpoint, never pan.
+    if (pointersRef.current.size >= 2) {
+      const pinch = readPinchGeometry();
+      const previous = pinchRef.current;
+      if (pinch && previous && previous.dist > 0) {
+        const factor = pinch.dist / previous.dist;
+        if (Math.abs(factor - 1) > VIEW_EPSILON) {
+          const rect = event.currentTarget.getBoundingClientRect();
+          zoomBy(factor, { x: pinch.midX - rect.left, y: pinch.midY - rect.top });
+        }
+        pinchRef.current = { dist: pinch.dist };
+      }
+      return;
+    }
     const drag = dragRef.current;
-    if (!interactive || !drag || drag.pointerId !== event.pointerId || !imageSize || !isUsableSize(viewportSize)) {
+    if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
     const nextLimits = computeImageScaleLimits(imageSize, viewportSize);
@@ -547,11 +667,16 @@ export function DirectPlaneImage({
   };
 
   const finishPointer = (event: PointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId !== event.pointerId) {
-      return;
+    pointersRef.current.delete(event.pointerId);
+    if (pointersRef.current.size < 2) {
+      // Dropped below two fingers → pinch is over. A lingering finger won't resume
+      // panning until it lifts and taps again (avoids a jump from the stale origin).
+      pinchRef.current = null;
     }
-    dragRef.current = null;
-    setIsDragging(false);
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+      setIsDragging(false);
+    }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -569,7 +694,7 @@ export function DirectPlaneImage({
       event.preventDefault();
       zoomBy(1 / ZOOM_STEP);
     }
-    if (event.key === "0") {
+    if (event.key === "0" || event.key === "r" || event.key === "R") {
       event.preventDefault();
       resetViewport();
     }
@@ -594,13 +719,13 @@ export function DirectPlaneImage({
       data-image-fit-scale={scaleLimits.fitScale.toFixed(6)}
       data-image-view-scale={viewport.scale.toFixed(6)}
       data-image-screen-aspect={naturalAspect.toFixed(6)}
-      onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={finishPointer}
       onPointerCancel={finishPointer}
       onDoubleClick={resetViewport}
       onKeyDown={handleKeyDown}
+      onFocus={() => chromeFadeRef.current?.reveal()}
     >
       <div
         ref={canvasHostRef}
@@ -618,23 +743,13 @@ export function DirectPlaneImage({
             <span className="viewer-orientation-label viewer-orientation-label-right">{orientationLabels.right}</span>
           </div>
         ) : null}
-        <div className="viewer-direct-image-toolbar" data-viewer-image-control="true">
-          <Badge variant="outline" className="viewer-direct-image-readout">
-            {dimensionLabel}
-          </Badge>
-          <Badge variant="secondary" className="viewer-direct-image-readout">
-            {zoomLabel}
-          </Badge>
-          <Button type="button" variant="outline" size="icon-xs" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)}>
-            <ZoomOut data-icon="inline-start" />
-          </Button>
-          <Button type="button" variant="outline" size="icon-xs" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)}>
-            <ZoomIn data-icon="inline-start" />
-          </Button>
-          <Button type="button" variant="outline" size="icon-xs" aria-label="Reset image view" onClick={resetViewport}>
-            <Maximize2 data-icon="inline-start" />
-          </Button>
-        </div>
+        <ViewerZoomToolbar
+          readout={zoomReadout}
+          extraReadout={dimensionLabel}
+          onZoomOut={() => zoomBy(1 / ZOOM_STEP)}
+          onZoomIn={() => zoomBy(ZOOM_STEP)}
+          onFit={resetViewport}
+        />
         {loadState === "loading" ? (
           <div className="viewer-direct-image-status" aria-live="polite">
             <span>{hasTexture ? "Loading next image..." : "Loading image..."}</span>
@@ -648,4 +763,4 @@ export function DirectPlaneImage({
       </div>
     </div>
   );
-}
+});

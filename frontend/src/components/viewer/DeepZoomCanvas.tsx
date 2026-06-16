@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Maximize2 } from "lucide-react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import * as THREE from "three";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import type { ApiClient } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 
@@ -16,6 +22,10 @@ import {
   type ImageViewport,
   type ImageViewportSize,
 } from "./DirectPlaneImage";
+import { composeViewBlob, type ViewerCanvasHandle } from "./captureView";
+import { ViewerZoomToolbar } from "./ViewerZoomToolbar";
+import { ZOOM_STEP, formatZoomReadout, nativeZoomLevel } from "./viewerZoom";
+import { createChromeFadeController, prefersReducedMotionSafe } from "./chromeVisibility";
 import { classifyWheelGesture } from "./wheelGesture";
 
 type DeepZoomCanvasProps = {
@@ -31,6 +41,39 @@ type DeepZoomCanvasProps = {
 type TileKey = `${number}:${number}:${number}`;
 type TileLevel = UploadViewerInfo["viewer"]["tile_scheme"]["levels"][number];
 
+// Transient tile-load failures (network blip, momentary engine load) are retried
+// with exponential backoff before a tile is dropped, so deep zoom self-heals
+// instead of leaving a permanent blank gap in the image.
+const MAX_TILE_LOAD_RETRIES = 3;
+
+// Pick the pyramid level whose pixels best match the screen at the current zoom — the
+// one nearest 1 screen-px per level-px (Photoshop/Preview/Maps convention). Used for
+// EVERY zoom including the fit view: forcing the coarsest overview level when the whole
+// image is visible (the old shortcut) left huge images blurry until the user zoomed in.
+// Generic over the level shape (only `downsample` is needed) so it's unit-testable.
+export const chooseTileLevel = <T extends { downsample: number }>(
+  levels: T[],
+  viewportWidth: number,
+  visibleWorldWidth: number,
+  worldWidth: number,
+  fullWidth: number,
+): T => {
+  const screenPixelsPerWorldUnit = Math.max(1, viewportWidth) / Math.max(1e-9, visibleWorldWidth);
+  const sourcePixelsPerWorldUnit = fullWidth / Math.max(1e-9, worldWidth);
+  const screenPixelsPerSourcePixel = screenPixelsPerWorldUnit / Math.max(1e-9, sourcePixelsPerWorldUnit);
+  let bestLevel = levels[levels.length - 1];
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const level of levels) {
+    const screenPixelsPerLevelPixel = screenPixelsPerSourcePixel * level.downsample;
+    const score = Math.abs(Math.log2(Math.max(screenPixelsPerLevelPixel, 1e-6)));
+    if (score < bestScore) {
+      bestScore = score;
+      bestLevel = level;
+    }
+  }
+  return bestLevel;
+};
+
 export const orderTileLevelsForRendering = (levels: TileLevel[]): TileLevel[] =>
   [...levels].sort((left, right) => {
     const downsampleDelta = right.downsample - left.downsample;
@@ -39,19 +82,6 @@ export const orderTileLevelsForRendering = (levels: TileLevel[]): TileLevel[] =>
     }
     return left.width * left.height - right.width * right.height;
   });
-
-// formatZoomReadout shows zoom as % of native (1 source px == 1 screen px == 100%),
-// the convention scientists expect (Photoshop/Preview). "Fit" when at the fit scale.
-const formatZoomReadout = (screenPxPerSourcePx: number, atFit: boolean): string => {
-  if (atFit) {
-    return "Fit";
-  }
-  const pct = screenPxPerSourcePx * 100;
-  if (pct >= 1000) return `${Math.round(pct / 100) * 100}%`;
-  if (pct >= 100) return `${Math.round(pct)}%`;
-  if (pct >= 10) return `${Math.round(pct)}%`;
-  return `${pct.toFixed(1)}%`;
-};
 
 // niceScaleBar picks a round physical length whose on-screen width is ~targetPx, with
 // unit promotion (µm→mm→m, m→km) for readability. screenPxPerUnit is screen px per one
@@ -105,20 +135,30 @@ export const niceScaleBar = (
 
 type ViewReadout = { zoom: string; atFit: boolean; scaleBar: { widthPx: number; label: string } | null };
 
-export function DeepZoomCanvas({
-  apiClient,
-  fileId,
-  viewerInfo,
-  axis = "z",
-  zIndex,
-  tIndex,
-  className,
-}: DeepZoomCanvasProps) {
+export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps>(function DeepZoomCanvas(
+  { apiClient, fileId, viewerInfo, axis = "z", zIndex, tIndex, className },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [readout, setReadout] = useState<ViewReadout>({ zoom: "Fit", atFit: true, scaleBar: null });
-  // Imperative handles set by the WebGL effect so the toolbar/keyboard can drive it.
-  const controllerRef = useRef<{ fit: () => void; zoomByAtCenter: (factor: number) => void } | null>(null);
+  // Imperative handles set by the WebGL effect so the toolbar/keyboard/context-menu can drive it.
+  const controllerRef = useRef<{
+    fit: () => void;
+    zoomByAtCenter: (factor: number) => void;
+    captureViewToBlob: () => Promise<Blob | null>;
+  } | null>(null);
+
+  // Expose fit + capture to the host shell (context menu). Delegates to the live
+  // controllerRef the WebGL effect populates (null until the effect runs / on fallback).
+  useImperativeHandle(
+    ref,
+    (): ViewerCanvasHandle => ({
+      fitView: () => controllerRef.current?.fit(),
+      captureViewToBlob: () => controllerRef.current?.captureViewToBlob() ?? Promise.resolve(null),
+    }),
+    []
+  );
 
   const descriptor = useMemo(
     () => viewerInfo.viewer.planes[axis] ?? viewerInfo.viewer.default_plane,
@@ -164,7 +204,15 @@ export function DeepZoomCanvas({
       }, 0);
     };
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+      // preserveDrawingBuffer keeps the backbuffer readable after compositing so the
+      // context-menu "Export / Copy current view" can capture it (negligible cost for a
+      // 2D image plane). Without it canvas.toBlob/toDataURL returns a blank frame.
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+        preserveDrawingBuffer: true,
+        powerPreference: "high-performance",
+      });
       if (renderError) {
         commitRenderError(null);
       }
@@ -198,8 +246,6 @@ export function DeepZoomCanvas({
     const worldHeight = Math.max(1, Number(descriptor.world_size.height) || 1);
     const fullWidth = Math.max(1, Number(descriptor.pixel_size.width) || 1);
     const imageSize: ImageViewportSize = { width: worldWidth, height: worldHeight };
-    // world units per source pixel (drives the scale bar + native-zoom readout).
-    const unitsPerSourcePx = worldWidth / fullWidth;
 
     let viewportSize: ImageViewportSize = { width: 1, height: 1 };
     let viewport: ImageViewport = { centerX: 0, centerY: 0, scale: 1 };
@@ -220,38 +266,17 @@ export function DeepZoomCanvas({
     };
 
     const reportView = () => {
-      const screenPxPerSourcePx = viewport.scale * unitsPerSourcePx; // scale is px/world-unit
+      const screenPxPerSourcePx = nativeZoomLevel(viewport.scale, worldWidth, fullWidth); // scale is px/world-unit
       const atFit = Math.abs(viewport.scale - limits.fitScale) / Math.max(1e-9, limits.fitScale) < 0.02;
       // scale bar: screen px per one physical unit == viewport.scale (world unit == physical unit)
       const scaleBar = niceScaleBar(viewport.scale, physicalUnit);
       publishReadout({ zoom: formatZoomReadout(screenPxPerSourcePx, atFit), atFit, scaleBar });
     };
 
-    const chooseLevel = (): TileLevel => {
-      const visibleWorldWidth = camera.right - camera.left;
-      const visibleWorldHeight = camera.top - camera.bottom;
-      if (
-        tileLevels.length > 0 &&
-        visibleWorldWidth >= worldWidth * 0.98 &&
-        visibleWorldHeight >= worldHeight * 0.98
-      ) {
-        return tileLevels[0];
-      }
-      const screenPixelsPerWorldUnit = Math.max(1, viewportSize.width) / Math.max(1e-9, visibleWorldWidth);
-      const sourcePixelsPerWorldUnit = fullWidth / worldWidth;
-      const screenPixelsPerSourcePixel = screenPixelsPerWorldUnit / Math.max(1e-9, sourcePixelsPerWorldUnit);
-      let bestLevel = tileLevels[tileLevels.length - 1];
-      let bestScore = Number.POSITIVE_INFINITY;
-      tileLevels.forEach((level) => {
-        const screenPixelsPerLevelPixel = screenPixelsPerSourcePixel * level.downsample;
-        const score = Math.abs(Math.log2(Math.max(screenPixelsPerLevelPixel, 1e-6)));
-        if (score < bestScore) {
-          bestScore = score;
-          bestLevel = level;
-        }
-      });
-      return bestLevel;
-    };
+    // Always pick the resolution-matched level (no coarsest-overview shortcut at fit),
+    // so a huge image is sharp at the fit view instead of blurry until the user zooms.
+    const chooseLevel = (): TileLevel =>
+      chooseTileLevel(tileLevels, viewportSize.width, camera.right - camera.left, worldWidth, fullWidth);
 
     const clearTiles = (keysToKeep: Set<TileKey>) => {
       tileMeshes.forEach((mesh, key) => {
@@ -320,32 +345,61 @@ export function DeepZoomCanvas({
         z: zIndex,
         t: tIndex,
       });
-      loader.load(
-        url,
-        (texture) => {
-          inflight.delete(key);
-          if (disposed) {
-            texture.dispose();
-            return;
+      // Permanently drop a tile only after retries are exhausted (a genuinely
+      // unservable tile), removing its scene resources.
+      const dropTile = () => {
+        inflight.delete(key);
+        group.remove(mesh);
+        mesh.geometry.dispose();
+        material.dispose();
+        materialCache.delete(key);
+        tileMeshes.delete(key);
+        render();
+      };
+      // Self-heal transient tile failures (network blip, momentary engine load):
+      // retry with exponential backoff before giving up, so deep zoom never shows a
+      // permanent blank gap from a recoverable error. The tile stays "inflight"
+      // across retries so updateTiles never starts a duplicate load for it.
+      const attemptLoad = (attempt: number) => {
+        loader.load(
+          url,
+          (texture) => {
+            inflight.delete(key);
+            if (disposed) {
+              texture.dispose();
+              return;
+            }
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.generateMipmaps = false;
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            textureCache.set(key, texture);
+            reveal(texture);
+          },
+          undefined,
+          () => {
+            if (disposed) {
+              inflight.delete(key);
+              return;
+            }
+            if (attempt < MAX_TILE_LOAD_RETRIES) {
+              const backoffMs = 300 * 2 ** attempt; // 300ms, 600ms, 1200ms
+              window.setTimeout(() => {
+                // Retry only if the tile is still wanted and the view is alive;
+                // otherwise release the inflight slot so it can reload later.
+                if (!disposed && tileMeshes.get(key) === mesh) {
+                  attemptLoad(attempt + 1);
+                } else {
+                  inflight.delete(key);
+                }
+              }, backoffMs);
+              return;
+            }
+            dropTile();
           }
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.generateMipmaps = false;
-          texture.minFilter = THREE.LinearFilter;
-          texture.magFilter = THREE.LinearFilter;
-          textureCache.set(key, texture);
-          reveal(texture);
-        },
-        undefined,
-        () => {
-          inflight.delete(key);
-          group.remove(mesh);
-          mesh.geometry.dispose();
-          material.dispose();
-          materialCache.delete(key);
-          tileMeshes.delete(key);
-          render();
-        }
-      );
+        );
+      };
+      attemptLoad(0);
     };
 
     const updateTiles = () => {
@@ -400,7 +454,21 @@ export function DeepZoomCanvas({
         )
       );
     };
-    controllerRef.current = { fit, zoomByAtCenter };
+    controllerRef.current = {
+      fit,
+      zoomByAtCenter,
+      // Flush the latest committed tiles, then composite the GL frame + scale bar.
+      // preserveDrawingBuffer (set above) makes the async toBlob in composeViewBlob valid.
+      captureViewToBlob: () => {
+        render();
+        return composeViewBlob(
+          container,
+          renderer.domElement,
+          [".viewer-scale-bar-line", ".viewer-scale-bar-label"],
+          "#f5f2eb"
+        );
+      },
+    };
 
     const resize = () => {
       const width = Math.max(1, container.clientWidth || 1);
@@ -415,25 +483,86 @@ export function DeepZoomCanvas({
       setView(wasFit ? { centerX: 0, centerY: 0, scale: limits.fitScale } : viewport);
     };
 
-    // --- pointer drag → pan -------------------------------------------------
+    // --- pointer drag → pan, two-finger pinch → zoom ------------------------
     const drag = { active: false, pointerId: -1, lastX: 0, lastY: 0 };
+    // Touch has no wheel, so pinch is the only zoom gesture on a phone. Track every
+    // active pointer; with two down, zoom incrementally by the distance ratio.
+    const pointers = new Map<number, { x: number; y: number }>();
+    const pinch = { dist: 0 };
+    const readPinch = () => {
+      const points = Array.from(pointers.values());
+      if (points.length < 2) {
+        return null;
+      }
+      const [a, b] = points;
+      return {
+        dist: Math.hypot(b.x - a.x, b.y - a.y),
+        midX: (a.x + b.x) / 2,
+        midY: (a.y + b.y) / 2,
+      };
+    };
     const el = renderer.domElement;
     el.style.touchAction = "none";
     el.style.cursor = "grab";
 
+    // Receding chrome: reveal on pointer activity / keyboard focus, fade after idle.
+    const chromeFade = createChromeFadeController(container, {
+      reducedMotion: prefersReducedMotionSafe(),
+    });
+    const onFocusIn = () => chromeFade.reveal();
+    container.addEventListener("focusin", onFocusIn);
+    chromeFade.reveal();
+
     const onPointerDown = (e: PointerEvent) => {
+      chromeFade.reveal();
       const target = e.target as HTMLElement | null;
       if (target?.closest("[data-viewer-image-control]")) {
+        return;
+      }
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      el.setPointerCapture(e.pointerId);
+      if (pointers.size >= 2) {
+        // Second finger → switch from pan to pinch-zoom; seed the pinch distance.
+        drag.active = false;
+        el.style.cursor = "grab";
+        const geometry = readPinch();
+        pinch.dist = geometry ? geometry.dist : 0;
         return;
       }
       drag.active = true;
       drag.pointerId = e.pointerId;
       drag.lastX = e.clientX;
       drag.lastY = e.clientY;
-      el.setPointerCapture(e.pointerId);
       el.style.cursor = "grabbing";
     };
     const onPointerMove = (e: PointerEvent) => {
+      chromeFade.reveal();
+      if (pointers.has(e.pointerId)) {
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      // Two fingers down → pinch-zoom toward the midpoint, never pan.
+      if (pointers.size >= 2) {
+        const geometry = readPinch();
+        if (geometry && pinch.dist > 0 && geometry.dist > 0) {
+          const factor = geometry.dist / pinch.dist;
+          if (Math.abs(factor - 1) > 1e-6) {
+            const rect = el.getBoundingClientRect();
+            setView(
+              zoomImageViewportAtPoint(
+                viewport,
+                { x: geometry.midX - rect.left, y: geometry.midY - rect.top },
+                viewport.scale * factor,
+                imageSize,
+                viewportSize,
+                limits.minScale,
+                limits.maxScale
+              )
+            );
+          }
+          pinch.dist = geometry.dist;
+        }
+        return;
+      }
       if (!drag.active || e.pointerId !== drag.pointerId) {
         return;
       }
@@ -444,18 +573,23 @@ export function DeepZoomCanvas({
       setView(panImageViewport(viewport, { x: dx, y: dy }, imageSize, viewportSize, limits.minScale, limits.maxScale));
     };
     const onPointerUp = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) {
+        pinch.dist = 0;
+      }
+      if (el.hasPointerCapture(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId);
+      }
       if (e.pointerId !== drag.pointerId) {
         return;
       }
       drag.active = false;
       el.style.cursor = "grab";
-      if (el.hasPointerCapture(e.pointerId)) {
-        el.releasePointerCapture(e.pointerId);
-      }
     };
 
     // --- wheel → pinch/⌘ zooms toward cursor; two-finger scroll pans --------
     const onWheel = (e: WheelEvent) => {
+      chromeFade.reveal();
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       if (classifyWheelGesture(e) === "pan") {
@@ -507,6 +641,8 @@ export function DeepZoomCanvas({
       el.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("dblclick", onDoubleClick);
+      container.removeEventListener("focusin", onFocusIn);
+      chromeFade.dispose();
       tileMeshes.forEach((mesh) => {
         group.remove(mesh);
         mesh.geometry.dispose();
@@ -535,11 +671,11 @@ export function DeepZoomCanvas({
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
-      controllerRef.current?.zoomByAtCenter(1.22);
+      controllerRef.current?.zoomByAtCenter(ZOOM_STEP);
     } else if (event.key === "-" || event.key === "_") {
       event.preventDefault();
-      controllerRef.current?.zoomByAtCenter(1 / 1.22);
-    } else if (event.key === "0") {
+      controllerRef.current?.zoomByAtCenter(1 / ZOOM_STEP);
+    } else if (event.key === "0" || event.key === "r" || event.key === "R") {
       event.preventDefault();
       controllerRef.current?.fit();
     }
@@ -574,25 +710,17 @@ export function DeepZoomCanvas({
       onKeyDown={handleKeyDown}
     >
       {readout.scaleBar ? (
-        <div className="viewer-scale-bar" aria-hidden="true">
+        <div className="viewer-scale-bar viewer-chrome-fade" aria-hidden="true">
           <div className="viewer-scale-bar-line" style={{ width: `${Math.round(readout.scaleBar.widthPx)}px` }} />
           <span className="viewer-scale-bar-label">{readout.scaleBar.label}</span>
         </div>
       ) : null}
-      <div className="viewer-direct-image-toolbar" data-viewer-image-control="true">
-        <Badge variant="secondary" className="viewer-direct-image-readout" data-testid="deepzoom-zoom-readout">
-          {readout.zoom}
-        </Badge>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-xs"
-          aria-label="Fit image to view"
-          onClick={() => controllerRef.current?.fit()}
-        >
-          <Maximize2 data-icon="inline-start" />
-        </Button>
-      </div>
+      <ViewerZoomToolbar
+        readout={readout.zoom}
+        onZoomOut={() => controllerRef.current?.zoomByAtCenter(1 / ZOOM_STEP)}
+        onZoomIn={() => controllerRef.current?.zoomByAtCenter(ZOOM_STEP)}
+        onFit={() => controllerRef.current?.fit()}
+      />
     </div>
   );
-}
+});

@@ -75,6 +75,7 @@ import type {
   ResourceBulkTagResponse,
   ResourceListResponse,
   ResourceMetadataFilter,
+  ResourceRecord,
   ResourceResponse,
   ResourceComputationLookupRequest,
   ResourceComputationLookupResponse,
@@ -4440,6 +4441,24 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as ResourceComputationLookupResponse;
+  }
+
+  // Fetch a single resource by id (GET /v2/resources/{file_id}). Used to restore a
+  // Lens deep-link / shared URL when the resource isn't already in the loaded list.
+  async getResource(fileId: string): Promise<ResourceRecord> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/resources/${encodeURIComponent(fileId.trim())}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    const payload = (await response.json()) as ResourceResponse;
+    return payload.resource;
   }
 
   async deleteResource(fileId: string): Promise<{ deleted: boolean; file_id: string }> {

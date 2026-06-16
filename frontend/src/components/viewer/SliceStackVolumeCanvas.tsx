@@ -5,7 +5,7 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 
-import { scalarVolumePayloadToHalfFloat } from "./scalarVolume";
+import { computeScalarVolumeAutoContrast, scalarVolumePayloadToHalfFloat } from "./scalarVolume";
 import { getPlaneDescriptor } from "./shared";
 import { computePhysicalVolumeGeometry } from "./volumeGeometry";
 import {
@@ -89,6 +89,20 @@ type AtlasVolumeSource = {
   texturePolicy?: UploadViewerInfo["viewer"]["texture_policy"];
 };
 
+type MultichannelVolumeSource = {
+  kind: "multichannel";
+  // Enabled channel indices, in render order. The renderer loads one R16F volume
+  // per index and fuses them; changing this set reloads (cached so no re-fetch).
+  channelIndices: number[];
+  loadChannel: (channel: number) => Promise<ScalarVolumePayload>;
+  fallbackImageUrl: string;
+  axisSizes: UploadViewerInfo["axis_sizes"];
+  plane: NonNullable<UploadViewerInfo["viewer"]["default_plane"]>;
+  physicalSpacing?: UploadViewerInfo["metadata"]["physical_spacing"] | null;
+  renderPolicy?: UploadViewerInfo["viewer"]["render_policy"];
+  texturePolicy?: UploadViewerInfo["viewer"]["texture_policy"];
+};
+
 type SliceStackVolumeCanvasProps = {
   apiClient?: ApiClient;
   fileId?: string;
@@ -99,7 +113,100 @@ type SliceStackVolumeCanvasProps = {
   tIndex?: number;
   className?: string;
   displayState?: UploadViewerInfo["display_defaults"] | null;
-  volumeSource?: ScalarVolumeSource | AtlasVolumeSource;
+  volumeSource?: ScalarVolumeSource | AtlasVolumeSource | MultichannelVolumeSource;
+};
+
+/**
+ * Parse an `#rrggbb` color to a LINEAR-light RGB triplet (0..1). The multichannel
+ * shader sums channel emissions in linear space, so channel LUT colors (authored
+ * as sRGB hex) must be sRGB->linear decoded first, or overlaps hue-shift/blow out.
+ */
+export const hexToLinearRgb = (hex: string | undefined): [number, number, number] => {
+  const value = String(hex || "").trim().replace(/^#/, "");
+  const full =
+    value.length === 3
+      ? value
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : value.padEnd(6, "0").slice(0, 6);
+  const srgb = [0, 1, 2].map((i) => {
+    const channel = Number.parseInt(full.slice(i * 2, i * 2 + 2), 16);
+    return Number.isFinite(channel) ? channel / 255 : 0;
+  });
+  const toLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  return [toLinear(srgb[0]), toLinear(srgb[1]), toLinear(srgb[2])];
+};
+
+type MultichannelRenderConfig = {
+  channels: Array<{
+    index: number;
+    color: [number, number, number];
+    // The user's explicit window, or null to fall back to the per-channel
+    // auto-contrast computed from the loaded volume (ImageJ-style).
+    manualWindow: { low: number; high: number } | null;
+    invert: boolean;
+  }>;
+  gammaScale: number;
+  brightness: number;
+  densityScale: number;
+};
+
+// Bounded cache of decoded per-channel volume payloads, keyed file:channel:time,
+// so toggling a channel (which rebuilds the renderer) reuses already-fetched
+// channels instead of re-downloading ~184 MB each. Capped to the max simultaneous
+// channels; the default view loads a single channel.
+const channelVolumeCache = new Map<string, ScalarVolumePayload>();
+const channelVolumeCacheKey = (fileId: string, channel: number, t: number) => `${fileId}:${channel}:${t}`;
+const rememberChannelVolume = (key: string, payload: ScalarVolumePayload): void => {
+  channelVolumeCache.delete(key);
+  channelVolumeCache.set(key, payload);
+  while (channelVolumeCache.size > MAX_VOLUME_CHANNELS) {
+    const oldest = channelVolumeCache.keys().next().value as string | undefined;
+    if (oldest === undefined) {
+      break;
+    }
+    channelVolumeCache.delete(oldest);
+  }
+};
+
+type MultichannelUniformSet = {
+  uChannelCount: { value: number };
+  uChanLow: { value: number[] };
+  uChanHigh: { value: number[] };
+  uChanColor: { value: THREE.Vector3[] };
+  uChanInvert: { value: boolean[] };
+  uGammaScale: { value: number };
+  uBrightness: { value: number };
+  uDensityScale: { value: number };
+};
+
+// Push per-channel color/window/invert + gamma into the live uniforms WITHOUT
+// touching uChannelCount — the count is owned by the texture-load step so the
+// shader never samples a channel slot whose texture has not been bound yet.
+const DEFAULT_CHANNEL_WINDOW = { low: 0, high: 1 };
+const applyMultichannelChannelUniforms = (
+  uniforms: MultichannelUniformSet,
+  config: MultichannelRenderConfig,
+  autoWindows: Map<number, { low: number; high: number }>
+): void => {
+  for (let i = 0; i < MAX_VOLUME_CHANNELS; i++) {
+    const channel = config.channels[i];
+    const window = channel
+      ? channel.manualWindow ?? autoWindows.get(channel.index) ?? DEFAULT_CHANNEL_WINDOW
+      : DEFAULT_CHANNEL_WINDOW;
+    uniforms.uChanLow.value[i] = window.low;
+    uniforms.uChanHigh.value[i] = window.high;
+    uniforms.uChanColor.value[i].set(
+      channel ? channel.color[0] : 0,
+      channel ? channel.color[1] : 0,
+      channel ? channel.color[2] : 0
+    );
+    uniforms.uChanInvert.value[i] = channel ? channel.invert : false;
+  }
+  uniforms.uGammaScale.value = config.gammaScale;
+  uniforms.uBrightness.value = config.brightness;
+  uniforms.uDensityScale.value = config.densityScale;
 };
 
 export const MAX_STEPS = 512;
@@ -786,6 +893,251 @@ const CUTFACE_FRAGMENT_SHADER = `
   }
 `;
 
+// Max simultaneously-rendered channels. WebGL2 guarantees >= 16 fragment texture
+// units; fluorescence is typically 2-5 channels, 8 covers spectral with headroom
+// for the cut-face. Enabling beyond this caps to the first MAX_CHANNELS.
+const MAX_VOLUME_CHANNELS = 8;
+
+// Multichannel fluorescence volume shader. Adapted from the scalar ray-march and
+// the Allen Institute vole-core approach: each enabled channel is its own R16F 3D
+// texture; per voxel we window each channel to [0,1], tint by its (linear) color,
+// and combine across channels with a per-component MAX ("fuse") so overlapping
+// channels keep their hue instead of additively blowing out to white. The fused
+// emission is then integrated along the ray (alpha-over composite or MIP) and a
+// gamma/brightness tone curve is applied — matching vole-core's final mapping so
+// faint structure stays readable. GLSL ES 3.0 forbids dynamic sampler indexing, so
+// channels are sampled through a constant-unrolled if-ladder, not an array index.
+const MULTICHANNEL_FRAGMENT_SHADER = `
+  precision highp float;
+  precision highp sampler3D;
+
+  uniform sampler3D uChan0;
+  uniform sampler3D uChan1;
+  uniform sampler3D uChan2;
+  uniform sampler3D uChan3;
+  uniform sampler3D uChan4;
+  uniform sampler3D uChan5;
+  uniform sampler3D uChan6;
+  uniform sampler3D uChan7;
+  uniform int uChannelCount;
+  uniform float uChanLow[${MAX_VOLUME_CHANNELS}];
+  uniform float uChanHigh[${MAX_VOLUME_CHANNELS}];
+  uniform vec3 uChanColor[${MAX_VOLUME_CHANNELS}];
+  uniform bool uChanInvert[${MAX_VOLUME_CHANNELS}];
+
+  uniform int uSteps;
+  uniform float uDensity;
+  uniform float uDensityScale;
+  uniform vec3 uVolumeScale;
+  uniform int uProjectionMode;
+  uniform vec3 uClipMin;
+  uniform vec3 uClipMax;
+  uniform vec3 uCameraPositionLocal;
+  uniform vec3 uCameraDirectionLocal;
+  uniform bool uOrthographicCamera;
+  uniform float uGammaMin;
+  uniform float uGammaMax;
+  uniform float uGammaScale;
+  uniform float uBrightness;
+  uniform float uSignalFloor;     // below this windowed intensity -> transparent
+  uniform bool uLightingEnabled;
+  uniform float uLightingStrength;
+  uniform vec3 uVoxelStep;        // one-voxel offset per axis (gradient delta)
+  uniform vec3 uVoxelSpacing;     // mm spacing ratio (anisotropy-correct normals)
+
+  varying vec3 vPosition;
+
+  bool intersectBox(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax, out float tNear, out float tFar) {
+    vec3 invDir = 1.0 / rayDir;
+    vec3 t0 = (boxMin - rayOrigin) * invDir;
+    vec3 t1 = (boxMax - rayOrigin) * invDir;
+    vec3 tsmaller = min(t0, t1);
+    vec3 tbigger = max(t0, t1);
+    tNear = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
+    tFar = min(min(tbigger.x, tbigger.y), tbigger.z);
+    return tFar > max(tNear, 0.0);
+  }
+
+  float sampleChannelRaw(int c, vec3 p) {
+    if (c == 0) return texture(uChan0, p).r;
+    if (c == 1) return texture(uChan1, p).r;
+    if (c == 2) return texture(uChan2, p).r;
+    if (c == 3) return texture(uChan3, p).r;
+    if (c == 4) return texture(uChan4, p).r;
+    if (c == 5) return texture(uChan5, p).r;
+    if (c == 6) return texture(uChan6, p).r;
+    return texture(uChan7, p).r;
+  }
+
+  float windowChannel(int c, float raw) {
+    float n = clamp((raw - uChanLow[c]) / max(0.000001, uChanHigh[c] - uChanLow[c]), 0.0, 1.0);
+    return uChanInvert[c] ? (1.0 - n) : n;
+  }
+
+  // Combined density (MAX windowed intensity across channels). Used for the
+  // opacity transfer + the shading gradient; cheaper than fusing color too.
+  float densityAt(vec3 location) {
+    vec3 p = clamp(location, vec3(0.0), vec3(1.0));
+    float density = 0.0;
+    for (int c = 0; c < ${MAX_VOLUME_CHANNELS}; c++) {
+      if (c >= uChannelCount) break;
+      density = max(density, windowChannel(c, sampleChannelRaw(c, p)));
+    }
+    return density;
+  }
+
+  // Fuse all enabled channels at one voxel: returns (emission RGB, density).
+  // emission = per-component MAX of color_c * windowed_c; density = MAX of
+  // windowed_c (the strongest channel drives opacity).
+  vec4 fuseVoxel(vec3 location) {
+    vec3 p = clamp(location, vec3(0.0), vec3(1.0));
+    vec3 emission = vec3(0.0);
+    float density = 0.0;
+    for (int c = 0; c < ${MAX_VOLUME_CHANNELS}; c++) {
+      if (c >= uChannelCount) break;
+      float n = windowChannel(c, sampleChannelRaw(c, p));
+      emission = max(emission, uChanColor[c] * n);
+      density = max(density, n);
+    }
+    return vec4(emission, density);
+  }
+
+  // Central-difference gradient of the combined density — the local surface
+  // normal at a structure boundary, used to shade flat emission into 3D form.
+  vec3 densityGradient(vec3 location) {
+    return vec3(
+      densityAt(location + vec3(uVoxelStep.x, 0.0, 0.0)) - densityAt(location - vec3(uVoxelStep.x, 0.0, 0.0)),
+      densityAt(location + vec3(0.0, uVoxelStep.y, 0.0)) - densityAt(location - vec3(0.0, uVoxelStep.y, 0.0)),
+      densityAt(location + vec3(0.0, 0.0, uVoxelStep.z)) - densityAt(location - vec3(0.0, 0.0, uVoxelStep.z))
+    );
+  }
+
+  // Anisotropy-correct Blinn-Phong shading on the fused emission, so fluorescence
+  // structures read as 3D surfaces instead of a flat translucent fog.
+  vec3 applyLighting(vec3 location, vec3 color, vec3 gradient) {
+    if (!uLightingEnabled || uLightingStrength <= 0.0) {
+      return color;
+    }
+    vec3 worldGradient = gradient / max(vec3(0.06), uVoxelSpacing);
+    if (length(worldGradient) < 0.0001) {
+      return color;
+    }
+    vec3 normal = normalize(worldGradient);
+    vec3 lightDir = normalize(vec3(-0.45, 0.55, 0.72));
+    vec3 viewDir = uOrthographicCamera
+      ? -normalize(uCameraDirectionLocal)
+      : normalize(uCameraPositionLocal - (location - vec3(0.5)));
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float diffuse = max(dot(normal, lightDir), dot(-normal, lightDir));
+    float specular = pow(max(dot(normal, halfDir), max(dot(-normal, halfDir), 0.0)), 24.0);
+    float shade = clamp(0.5 + 0.7 * diffuse, 0.4, 1.3);
+    vec3 lit = color * shade + vec3(0.22 * specular);
+    return mix(color, lit, uLightingStrength);
+  }
+
+  float alphaFromOpacity(float opacityValue, float stepLength) {
+    float baseAlpha = clamp(opacityValue * uDensity * uDensityScale, 0.0, 0.95);
+    float stepScale = max(0.001, stepLength * 128.0);
+    return 1.0 - pow(1.0 - baseAlpha, stepScale);
+  }
+
+  vec3 applyTone(vec3 c) {
+    c *= max(0.0, uBrightness);
+    float range = max(0.0001, uGammaMax - uGammaMin);
+    c = clamp((c - uGammaMin) / range, 0.0, 1.0);
+    return pow(c, vec3(max(0.0001, uGammaScale)));
+  }
+
+  void main() {
+    vec3 rayDir = uOrthographicCamera ? normalize(uCameraDirectionLocal) : normalize(vPosition - uCameraPositionLocal);
+    vec3 rayOrigin = uOrthographicCamera ? vPosition - rayDir * 2.0 : uCameraPositionLocal;
+    vec3 boxMin = uClipMin - vec3(0.5);
+    vec3 boxMax = uClipMax - vec3(0.5);
+    float tNear = 0.0;
+    float tFar = 0.0;
+    if (!intersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar)) {
+      discard;
+    }
+    int steps = min(uSteps, ${MAX_STEPS});
+    if (steps < 1 || uChannelCount < 1) {
+      discard;
+    }
+    vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
+    vec3 back = rayOrigin + rayDir * tFar;
+    vec3 delta = (back - front) / float(steps);
+    vec3 location = front + vec3(0.5);
+    // Dither the ray start by a per-pixel fraction of one step. Coherent (un-jittered)
+    // sampling of a dense volume at interactive step counts produces wood-grain streak
+    // artifacts; a stable per-pixel offset (no time term, so it never flickers) trades
+    // those streaks for fine, unobjectionable noise. Homogeneous volumes are unaffected
+    // (every sample along the ray is identical), so deterministic readback tests hold.
+    location += delta * fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float stepLen = length(delta * uVolumeScale);
+
+    vec4 accum = vec4(0.0);
+    // Per-channel maxima for MIP. MIP must be computed INDEPENDENTLY per channel —
+    // taking the single max-density voxel per ray (and its fused color) collapses a
+    // multichannel volume to whichever channel is densest, hiding the sparse nuclei.
+    float chanMax[${MAX_VOLUME_CHANNELS}];
+    for (int c = 0; c < ${MAX_VOLUME_CHANNELS}; c++) {
+      chanMax[c] = 0.0;
+    }
+    for (int iter = 0; iter < ${MAX_STEPS}; iter++) {
+      if (iter >= steps) {
+        break;
+      }
+      if (uProjectionMode == 1) {
+        vec3 pp = clamp(location, vec3(0.0), vec3(1.0));
+        for (int c = 0; c < ${MAX_VOLUME_CHANNELS}; c++) {
+          if (c >= uChannelCount) break;
+          chanMax[c] = max(chanMax[c], windowChannel(c, sampleChannelRaw(c, pp)));
+        }
+        location += delta;
+        continue;
+      }
+      vec4 fused = fuseVoxel(location);
+      // Suppress background: only intensity above the signal floor becomes opaque,
+      // so the volume box stops fogging up into a flat haze.
+      float opacity = smoothstep(uSignalFloor, 1.0, fused.a);
+      if (opacity <= 0.0) {
+        location += delta;
+        continue;
+      }
+      vec3 lit = applyLighting(location, fused.rgb, densityGradient(location));
+      float alpha = alphaFromOpacity(opacity, stepLen);
+      accum.rgb += (1.0 - accum.a) * lit * alpha;
+      accum.a += (1.0 - accum.a) * alpha;
+      if (accum.a >= 0.985) {
+        break;
+      }
+      location += delta;
+    }
+
+    if (uProjectionMode == 1) {
+      // Combine each channel's max in its own color (additive, like the 2D fuse),
+      // so every channel's brightest structures show — not just the densest one.
+      vec3 emission = vec3(0.0);
+      float maxDensity = 0.0;
+      for (int c = 0; c < ${MAX_VOLUME_CHANNELS}; c++) {
+        if (c >= uChannelCount) break;
+        emission += uChanColor[c] * chanMax[c];
+        maxDensity = max(maxDensity, chanMax[c]);
+      }
+      emission = min(emission, vec3(1.0));
+      float maxOpacity = smoothstep(uSignalFloor, 1.0, maxDensity);
+      if (maxOpacity < 0.02) {
+        discard;
+      }
+      gl_FragColor = vec4(applyTone(emission), clamp(maxOpacity * uDensityScale * 1.2, 0.0, 1.0));
+      return;
+    }
+    if (accum.a < 0.02) {
+      discard;
+    }
+    gl_FragColor = vec4(applyTone(accum.rgb), accum.a);
+  }
+`;
+
 const atlasToVolumeTexture = async (
   atlasUrl: string,
   atlasScheme: NonNullable<UploadViewerInfo["viewer"]["atlas_scheme"]>,
@@ -1122,6 +1474,14 @@ export function SliceStackVolumeCanvas({
   const sliceCursorPlanesRef = useRef<SliceCursorPlanes | null>(null);
   const cutFaceRef = useRef<{ mesh: THREE.Mesh; material: THREE.ShaderMaterial } | null>(null);
   const scalarRangeRef = useRef<{ rawMin: number; rawMax: number } | null>(null);
+  // Live multichannel uniforms (the THREE uniform objects) so per-channel
+  // color/window + gamma update without rebuilding the renderer.
+  const multichannelUniformsRef = useRef<MultichannelUniformSet | null>(null);
+  const multichannelRenderConfigRef = useRef<MultichannelRenderConfig | null>(null);
+  // Per-channel ImageJ-style auto-contrast windows (normalized [0,1]), computed
+  // from each loaded volume; used as the default window when the user has not set
+  // a manual one, so the background maps to zero opacity (no fog).
+  const channelAutoWindowsRef = useRef<Map<number, { low: number; high: number }>>(new Map());
   const [renderError, setRenderError] = useState<string | null>(null);
 
   const plane = useMemo(
@@ -1187,6 +1547,35 @@ export function SliceStackVolumeCanvas({
     return null;
   }, [displayState?.channels, displayState?.volume_channel, viewerInfo]);
 
+  // The set of channels the multichannel volume composites: the user's enabled
+  // channels (display_defaults.channels), de-duped, capped, defaulting to the
+  // single scalar channel. Changing this set reloads the per-channel textures.
+  const enabledVolumeChannels = useMemo(() => {
+    const raw = Array.isArray(displayState?.channels) ? displayState.channels : [];
+    const cleaned = raw
+      .filter((value) => Number.isFinite(value))
+      .map((value) => Math.max(0, Math.floor(Number(value))))
+      .filter((value, index, list) => list.indexOf(value) === index)
+      .sort((a, b) => a - b)
+      .slice(0, MAX_VOLUME_CHANNELS);
+    return cleaned.length > 0 ? cleaned : [Math.max(0, scalarChannel ?? 0)];
+  }, [displayState, scalarChannel]);
+
+  // Any NON-MEDICAL 3D volume (single- or multi-channel microscopy / scientific
+  // scalar) renders through the full-res per-channel quality path — auto-contrast
+  // + density-gradient shading + signal-floor opacity — rather than the downsampled
+  // server-fused atlas. Medical volumes (volume_mode "scalar") deliberately stay on
+  // the clinical scalar path so their Hounsfield/window presets are not discarded
+  // by auto-contrast.
+  const isPerChannelVolume = Boolean(
+    apiClient &&
+      fileId &&
+      viewerInfo?.is_volume &&
+      viewerInfo?.viewer.volume_mode !== "scalar" &&
+      Boolean(viewerInfo?.viewer.available_surfaces?.includes("volume")) &&
+      Boolean(viewerInfo?.viewer.service_urls?.scalar_volume ?? viewerInfo?.service_urls?.scalar_volume)
+  );
+
   const atlasUrl = useMemo(() => {
     if (!apiClient || !fileId) {
       return "";
@@ -1232,6 +1621,21 @@ export function SliceStackVolumeCanvas({
         physicalSpacing: spacing,
       };
     }
+    // Multichannel fluorescence z-stack: composite the enabled channels' full-res
+    // volumes in-shader (vole-core-style fuse-then-raymarch). Takes priority over
+    // the server-fused atlas fallback. Identity changes when the enabled set or
+    // time changes (reload); per-channel color/window are applied incrementally.
+    if (isPerChannelVolume && apiClient && fileId) {
+      return {
+        kind: "multichannel" as const,
+        channelIndices: enabledVolumeChannels,
+        loadChannel: (channel: number) => apiClient.getUploadScalarVolume(fileId, { t: tIndex, channel }),
+        fallbackImageUrl: "",
+        axisSizes,
+        plane,
+        physicalSpacing: spacing,
+      };
+    }
     if (!apiClient || !fileId || !viewerInfo?.viewer.atlas_scheme) {
       return null;
     }
@@ -1248,6 +1652,8 @@ export function SliceStackVolumeCanvas({
     apiClient,
     atlasUrl,
     axisSizes,
+    enabledVolumeChannels,
+    isPerChannelVolume,
     fileId,
     plane,
     scalarChannel,
@@ -1346,11 +1752,26 @@ export function SliceStackVolumeCanvas({
   const effectiveClipBoundsRef = useRef(effectiveClipBounds);
   const cutawayActiveRef = useRef(cutawayActive);
   const cutawayZRef = useRef(cutawayZ);
-  const projectionMode = resolveVolumeProjectionMode({
-    renderPolicy,
-    modality,
-    fusionMethod: displayState?.fusion_method,
-  });
+  // 3D ray-projection. `volume_projection` is the dedicated control (decoupled from
+  // the 2D `fusion_method`); when the user has set it, it wins. Otherwise pick a
+  // per-source default: multichannel fluorescence z-stacks are dense and space-
+  // filling, so a MIP maxes every ray to its brightest voxel and flattens the whole
+  // stack into a uniform cloud — composite (front-to-back, occluding) reads as a
+  // coherent 3D volume, so default per-channel volumes to composite. Scalar volumes
+  // keep the existing modality/fusion-derived default.
+  const explicitVolumeProjection =
+    displayState?.volume_projection === "mip" || displayState?.volume_projection === "composite"
+      ? displayState.volume_projection
+      : null;
+  const projectionMode =
+    explicitVolumeProjection ??
+    (isPerChannelVolume
+      ? "composite"
+      : resolveVolumeProjectionMode({
+          renderPolicy,
+          modality,
+          fusionMethod: displayState?.fusion_method,
+        }));
   const scalarColorMap = useMemo(
     () => resolveScalarVolumeColorMap(displayState?.scalar_colormap),
     [displayState?.scalar_colormap]
@@ -1458,8 +1879,16 @@ export function SliceStackVolumeCanvas({
     renderPolicy === "scalar" || renderPolicy === "categorical" || renderPolicy === "display"
       ? DEFAULT_VOLUME_CLEAR
       : 0xf5f2eb;
-  const density =
-    renderPolicy === "scalar"
+  const density = isPerChannelVolume
+    ? // Per-channel fluorescence: MIP ignores uDensity (its opacity is the windowed
+      // max), so this only matters for composite. The sample is dense and space-
+      // filling, so a low density integrates a see-through haze; a higher density
+      // makes the front layers occlude into a solid, depth-ordered volume. The
+      // Density slider (uDensityScale) tunes around this base.
+      projectionMode === "mip"
+      ? 0.9
+      : 1.1
+    : renderPolicy === "scalar"
       ? projectionMode === "mip"
         ? 0.9
         : modality === "medical"
@@ -1484,7 +1913,9 @@ export function SliceStackVolumeCanvas({
   const sampleBudget = useMemo(
     () =>
       computeVolumeSampleBudget({
-        sourceKind: resolvedSource?.kind ?? "atlas",
+        // Multichannel ray-marches R16F 3D textures like the scalar path, so it
+        // shares the scalar (higher) sample budget rather than the atlas one.
+        sourceKind: resolvedSource?.kind === "atlas" ? "atlas" : "scalar",
         volumeDepth,
         projectionMode,
       }),
@@ -1520,6 +1951,49 @@ export function SliceStackVolumeCanvas({
   useEffect(() => {
     scalarRenderConfigRef.current = scalarRenderConfig;
   }, [scalarRenderConfig]);
+
+  const multichannelRenderConfig = useMemo<MultichannelRenderConfig>(
+    () => ({
+      channels: enabledVolumeChannels.map((index) => {
+        const hex =
+          displayState?.channel_colors?.[index] ??
+          viewerInfo?.phys?.channel_colors?.[index]?.hex ??
+          "#ffffff";
+        const win = displayState?.volume_channel_windows?.[index];
+        let manualWindow: { low: number; high: number } | null = null;
+        if (win && (Number.isFinite(win.low) || Number.isFinite(win.high))) {
+          const low = Math.min(1, Math.max(0, Number(win.low ?? 0)));
+          const high = Math.min(1, Math.max(0, Number(win.high ?? 1)));
+          manualWindow = { low, high: high > low ? high : Math.min(1, low + 0.0001) };
+        }
+        return {
+          index,
+          color: hexToLinearRgb(hex),
+          manualWindow,
+          invert: Boolean(displayState?.negative),
+        };
+      }),
+      gammaScale: (() => {
+        const gamma = Number(displayState?.volume_gamma);
+        return Number.isFinite(gamma) && gamma > 0 ? gamma : 1;
+      })(),
+      brightness: 1,
+      densityScale: scalarTransfer.densityScale,
+    }),
+    [enabledVolumeChannels, displayState, viewerInfo?.phys?.channel_colors, scalarTransfer.densityScale]
+  );
+
+  // Keep the latest config in a ref (read at renderer-creation) and push
+  // per-channel color/window/gamma into the live uniforms with no rebuild.
+  useEffect(() => {
+    multichannelRenderConfigRef.current = multichannelRenderConfig;
+    const uniforms = multichannelUniformsRef.current;
+    if (!uniforms) {
+      return;
+    }
+    applyMultichannelChannelUniforms(uniforms, multichannelRenderConfig, channelAutoWindowsRef.current);
+    requestRenderRef.current?.();
+  }, [multichannelRenderConfig]);
 
   useEffect(() => {
     sliceCursorCueRef.current = sliceCursorCue;
@@ -1704,6 +2178,7 @@ export function SliceStackVolumeCanvas({
     // already sliced; the clip effect keeps them live as Z scrubs without a
     // renderer rebuild.
     const initialClip = effectiveClipBoundsRef.current;
+    const mcConfig = multichannelRenderConfigRef.current;
     const material =
       resolvedSource.kind === "scalar"
         ? new THREE.ShaderMaterial({
@@ -1733,6 +2208,57 @@ export function SliceStackVolumeCanvas({
             },
             vertexShader: VERTEX_SHADER,
             fragmentShader: SCALAR_FRAGMENT_SHADER,
+            side: THREE.DoubleSide,
+            transparent: true,
+            depthWrite: false,
+          })
+        : resolvedSource.kind === "multichannel"
+        ? new THREE.ShaderMaterial({
+            uniforms: {
+              uChan0: { value: null },
+              uChan1: { value: null },
+              uChan2: { value: null },
+              uChan3: { value: null },
+              uChan4: { value: null },
+              uChan5: { value: null },
+              uChan6: { value: null },
+              uChan7: { value: null },
+              // uChannelCount stays 0 until the load step binds the textures, so
+              // the shader never samples an unbound slot.
+              uChannelCount: { value: 0 },
+              // Seed manual windows; the load step overwrites with auto-contrast
+              // (or manual) once each channel's data is available.
+              uChanLow: { value: Array.from({ length: MAX_VOLUME_CHANNELS }, (_v, i) => mcConfig?.channels[i]?.manualWindow?.low ?? 0) },
+              uChanHigh: { value: Array.from({ length: MAX_VOLUME_CHANNELS }, (_v, i) => mcConfig?.channels[i]?.manualWindow?.high ?? 1) },
+              uChanColor: {
+                value: Array.from({ length: MAX_VOLUME_CHANNELS }, (_v, i) => {
+                  const color = mcConfig?.channels[i]?.color;
+                  return new THREE.Vector3(color?.[0] ?? 0, color?.[1] ?? 0, color?.[2] ?? 0);
+                }),
+              },
+              uChanInvert: { value: Array.from({ length: MAX_VOLUME_CHANNELS }, (_v, i) => mcConfig?.channels[i]?.invert ?? false) },
+              uSteps: { value: sampleBudget.interactiveSteps },
+              uDensity: { value: density },
+              uDensityScale: { value: mcConfig?.densityScale ?? scalarRenderConfigRef.current.densityScale },
+              uVolumeScale: { value: new THREE.Vector3(normalizedScale.x, normalizedScale.y, normalizedScale.z) },
+              uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
+              uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
+              uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
+              uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
+              uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
+              uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
+              uGammaMin: { value: 0 },
+              uGammaMax: { value: 1 },
+              uGammaScale: { value: mcConfig?.gammaScale ?? 1 },
+              uBrightness: { value: mcConfig?.brightness ?? 1 },
+              uSignalFloor: { value: 0.08 },
+              uLightingEnabled: { value: true },
+              uLightingStrength: { value: 0.55 },
+              uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
+              uVoxelSpacing: { value: new THREE.Vector3(voxelSpacingRatio.x, voxelSpacingRatio.y, voxelSpacingRatio.z) },
+            },
+            vertexShader: VERTEX_SHADER,
+            fragmentShader: MULTICHANNEL_FRAGMENT_SHADER,
             side: THREE.DoubleSide,
             transparent: true,
             depthWrite: false,
@@ -1841,7 +2367,9 @@ export function SliceStackVolumeCanvas({
         showPlanes: shouldShowVolumeSliceCursorPlanes({
           cueVisible: initialSliceCursorCue.visible,
           interiorInspectionActive: volumeInteriorInspectionActive,
-          cutawayActive: cutawayActiveRef.current,
+          // Hide the flat cursor quads for the multichannel volume too — they wash
+          // out the fluorescence render (the light cross-bands).
+          cutawayActive: cutawayActiveRef.current || resolvedSource.kind === "multichannel",
         }),
       });
     }
@@ -1938,6 +2466,10 @@ export function SliceStackVolumeCanvas({
       uClipMin: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMin,
       uClipMax: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMax,
     };
+    if (resolvedSource.kind === "multichannel") {
+      // Point the incremental config effect at this material's live uniforms.
+      multichannelUniformsRef.current = material.uniforms as unknown as MultichannelUniformSet;
+    }
 
     const resize = () => {
       const width = Math.max(1, container.clientWidth || 1);
@@ -1970,6 +2502,7 @@ export function SliceStackVolumeCanvas({
     observer.observe(container);
 
     let texture3D: THREE.Data3DTexture | null = null;
+    const channelTextures: THREE.Data3DTexture[] = [];
     let animationFrame = 0;
     const animate = () => {
       if (disposed) {
@@ -1983,7 +2516,69 @@ export function SliceStackVolumeCanvas({
       animationFrame = window.requestAnimationFrame(animate);
     };
 
-    const loadPromise =
+    if (resolvedSource.kind === "multichannel") {
+      // Load each enabled channel's full-res volume (cached so a channel toggle
+      // reuses already-fetched channels), upload as its own R16F 3D texture, bind
+      // to uChan0..N, then publish uChannelCount last so the shader only ever reads
+      // bound slots. Per-channel color/window/gamma come from the config.
+      const samplerNames = ["uChan0", "uChan1", "uChan2", "uChan3", "uChan4", "uChan5", "uChan6", "uChan7"];
+      const channelIndices = resolvedSource.channelIndices.slice(0, MAX_VOLUME_CHANNELS);
+      const multichannelSource = resolvedSource;
+      const loadOne = async (channel: number): Promise<ScalarVolumePayload> => {
+        const key = channelVolumeCacheKey(fileId ?? "", channel, tIndex ?? 0);
+        const cached = channelVolumeCache.get(key);
+        if (cached) {
+          return cached;
+        }
+        const payload = await multichannelSource.loadChannel(channel);
+        rememberChannelVolume(key, payload);
+        return payload;
+      };
+      void Promise.all(
+        channelIndices.map(async (channel, slot) => {
+          const payload = await loadOne(channel);
+          // ImageJ-style auto-contrast from the actual data so background is
+          // transparent (used as the default window when no manual one is set).
+          channelAutoWindowsRef.current.set(channel, computeScalarVolumeAutoContrast(payload));
+          const texture = await scalarToVolumeTexture(payload, texturePolicy);
+          return { slot, texture };
+        })
+      )
+        .then((loaded) => {
+          if (disposed) {
+            loaded.forEach(({ texture }) => texture.dispose());
+            return;
+          }
+          const uniforms = material.uniforms as Record<string, { value: unknown }>;
+          loaded
+            .sort((a, b) => a.slot - b.slot)
+            .forEach(({ slot, texture }) => {
+              if (typeof renderer.initTexture === "function") {
+                renderer.initTexture(texture);
+              }
+              channelTextures[slot] = texture;
+              uniforms[samplerNames[slot]].value = texture;
+            });
+          const config = multichannelRenderConfigRef.current;
+          if (config) {
+            applyMultichannelChannelUniforms(
+              material.uniforms as unknown as MultichannelUniformSet,
+              config,
+              channelAutoWindowsRef.current
+            );
+          }
+          (uniforms.uChannelCount as { value: number }).value = channelTextures.filter(Boolean).length;
+          material.needsUpdate = true;
+          resize();
+        })
+        .catch((error: unknown) => {
+          if (disposed) {
+            return;
+          }
+          setRenderError(error instanceof Error ? error.message : "Volume channels failed to load");
+        });
+    } else {
+      const loadPromise =
       resolvedSource.kind === "scalar"
         ? resolvedSource.loadScalarVolume().then(async (payload) => {
             const texture = await scalarToVolumeTexture(payload, texturePolicy);
@@ -2047,6 +2642,7 @@ export function SliceStackVolumeCanvas({
         }
         setRenderError(error instanceof Error ? error.message : "Volume data failed to load");
       });
+    }
 
     resize();
     animate();
@@ -2055,6 +2651,7 @@ export function SliceStackVolumeCanvas({
       disposed = true;
       requestRenderRef.current = null;
       scalarUniformsRef.current = null;
+      multichannelUniformsRef.current = null;
       clipUniformsRef.current = null;
       cameraRigRef.current = null;
       sliceCursorPlanesRef.current = null;
@@ -2081,6 +2678,7 @@ export function SliceStackVolumeCanvas({
       cutFaceMaterial?.dispose();
       material.dispose();
       texture3D?.dispose();
+      channelTextures.forEach((texture) => texture?.dispose());
       renderer.dispose();
       renderer.domElement.parentNode?.removeChild(renderer.domElement);
     };
@@ -2119,6 +2717,9 @@ export function SliceStackVolumeCanvas({
     physicalGeometry.worldHeight,
     physicalGeometry.worldWidth,
     volumeClipCue.active,
+    fileId,
+    tIndex,
+    isPerChannelVolume,
   ]);
 
   useEffect(() => {
@@ -2133,11 +2734,11 @@ export function SliceStackVolumeCanvas({
       showPlanes: shouldShowVolumeSliceCursorPlanes({
         cueVisible: sliceCursorCue.visible,
         interiorInspectionActive: volumeInteriorInspectionActive,
-        cutawayActive,
+        cutawayActive: cutawayActive || isPerChannelVolume,
       }),
     });
     requestRenderRef.current?.();
-  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive]);
+  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive, isPerChannelVolume]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (
@@ -2292,7 +2893,7 @@ export function SliceStackVolumeCanvas({
           shouldShowVolumeSliceCursorPlanes({
             cueVisible: sliceCursorCue.visible,
             interiorInspectionActive: volumeInteriorInspectionActive,
-            cutawayActive,
+            cutawayActive: cutawayActive || isPerChannelVolume,
           })
             ? "true"
             : "false"

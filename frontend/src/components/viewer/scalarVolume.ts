@@ -93,6 +93,60 @@ const scalarVolumeOutputLength = (payload: ScalarVolumePayload): number => {
   return voxelCount > 0 ? Math.min(voxelCount, availableVoxels) : availableVoxels;
 };
 
+/**
+ * Auto-contrast window for a scalar volume in volume-rendering use, returned in
+ * the normalized [0,1] space the GPU texture stores. Unlike a 2D display
+ * auto-contrast (which brackets the full data range), a *volume* needs the low
+ * cutoff ABOVE the background bulk: even a small per-voxel background opacity
+ * accumulates into a flat fog over a deep z-stack. So we take a high low-percentile
+ * (the background of fluorescence is the dominant low-intensity mode) and a high
+ * high-percentile, computed from a subsampled histogram.
+ */
+export const computeScalarVolumeAutoContrast = (
+  payload: ScalarVolumePayload,
+  lowPercentile = 0.78,
+  highPercentile = 0.995
+): { low: number; high: number } => {
+  const bytesPerVoxel = Math.max(1, safePositiveInteger(payload.bytesPerVoxel) || 1);
+  const { rawMin, range } = scalarVolumeNormalizationRange(payload);
+  const view = new DataView(payload.data);
+  const voxelCount = scalarVolumeOutputLength(payload);
+  const BINS = 512;
+  const histogram = new Float64Array(BINS);
+  // Subsample for speed; a histogram is robust to it (cap ~2M samples).
+  const stride = Math.max(1, Math.floor(voxelCount / 2_000_000));
+  let sampled = 0;
+  for (let voxelIndex = 0; voxelIndex < voxelCount; voxelIndex += stride) {
+    const value = scalarVolumeSampleValue(view, voxelIndex * bytesPerVoxel, payload);
+    const finite = Number.isFinite(value) ? value : rawMin;
+    const normalized = Math.max(0, Math.min(0.999999, (finite - rawMin) / range));
+    histogram[Math.floor(normalized * BINS)] += 1;
+    sampled += 1;
+  }
+  if (sampled === 0) {
+    return { low: 0, high: 1 };
+  }
+  const percentileBin = (p: number): number => {
+    const target = sampled * Math.max(0, Math.min(1, p));
+    let cumulative = 0;
+    for (let i = 0; i < BINS; i += 1) {
+      cumulative += histogram[i];
+      if (cumulative >= target) {
+        return i;
+      }
+    }
+    return BINS - 1;
+  };
+  const low = percentileBin(lowPercentile) / BINS;
+  const highBin = percentileBin(highPercentile);
+  const high = Math.min(1, (highBin + 1) / BINS);
+  // Guarantee a usable, non-degenerate window.
+  if (high <= low) {
+    return { low: Math.min(low, 0.95), high: 1 };
+  }
+  return { low, high };
+};
+
 export const scalarVolumePayloadToTextureBytes = (payload: ScalarVolumePayload): Uint8Array => {
   const bytesPerVoxel = Math.max(1, safePositiveInteger(payload.bytesPerVoxel) || 1);
   const output = new Uint8Array(scalarVolumeOutputLength(payload));

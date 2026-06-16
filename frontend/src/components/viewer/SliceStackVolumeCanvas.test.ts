@@ -148,7 +148,9 @@ describe("volume camera fit", () => {
 
     expect(hudSafe.distance).toBeGreaterThan(relaxed.distance);
     expect(hudSafe.minDistance).toBeGreaterThan(2.7);
-    expect(hudSafe.orthographicFrustumHeight).toBeGreaterThan(3.5);
+    // Re-baselined for the tighter VOLUME_CAMERA_FIT_MARGIN (1.35 -> 1.15): at
+    // safeHeight ~0.70 the ortho height is (2 * 1.15) / 0.70 ~= 3.28.
+    expect(hudSafe.orthographicFrustumHeight).toBeGreaterThan(3.2);
     expect(hudSafe.maxDistance).toBeGreaterThan(hudSafe.distance);
   });
 

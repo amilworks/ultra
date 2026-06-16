@@ -12,7 +12,7 @@ export {
 } from "./chat-container";
 export { FileUpload, FileUploadContent, FileUploadTrigger } from "./file-upload";
 export { FeedbackBar } from "./feedback-bar";
-export { Loader } from "./loader";
+export { CircularLoader, Loader } from "./loader";
 export {
   Message,
   MessageAction,

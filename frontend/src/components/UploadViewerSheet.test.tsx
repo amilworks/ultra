@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/lib/api";
 import type { UploadedFileRecord, UploadViewerInfo } from "@/types";
 
-import { resolveDefaultEnhancement, UploadViewerWorkspace } from "./UploadViewerSheet";
+import { normalizeSurface, resolveDefaultEnhancement, UploadViewerWorkspace } from "./UploadViewerSheet";
 
 vi.mock("./viewer/ImageViewerShell", () => ({
   ImageViewerShell: ({ selectedDisplayState }: { selectedDisplayState: UploadViewerInfo["display_defaults"] }) => (
@@ -246,5 +246,40 @@ describe("resolveDefaultEnhancement", () => {
         )
       )
     ).toBe("hounsfield:35.000:75.000");
+  });
+});
+
+describe("normalizeSurface", () => {
+  const medicalVolume = (defaultSurface = "2d") =>
+    ({
+      is_volume: true,
+      viewer: { default_surface: defaultSurface, available_surfaces: ["2d", "metadata", "mpr", "volume"] },
+    }) as unknown as UploadViewerInfo;
+
+  it("defaults a NIfTI/DICOM volume to the 2D surface on first load (no current selection)", () => {
+    expect(normalizeSurface(medicalVolume())).toBe("2d");
+    expect(normalizeSurface(medicalVolume(), null)).toBe("2d");
+  });
+
+  it("forces 2D for a volume even if the backend default were mpr/volume", () => {
+    expect(normalizeSurface(medicalVolume("volume"))).toBe("2d");
+    expect(normalizeSurface(medicalVolume("mpr"))).toBe("2d");
+  });
+
+  it("preserves the surface the user explicitly switched to (does not force 2D back)", () => {
+    expect(normalizeSurface(medicalVolume(), "volume")).toBe("volume");
+    expect(normalizeSurface(medicalVolume(), "mpr")).toBe("mpr");
+  });
+
+  it("honors the backend default for a non-volume image", () => {
+    const photo = {
+      is_volume: false,
+      viewer: { default_surface: "2d", available_surfaces: ["2d", "metadata"] },
+    } as unknown as UploadViewerInfo;
+    expect(normalizeSurface(photo)).toBe("2d");
+  });
+
+  it("falls back to 2D when surface info is missing", () => {
+    expect(normalizeSurface(null)).toBe("2d");
   });
 });

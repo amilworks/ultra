@@ -1,7 +1,10 @@
 [Unit]
 Description=BisQue Ultra Go control plane
-After=network-online.target postgresql.service nats-server.service
-Wants=network-online.target
+# Postgres + NATS run as Docker containers (ultra-postgres / ultra-nats), not as
+# host postgresql/nats-server units. Order after docker + those units when present;
+# control-plane migrate-on-start retries until the DB is reachable regardless.
+After=network-online.target docker.service ultra-postgres.service ultra-nats.service
+Wants=network-online.target docker.service
 
 [Service]
 Type=simple

@@ -40,6 +40,20 @@ def test_convert_command_custom_spec():
     assert cmd[-1] == "compression zip tiles 1024 pyramid topdirs"
 
 
+def test_derive_pyramid_creates_destination_directory(tmp_path):
+    # imgcnv won't mkdir the output dir; derive_pyramid must, or it fails with
+    # "Cannot write into" on a fresh derived/ (regression: first-upload in a clean
+    # docker volume). Use `true` as a stand-in engine so no native lib is needed.
+    src = tmp_path / "src.tif"
+    src.write_bytes(b"x")
+    dst = tmp_path / "derived" / "out.tif"
+    from ultra_deepagents.imaging.convert import derive_pyramid
+
+    result = derive_pyramid(str(src), str(dst), imgcnv_bin="true")
+    assert result.ok
+    assert dst.parent.is_dir()
+
+
 def test_meta_command():
     assert meta_command("a.nd2", imgcnv_bin="imgcnv") == ["imgcnv", "-i", "a.nd2", "-meta", "-verbose", "0"]
 

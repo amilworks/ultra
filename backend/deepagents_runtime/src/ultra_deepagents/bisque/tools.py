@@ -108,6 +108,66 @@ def search_bisque_resources(
     )
 
 
+def list_bisque_module_runs(
+    settings: RuntimeSettings,
+    *,
+    scope: str = "owner",
+    sort: str = "recent",
+    limit: int = 25,
+    status: str = "",
+    count_all: bool = False,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """List recent BisQue module-execution (MEX) runs with status + module + time."""
+    response = search_bisque_resources(
+        settings,
+        resource_type="mex",
+        scope=scope or "owner",
+        sort=sort or "recent",
+        limit=limit,
+        count_all=count_all,
+        context=context,
+    )
+    results = response.get("results") if isinstance(response, dict) else None
+    runs = [item for item in results if isinstance(item, dict)] if isinstance(results, list) else []
+    wanted = str(status or "").strip().upper()
+    if wanted:
+        runs = [run for run in runs if str(run.get("status") or "").strip().upper() == wanted]
+    summary = [
+        {
+            "mex_uri": str(run.get("resource_uri") or "").strip(),
+            "mex_uniq": str(run.get("resource_uniq") or "").strip(),
+            "module_name": str(run.get("module_name") or run.get("name") or "").strip(),
+            "status": str(run.get("status") or "").strip(),
+            "created_at": str(run.get("created_at") or "").strip(),
+            "client_view_url": str(run.get("client_view_url") or "").strip(),
+        }
+        for run in runs
+    ]
+    return {
+        "ok": True,
+        "count": response.get("count", len(summary)) if isinstance(response, dict) else len(summary),
+        "runs": summary,
+    }
+
+
+def get_bisque_module_run(
+    settings: RuntimeSettings,
+    *,
+    mex_uri: str,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """Fetch one module run's structured inputs/outputs (download-ready result resources)."""
+    cleaned = str(mex_uri or "").strip()
+    if not cleaned:
+        return {"ok": False, "error": "mex_uri_required"}
+    payload = {"mex_uri": cleaned} if "/" in cleaned else {"mex_uniq": cleaned}
+    response = control_post_json(settings, "/v2/bisque/module-run", payload, context=context)
+    if isinstance(response, dict) and "ok" not in response:
+        response["ok"] = bool(str(response.get("resource_uri") or "").strip())
+    return response
+
+
 def download_bisque_resources(
     settings: RuntimeSettings,
     *,
@@ -475,12 +535,49 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
             )
         )
 
+    @tool
+    def bisque_module_runs(
+        runtime: ToolRuntime[AgentRunContext],
+        mex_uri: str = "",
+        scope: str = "owner",
+        sort: str = "recent",
+        limit: int = 25,
+        status: str = "",
+    ) -> str:
+        """List BisQue module-execution (MEX) runs, or inspect one run's results.
+
+        Answer "what modules have I run recently on BisQue?" by calling with no
+        mex_uri: returns each run's module_name, status (FINISHED/RUNNING/FAILED),
+        created_at, and mex_uri. Pass status="FINISHED" to filter.
+
+        To pull a result from a run (e.g. a segmentation mask), pass mex_uri (the run's
+        resource_uri or resource_uniq): returns the run's structured inputs and outputs.
+        Each resource-typed output carries resource_uri (feed to bisque_download_resource
+        to materialize it into Ultra for analysis) and client_view_url (report to the user
+        to view it on BisQue).
+        """
+        if str(mex_uri or "").strip():
+            return _json_text(
+                get_bisque_module_run(settings, mex_uri=mex_uri, context=runtime.context)
+            )
+        return _json_text(
+            list_bisque_module_runs(
+                settings,
+                scope=scope,
+                sort=sort,
+                limit=limit,
+                status=status,
+                context=runtime.context,
+            )
+        )
+
     return [
         bisque_search_resources,
         bisque_download_resource,
         bisque_upload_files,
         bisque_upload_workspace_files,
         bisque_create_dataset,
+        bisque_module_runs,
     ]
 
 

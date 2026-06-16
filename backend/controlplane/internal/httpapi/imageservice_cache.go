@@ -142,15 +142,15 @@ func imageCacheKey(endpoint string, query url.Values) (string, bool) {
 // a cache hit replays captured bytes without touching the engine; a miss fetches, serves, and
 // stores a successful response. Falls back to the plain streaming proxy when the cache is
 // disabled or the request can't be keyed.
-func (deps ServerDeps) proxyImageServiceCached(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values) {
+func (deps ServerDeps) proxyImageServiceCached(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values, fallback ...http.HandlerFunc) {
 	cache := deps.imageCache
 	if cache == nil {
-		deps.proxyImageService(w, r, endpoint, query)
+		deps.proxyImageService(w, r, endpoint, query, fallback...)
 		return
 	}
 	key, ok := imageCacheKey(endpoint, query)
 	if !ok {
-		deps.proxyImageService(w, r, endpoint, query)
+		deps.proxyImageService(w, r, endpoint, query, fallback...)
 		return
 	}
 	if resp, hit := cache.get(key); hit {
@@ -170,6 +170,10 @@ func (deps ServerDeps) proxyImageServiceCached(w http.ResponseWriter, r *http.Re
 	}
 	resp, err := imageServiceHTTPClient.Do(req)
 	if err != nil {
+		if len(fallback) > 0 && fallback[0] != nil {
+			fallback[0](w, r) // image service unreachable -> legacy native path
+			return
+		}
 		writeError(w, http.StatusBadGateway, fmt.Errorf("image service request failed: %w", err))
 		return
 	}

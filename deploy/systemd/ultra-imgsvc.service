@@ -1,0 +1,33 @@
+[Unit]
+Description=BisQue Ultra image-service (libbioimage decode/convert + pyramid tiles)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Self-contained image-service image (libbioimage baked in; serves on 8090).
+# ULTRA_IMGSVC_IMAGE is set in the env file to the registry-qualified, digest- or
+# sha-pinned tag (kept out of git). Bind defaults to all interfaces; restrict
+# reachability to the edge node via the host firewall / DOCKER-USER chain.
+EnvironmentFile=/etc/ultra/ultra-imgsvc.env
+ExecStartPre=/bin/mkdir -p ${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch}
+ExecStartPre=-/usr/bin/docker rm -f ultra-imgsvc
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-imgsvc \
+  --env-file /etc/ultra/ultra-imgsvc.env \
+  -p ${ULTRA_IMGSVC_BIND:-0.0.0.0}:${ULTRA_IMGSVC_PORT:-8099}:8090 \
+  -v ${ULTRA_CONTROL_UPLOAD_ROOT:-/srv/ultra/shared/uploads}:${ULTRA_CONTROL_UPLOAD_ROOT:-/srv/ultra/shared/uploads} \
+  -v ${ULTRA_CONTROL_ARTIFACT_ROOT:-/srv/ultra/shared/artifacts}:${ULTRA_CONTROL_ARTIFACT_ROOT:-/srv/ultra/shared/artifacts} \
+  -v ${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch}:${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch} \
+  -e TMPDIR=${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch} \
+  --memory=${ULTRA_IMGSVC_MEMORY:-96g} \
+  ${ULTRA_IMGSVC_IMAGE:-ultra-image-service:current} \
+  --workers ${ULTRA_IMGSVC_WORKERS:-12}'
+ExecStop=/usr/bin/docker stop ultra-imgsvc
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

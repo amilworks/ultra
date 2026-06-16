@@ -90,3 +90,73 @@ describe("DirectPlaneImage viewport math", () => {
     expect(lineZoomOut).toBeLessThan(1);
   });
 });
+
+// Mirrors the two-finger pinch handler in DirectPlaneImage/DeepZoomCanvas: factor is
+// the ratio of the current to previous finger distance, anchored at the finger
+// midpoint (rect-relative). Phones emit no wheel events, so this is the only zoom
+// path on touch — these lock the math the handlers feed into zoomImageViewportAtPoint.
+describe("DirectPlaneImage pinch-zoom gesture math", () => {
+  const dist = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    Math.hypot(b.x - a.x, b.y - a.y);
+  const mid = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  });
+
+  it("scales by the ratio of the two-finger distance (spread = zoom in)", () => {
+    const image = { width: 1000, height: 800 };
+    const viewport = { width: 500, height: 400 };
+    const current = { centerX: 0, centerY: 0, scale: 0.5 };
+
+    // Fingers spread from 100px to 200px apart, centered on the viewport center.
+    const startA = { x: 200, y: 200 };
+    const startB = { x: 300, y: 200 };
+    const endA = { x: 150, y: 200 };
+    const endB = { x: 350, y: 200 };
+    const factor = dist(endA, endB) / dist(startA, startB);
+    const anchor = mid(endA, endB); // rect origin (0,0), so no offset
+
+    const next = zoomImageViewportAtPoint(current, anchor, current.scale * factor, image, viewport, 0.25, 16);
+
+    expect(factor).toBe(2);
+    expect(next.scale).toBeCloseTo(1, 5);
+    // Anchored at the viewport center → center does not drift.
+    expect(next.centerX).toBeCloseTo(0, 5);
+    expect(next.centerY).toBeCloseTo(0, 5);
+  });
+
+  it("pinch in (fingers together) zooms out", () => {
+    const image = { width: 1000, height: 800 };
+    const viewport = { width: 500, height: 400 };
+    const current = { centerX: 0, centerY: 0, scale: 1 };
+    const factor = dist({ x: 200, y: 200 }, { x: 240, y: 200 }) / dist({ x: 180, y: 200 }, { x: 300, y: 200 });
+
+    const next = zoomImageViewportAtPoint(current, { x: 250, y: 200 }, current.scale * factor, image, viewport, 0.25, 16);
+
+    expect(factor).toBeLessThan(1);
+    expect(next.scale).toBeLessThan(1);
+  });
+
+  it("keeps the world point under the two-finger midpoint anchored while zooming", () => {
+    const image = { width: 1000, height: 800 };
+    const viewport = { width: 500, height: 400 };
+    const current = { centerX: 0, centerY: 0, scale: 0.5 };
+    // Off-center midpoint, fingers spread 80px -> 160px (factor 2).
+    const anchor = mid({ x: 320, y: 120 }, { x: 400, y: 120 });
+    const factor = dist({ x: 280, y: 120 }, { x: 440, y: 120 }) / dist({ x: 320, y: 120 }, { x: 400, y: 120 });
+    const worldBefore = {
+      x: current.centerX + (anchor.x - viewport.width / 2) / current.scale,
+      y: current.centerY - (anchor.y - viewport.height / 2) / current.scale,
+    };
+
+    const next = zoomImageViewportAtPoint(current, anchor, current.scale * factor, image, viewport, 0.25, 16);
+    const worldAfter = {
+      x: next.centerX + (anchor.x - viewport.width / 2) / next.scale,
+      y: next.centerY - (anchor.y - viewport.height / 2) / next.scale,
+    };
+
+    expect(factor).toBe(2);
+    expect(worldAfter.x).toBeCloseTo(worldBefore.x, 5);
+    expect(worldAfter.y).toBeCloseTo(worldBefore.y, 5);
+  });
+});

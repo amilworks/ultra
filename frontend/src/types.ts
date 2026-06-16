@@ -2060,12 +2060,23 @@ export type UploadViewerInfo = {
     volume_channel?: number | null;
     volume_view_preset?: string | null;
     volume_camera_mode?: string | null;
+    // 3D ray-projection, decoupled from the 2D `fusion_method` (which combines
+    // channels in a flat image). MIP maxes each ray; composite integrates front-to-
+    // back. Undefined → the renderer's per-source default (composite for multichannel
+    // fluorescence, which is dense; MIP would flatten it into a cloud).
+    volume_projection?: "mip" | "composite" | null;
     volume_clip_min?: { x: number; y: number; z: number };
     volume_clip_max?: { x: number; y: number; z: number };
     // Z-cursor cutaway: when true the Volume tab cuts the volume at the live Z
     // slice and exposes a high-resolution interior cross-section (overview camera),
     // independent of the manual volume_clip box.
     volume_cutaway?: boolean | null;
+    // Per-channel intensity window (normalized [0,1]) for the multichannel volume
+    // LUT, indexed by channel. Absent -> full range per channel.
+    volume_channel_windows?: Array<{ low: number; high: number } | null> | null;
+    // Gamma tone-curve exponent for the multichannel volume (vole-core GAMMA_SCALE):
+    // default 1 (linear); >1 darkens midtones, <1 lifts faint structure.
+    volume_gamma?: number | null;
   };
   service_urls?: {
     preview?: string;
@@ -2080,6 +2091,8 @@ export type UploadViewerInfo = {
   };
   metadata: {
     reader: string;
+    format?: string;
+    acquisition?: Record<string, string | number>;
     dims_order: string;
     array_shape: number[];
     array_dtype: string;
@@ -2099,6 +2112,13 @@ export type UploadViewerInfo = {
     } | null;
     scene?: string | null;
     scene_count: number;
+    /** Tiled-mosaic acquisition (multi-field stage scan). Null/absent for a normal
+     *  single-field image. An unstitched mosaic shows per-field illumination seams. */
+    mosaic?: {
+      tiles: number;
+      stitched?: boolean;
+      overlap?: number;
+    } | null;
     header?: Record<string, string>;
     filename_hints?: Record<string, unknown>;
     exif?: Record<string, string>;
@@ -2252,6 +2272,7 @@ export type UploadViewerInfo = {
       volume_channel?: number | null;
       volume_view_preset?: string | null;
       volume_camera_mode?: string | null;
+      volume_projection?: "mip" | "composite" | null;
     };
     service_urls?: {
       preview?: string;

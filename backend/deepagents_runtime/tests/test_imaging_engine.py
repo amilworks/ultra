@@ -198,6 +198,34 @@ def test_thumbnail_does_not_retry_unrelated_value_error():
     assert calls["n"] == 1  # a real error surfaces immediately, never retried
 
 
+def test_thumbnail_prefers_actual_czi_pyramid_level_count():
+    czi_meta = {
+        "image_num_x": 5913,
+        "image_num_y": 5679,
+        "image_pixel_depth": 16,
+        "image_pixel_format": "unsigned integer",
+        "image_num_c": 1,
+        "image_num_resolution_levels": 10,
+        "image_resolution_level_scales": "1.0,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.007812,0.003906,0.001953",
+        "image_num_resolution_levels_actual": 4,
+        "image_resolution_level_scales_actual": "1.0,0.5,0.25,0.125",
+    }
+    seen: dict[str, str] = {}
+
+    def render(self, path, pipeline):
+        seen["path"] = path
+        seen["pipeline"] = pipeline
+        return _PNG_MAGIC
+
+    engine = _engine_with_render(czi_meta, render)
+
+    assert engine.thumbnail("/scene.czi", max_size=256) == _PNG_MAGIC
+    assert seen == {
+        "path": "/scene.czi",
+        "pipeline": "-res-level 3 -resize 256,256,BC,MX -depth 8,D,U",
+    }
+
+
 def test_libbioimage_slice_scrub_reads_bounded_level_but_settled_reads_native():
     # A large-plane z-stack: scrub frames (full_resolution=False) read a bounded
     # pyramid level; the settled view (full_resolution=True) reads the native plane

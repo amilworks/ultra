@@ -361,6 +361,111 @@ describe("ImageViewerShell", () => {
     );
   });
 
+  it("offers a curated right-click context menu on the 2D surface", async () => {
+    const resourceDownloadUrl = vi.fn(() => "https://ultra.example.org/v2/resources/file-123/download");
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+      resourceDownloadUrl,
+    } as unknown as ApiClient;
+
+    const onSurfaceChange = vi.fn();
+    render(
+      <ImageViewerShell
+        viewerInfo={viewerInfo}
+        apiClient={apiClient}
+        selectedSurface="2d"
+        onSurfaceChange={onSurfaceChange}
+        selectedDisplayState={viewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+        debouncedX={0}
+        debouncedY={0}
+        debouncedZ={0}
+        debouncedT={0}
+        xAxisSize={4}
+        yAxisSize={1}
+        zAxisSize={1}
+        tAxisSize={1}
+        setSelectedIndex={() => {}}
+        selectedCaption=""
+        captionLoading={false}
+      />
+    );
+
+    const surface = document.querySelector('[data-viewer-surface="2d"]');
+    expect(surface).not.toBeNull();
+    fireEvent.contextMenu(surface as HTMLElement);
+
+    // Curated, high-value actions are present; zoom in/out are intentionally NOT in the
+    // menu (they duplicate the always-visible toolbar buttons).
+    expect(await screen.findByText("Reset view")).toBeInTheDocument();
+    expect(screen.getByText("Copy current view")).toBeInTheDocument();
+    expect(screen.getByText("Export current view (PNG)")).toBeInTheDocument();
+    expect(screen.getByText("Download original image")).toBeInTheDocument();
+    expect(screen.getByText("View metadata")).toBeInTheDocument();
+    expect(screen.queryByText("Zoom in")).not.toBeInTheDocument();
+    expect(screen.queryByText("Zoom out")).not.toBeInTheDocument();
+
+    // "View metadata" jumps to the metadata surface via the shell's surface change.
+    fireEvent.click(screen.getByText("View metadata"));
+    expect(onSurfaceChange).toHaveBeenCalledWith("metadata");
+  });
+
+  it("tags the 2D canvas wrapper so it fills the available height (volume + non-volume)", () => {
+    // The fill chain (.viewer-workspace-surface-2d .viewer-canvas-layout-2d { height:100% })
+    // only reaches the canvas if BOTH the volume and non-volume wrappers carry the
+    // shared class — a non-volume image previously had an unclassed wrapper, so the
+    // canvas left empty panel space below it. Guard the class on both branches.
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+    const props = {
+      apiClient,
+      selectedSurface: "2d" as const,
+      onSurfaceChange: () => {},
+      updateSelectedDisplay: () => {},
+      clampedIndices: { x: 0, y: 0, z: 0, t: 0 },
+      debouncedX: 0,
+      debouncedY: 0,
+      debouncedZ: 0,
+      debouncedT: 0,
+      xAxisSize: 4,
+      yAxisSize: 1,
+      zAxisSize: 1,
+      tAxisSize: 1,
+      setSelectedIndex: () => {},
+      selectedCaption: "",
+      captionLoading: false,
+    };
+    // Non-volume photo: wrapper carries the shared fill class, NOT the volume class.
+    const { container, unmount } = render(
+      <ImageViewerShell {...props} viewerInfo={viewerInfo} selectedDisplayState={viewerInfo.display_defaults ?? null} />
+    );
+    const flat = container.querySelector(".viewer-canvas-layout-2d");
+    expect(flat).not.toBeNull();
+    expect(flat?.classList.contains("viewer-volume-layout-2d")).toBe(false);
+    unmount();
+
+    // Volume: wrapper carries BOTH the volume layout class and the shared fill class.
+    const volumeInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      is_volume: true,
+      axis_sizes: { ...viewerInfo.axis_sizes, Z: 40 },
+    };
+    const { container: volContainer } = render(
+      <ImageViewerShell {...props} viewerInfo={volumeInfo} selectedDisplayState={volumeInfo.display_defaults ?? null} />
+    );
+    const volWrapper = volContainer.querySelector(".viewer-volume-layout-2d");
+    expect(volWrapper).not.toBeNull();
+    expect(volWrapper?.classList.contains("viewer-canvas-layout-2d")).toBe(true);
+  });
+
   it("lets direct multichannel images choose the visualized channel", async () => {
     const multichannelViewerInfo: UploadViewerInfo = {
       ...viewerInfo,
@@ -672,9 +777,6 @@ describe("ImageViewerShell", () => {
       expect(imageUrl).toContain("channels=2");
     });
 
-    fireEvent.change(screen.getByLabelText("Z slice"), { target: { value: "0" } });
-    await waitFor(() => expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("z=0"));
-
     fireEvent.click(screen.getByRole("button", { name: "DAPI" }));
     await waitFor(() => {
       const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
@@ -682,6 +784,16 @@ describe("ImageViewerShell", () => {
       expect(imageUrl).not.toContain("channels=0%2C2");
       expect(imageUrl).not.toContain("channels=0,2");
     });
+
+    // The Z slice control is now the calm shadcn Slider (a Radix component, not a
+    // native range), so it is driven via keyboard: hovering the 2D viewer and pressing
+    // arrow keys steps Z. z starts at 1, so ArrowDown -> z=0, then ArrowUp -> z=1.
+    const shell = document.querySelector(".viewer-shell") as HTMLElement;
+    fireEvent.pointerEnter(shell);
+    fireEvent.keyDown(shell, { key: "ArrowDown" });
+    await waitFor(() => expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("z=0"));
+    fireEvent.keyDown(shell, { key: "ArrowUp" });
+    await waitFor(() => expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("z=1"));
   });
 
   it("shows source voxel values for the single selected scalar MPR channel", async () => {

@@ -141,8 +141,8 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 
 func isWorkerBisqueEndpointPath(path string) bool {
 	switch path {
-	case "/v2/bisque/search", "/v2/bisque/download", "/v2/bisque/upload",
-		"/v2/bisque/datasets", "/v2/bisque/push", "/v2/uploads":
+	case "/v2/bisque/search", "/v2/bisque/module-run", "/v2/bisque/download",
+		"/v2/bisque/upload", "/v2/bisque/datasets", "/v2/bisque/push", "/v2/uploads":
 		return true
 	default:
 		return false
@@ -467,6 +467,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/caption", deps.handleGetUploadCaption)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
+			r.Post("/bisque/module-run", deps.handleBisqueModuleRun)
 			r.Post("/bisque/download", deps.handleImportBisqueResources)
 			r.Post("/bisque/upload", deps.handleBisqueUpload)
 			r.Post("/bisque/datasets", deps.handleBisqueCreateDataset)
@@ -992,11 +993,20 @@ func (deps ServerDeps) handleWorkOSBisqueLink(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, session)
 }
 
+// localBootstrapAccounts returns the built-in dev-auth accounts. The admin
+// password is read from ULTRA_CONTROL_DEV_ADMIN_PASSWORD so beta/production
+// deployments can set a real credential without a code change; it defaults to
+// "admin" to preserve local-dev behavior. Only the admin account carries a
+// password, so it is the sole credential-loginable bootstrap account.
 func localBootstrapAccounts() []localBootstrapAccount {
+	adminPassword := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_DEV_ADMIN_PASSWORD"))
+	if adminPassword == "" {
+		adminPassword = "admin"
+	}
 	return []localBootstrapAccount{
 		{
 			Username:    "admin",
-			Password:    "admin",
+			Password:    adminPassword,
 			UserID:      "bisque:admin",
 			DisplayName: "Admin",
 			Role:        "admin",
@@ -1413,12 +1423,19 @@ func (deps ServerDeps) hasLinkedBisqueSession(ctx context.Context, r *http.Reque
 	if deps.BisqueCredentials == nil {
 		return false
 	}
-	sessionID := bisqueSessionIDFromRequest(r)
-	if sessionID == "" {
+	if sessionID := bisqueSessionIDFromRequest(r); sessionID != "" {
+		if _, found, err := deps.BisqueCredentials.GetWithContext(ctx, sessionID); found && err == nil {
+			return true
+		}
+	}
+	// Linked status is a durable property of the account, not the session
+	// cookie: a user who linked BisQue stays linked after the cookie expires.
+	principal := deps.principalFromRequest(r, "")
+	if strings.TrimSpace(principal.UserID) == "" {
 		return false
 	}
-	_, found, err := deps.BisqueCredentials.GetWithContext(ctx, sessionID)
-	return err == nil && found
+	_, _, ok := deps.BisqueCredentials.ResolveLinkedSessionForUser(ctx, principal.UserID, principal.OrgID)
+	return ok
 }
 
 func devAuthSession(username string, mode string, guestProfile map[string]any, adminEnabled bool) map[string]any {
@@ -6963,6 +6980,12 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 	selectedZ := positiveIntOr(meta.SizeZ, 1) / 2
 	selectedC := omeDefaultChannelIndex(meta)
 	channelColors := omeChannelColorStrings(meta)
+	// OME-TIFF is non-medical microscopy: 2D-only for now. The multichannel 3D render
+	// is not shippable yet, so we lead with reliable 2D + first-class Z/T scrubbing.
+	// volume_mode stays "slice_stack" below so the 2D Z scrub still knows it is a
+	// stack — only the 3D surfaces are withheld. Mirrors the engine-backed viewerinfo
+	// policy (3D surfaces are medical-only); medical NIfTI/DICOM keep 3D elsewhere.
+	availableSurfaces := []string{"2d", "metadata"}
 	displayCapabilities := []string{"slice_navigation", "intensity_window"}
 	viewerCapabilities := []string{"webgl_first_paint", "direct_delivery", "linear_sampling", "slice_navigation"}
 	measurementPolicy := "pixel-only"
@@ -7052,7 +7075,7 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 			"warmup_mode":          "lazy",
 			"backend_mode":         "direct",
 			"default_surface":      "2d",
-			"available_surfaces":   []string{"2d", "metadata"},
+			"available_surfaces":   availableSurfaces,
 			"default_axis":         "z",
 			"slice_axes":           []string{"z"},
 			"channel_mode":         "single",

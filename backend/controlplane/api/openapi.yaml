@@ -1431,6 +1431,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/module-run:
+    post:
+      operationId: getBisqueModuleRun
+      description: >-
+        Fetch a single BisQue module-execution (MEX) at view=deep and return its
+        status, module, and structured inputs/outputs. Resource-typed outputs (e.g. a
+        Segmentation image) carry a download-ready resource_uri and a viewable
+        client_view_url, so a result mask can be pulled via /v2/bisque/download.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mex_uri: { type: string }
+                mex_uniq: { type: string }
+                mex: { type: string }
+      responses:
+        "200":
+          description: The module run with resolved inputs and outputs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueResource"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/bisque/download:
     post:
       operationId: downloadBisqueResources
@@ -3805,6 +3836,16 @@ components:
         uploaded:
           $ref: "#/components/schemas/V2UploadedFileRecord"
         duplicate: { type: boolean }
+    V2BisqueMexParam:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        type: { type: string, nullable: true }
+        value: { type: string, nullable: true }
+        resource_uri: { type: string, nullable: true }
+        resource_uniq: { type: string, nullable: true }
+        client_view_url: { type: string, nullable: true }
     V2BisqueResource:
       type: object
       required: [resource_uri]
@@ -3818,6 +3859,17 @@ components:
           additionalProperties: { type: string }
         client_view_url: { type: string, nullable: true }
         image_service_url: { type: string, nullable: true }
+        status: { type: string, nullable: true, description: "Module run status (mex value), e.g. FINISHED/RUNNING/FAILED." }
+        module_name: { type: string, nullable: true }
+        module_uri: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+        started_at: { type: string, nullable: true }
+        inputs:
+          type: array
+          items: { $ref: "#/components/schemas/V2BisqueMexParam" }
+        outputs:
+          type: array
+          items: { $ref: "#/components/schemas/V2BisqueMexParam" }
     V2BisqueSearchResponse:
       type: object
       required: [count, results]

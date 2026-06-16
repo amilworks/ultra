@@ -1,0 +1,32 @@
+[Unit]
+Description=BisQue Ultra Postgres (control-plane DB, local disk)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Data MUST live on local disk (never NFS): NFSv3 fsync/locking is unsafe for
+# Postgres. Default points at a node-local path, not the barrel symlink tree.
+EnvironmentFile=/etc/ultra/postgres-control.env
+ExecStartPre=/bin/mkdir -p ${ULTRA_PG_DATA_DIR:-/srv/ultra-local/postgres-control}
+ExecStartPre=-/usr/bin/docker rm -f ultra-postgres
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-postgres \
+  --env-file /etc/ultra/postgres-control.env \
+  -p 127.0.0.1:${ULTRA_PG_PORT:-55433}:5432 \
+  -v ${ULTRA_PG_DATA_DIR:-/srv/ultra-local/postgres-control}:/var/lib/postgresql \
+  --shm-size=${ULTRA_PG_SHM_SIZE:-256m} \
+  postgres:18-alpine \
+  -c shared_buffers=${ULTRA_PG_SHARED_BUFFERS:-4GB} \
+  -c effective_cache_size=${ULTRA_PG_EFFECTIVE_CACHE_SIZE:-24GB} \
+  -c work_mem=${ULTRA_PG_WORK_MEM:-64MB} \
+  -c maintenance_work_mem=${ULTRA_PG_MAINTENANCE_WORK_MEM:-512MB} \
+  -c max_connections=${ULTRA_PG_MAX_CONNECTIONS:-50}'
+ExecStop=/usr/bin/docker stop ultra-postgres
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

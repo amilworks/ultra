@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { CircularLoader } from "@/components/prompt-kit";
 
 type RunningStatusPillProps = {
   className?: string;
@@ -20,9 +21,11 @@ export function RunningStatusPill({
       aria-label={label}
       title={label}
     >
-      <span className="running-status-pill-beacon" aria-hidden="true">
-        <span className="running-status-pill-beacon-core" />
-      </span>
+      <CircularLoader
+        decorative
+        size={size === "compact" ? "sm" : "md"}
+        className="running-status-pill-loader"
+      />
       <span className="sr-only">{label}</span>
     </span>
   );

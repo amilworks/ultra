@@ -794,6 +794,37 @@ WHERE session_id = $1`,
 	return err
 }
 
+// GetActiveBisqueCredentialForUser resolves a user's linked BisQue credential by
+// account identity so linked detection no longer depends on the session cookie.
+// Backed by the control_bisque_credentials_user_status_idx index.
+func (s *PostgresStore) GetActiveBisqueCredentialForUser(ctx context.Context, userID string, orgID string) (domain.BisqueCredentialRecord, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	orgID = strings.TrimSpace(orgID)
+	row := s.pool.QueryRow(ctx, `
+SELECT session_id, user_id, COALESCE(org_id, ''), root_url, username,
+       password_ciphertext, password_nonce, password_key_id, password_algorithm,
+       status, last_verified_at, created_at, updated_at, metadata
+FROM control_bisque_credentials
+WHERE user_id = $1 AND status = 'active'
+  AND ($2 = '' OR COALESCE(org_id, '') = '' OR COALESCE(org_id, '') = $2)
+ORDER BY updated_at DESC
+LIMIT 1`,
+		userID,
+		orgID,
+	)
+	record, err := scanBisqueCredential(row)
+	if errors.Is(err, ErrNotFound) {
+		return domain.BisqueCredentialRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.BisqueCredentialRecord{}, false, err
+	}
+	return record, true, nil
+}
+
 func (s *PostgresStore) UpsertWorkerHeartbeat(ctx context.Context, input domain.UpsertWorkerHeartbeatInput) (domain.WorkerHeartbeatRecord, error) {
 	now := domain.Now()
 	workerID := strings.TrimSpace(input.WorkerID)

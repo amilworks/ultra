@@ -11403,6 +11403,184 @@ func TestV2BisqueSearchResultsCarryCanonicalViewURL(t *testing.T) {
 	}
 }
 
+// nphMexDeepXML mirrors the live deep view of a finished module run: a <mex>
+// with a status value attr, a module type uri, and nested inputs/outputs where
+// the Segmentation output points at the resulting image resource.
+func nphMexDeepXML(root string) string {
+	return `<mex uri="` + root + `/data_service/00-MEX" resource_uniq="00-MEX" name="nph_prediction_V2" ` +
+		`type="` + root + `/data_service/00-MODULE" value="FINISHED" created="2026-06-12T01:07:16">` +
+		`<tag name="inputs">` +
+		`<tag name="resource_url" type="image" value="` + root + `/data_service/00-INPUT"/>` +
+		`<tag name="threshold" type="number" value="0.05"/>` +
+		`<tag name="mex_url" type="system-input"/>` +
+		`</tag>` +
+		`<tag name="outputs">` +
+		`<tag name="Segmentation" type="image" value="` + root + `/data_service/00-SEG"><template/></tag>` +
+		`</tag>` +
+		`<tag name="start-time" value="2026-06-12 01:07:16"/>` +
+		`</mex>`
+}
+
+func TestV2BisqueModuleRunExtractsStatusAndOutputs(t *testing.T) {
+	t.Parallel()
+
+	var gotView string
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotView = r.URL.Query().Get("view")
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(nphMexDeepXML(bisque.URL)))
+	}))
+	defer bisque.Close()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/module-run", strings.NewReader(`{"mex_uri":"`+bisque.URL+`/data_service/00-MEX"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("module-run status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if gotView != "deep" {
+		t.Fatalf("view = %q, want deep so nested outputs are present", gotView)
+	}
+	var run BisqueResource
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("decode module run: %v", err)
+	}
+	if run.Status != "FINISHED" {
+		t.Fatalf("status = %q, want FINISHED (the mex value attr)", run.Status)
+	}
+	if run.ModuleName != "nph_prediction_V2" || run.ModuleURI != bisque.URL+"/data_service/00-MODULE" {
+		t.Fatalf("module = %q / %q", run.ModuleName, run.ModuleURI)
+	}
+	if run.ImageServiceURL != "" {
+		t.Fatalf("a mex must not get an image_service_url: %q", run.ImageServiceURL)
+	}
+	// Outputs: the Segmentation result resource is extracted with a viewable link.
+	if len(run.Outputs) != 1 {
+		t.Fatalf("outputs = %+v, want one (Segmentation)", run.Outputs)
+	}
+	seg := run.Outputs[0]
+	if seg.Name != "Segmentation" || seg.Type != "image" || seg.ResourceURI != bisque.URL+"/data_service/00-SEG" {
+		t.Fatalf("segmentation output = %+v", seg)
+	}
+	if seg.ResourceUniq != "00-SEG" {
+		t.Fatalf("segmentation resource_uniq = %q, want 00-SEG", seg.ResourceUniq)
+	}
+	if seg.ClientViewURL != bisque.URL+"/client_service/view?resource="+bisque.URL+"/data_service/00-SEG" {
+		t.Fatalf("segmentation client_view_url = %q", seg.ClientViewURL)
+	}
+	// Inputs: resource_url resolved as a resource; threshold stays a scalar.
+	var inputImage, threshold *BisqueMexParam
+	for i := range run.Inputs {
+		switch run.Inputs[i].Name {
+		case "resource_url":
+			inputImage = &run.Inputs[i]
+		case "threshold":
+			threshold = &run.Inputs[i]
+		}
+	}
+	if inputImage == nil || inputImage.ResourceURI != bisque.URL+"/data_service/00-INPUT" {
+		t.Fatalf("input resource_url not resolved: %+v", inputImage)
+	}
+	if threshold == nil || threshold.ResourceURI != "" || threshold.Value != "0.05" {
+		t.Fatalf("threshold should be a scalar param: %+v", threshold)
+	}
+}
+
+func TestV2BisqueModuleRunRejectsNonMexResource(t *testing.T) {
+	t.Parallel()
+
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<image uri="` + bisque.URL + `/data_service/00-IMG" name="scan.png" resource_uniq="00-IMG"/>`))
+	}))
+	defer bisque.Close()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/module-run", strings.NewReader(`{"mex_uniq":"00-IMG"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400 for non-mex resource", rec.Code, rec.Body.String())
+	}
+}
+
+func TestV2BisqueSearchEnrichesMexStatusAndModule(t *testing.T) {
+	t.Parallel()
+
+	var bisque *httptest.Server
+	bisque = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/data_service/mex/" {
+			t.Fatalf("path = %q, want /data_service/mex/", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<resource>` +
+			`<mex uri="` + bisque.URL + `/data_service/00-A" resource_uniq="00-A" name="nph_prediction_V2" type="` + bisque.URL + `/data_service/00-MOD" value="FINISHED" created="2026-06-12T01:07:16"/>` +
+			`<mex uri="` + bisque.URL + `/data_service/00-B" resource_uniq="00-B" name="CellSegment3DUnet" type="` + bisque.URL + `/data_service/00-MOD2" value="FAILED" created="2023-03-01T03:37:50"/>` +
+			`</resource>`))
+	}))
+	defer bisque.Close()
+
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL:       bisque.URL,
+			AllowedRoots:  []string{bisque.URL},
+			HTTPClient:    bisque.Client(),
+			UploadRoot:    t.TempDir(),
+			MaxImportSize: 8 << 20,
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"mex","scope":"owner","sort":"recent","limit":10}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body bisqueSearchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(body.Results) != 2 {
+		t.Fatalf("results = %+v, want two mex runs", body.Results)
+	}
+	if body.Results[0].Status != "FINISHED" || body.Results[0].ModuleName != "nph_prediction_V2" {
+		t.Fatalf("first run = %+v, want enriched status+module", body.Results[0])
+	}
+	if body.Results[1].Status != "FAILED" {
+		t.Fatalf("second run status = %q, want FAILED", body.Results[1].Status)
+	}
+	if body.Results[0].ImageServiceURL != "" {
+		t.Fatalf("mex search result must not get image_service_url: %q", body.Results[0].ImageServiceURL)
+	}
+}
+
 func TestV2BisqueSearchRejectsNonNumericRelationalFilter(t *testing.T) {
 	t.Parallel()
 
@@ -12053,6 +12231,30 @@ func TestWorkerBisqueSessionRejectedWhenRunOwnerDiffers(t *testing.T) {
 	}
 }
 
+func TestWorkerBisqueEndpointAllowlistCoversAgentReachableRoutes(t *testing.T) {
+	t.Parallel()
+
+	// Every bisque endpoint an agent tool calls must be worker-reachable in
+	// WorkOS mode, or the worker gets 401. unlink is user-only (browser) and is
+	// intentionally excluded.
+	for _, path := range []string{
+		"/v2/bisque/search",
+		"/v2/bisque/module-run",
+		"/v2/bisque/download",
+		"/v2/bisque/upload",
+		"/v2/bisque/datasets",
+		"/v2/bisque/push",
+		"/v2/uploads",
+	} {
+		if !isWorkerBisqueEndpointPath(path) {
+			t.Fatalf("agent-reachable endpoint %q is missing from the worker bisque allowlist", path)
+		}
+	}
+	if isWorkerBisqueEndpointPath("/v2/bisque/unlink") {
+		t.Fatalf("unlink is user-only and must not be worker-reachable")
+	}
+}
+
 func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
 	t.Parallel()
 
@@ -12109,6 +12311,77 @@ func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
 	}
 	if uploadResponse.Uploaded[0].Principal.UserID != "workos:user_e2e" {
 		t.Fatalf("uploaded principal = %q, want run owner workos:user_e2e", uploadResponse.Uploaded[0].Principal.UserID)
+	}
+}
+
+func TestBisqueLinkedDetectionIsDurableWithoutSessionCookie(t *testing.T) {
+	t.Parallel()
+
+	persistent := store.NewMemoryStore()
+	cipher, err := NewBisqueCredentialCipher(bytes.Repeat([]byte{5}, 32), "test-key")
+	if err != nil {
+		t.Fatalf("NewBisqueCredentialCipher: %v", err)
+	}
+	credentialStore := NewPersistentBisqueCredentialStore(persistent, cipher, "https://bisque.example.test")
+	sessionID, err := credentialStore.PutLinked(context.Background(), BisqueCredentialLinkInput{
+		Credentials: BisqueCredentials{Username: "amil", Password: "bean123"},
+		UserID:      "workos:user_amil",
+		OrgID:       "workos-org",
+		RootURL:     "https://bisque.example.test",
+	})
+	if err != nil {
+		t.Fatalf("PutLinked: %v", err)
+	}
+	deps := ServerDeps{BisqueCredentials: credentialStore}
+
+	// A run-creation request from the linked user that carries NO bisque session
+	// cookie (cookie expired / different browser). Linked status must still be
+	// detected by account identity, and the run job must still carry the session.
+	linkedReq := httptest.NewRequest(http.MethodPost, "/v2/threads/t/runs", nil)
+	linkedReq.Header.Set("X-Ultra-User-Id", "workos:user_amil")
+	linkedReq.Header.Set("X-Ultra-Org-Id", "workos-org")
+
+	if !deps.hasLinkedBisqueSession(context.Background(), linkedReq) {
+		t.Fatalf("linked user must be detected as linked without a session cookie")
+	}
+	metadata := deps.bisqueJobMetadataFromRequest(linkedReq)
+	if metadata["bisque_session_id"] != sessionID {
+		t.Fatalf("job metadata bisque_session_id = %#v, want durable session %q", metadata["bisque_session_id"], sessionID)
+	}
+
+	// A different user with no linked account gets neither linked status nor a session.
+	otherReq := httptest.NewRequest(http.MethodPost, "/v2/threads/t/runs", nil)
+	otherReq.Header.Set("X-Ultra-User-Id", "workos:user_other")
+	if deps.hasLinkedBisqueSession(context.Background(), otherReq) {
+		t.Fatalf("unlinked user must not be detected as linked")
+	}
+	if _, ok := deps.bisqueJobMetadataFromRequest(otherReq)["bisque_session_id"]; ok {
+		t.Fatalf("unlinked user must not receive a bisque_session_id")
+	}
+}
+
+func TestGetActiveBisqueCredentialForUserMemoryStore(t *testing.T) {
+	t.Parallel()
+
+	memory := store.NewMemoryStore()
+	if _, err := memory.UpsertBisqueCredential(context.Background(), domain.UpsertBisqueCredentialInput{
+		UserID:   "workos:user_amil",
+		OrgID:    "workos-org",
+		RootURL:  "https://bisque.example.test",
+		Username: "amil",
+		Status:   "active",
+	}); err != nil {
+		t.Fatalf("UpsertBisqueCredential: %v", err)
+	}
+	record, found, err := memory.GetActiveBisqueCredentialForUser(context.Background(), "workos:user_amil", "workos-org")
+	if err != nil || !found {
+		t.Fatalf("GetActiveBisqueCredentialForUser found=%v err=%v, want found", found, err)
+	}
+	if record.Username != "amil" || strings.TrimSpace(record.SessionID) == "" {
+		t.Fatalf("record = %+v, want amil with a session id", record)
+	}
+	if _, found, _ := memory.GetActiveBisqueCredentialForUser(context.Background(), "workos:user_other", "workos-org"); found {
+		t.Fatalf("another user must not resolve a credential")
 	}
 }
 

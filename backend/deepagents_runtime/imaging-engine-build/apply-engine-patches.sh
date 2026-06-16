@@ -5,7 +5,7 @@
 # while producing a working imgcnv + libimgcnv.so. Run from the repo root
 # (or pass it as $1). Intended for the Linux/CI build (GNU sed).
 #
-# Fixes 1 and 3 are genuine, upstreamable build bugs; fix 2 is a scope choice.
+# Fixes 1, 3, and 4 are genuine, upstreamable build bugs; fix 2 is a scope choice.
 #
 #   1. GeoTIFF is compiled unconditionally (bim_geotiff_parse.cpp lives in the
 #      always-on libtiff SOURCES block) and its callers in bim_tiff_format_io.cpp
@@ -16,10 +16,10 @@
 #   2. Disable the out-of-scope geospatial (PROJ/GeoTIFF) format + its lib build.
 #   3. `-lzstd` is bundled only inside the CZI link block, but libtiff's LERC
 #      needs ZSTD_compress regardless; link it independently.
-#
-# CZI: the public mirror's libCZI static lib is missing symbols (CreateCZIReader,
-# CompressionModeToCompressionIdentifier) -> link failure. If that occurs, also
-# run the CZI-disable sed printed at the end (we validated locally with CZI off).
+#   4. Keep CZI enabled. The public mirror's libCZI static archive and the
+#      standalone JPEG-XR archives both vendor the same JPEG-XR glue symbols on
+#      Linux. We tolerate those duplicate static symbols at final link time so
+#      both .czi and .jxr readers stay registered.
 set -euo pipefail
 ROOT="${1:-.}"
 cd "$ROOT"
@@ -45,20 +45,73 @@ PY
 
 # 2. Disable geospatial config across the three project files + drop the
 #    broken libgeotiff.a (and its libproj.a prereq) from buildlibs.
-for f in src/imgcnv.pro src_dylib/libimgcnv.pro libsrc/libbioimg/bioimage.pro; do
-  sed -i 's/^CONFIG += lib_libgeotiff.*/#& (disabled: geospatial out of scope)/' "$f"
-  sed -i 's/^CONFIG += lib_proj.*/#& (disabled: geospatial out of scope)/' "$f"
-done
-sed -i 's# \$(LIBS)/libgeotiff.a##' Makefile.linux
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+project_files = [
+    Path("src/imgcnv.pro"),
+    Path("src_dylib/libimgcnv.pro"),
+    Path("libsrc/libbioimg/bioimage.pro"),
+]
+
+for path in project_files:
+    s = path.read_text()
+    for config in ("lib_libgeotiff", "lib_proj"):
+        s = re.sub(
+            rf"^CONFIG \+= {config}.*$",
+            lambda m: f"#{m.group(0)} (disabled: geospatial out of scope)",
+            s,
+            flags=re.MULTILINE,
+        )
+    path.write_text(s)
+
+makefile = Path("Makefile.linux")
+s = makefile.read_text()
+s = s.replace(" $(LIBS)/libgeotiff.a", "")
+makefile.write_text(s)
+PY
 echo "disabled geospatial (PROJ/GeoTIFF)"
 
 # 3. Link zstd independently (libtiff LERC needs it).
-for f in src/imgcnv.pro src_dylib/libimgcnv.pro; do
-  grep -q '^LIBS += -lzstd  # libtiff LERC' "$f" || printf '\nLIBS += -lzstd  # libtiff LERC needs zstd independent of CZI\n' >> "$f"
-done
+python3 - <<'PY'
+from pathlib import Path
+
+line = "LIBS += -lzstd  # libtiff LERC needs zstd independent of CZI"
+for path in [Path("src/imgcnv.pro"), Path("src_dylib/libimgcnv.pro")]:
+    s = path.read_text()
+    if line not in s:
+        s = s.rstrip() + f"\n\n{line}\n"
+        path.write_text(s)
+PY
 echo "linked zstd independently"
 
-echo
-echo "Done. If the libCZI static link fails, also disable CZI:"
-echo "  sed -i 's/^CONFIG += lib_libczi/#&/' src/imgcnv.pro src_dylib/libimgcnv.pro libsrc/libbioimg/bioimage.pro"
-echo "  sed -i 's# \$(LIBS)/libczi.a##' Makefile.linux   # if buildlibs lists it"
+# 4. Keep CZI enabled and tolerate duplicated static JPEG-XR glue symbols at
+#    final link. This preserves the standalone .jxr reader and the libCZI reader.
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+project_files = [
+    Path("src/imgcnv.pro"),
+    Path("src_dylib/libimgcnv.pro"),
+    Path("libsrc/libbioimg/bioimage.pro"),
+]
+for path in project_files:
+    s = path.read_text()
+    s = re.sub(
+        r"^#(CONFIG \+= lib_libczi).*$",
+        r"\1",
+        s,
+        flags=re.MULTILINE,
+    )
+    path.write_text(s)
+
+linker_flag = "QMAKE_LFLAGS += -Wl,--allow-multiple-definition"
+for path in [Path("src/imgcnv.pro"), Path("src_dylib/libimgcnv.pro")]:
+    s = path.read_text()
+    if linker_flag not in s:
+        s = s.rstrip() + f"\n\n{linker_flag}\n"
+        path.write_text(s)
+PY
+echo "enabled CZI with duplicate JPEG-XR static symbol link guard"

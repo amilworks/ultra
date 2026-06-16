@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+#
+# Deep Agents durable NATS worker (executes chat/agent runs). Build context =
+# backend/deepagents_runtime.  docker build -f Dockerfile.worker -t ultra-worker:local .
+# Core deps only (no torch/rarespot, no native imaging engine) — the worker calls
+# the model endpoint + control plane over HTTP and consumes NATS jobs.
+FROM python:3.11-slim AS runtime
+ENV PYTHONUNBUFFERED=1
+# ca-certificates for HTTPS; the static docker CLI lets the worker drive the host
+# Docker daemon (mounted socket) to run code in the sandbox image (execute_python).
+ARG DOCKER_CLI_VERSION=27.4.0
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+  && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+     | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
+  && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . /app/deepagents_runtime
+RUN pip install --no-cache-dir /app/deepagents_runtime
+# Durable run worker; compose can override `command` for other roles.
+CMD ["python", "-m", "ultra_deepagents.nats_worker"]

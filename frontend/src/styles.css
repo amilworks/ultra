@@ -1555,6 +1555,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: var(--sidebar-item-active-bg);
 }
 
+.app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
+  fill: transparent;
+  transition: fill 160ms ease;
+}
+
+.app-resource-browser-button[data-variant="secondary"]:hover .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
+  fill: currentColor;
+}
+
 .app-bisque-group {
   padding-top: 0;
   padding-inline: var(--sidebar-section-padding-x);
@@ -1606,9 +1615,33 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 
+.app-sidebar-brand-button[data-slot="button"] {
+  justify-content: flex-start;
+  min-height: 2.55rem;
+  height: auto;
+  max-width: 100%;
+  padding: 0.25rem 0.6rem 0.25rem 0.25rem;
+  border-radius: var(--sidebar-radius-action);
+  background: transparent;
+  color: var(--sidebar-foreground);
+  box-shadow: none;
+  font-family: var(--font-sans);
+  line-height: 1.35;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.app-sidebar-brand-button[data-slot="button"]:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 86%, var(--sidebar-foreground) 4%);
+  color: var(--sidebar-accent-foreground);
+}
+
+.app-sidebar-brand-mark {
+  flex: 0 0 2rem;
+}
+
 .app-shell-brand {
   font-size: 0.92rem;
-  font-weight: var(--font-weight-panel-heading);
+  font-weight: 400;
   letter-spacing: -0.012em;
 }
 
@@ -1809,10 +1842,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .hero-title {
   margin: 0;
-  font-size: clamp(1.9rem, 4vw, 3rem);
+  font-size: clamp(1.65rem, 3.2vw, 2.35rem);
   font-weight: var(--font-weight-strong);
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   color: var(--text-main);
+}
+
+.dark .hero-title {
+  color: #ffffff;
 }
 
 .hero-title-welcome {
@@ -1820,11 +1857,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .hero-subtitle {
-  margin: 0.75rem 0 0;
-  max-width: 50rem;
-  font-size: 1rem;
-  line-height: 1.55;
+  margin: 0.65rem 0 0;
+  max-width: 42rem;
+  font-size: 0.92rem;
+  line-height: 1.48;
   color: var(--text-muted);
+}
+
+.dark .hero-subtitle {
+  color: color-mix(in oklab, #ffffff 68%, transparent);
 }
 
 .resource-browser {
@@ -3173,7 +3214,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
   .resource-browser {
     max-width: 100%;
-    padding: 0.9rem 0.8rem calc(1rem + env(safe-area-inset-bottom, 0px));
+    padding: 0.9rem 0.6rem calc(1rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* shadcn CardContent ships px-6 (24px each side); on a ~390px phone that plus
+     the section inset steals ~48px, squishing the cards/strip. Drop it on mobile. */
+  .resource-browser .resource-browser-content {
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .resource-browser-shell {
@@ -3207,8 +3255,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 
   .resource-browser-new-menu,
-  .resource-browser-refresh {
-    min-height: 2.55rem;
+  .resource-browser-refresh,
+  .resource-browser-filter-trigger {
+    min-height: 2.75rem;
     padding-inline: 0.8rem;
   }
 
@@ -3224,6 +3273,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
   .resource-browser-upload-progress-action {
     width: 100%;
+    min-height: 2.5rem;
     justify-self: stretch;
   }
 
@@ -3234,6 +3284,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
   .resource-browser-toolbar {
     align-items: stretch;
+    /* Mobile-card mode starts at 721px; give the search its own row from here
+       (not just <=640px) so it never gets squeezed beside the two buttons. */
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.55rem;
+  }
+
+  .resource-browser-toolbar .resource-browser-search {
+    grid-column: 1 / -1;
   }
 
   .resource-browser-active-collection {
@@ -3251,11 +3309,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .resource-browser-active-collection-root,
   .resource-browser-active-collection-parent {
     flex: 0 1 auto;
-    max-width: 7rem;
+    min-width: 2.5rem;
+    max-width: min(40vw, 7rem);
   }
 
+  /* The active folder is what the user is looking at — give it priority over the
+     parent crumbs so a long parent name can't shrink it to a couple of letters. */
   .resource-browser-active-collection-current {
-    flex: 1 1 auto;
+    flex: 2 1 auto;
+    min-width: 6rem;
     max-width: 100%;
   }
 
@@ -3266,8 +3328,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 
   .resource-browser-active-collection-clear {
-    min-width: 2.1rem;
-    width: 2.1rem;
+    min-width: 2.75rem;
+    width: 2.75rem;
+    min-height: 2.75rem;
     padding-inline: 0.45rem;
   }
 
@@ -3298,23 +3361,20 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     width: 100%;
   }
 
+  /* Wrap rather than scroll sideways: a hidden horizontal scroller buried the
+     destructive Trash/Move actions off the right edge on a phone. Let them wrap. */
   .resource-browser-bulk-toolbar {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-start;
     gap: 0.45rem;
-    overflow-x: auto;
+    overflow-x: visible;
     padding: 0.5rem;
-    scrollbar-width: none;
-  }
-
-  .resource-browser-bulk-toolbar::-webkit-scrollbar {
-    display: none;
   }
 
   .resource-browser-bulk-summary {
     min-width: auto;
-    flex: 0 0 auto;
+    flex: 1 1 100%;
     padding-inline: 0.15rem 0.25rem;
     white-space: nowrap;
   }
@@ -3330,6 +3390,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .resource-browser-bulk-clear {
     flex: 0 0 auto;
     min-width: 0;
+    min-height: 2.5rem;
     width: auto;
     max-width: none;
   }
@@ -3352,6 +3413,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
   .resource-browser-filter-trigger {
     padding-inline: 0.8rem;
+  }
+
+  /* The base card is a fixed 17.75rem with a 10.75rem preview track; the mobile
+     180px preview slightly exceeds that track and clipped the meta row. Let the
+     single-column card grow with its content instead of fighting a fixed height. */
+  .resource-browser-card {
+    height: auto;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .resource-browser-preview {
@@ -5358,168 +5427,33 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .running-status-pill {
   --running-status-ink: #111111;
-  position: relative;
-  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.08), transparent 44%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
-    var(--bg-panel-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 8px 20px rgba(5, 18, 24, 0.12);
+  color: var(--running-status-ink);
 }
 
 .dark .running-status-pill {
   --running-status-ink: #ffffff;
 }
 
-.running-status-pill::before {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  border-radius: inherit;
-  background: linear-gradient(
-    120deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.02) 22%,
-    rgba(255, 255, 255, 0.12) 46%,
-    transparent 72%
-  );
-  opacity: 0.9;
-  transform: translateX(-135%);
-  animation: running-status-sheen 4.6s ease-in-out infinite;
-}
-
 .running-status-pill[data-size="default"] {
-  width: 1.8rem;
-  height: 1.8rem;
+  width: 1.35rem;
+  height: 1.35rem;
 }
 
 .running-status-pill[data-size="compact"] {
-  width: 1.26rem;
-  height: 1.26rem;
+  width: 1rem;
+  height: 1rem;
 }
 
-.running-status-pill-beacon {
-  position: relative;
-  z-index: 1;
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 0.95rem;
-  height: 0.95rem;
-  border-radius: 999px;
-  background:
-    radial-gradient(
-      circle,
-      color-mix(in oklab, var(--running-status-ink) 8%, transparent) 0%,
-      color-mix(in oklab, var(--running-status-ink) 2%, transparent) 62%,
-      transparent 80%
-    );
-}
-
-.running-status-pill-beacon::before,
-.running-status-pill-beacon::after {
-  content: "";
-  position: absolute;
-  inset: 0.08rem;
-  border-radius: 999px;
-}
-
-.running-status-pill-beacon::before {
-  border: 1px solid color-mix(in oklab, var(--running-status-ink) 14%, transparent);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 0 0 1px color-mix(in oklab, var(--running-status-ink) 4%, transparent);
-}
-
-.running-status-pill-beacon::after {
-  border: 1.5px solid transparent;
-  border-top-color: var(--running-status-ink);
-  border-right-color: color-mix(in oklab, var(--running-status-ink) 72%, transparent);
-  opacity: 0.92;
-  animation: running-status-spin 1.05s linear infinite;
-}
-
-.running-status-pill[data-size="compact"] .running-status-pill-beacon {
-  width: 0.8rem;
-  height: 0.8rem;
-}
-
-.running-status-pill[data-size="compact"] .running-status-pill-beacon::before,
-.running-status-pill[data-size="compact"] .running-status-pill-beacon::after {
-  inset: 0.07rem;
-}
-
-.running-status-pill[data-size="compact"] .running-status-pill-beacon::after {
-  border-width: 1.25px;
-}
-
-.running-status-pill-beacon-core {
-  position: absolute;
-  width: 0.14rem;
-  height: 0.14rem;
-  border-radius: 999px;
-  background: var(--running-status-ink);
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--running-status-ink) 8%, transparent),
-    0 0 8px color-mix(in oklab, var(--running-status-ink) 12%, transparent);
-  animation: running-status-core 1.8s ease-in-out infinite;
-}
-
-.running-status-pill[data-size="compact"] .running-status-pill-beacon-core {
-  width: 0.12rem;
-  height: 0.12rem;
-}
-
-@keyframes running-status-sheen {
-  0%,
-  18% {
-    transform: translateX(-135%);
-  }
-  34%,
-  100% {
-    transform: translateX(150%);
-  }
-}
-
-@keyframes running-status-core {
-  0%,
-  100% {
-    opacity: 0.74;
-    transform: scale(0.92);
-    box-shadow:
-      0 0 0 1px color-mix(in oklab, var(--running-status-ink) 8%, transparent),
-      0 0 6px color-mix(in oklab, var(--running-status-ink) 10%, transparent);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-    box-shadow:
-      0 0 0 1px color-mix(in oklab, var(--running-status-ink) 10%, transparent),
-      0 0 10px color-mix(in oklab, var(--running-status-ink) 16%, transparent);
-  }
-}
-
-@keyframes running-status-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.running-status-pill-loader {
+  color: var(--running-status-ink);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .running-status-pill::before,
-  .running-status-pill-beacon-core,
-  .running-status-pill-beacon::after {
+  .running-status-pill-loader {
     animation: none;
   }
 }
@@ -5957,7 +5891,10 @@ details {
 
 .viewer-workspace-embedded {
   width: 100%;
-  min-height: min(78vh, 940px);
+  /* Reserve more of the tall Lens page so the now-growable 2D canvas has room to
+     expand into (kept a min-height/clamp so the page still degrades gracefully and the
+     page section keeps overflow-y:auto). */
+  min-height: min(86vh, 1100px);
 }
 
 .viewer-workspace-embedded.viewer-workspace-surface-metadata {
@@ -6183,10 +6120,40 @@ details {
 }
 
 .viewer-canvas-shell-2d {
-  flex: 0 0 auto;
-  height: clamp(320px, 62vh, 720px);
-  min-height: clamp(320px, 62vh, 720px);
-  max-height: clamp(320px, 62vh, 720px);
+  /* Fill the stage's available height instead of a fixed box that leaves dead space
+     below it. The grow comes from the .viewer-workspace-surface-2d chain (tabs/panel
+     flex-fill); the min-height is a responsive FLOOR so the canvas never collapses and
+     is at least as tall as the old fixed clamp even if the fill chain doesn't apply. */
+  min-height: clamp(360px, 64vh, 760px);
+}
+
+/* When the 2D surface is active, let the Tabs wrapper + its active panel grow so the
+   canvas-shell fills the stage's leftover height (the caption + Z/T slider keep their
+   natural size below it). Scoped to surface-2d so the volume/MPR/metadata panels keep
+   their own content-height behavior. The Tabs root becomes a flex column (instead of a
+   grid) so the active panel grows regardless of how many panels Radix mounts. */
+.viewer-workspace-surface-2d .viewer-surface-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.viewer-workspace-surface-2d .viewer-surface-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.viewer-workspace-surface-2d .viewer-canvas-layout-2d {
+  min-height: 0;
+  height: 100%;
+}
+
+/* The non-volume 2D wrapper is otherwise a bare block, so the canvas-shell wouldn't
+   fill it. Make it a single-cell grid (the volume wrapper is already a grid) so the
+   canvas-shell stretches to the full height — the image, not empty space, gets the room. */
+.viewer-canvas-layout-2d:not(.viewer-volume-layout-2d) {
+  display: grid;
 }
 
 .viewer-canvas-shell-volume {
@@ -6194,8 +6161,23 @@ details {
   height: clamp(400px, 62vh, 760px);
   min-height: clamp(400px, 62vh, 760px);
   max-height: clamp(400px, 62vh, 760px);
+  /* Full-bleed: drop the docked card chrome so the 3D scene reaches every edge.
+     Scoped to -volume only; the 2D deep-zoom card (-2d) and sheet base keep their
+     frame. position:relative + overflow:hidden are inherited from the base so the
+     absolute glass overlays/scale bar still clip to the (now square) corners. */
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  /* Atmosphere (all background layers, painted BEHIND the transparent-cleared
+     WebGL canvas — see setClearColor alpha 0 for the dark render policies — so they
+     show only through empty/discarded fragments and never tint the rendered volume):
+       1. a soft contact shadow pooling under the volume to ground it,
+       2. a faint cool key glow at the volume center,
+       3. an outer-corner vignette that darkens the frame edges for depth. */
   background:
+    radial-gradient(ellipse 58% 13% at 50% 90%, rgba(0, 0, 0, 0.42), transparent 72%),
     radial-gradient(circle at 50% 42%, rgba(116, 167, 255, 0.055), transparent 44%),
+    radial-gradient(circle at 50% 50%, transparent 58%, rgba(0, 0, 0, 0.34) 100%),
     #06080d;
 }
 
@@ -6217,6 +6199,10 @@ details {
   height: 100%;
   min-height: 320px;
   position: relative;
+  /* Own every touch gesture (single-finger pan, two-finger pinch-zoom) on the 2D
+     plane. Without this the browser claims touch-drags as page scroll and pinches
+     as native zoom, so the second pointer never reaches our pinch handler. */
+  touch-action: none;
 }
 
 .viewer-webgl-canvas-host {
@@ -6230,6 +6216,38 @@ details {
   display: block;
   width: 100%;
   height: 100%;
+  /* Let three.js own all touch gestures (pinch-zoom / two-finger orbit+pan) on the
+     volume and MPR canvases; without this the browser intercepts them and the
+     gestures never reach the controls. The 2D deep-zoom canvas also sets this. */
+  touch-action: none;
+}
+
+/* Receding glass chrome: overlays fade to a faint, still-discoverable level once
+   the pointer is idle (driver writes data-chrome-faded on the canvas root), and
+   snap back on pointer movement, hover, or keyboard focus. OPACITY-ONLY so faded
+   controls stay in the tab order and the accessibility tree — never
+   display:none / visibility:hidden / pointer-events:none on focusable controls. */
+.viewer-chrome-fade {
+  transition: opacity 240ms ease;
+}
+
+[data-chrome-faded="true"] .viewer-chrome-fade {
+  opacity: 0.18;
+}
+
+.viewer-chrome-fade:hover,
+.viewer-chrome-fade:focus-within {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewer-chrome-fade {
+    transition: none;
+  }
+  /* Reduced motion keeps chrome fully visible even if the driver marks it faded. */
+  [data-chrome-faded="true"] .viewer-chrome-fade {
+    opacity: 1;
+  }
 }
 
 /* Deep-zoom scale bar: physical-distance reference, bottom-left of the canvas. */
@@ -6736,6 +6754,40 @@ details {
   color: var(--text-muted);
 }
 
+/* Canvas right-click / long-press menu: dark glass to match the viewer chrome
+   instead of the app's light popover surface (the viewer renders dark in a light app). */
+.viewer-context-menu {
+  border-color: rgba(219, 227, 242, 0.14);
+  background: rgba(10, 13, 20, 0.94);
+  color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px) saturate(1.05);
+  box-shadow: 0 18px 48px rgba(2, 6, 18, 0.5);
+}
+
+.viewer-context-menu [data-slot="context-menu-item"] {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.viewer-context-menu [data-slot="context-menu-item"]:focus,
+.viewer-context-menu [data-slot="context-menu-item"][data-highlighted] {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.viewer-context-menu [data-slot="context-menu-item"][data-disabled] {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.viewer-context-menu [data-slot="context-menu-separator"] {
+  background: rgba(219, 227, 242, 0.14);
+}
+
+.viewer-context-menu svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  opacity: 0.85;
+}
+
 .viewer-bisque-iframe {
   display: block;
   width: 100%;
@@ -7136,8 +7188,8 @@ details {
   appearance: none;
   border: 1px solid rgba(255, 255, 255, 0.42);
   border-radius: 999px;
-  background: #8fc8ff;
-  box-shadow: 0 0 0 2px rgba(143, 200, 255, 0.16);
+  background: #f5f5f5;
+  box-shadow: 0 0 0 1px rgba(18, 20, 28, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .viewer-inline-control input[type="range"]::-moz-range-track,
@@ -7156,8 +7208,41 @@ details {
   height: 0.86rem;
   border: 1px solid rgba(255, 255, 255, 0.42);
   border-radius: 999px;
-  background: #8fc8ff;
-  box-shadow: 0 0 0 2px rgba(143, 200, 255, 0.16);
+  background: #f5f5f5;
+  box-shadow: 0 0 0 1px rgba(18, 20, 28, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Touch ergonomics: on coarse pointers the dense viewer controls fall below the
+   ~44px target. Enlarge the hit areas without changing the calm visual density on
+   mouse/desktop (the swatch + thumb stay visually small; just the tappable band
+   grows). Gated on pointer:coarse so fine-pointer desktops keep their compact UI. */
+@media (pointer: coarse) {
+  .viewer-channel-chip {
+    min-height: 2.4rem;
+  }
+
+  .viewer-channel-toggle {
+    line-height: 2.4rem;
+  }
+
+  .viewer-channel-swatch-btn {
+    padding-inline: 0.6rem;
+  }
+
+  .viewer-inline-control input[type="range"]::-webkit-slider-thumb,
+  .viewer-slider input[type="range"]::-webkit-slider-thumb,
+  .viewer-volume-clip-sliders input[type="range"]::-webkit-slider-thumb {
+    width: 1.4rem;
+    height: 1.4rem;
+    margin-top: -0.56rem;
+  }
+
+  .viewer-inline-control input[type="range"]::-moz-range-thumb,
+  .viewer-slider input[type="range"]::-moz-range-thumb,
+  .viewer-volume-clip-sliders input[type="range"]::-moz-range-thumb {
+    width: 1.4rem;
+    height: 1.4rem;
+  }
 }
 
 .viewer-volume-clip-panel {
@@ -7248,6 +7333,54 @@ details {
   gap: 10px;
 }
 
+/* Fullscreen wrapper: layout-transparent when docked (display:contents → the
+   docked layout is byte-identical), and only a filling column once the browser
+   promotes it to the top layer via the Fullscreen API. Native fullscreen also
+   hides the app sidebar + header for free. */
+.viewer-shell {
+  display: contents;
+}
+
+.viewer-fullscreen-toggle {
+  margin-left: auto;
+}
+
+.viewer-shell:fullscreen {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100vw;
+  height: 100vh;
+  padding: 12px;
+  background: var(--viewer-bg, #06080d);
+  overflow: auto;
+}
+.viewer-shell:-webkit-full-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100vw;
+  height: 100vh;
+  padding: 12px;
+  background: var(--viewer-bg, #06080d);
+  overflow: auto;
+}
+
+/* In fullscreen the canvas grows to own the viewport (overriding the fixed docked
+   clamp heights); the tab bar + control panels keep their natural size around it. */
+.viewer-shell:fullscreen .viewer-canvas-shell-2d,
+.viewer-shell:fullscreen .viewer-canvas-shell-volume {
+  height: min(86vh, calc(100vh - 132px));
+  min-height: 0;
+  max-height: none;
+}
+.viewer-shell:-webkit-full-screen .viewer-canvas-shell-2d,
+.viewer-shell:-webkit-full-screen .viewer-canvas-shell-volume {
+  height: min(86vh, calc(100vh - 132px));
+  min-height: 0;
+  max-height: none;
+}
+
 .viewer-surface-list {
   width: fit-content;
   display: inline-flex;
@@ -7277,6 +7410,56 @@ details {
   margin-top: 0;
   display: grid;
   gap: 0.65rem;
+}
+
+/* Data-first caption: the specimen "label" beneath the canvas — name on top, a
+   calm facts line / compact readout below. Quiet and secondary so the data leads. */
+.viewer-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 2px 0;
+}
+
+.viewer-caption-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main);
+  min-width: 0;
+}
+
+.viewer-caption-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Calm amber flag for a genuine data caveat (e.g. an unstitched mosaic): readable but
+   not alarming, never an accent-hue the rest of the calm UI avoids for chrome. */
+.viewer-caption-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.42rem;
+  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in oklab, #b45309 16%, transparent);
+  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.viewer-caption-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .viewer-slider {
@@ -7503,51 +7686,145 @@ details {
   stroke-width: 1.5;
 }
 
+/* Channel selection: dense, calm pills (flex-wrap, tight gap) that pack many
+   channels into a couple of rows. Each chip is one toggle; an inactive channel
+   recedes via opacity and a quiet border; an active one leads. Color editing is
+   on-demand via a Popover off the swatch (no always-visible color rectangles). */
 .viewer-channel-controls {
   display: flex;
   flex-wrap: wrap;
-  align-items: end;
-  gap: 10px;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .viewer-channel-chip {
-  display: flex;
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 1.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--viewer-control-line, var(--line));
+  background: color-mix(in oklab, var(--surface-panel) 90%, transparent);
+  overflow: hidden;
+  opacity: 0.6;
+  transition:
+    opacity var(--motion-fast, 160ms) ease,
+    border-color var(--motion-fast, 160ms) ease,
+    background var(--motion-fast, 160ms) ease;
+}
+
+.viewer-channel-chip[data-active="true"] {
+  opacity: 1;
+  border-color: color-mix(in oklab, var(--text-main) 22%, var(--line));
+  background: color-mix(in oklab, var(--surface-panel) 78%, white 16%);
+}
+
+.viewer-channel-chip:hover {
+  opacity: 1;
+}
+
+.viewer-channel-swatch-btn {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
+  padding: 0 0.28rem 0 0.5rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.viewer-channel-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 3px;
+  border: 1px solid color-mix(in oklab, var(--text-main) 28%, transparent);
+}
+
+.viewer-channel-swatch-static {
+  align-self: center;
+  margin-left: 0.5rem;
 }
 
 .viewer-channel-toggle {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: color-mix(in oklab, var(--surface-panel) 88%, white 12%);
-  color: var(--text-muted);
-  padding: 0 12px;
-}
-
-.viewer-channel-toggle.is-active {
-  color: var(--text-main);
-  border-color: color-mix(in oklab, var(--text-main) 18%, var(--line));
-  background: color-mix(in oklab, var(--surface-panel) 80%, white 20%);
-}
-
-.viewer-channel-swatch {
-  width: 0.8rem;
-  height: 0.8rem;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  box-shadow: inset 0 0 0 1px rgba(18, 20, 28, 0.18);
-}
-
-.viewer-channel-chip input[type="color"] {
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
+  align-items: baseline;
+  gap: 0.34rem;
+  padding: 0 0.7rem 0 0.4rem;
   border: 0;
   background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 540;
+  line-height: 1.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.viewer-channel-chip[data-active="true"] .viewer-channel-toggle {
+  color: var(--text-main);
+}
+
+.viewer-channel-name {
+  /* Cap + ellipsis so a long single-token channel name can't overflow the
+     nowrap chip on a narrow phone. */
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-channel-meta {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--text-muted) 78%, transparent);
+}
+
+.viewer-channel-swatch-btn:focus-visible,
+.viewer-channel-toggle:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 34%, transparent);
+  outline-offset: -2px;
+  border-radius: 999px;
+}
+
+.viewer-channel-color-popover {
+  display: grid;
+  gap: 0.45rem;
+  width: auto;
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+}
+
+.viewer-channel-color-popover-label {
+  font-size: 0.74rem;
+  font-weight: 560;
+  color: var(--text-muted);
+}
+
+.viewer-channel-color-popover input[type="color"] {
+  width: 8rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Slider field (Z / Time / Window): label + tabular counter on one line, the
+   shadcn Slider below. Calm, neutral — no accent thumb. */
+.viewer-slider-field {
+  gap: 0.4rem;
+}
+
+.viewer-slider-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.viewer-slider-field-head strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 580;
+  color: var(--text-main);
 }
 
 .viewer-metadata-grid {
@@ -7626,6 +7903,18 @@ details {
 .viewer-metadata-kv-text {
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+/* Channel LUT-color swatch in the Channels metadata group. The fill is the channel's
+   own data color (not a UI accent); a faint neutral ring keeps black/white swatches
+   legible on either theme. */
+.viewer-metadata-kv-swatch {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 0.66rem;
+  height: 0.66rem;
+  border-radius: 3px;
+  border: 1px solid color-mix(in oklab, var(--text-main) 24%, transparent);
 }
 
 .viewer-metadata-kv-value-mono .viewer-metadata-kv-text {
@@ -7870,6 +8159,11 @@ details {
     max-height: clamp(340px, 56vh, 580px);
   }
 
+  /* 2D canvas keeps growing but with a smaller viewport-relative floor on tablets. */
+  .viewer-canvas-shell-2d {
+    min-height: clamp(300px, 46vh, 460px);
+  }
+
   .viewer-volume-intensity-panel,
   .viewer-inline-control-wide,
   .viewer-volume-clip-panel {
@@ -7898,6 +8192,10 @@ details {
     max-height: clamp(320px, 52vh, 520px);
   }
 
+  .viewer-canvas-shell-2d {
+    min-height: clamp(260px, 42vh, 380px);
+  }
+
   .viewer-surface-readout-list,
   .viewer-metadata-overview-list {
     grid-template-columns: 1fr;
@@ -7906,6 +8204,16 @@ details {
   .viewer-metadata-overview-row {
     grid-template-columns: 1fr;
     gap: 0.16rem;
+  }
+
+  /* The fixed 6rem label column is cramped at 360px; stack label over value. */
+  .viewer-metadata-kv-row {
+    grid-template-columns: 1fr;
+    gap: 0.16rem;
+  }
+
+  .viewer-channel-name {
+    max-width: 9rem;
   }
 
   .viewer-surface-readout-item {
@@ -8666,12 +8974,12 @@ details {
   }
 
   .hero-title {
-    font-size: clamp(1.55rem, 7vw, 2.1rem);
+    font-size: clamp(1.45rem, 6.2vw, 1.9rem);
   }
 
   .hero-subtitle {
-    margin-top: 0.65rem;
-    font-size: 0.95rem;
+    margin-top: 0.55rem;
+    font-size: 0.88rem;
   }
 
   .composer-running {
@@ -8934,6 +9242,31 @@ details {
   font-size: 0.95rem;
 }
 
+.pk-circular-loader {
+  display: inline-flex;
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid currentColor;
+  border-right-color: color-mix(in oklab, currentColor 48%, transparent);
+  border-bottom-color: color-mix(in oklab, currentColor 22%, transparent);
+  border-left-color: color-mix(in oklab, currentColor 22%, transparent);
+  border-radius: 999px;
+  animation: pk-circular-loader-spin 0.82s linear infinite;
+}
+
+.pk-circular-loader-sm {
+  width: 0.92rem;
+  height: 0.92rem;
+  border-width: 1.5px;
+}
+
+.pk-circular-loader-lg {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-width: 2.25px;
+}
+
 @keyframes pk-loader-pulse {
   0%,
   80%,
@@ -8944,6 +9277,12 @@ details {
   40% {
     opacity: 1;
     transform: translateY(-2px);
+  }
+}
+
+@keyframes pk-circular-loader-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

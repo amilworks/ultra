@@ -335,6 +335,34 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 	}
 }
 
+func TestV2UploadSliceFallsBackWhenImageServiceUnreachable(t *testing.T) {
+	t.Parallel()
+
+	// A configured-but-unreachable image service (server created, then closed).
+	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	downURL := down.URL
+	down.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: downURL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "plane.png", testPNGBytes(t, 8, 8))
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	// Degrades to the legacy native path (serves the source image), not a 502.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("slice fallback status = %d, want 200 (legacy native path)", rec.Code)
+	}
+}
+
 func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -563,9 +591,10 @@ func TestImageServiceProxyErrorMatrix(t *testing.T) {
 	}
 }
 
-// TestImageServiceProxyMapsUnreachableServiceTo502 covers the dependency-down path: when
-// the image service can't be reached at all, the viewer gets a clean 502 (not a hang or a
-// raw connection error), so the frontend can show a clear "preview unavailable" state.
+// TestImageServiceProxyMapsUnreachableServiceTo502 covers a dependency-down path without
+// a native fallback: when the image service can't be reached at all, the viewer gets a
+// clean 502 (not a hang or a raw connection error), so the frontend can show a clear
+// "preview unavailable" state.
 func TestImageServiceProxyMapsUnreachableServiceTo502(t *testing.T) {
 	t.Parallel()
 	mem := store.NewMemoryStore()
@@ -576,8 +605,8 @@ func TestImageServiceProxyMapsUnreachableServiceTo502(t *testing.T) {
 		UploadRoot:      t.TempDir(),
 		ImageServiceURL: "http://127.0.0.1:1", // nothing listening
 	})
-	fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
+	fileID := uploadNamedFileForProxyTest(t, router, "stack.czi", testPNGBytes(t, 4, 4))
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

@@ -1216,21 +1216,50 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
     service_urls: serviceUrls,
     metadata: {
       reader: String(metadataSource.reader ?? source.reader ?? "unknown"),
+      // The real container format ("OME-TIFF"/"BigTIFF"/...), distinct from the reader.
+      format: String(metadataSource.format ?? source.format ?? ""),
       dims_order: normalizeDimsOrder(metadataSource.dims_order ?? source.dims_order),
       array_shape: Array.isArray(metadataSource.array_shape)
         ? metadataSource.array_shape.map((item) => Math.max(0, Math.round(Number(item) || 0)))
         : defaultShape,
       array_dtype: String(metadataSource.array_dtype ?? source.array_dtype ?? "unknown"),
-      array_min: toFiniteNumber(metadataSource.array_min ?? source.array_min, 0),
-      array_max: toFiniteNumber(metadataSource.array_max ?? source.array_max, 0),
+      // NaN (not 0) when the backend never computed an intensity range, so the viewer
+      // hides the row instead of showing a meaningless "0 → 0".
+      array_min: toFiniteNumber(metadataSource.array_min ?? source.array_min, Number.NaN),
+      array_max: toFiniteNumber(metadataSource.array_max ?? source.array_max, Number.NaN),
       intensity_stats: {
-        min: toFiniteNumber(metadataSource.array_min ?? source.array_min, 0),
-        max: toFiniteNumber(metadataSource.array_max ?? source.array_max, 0),
+        min: toFiniteNumber(metadataSource.array_min ?? source.array_min, Number.NaN),
+        max: toFiniteNumber(metadataSource.array_max ?? source.array_max, Number.NaN),
       },
+      // Curated provenance + instrument facts (software, capture date, acquisition
+      // mode, objective, detector, experimenter). Empty object when the file carries
+      // none, so the viewer's Acquisition group is hidden.
+      acquisition: Object.fromEntries(
+        Object.entries(toRecord(metadataSource.acquisition)).map(([key, value]) => [
+          key,
+          typeof value === "number" ? value : String(value),
+        ])
+      ),
       physical_spacing: physicalSpacing,
       scene: metadataSource.scene == null ? null : String(metadataSource.scene),
       scene_count: toPositiveInt(metadataSource.scene_count ?? source.scene_count, 1),
       header: Object.fromEntries(Object.entries(toRecord(metadataSource.header)).map(([key, value]) => [key, String(value)])),
+      // Tiled-mosaic acquisition (>1 stitched/unstitched field). Null for a normal
+      // single-field image. An UNstitched mosaic shows per-field illumination seams
+      // that look like a render bug but are the raw data — the viewer labels it.
+      mosaic: (() => {
+        const source_ = toRecord(metadataSource.mosaic);
+        const tiles = toPositiveInt(source_.tiles, 0);
+        if (tiles <= 1) {
+          return null;
+        }
+        const overlap = toFiniteNumber(source_.overlap, Number.NaN);
+        return {
+          tiles,
+          stitched: typeof source_.stitched === "boolean" ? source_.stitched : undefined,
+          overlap: Number.isFinite(overlap) ? overlap : undefined,
+        };
+      })(),
       filename_hints: toRecord(metadataSource.filename_hints),
       exif: Object.fromEntries(Object.entries(toRecord(metadataSource.exif)).map(([key, value]) => [key, String(value)])),
       geo: Object.keys(toRecord(metadataSource.geo)).length > 0 ? toRecord(metadataSource.geo) : null,

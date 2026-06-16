@@ -12,9 +12,12 @@ describe("resource browser responsive layout", () => {
     );
   });
 
-  it("keeps selected-resource actions compact on mobile", () => {
+  it("wraps selected-resource actions on mobile so destructive actions stay visible", () => {
+    // The bulk bar wraps rather than scrolling sideways (a hidden horizontal
+    // scroller buried Trash/Move off the right edge), and the summary takes its
+    // own row above the icon buttons.
     expect(stylesSource).toMatch(
-      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-bulk-toolbar\s*\{[^}]*flex-wrap:\s*nowrap;[\s\S]*\.resource-browser-bulk-controls\s*\{[^}]*flex-wrap:\s*nowrap;[\s\S]*\.resource-browser-bulk-action-label\s*\{[^}]*display:\s*none;[\s\S]*\.resource-browser-bulk-move-action\s+svg\[data-icon="inline-end"\]\s*\{[^}]*display:\s*none;/s
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-bulk-toolbar\s*\{[^}]*flex-wrap:\s*wrap;[^}]*overflow-x:\s*visible;[\s\S]*\.resource-browser-bulk-summary\s*\{[^}]*flex:\s*1 1 100%;[\s\S]*\.resource-browser-bulk-action-label\s*\{[^}]*display:\s*none;/s
     );
   });
 
@@ -24,9 +27,10 @@ describe("resource browser responsive layout", () => {
     );
   });
 
-  it("keeps active-folder context compact on mobile", () => {
+  it("keeps active-folder context compact on mobile with a 44px clear target", () => {
+    // Icon-only clear (label hidden) but a touch-sized 2.75rem hit area.
     expect(stylesSource).toMatch(
-      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-active-collection\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto;[\s\S]*\.resource-browser-active-collection-actions\s*\{[^}]*flex-direction:\s*row;[\s\S]*\.resource-browser-active-collection-clear\s*\{[^}]*width:\s*2\.1rem;[\s\S]*\.resource-browser-active-collection-clear-label\s*\{[^}]*display:\s*none;/s
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-active-collection\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto;[\s\S]*\.resource-browser-active-collection-actions\s*\{[^}]*flex-direction:\s*row;[\s\S]*\.resource-browser-active-collection-clear\s*\{[^}]*width:\s*2\.75rem;[\s\S]*\.resource-browser-active-collection-clear-label\s*\{[^}]*display:\s*none;/s
     );
   });
 

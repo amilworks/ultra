@@ -81,6 +81,7 @@ import {
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
+import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
@@ -194,11 +195,11 @@ import type {
   RunEvent,
   RunTokenUsage,
   Sam3InteractiveRequest,
-  SantaBarbaraWeatherResponse,
   SelectionContext,
   UploadedFileRecord,
 } from "./types";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
+import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
 import type {
   ComposerWorkflowDefinition,
@@ -242,7 +243,6 @@ import {
   FolderOpen,
   ImageIcon,
   Images,
-  Layers3,
   Laptop,
   Link2,
   LogOut,
@@ -7866,9 +7866,6 @@ export function App() {
     useState<Sam3AnnotationSession | null>(null);
   const [sam3AnnotationBusy, setSam3AnnotationBusy] = useState(false);
   const [pendingReusePrompt, setPendingReusePrompt] = useState<PendingReusePrompt | null>(null);
-  const [welcomeWeather, setWelcomeWeather] =
-    useState<SantaBarbaraWeatherResponse | null>(null);
-  const [welcomeWeatherFetchedAtMs, setWelcomeWeatherFetchedAtMs] = useState<number | null>(null);
   const [composerDraftsByConversationId, setComposerDraftsByConversationId] = useState<
     Record<string, string>
   >(() => readComposerDraftsFromStorage());
@@ -8937,68 +8934,6 @@ export function App() {
     authStatus,
     conversationsHydrated,
     ensureConversationHydrated,
-  ]);
-
-  useEffect(() => {
-    if (authStatus !== "authenticated" || !conversationsHydrated) {
-      return;
-    }
-    if (activePanel !== "chat") {
-      return;
-    }
-    if (activeConversation && !activeConversation.hydrated) {
-      return;
-    }
-    if ((activeConversation?.messages.length ?? 0) > 0) {
-      return;
-    }
-    if (welcomeWeatherFetchedAtMs !== null) {
-      const maxAgeMs = welcomeWeather?.success ? 2 * 60 * 60 * 1000 : 15 * 60 * 1000;
-      const ageMs = Date.now() - welcomeWeatherFetchedAtMs;
-      const laToday = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Los_Angeles",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date());
-      const observedDay = String(welcomeWeather?.observed_at || "").slice(0, 10);
-      const currentForToday =
-        !welcomeWeather?.success || observedDay.length === 0 || observedDay === laToday;
-      if (ageMs < maxAgeMs && currentForToday) {
-        return;
-      }
-    }
-
-    let cancelled = false;
-    void apiClient
-      .getSantaBarbaraWeather()
-      .then((weatherResult) => {
-        if (cancelled) {
-          return;
-        }
-        setWelcomeWeather(weatherResult);
-        setWelcomeWeatherFetchedAtMs(Date.now());
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setWelcomeWeather(null);
-          setWelcomeWeatherFetchedAtMs(Date.now());
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeConversation,
-    activeConversation?.id,
-    activeConversation?.hydrated,
-    activeConversation?.messages.length,
-    activePanel,
-    apiClient,
-    authStatus,
-    conversationsHydrated,
-    welcomeWeather,
-    welcomeWeatherFetchedAtMs,
   ]);
 
   const updateConversation = useCallback((
@@ -10265,23 +10200,9 @@ export function App() {
 	    updateConversation,
 	  ]);
 
-  const welcomeHeadline = "Ready when you are.";
-  const welcomeSubtitleBase =
-    "Ask for segmentation, quantification, file-grounded analysis, or anything else you want to explore.";
-  const welcomeSecondaryText = useMemo(() => {
-    if (welcomeWeather?.success) {
-      const blip = String(welcomeWeather.blip || "").trim();
-      if (blip) {
-        return blip;
-      }
-      const summary = String(welcomeWeather.summary || "").trim();
-      if (summary) {
-        return summary;
-      }
-    }
-    return "Santa Barbara weather is taking a quick break — we can still dive right into your analysis.";
-  }, [welcomeWeather]);
-  const welcomeSubtitle = `${welcomeSubtitleBase} ${welcomeSecondaryText}`;
+  const welcomeHeadline = "What are you working on?";
+  const welcomeSubtitle =
+    "Ask about your data, images, papers, models, or any scientific workflow you want to move forward.";
   const viewerUploadedFiles =
     resourceViewerContext?.uploadedFiles ?? activeAvailableUploadedFiles;
   const viewerBisqueLinksByFileId =
@@ -11297,6 +11218,131 @@ export function App() {
     const bisqueLink = resourceToBisqueLink(resource);
     openUploadedFilesInViewer([uploaded], bisqueLink ? { [uploaded.file_id]: bisqueLink } : {});
   };
+
+  // --- URL-as-navigation-state -------------------------------------------------------
+  // The app has no router; navigation is React state. Reflect the active panel + open
+  // Lens resource in the URL so the browser Back/Forward buttons work, a refresh
+  // restores the view, and a Lens view is a shareable deep link. This coexists with the
+  // ?conversation= sync — buildNavUrl preserves every other param, so each layer only
+  // ever touches its own keys.
+  const viewerResourceFileIds = useMemo(
+    () => (resourceViewerContext?.uploadedFiles ?? []).map((file) => file.file_id),
+    [resourceViewerContext]
+  );
+  const initialNavRef = useRef<NavState>(
+    typeof window === "undefined"
+      ? { panel: "chat", resourceFileIds: [] }
+      : parseNavFromSearch(window.location.search)
+  );
+  const navRestoredRef = useRef(false);
+  const suppressNavSyncRef = useRef(false);
+  const lastNavKeyRef = useRef<string | null>(null);
+
+  // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
+  // Always fetches fresh by id (cheap, only on navigation) so it doesn't depend on the
+  // in-memory list and stays referentially stable. Mirrors resourceToUploadedFile /
+  // resourceToBisqueLink.
+  const restoreViewerContextForFileIds = useCallback(
+    async (fileIds: string[]): Promise<void> => {
+      const ids = uniqueFileIds(fileIds);
+      if (ids.length === 0) {
+        return;
+      }
+      const records = await Promise.all(ids.map((id) => apiClient.getResource(id).catch(() => null)));
+      const found = records.filter((record): record is ResourceRecord => record !== null);
+      if (found.length === 0) {
+        return;
+      }
+      const uploadedFiles = uniqueByFileId(
+        found.map((record) => ({
+          file_id: record.file_id,
+          original_name: record.original_name,
+          content_type: record.content_type ?? null,
+          size_bytes: Math.max(0, Number(record.size_bytes) || 0),
+          sha256: record.sha256,
+          created_at: record.created_at,
+        }))
+      );
+      const bisqueLinksByFileId: Record<string, BisqueViewerLink> = {};
+      for (const record of found) {
+        const clientViewUrl = String(record.client_view_url ?? "").trim();
+        if (clientViewUrl) {
+          bisqueLinksByFileId[record.file_id] = {
+            clientViewUrl,
+            resourceUri: record.source_uri ?? null,
+            imageServiceUrl: record.image_service_url ?? null,
+            inputUrl: record.source_uri ?? undefined,
+          };
+        }
+      }
+      setResourceViewerContext({ uploadedFiles, bisqueLinksByFileId });
+    },
+    [apiClient]
+  );
+
+  // One-time restore on load: apply a deep-linked panel + Lens resource once authenticated.
+  useEffect(() => {
+    if (navRestoredRef.current || authStatus !== "authenticated") {
+      return;
+    }
+    navRestoredRef.current = true;
+    const initial = initialNavRef.current;
+    if (initial.panel !== "chat") {
+      setActivePanel(initial.panel);
+    }
+    if (initial.panel === "scientific-viewer" && initial.resourceFileIds.length > 0) {
+      void restoreViewerContextForFileIds(initial.resourceFileIds);
+    }
+  }, [authStatus, restoreViewerContextForFileIds]);
+
+  // State -> URL: push a history entry on each navigation (so Back reverses it), replace
+  // on the first sync, and skip writes that originated from Back/Forward (popstate).
+  useEffect(() => {
+    if (typeof window === "undefined" || !navRestoredRef.current || authStatus !== "authenticated") {
+      return;
+    }
+    const nav: NavState = { panel: activePanel, resourceFileIds: viewerResourceFileIds };
+    const key = navStateKey(nav);
+    if (key === lastNavKeyRef.current) {
+      return;
+    }
+    const isFirstSync = lastNavKeyRef.current === null;
+    lastNavKeyRef.current = key;
+    if (suppressNavSyncRef.current) {
+      suppressNavSyncRef.current = false;
+      return;
+    }
+    const nextUrl = buildNavUrl(
+      { pathname: window.location.pathname, search: window.location.search, hash: window.location.hash },
+      nav
+    );
+    const currentRelativeUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl === currentRelativeUrl) {
+      return;
+    }
+    if (isFirstSync) {
+      window.history.replaceState(window.history.state, "", nextUrl);
+    } else {
+      window.history.pushState({}, "", nextUrl);
+    }
+  }, [activePanel, viewerResourceFileIds, authStatus]);
+
+  // Back/Forward: restore the panel + Lens resource from the URL the browser navigated to.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const handlePopState = (): void => {
+      const nav = parseNavFromSearch(window.location.search);
+      suppressNavSyncRef.current = true;
+      setActivePanel(nav.panel);
+      if (nav.panel === "scientific-viewer" && nav.resourceFileIds.length > 0) {
+        void restoreViewerContextForFileIds(nav.resourceFileIds);
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [restoreViewerContextForFileIds]);
 
   const stageResourcesForConversation = (
     conversationId: string,
@@ -13640,14 +13686,22 @@ export function App() {
           onOpenRecent={openHistoryItem}
         />
         <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
-          <div className="flex min-w-0 flex-row items-center gap-2 px-1">
-            <div className="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
+          <Button
+            type="button"
+            variant="ghost"
+            className="app-sidebar-brand-button min-w-0"
+            onClick={createNewConversation}
+            aria-label="Start a new chat"
+            title="Start a new chat"
+            {...mobileSidebarCloseProps}
+          >
+            <span className="app-sidebar-brand-mark bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
               <BisqueMarkIcon className="size-4" />
-            </div>
-            <div className="app-shell-brand text-primary truncate">
+            </span>
+            <span className="app-shell-brand text-primary truncate">
               BisQue Ultra
-            </div>
-          </div>
+            </span>
+          </Button>
           <SidebarTrigger
             className="app-sidebar-trigger app-sidebar-header-trigger shrink-0"
             aria-label="Collapse sidebar"
@@ -13744,12 +13798,16 @@ export function App() {
                 variant={activePanel === "scientific-viewer" ? "secondary" : "ghost"}
                 className="app-resource-browser-button group/scientific-viewer mb-1 flex w-full items-center justify-between gap-2"
                 onClick={openScientificViewerPanel}
-                title="Scientific Viewer"
+                title="Lens — scientific image viewer"
                 {...mobileSidebarCloseProps}
               >
                 <span className="flex items-center gap-2">
-                  <Layers3 data-icon="inline-start" aria-hidden="true" />
-                  <span>Scientific Viewer</span>
+                  <LensSidebarIcon
+                    active={activePanel === "scientific-viewer"}
+                    data-icon="inline-start"
+                    aria-hidden="true"
+                  />
+                  <span>Lens</span>
                 </span>
               </Button>
             </div>
@@ -14192,7 +14250,6 @@ export function App() {
                 bisqueLinksByFileId={viewerBisqueLinksByFileId}
                 apiClient={apiClient}
                 onUseHdf5DatasetInChat={useHdf5DatasetInChat}
-                onOpenResources={openResourcesPanel}
               />
             </Suspense>
           ) : (

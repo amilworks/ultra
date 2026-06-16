@@ -1,0 +1,15 @@
+# Keep the image-service build context lean: only the package + the engine-build
+# patch script are needed (see Dockerfile.imaging).
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+data
+tests
+*.egg-info
+build
+dist

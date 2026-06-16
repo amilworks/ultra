@@ -77,8 +77,12 @@ function useDebouncedNumber(value: number, delayMs = 70): number {
   return debouncedValue;
 }
 
-const normalizeSurface = (viewerInfo: UploadViewerInfo | null, current?: string | null): ViewerSurface => {
-  const fallback = (viewerInfo?.viewer?.default_surface ?? "2d") as ViewerSurface;
+export const normalizeSurface = (viewerInfo: UploadViewerInfo | null, current?: string | null): ViewerSurface => {
+  // Volumes (NIfTI/DICOM medical + microscopy z-stacks) open on the 2D tab by default
+  // — it's the fastest and most measurement-accurate surface. This only sets the
+  // FIRST-LOAD surface (applied when `current` is absent); the user can still switch to
+  // Slice Views/Volume, and that choice is preserved per file via `current`.
+  const fallback = ((viewerInfo?.is_volume ? "2d" : viewerInfo?.viewer?.default_surface) ?? "2d") as ViewerSurface;
   const available = new Set((viewerInfo?.viewer?.available_surfaces ?? [fallback]).map((value) => String(value)));
   if (current && available.has(current)) {
     return current as ViewerSurface;
@@ -158,33 +162,6 @@ const buildViewerDisplayState = (
   },
   ...override,
 });
-
-const formatStageNumber = (value: number): string =>
-  Number.isFinite(value) ? Math.max(0, Math.floor(value)).toLocaleString() : "0";
-
-const formatStageLabel = (value: string | null | undefined): string => {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) {
-    return "";
-  }
-  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
-};
-
-const buildViewerStageMeta = (viewerInfo: UploadViewerInfo): string => {
-  const size = viewerInfo.is_volume
-    ? `${formatStageNumber(viewerInfo.axis_sizes.X)} x ${formatStageNumber(
-        viewerInfo.axis_sizes.Y
-      )} x ${formatStageNumber(viewerInfo.axis_sizes.Z)} voxels`
-    : `${formatStageNumber(viewerInfo.axis_sizes.X)} x ${formatStageNumber(viewerInfo.axis_sizes.Y)} px`;
-  return [
-    formatStageLabel(viewerInfo.modality),
-    viewerInfo.is_volume ? "Volume" : "Image",
-    size,
-    viewerInfo.dims_order ? `Axes ${viewerInfo.dims_order}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-};
 
 const isPdfUpload = (file: UploadedFileRecord | null | undefined): boolean => {
   const contentType = String(file?.content_type ?? "")
@@ -671,15 +648,6 @@ export function UploadViewerWorkspace({
             </div>
           ) : selectedViewerInfo ? (
             <>
-              {!isHdf5Viewer ? (
-                <div className="viewer-stage-header">
-                  <div className="viewer-stage-heading">
-                    <div className="viewer-stage-title">{selectedViewerInfo.original_name}</div>
-                    <div className="viewer-stage-meta">{buildViewerStageMeta(selectedViewerInfo)}</div>
-                  </div>
-                </div>
-              ) : null}
-
               {selectedBisqueLink?.clientViewUrl ? (
                 <div className="viewer-mode-toggle">
                   <Button type="button" size="sm" variant="secondary">
@@ -771,7 +739,7 @@ export function UploadViewerSheet({
         <SheetHeader className="viewer-sheet-header border-b px-4 pb-3">
           <SheetTitle className="viewer-sheet-title flex items-center gap-2">
             <Layers3 className="size-4" />
-            Scientific Viewer
+            Lens
           </SheetTitle>
           <SheetDescription className="viewer-sheet-description">
             Native scientific imaging workspace for 2D planes, orthogonal slices, metadata, and Three.js volume

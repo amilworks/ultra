@@ -1,0 +1,169 @@
+# BisQue Ultra — local all-in-one stack.
+#
+#   docker compose up --build
+#
+# Brings up: Postgres, NATS (JetStream), the libbioimage image service + its
+# convert worker, the Go control plane, the Deep Agents worker, and the frontend.
+# Talks to a model server you run on the HOST (Ollama or vLLM) — by default
+# http://host.docker.internal:11434/v1 with model `gpt-oss:20b`.
+#
+# Override the model (and a few ports) without touching the app's .env via shell
+# vars or an --env-file, e.g.:
+#   ULTRA_MODEL_NAME=qwen2.5:14b-instruct docker compose up --build
+#   docker compose --env-file .env.docker up --build
+#
+# Auth defaults to "dev" (a local username/password form — no WorkOS/cloud).
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bisque_ultra
+    volumes:
+      - ultra-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bisque_ultra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  image-service:
+    build:
+      context: backend/deepagents_runtime
+      dockerfile: Dockerfile.imaging
+    image: ultra-image-service:local
+    platform: linux/amd64 # the libbioimage engine is x86/SSE (emulated on arm64)
+    volumes:
+      - ultra-uploads:/data/uploads
+    ports:
+      - "${IMAGE_SERVICE_PORT:-8099}:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8090/healthz').status==200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  image-convert-worker:
+    image: ultra-image-service:local # same image, worker role
+    platform: linux/amd64
+    command: ["python", "-m", "ultra_deepagents.image_convert_worker"]
+    environment:
+      ULTRA_CONTROL_NATS_URL: nats://nats:4222
+      ULTRA_CONTROL_NATS_IMAGE_JOBS_SUBJECT: ultra.data_agent.jobs
+      ULTRA_CONTROL_NATS_IMAGE_WORKER_DURABLE: ultra-image-convert-worker
+    volumes:
+      - ultra-uploads:/data/uploads
+    depends_on:
+      nats:
+        condition: service_healthy
+      image-service:
+        condition: service_started
+
+  # Build-only: the worker runs this image (execute_python) via the host Docker
+  # daemon, so it just needs to exist + be tagged. It builds on `up --build`, then
+  # exits. Heavy (~9GB scientific Python). Skip with: docker compose up --scale codeexec-sandbox=0
+  codeexec-sandbox:
+    build:
+      context: .
+      dockerfile: deploy/docker/deepagents-sandbox.Dockerfile
+    image: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
+    command: ["sh", "-c", "echo 'code-exec sandbox image ready'"]
+    restart: "no"
+
+  control-plane:
+    build:
+      context: backend/controlplane
+    image: ultra-control:local
+    environment:
+      ULTRA_CONTROL_HTTP_ADDR: 0.0.0.0:8000
+      ULTRA_CONTROL_DATABASE_URL: postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable
+      ULTRA_CONTROL_NATS_URL: nats://nats:4222
+      ULTRA_CONTROL_UPLOAD_ROOT: /data/uploads
+      # Artifacts live on a host-bind shared with the worker's code-exec sandbox
+      # (see ULTRA_DATA_DIR note in the worker service).
+      ULTRA_CONTROL_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
+      ULTRA_CONTROL_IMAGE_SERVICE_URL: http://image-service:8090
+      ULTRA_CONTROL_AUTH_PROVIDER: ${ULTRA_AUTH_PROVIDER:-dev}
+      ULTRA_CONTROL_DEV_ADMIN_ENABLED: "true"
+      ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
+      ULTRA_CONTROL_BISQUE_ROOT_URL: ${ULTRA_BISQUE_ROOT_URL:-}
+    volumes:
+      - ultra-uploads:/data/uploads
+      - ${ULTRA_DATA_DIR:-/tmp/ultra-data}:${ULTRA_DATA_DIR:-/tmp/ultra-data}
+    ports:
+      - "${CONTROL_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    build:
+      context: backend/deepagents_runtime
+      dockerfile: Dockerfile.worker
+    image: ultra-worker:local
+    environment:
+      OPENAI_BASE_URL: ${ULTRA_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
+      OPENAI_MODEL: ${ULTRA_MODEL_NAME:-gpt-oss:20b}
+      OPENAI_API_KEY: ${ULTRA_MODEL_API_KEY:-EMPTY}
+      ULTRA_CONTROL_BASE_URL: http://control-plane:8000
+      ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
+      ULTRA_CONTROL_NATS_URL: nats://nats:4222
+      ULTRA_NATS_URL: nats://nats:4222
+      ULTRA_CONTROL_DATABASE_URL: postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable
+      ULTRA_CONTROL_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
+      ULTRA_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
+      ULTRA_UPLOAD_ROOTS: /data/uploads
+      ULTRA_DEEPAGENTS_WORKSPACE_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/workspace
+      ULTRA_DEEPAGENTS_MEMORY_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/memory
+      # Code execution: the worker runs each run's code in the sandbox image via
+      # the host Docker daemon (mounted socket). The sandbox bind-mounts the run's
+      # workspace + artifact dir BY PATH on the host daemon, so those dirs must sit
+      # at the SAME absolute path inside the worker and on the host — hence the
+      # ULTRA_DATA_DIR host-bind below (not a named volume).
+      ULTRA_DEEPAGENTS_SANDBOX_IMAGE: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
+      ULTRA_DEEPAGENTS_SANDBOX_NETWORK: ${ULTRA_SANDBOX_NETWORK:-none}
+    volumes:
+      - ultra-uploads:/data/uploads
+      - ${ULTRA_DATA_DIR:-/tmp/ultra-data}:${ULTRA_DATA_DIR:-/tmp/ultra-data}
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # reach a HOST Ollama/vLLM on Linux
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
+
+  frontend:
+    build:
+      context: frontend
+    image: ultra-frontend:local
+    ports:
+      - "${FRONTEND_PORT:-5174}:80"
+    depends_on:
+      control-plane:
+        condition: service_started
+
+volumes:
+  ultra-pgdata:
+  ultra-uploads:

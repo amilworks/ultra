@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import io
 import math
-from typing import Any, Protocol, Sequence, runtime_checkable
+import os
+from collections.abc import Sequence
+from typing import Any, Protocol, runtime_checkable
 
 from ultra_deepagents.imaging import fusion, pipelines, viewerinfo
 
@@ -117,9 +119,9 @@ class LibBioImageEngine:
 
     def __init__(self, *, cache_size: int = 4) -> None:
         try:  # lazy, so importing this module never requires the native stack
+            import libbioimage.libbioimage as bim
             import numpy  # noqa: F401
             from PIL import Image  # noqa: F401
-            import libbioimage.libbioimage as bim
         except Exception as exc:  # pragma: no cover - exercised only without the lib
             raise EngineUnavailable(
                 "libbioimage engine unavailable: install libimgcnv.so + the "
@@ -130,6 +132,10 @@ class LibBioImageEngine:
         self._Image = Image
         self._bim = bim
         self._cache = bim.Cache(size=cache_size)
+        self._signal_score_cache: dict[Any, list[float] | None] = {}
+        # One robust global display window per (path, mtime, channels) so tiled scalar
+        # reads share a single mapping instead of auto-scaling per tile (checkerboard).
+        self._display_window_cache: dict[Any, list[tuple[float, float]]] = {}
 
     # -- public API -----------------------------------------------------------------
     def formats(self) -> list[str]:
@@ -142,26 +148,62 @@ class LibBioImageEngine:
     def meta(self, path: str) -> dict[str, Any]:
         return dict(self._bim.meta(path, self._cache))
 
-    def _display_out_depth(self, path: str) -> str:
-        """Pick the display ``-depth`` for a non-fused (RGB/grayscale) read. An 8-bit
-        RGB(A) PHOTO (orthomosaic, slide) uses FULL-range so true colors show and the
-        alpha survives — data-range collapses a constant (fully-opaque) alpha channel
-        to 0, which renders a native tile blank (see DEPTH_DISPLAY_8U_FULLRANGE).
-        Scientific scalar data (>8-bit / float / single-channel) keeps data-range so
-        its values map into the 8-bit display. Best-effort: any meta failure keeps the
-        historic data-range default."""
+    def _is_display_photo(self, path: str) -> bool:
+        """True for an 8-bit RGB(A) PHOTO (orthomosaic, slide): already display-ready,
+        so it uses FULL type-range (data-range would collapse a constant fully-opaque
+        alpha channel to 0 and render a native tile blank). Everything else is
+        scientific scalar data (>8-bit / float / single-channel) that needs a consistent
+        GLOBAL window — letting libbioimage data-range each TILE independently is what
+        checkerboards a tiled scalar image. Best-effort: a meta failure is treated as
+        scalar (the safe, windowed path)."""
         try:
             meta = self._bim.meta(path, self._cache)
         except Exception:  # noqa: BLE001
-            return pipelines.DEPTH_DISPLAY_8U
+            return False
         pf = str(meta.get("image_pixel_format", "")).lower()
         depth = int(meta.get("image_pixel_depth", 8) or 8)
         c = int(meta.get("image_num_c", 1) or 1)
         mode = str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "").strip().lower()
         names = [str(meta.get(f"channels/channel:{i}/name", "")).strip().lower() for i in range(3)]
         rgb_named = names == ["red", "green", "blue"]
-        is_photo = ("unsigned" in pf or pf == "") and depth <= 8 and c in (3, 4) and (mode.startswith("rgb") or rgb_named)
-        return pipelines.DEPTH_DISPLAY_8U_FULLRANGE if is_photo else pipelines.DEPTH_DISPLAY_8U
+        return ("unsigned" in pf or pf == "") and depth <= 8 and c in (3, 4) and (mode.startswith("rgb") or rgb_named)
+
+    def _display_out_depth(self, path: str) -> str:
+        """The display ``-depth`` for a non-fused read: FULL type-range for an 8-bit RGB
+        photo, else data-range. (Tiled scalar reads no longer use this — they go through
+        the global-window path; this remains for the full-extent slice/thumbnail reads,
+        where a single read already data-ranges over the whole image.)"""
+        return pipelines.DEPTH_DISPLAY_8U_FULLRANGE if self._is_display_photo(path) else pipelines.DEPTH_DISPLAY_8U
+
+    def _display_global_windows(self, path: str, channels=None) -> list[tuple[float, float]]:
+        """One robust [p1,p99] window per (read) channel, sampled over a downsampled
+        level of the WHOLE image, cached per (path, mtime, channels). Applied to every
+        tile/region so a tiled scalar image shares a single mapping instead of
+        auto-scaling per tile."""
+        np = self._np
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        key = (path, mtime, tuple(channels) if channels else None)
+        cached = self._display_window_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            level = _histogram_level_for_meta(dict(self._bim.meta(path, self._cache)))
+        except Exception:  # noqa: BLE001 - bounded fallback, mirrors histogram()
+            level = 2
+        pipeline = pipelines.build(
+            pipelines.res_level(level) if level is not None else None,
+            pipelines.remap(channels) if channels else None,
+            pipelines.depth(32, "D", "F"),
+        )
+        arr = self._bim.read(path, pipeline, self._cache)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        windows = [_robust_window(arr[c].ravel(), np) for c in range(arr.shape[0])]
+        self._display_window_cache[key] = windows
+        return windows
 
     def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
         if colors:
@@ -170,6 +212,14 @@ class LibBioImageEngine:
                 pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
                 colors,
                 windows,
+            )
+        if not self._is_display_photo(path):
+            # Scalar/scientific: apply ONE global window to every tile (per-tile
+            # data-range would checkerboard the image).
+            return self._render_windowed(
+                path,
+                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                self._display_global_windows(path, channels),
             )
         return self._render(
             path,
@@ -186,6 +236,15 @@ class LibBioImageEngine:
                 ),
                 colors,
                 windows,
+            )
+        if not self._is_display_photo(path):
+            return self._render_windowed(
+                path,
+                pipelines.region(
+                    x1, y1, x2, y2, region_scale=region_scale, channels=channels,
+                    out_depth=pipelines.DEPTH_SCALAR_F32,
+                ),
+                self._display_global_windows(path, channels),
             )
         return self._render(
             path,
@@ -419,7 +478,73 @@ class LibBioImageEngine:
         return out
 
     def viewer_info(self, path) -> dict[str, Any]:
-        return viewerinfo.build_viewer_info(dict(self._bim.meta(path, self._cache)))
+        meta = dict(self._bim.meta(path, self._cache))
+        return viewerinfo.build_viewer_info(meta, signal_scores=self._channel_signal_scores(path, meta))
+
+    def _channel_signal_scores(self, path, meta) -> list[float] | None:
+        """Per-channel spatial-structure score (lag-1 horizontal autocorrelation of
+        one mid-z plane). Real imagery scores ~0.9+ (neighbouring pixels correlate);
+        pure noise scores ~0. Lets the viewer default to channels that actually
+        contain structure instead of dead/noise/segmentation channels (e.g. the
+        ``_1`` noise variants in AICS OME-TIFFs). Multichannel only; returns ``None``
+        on any failure so the caller falls back to the metadata-only default.
+
+        Reads ALL channels in ONE multi-channel decode (the decode dominates cost, so
+        one read of N channels ~= one channel; reading them separately was N× slower
+        and timed out ``/viewerinfo`` on a non-pyramidal source). Result is cached per
+        (path, mtime) so repeated opens are instant.
+        """
+        try:
+            c = int(meta.get("image_num_c", 1) or 1)
+            if c <= 1:
+                return None
+            try:
+                cache_key = (path, os.path.getmtime(path), c)
+            except OSError:
+                cache_key = (path, None, c)
+            if cache_key in self._signal_score_cache:
+                return self._signal_score_cache[cache_key]
+            # Guard: scoring decodes one full mid-z plane of all channels. On a
+            # non-pyramidal source that is a full decode, so cap the work to keep
+            # /viewerinfo well under its client timeout — for very large multichannel
+            # planes, skip scoring (caller falls back to the metadata-only default)
+            # rather than risk a slow open.
+            x = int(meta.get("image_num_x", 0) or 0)
+            y = int(meta.get("image_num_y", 0) or 0)
+            if x * y * c > 12_000_000:
+                self._signal_score_cache[cache_key] = None
+                return None
+            np = self._np
+            pages = viewerinfo.paged_depth(meta)
+            depth = pages or int(meta.get("image_num_z", 1) or 1)
+            mid = max(0, depth // 2)
+            chans = list(range(1, c + 1))  # -remap is 1-based
+            if pages:
+                pipeline = pipelines.page_plane(mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32)
+            else:
+                pipeline = pipelines.slice_plane(z=mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32)
+            arr = np.asarray(self._bim.read(path, pipeline, self._cache), dtype="float32")
+            if arr.ndim == 2:  # single plane came back without a channel axis
+                arr = arr[None]
+            scores: list[float] = []
+            for ci in range(min(c, arr.shape[0])):
+                s = arr[ci]
+                if s.ndim != 2 or min(s.shape) < 4:
+                    scores.append(1.0)  # too small to judge -> assume real
+                    continue
+                m = float(s.mean())
+                var = float(((s - m) ** 2).mean())
+                if var <= 1e-9:
+                    scores.append(0.0)  # flat -> no structure
+                    continue
+                cov = float(((s[:, :-1] - m) * (s[:, 1:] - m)).mean())
+                scores.append(max(0.0, min(1.0, cov / var)))
+            while len(scores) < c:  # engine returned fewer channels than expected
+                scores.append(1.0)
+            self._signal_score_cache[cache_key] = scores
+            return scores
+        except Exception:
+            return None
 
     def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
         # Sequential reference, sharing scalar_planes + build_scalar_volume_dict with the
@@ -458,6 +583,14 @@ class LibBioImageEngine:
     def _render(self, path: str, pipeline: str) -> bytes:
         arr = self._bim.read(path, pipeline, self._cache)
         return self._encode_png(arr)
+
+    def _render_windowed(self, path: str, pipeline: str, windows) -> bytes:
+        # Read raw float (the pipeline carries -depth 32,D,F) and apply ONE global
+        # per-channel window -> 8-bit, so every tile of a scalar image maps identically.
+        # This replaces imgcnv's per-tile -depth 8,D,U, which auto-scales each tile to
+        # its own range and checkerboards the image.
+        arr = self._bim.read(path, pipeline, self._cache)
+        return self._encode_png(_window_to_uint8(arr, windows, self._np))
 
     def _render_fused(self, path: str, pipeline: str, colors, windows=None) -> bytes:
         # Read the selected channels as raw float (the pipeline carries
@@ -589,6 +722,36 @@ class StubEngine:
         return buf.getvalue()
 
 
+def _robust_window(values, np) -> tuple[float, float]:
+    """A robust [p1, p99] intensity window for a 1-D value array — the same
+    convention the atlas/fusion paths use. Guarantees hi > lo so the mapping never
+    divides by zero on a constant region."""
+    if getattr(values, "size", 0) == 0:
+        return (0.0, 1.0)
+    lo, hi = (float(v) for v in np.percentile(values, (1.0, 99.0)))
+    if not hi > lo:
+        hi = lo + 1.0
+    return (lo, hi)
+
+
+def _window_to_uint8(arr, windows, np):
+    """Map a float array — (H,W) or (C,H,W) — to uint8 by applying a per-channel
+    [lo,hi] window: ``out = clip((v - lo) / (hi - lo), 0, 1) * 255``.
+
+    The window is supplied by the caller (one GLOBAL window per image), so EVERY tile
+    of an image maps identically — this is what kills the per-tile contrast stretch
+    (the checkerboard) that libbioimage's ``-depth 8,D,U`` produces on tiled reads.
+    Pure + unit-tested. Preserves the input rank (2-D stays 2-D)."""
+    single = arr.ndim == 2
+    a = arr[np.newaxis, ...] if single else arr
+    out = np.empty(a.shape, dtype="uint8")
+    for c in range(a.shape[0]):
+        lo, hi = windows[c] if c < len(windows) else (windows[-1] if windows else (0.0, 1.0))
+        scale = 255.0 / max(float(hi) - float(lo), 1e-6)
+        out[c] = np.clip((a[c].astype("float32") - float(lo)) * scale, 0.0, 255.0).astype("uint8")
+    return out[0] if single else out
+
+
 def _seed(*parts: Any) -> int:
     """Stable non-cryptographic seed from request parts (deterministic across runs)."""
     h = 1469598103934665603  # FNV-1a 64-bit
@@ -606,8 +769,17 @@ def _meta_int(meta: dict[str, Any], key: str) -> int:
         return 0
 
 
+def _resolution_level_count(meta: dict[str, Any]) -> int:
+    return _meta_int(meta, "image_num_resolution_levels_actual") or _meta_int(meta, "image_num_resolution_levels")
+
+
 def _resolution_scales(meta: dict[str, Any]) -> list[float]:
-    raw = meta.get("image_resolution_level_scales") or meta.get("image_res_l_scales")
+    raw = (
+        meta.get("image_resolution_level_scales_actual")
+        or meta.get("image_res_l_scales_actual")
+        or meta.get("image_resolution_level_scales")
+        or meta.get("image_res_l_scales")
+    )
     if isinstance(raw, str):
         values = [part.strip() for part in raw.split(",")]
     elif isinstance(raw, (list, tuple)):
@@ -622,6 +794,9 @@ def _resolution_scales(meta: dict[str, Any]) -> list[float]:
             continue
         if scale > 0:
             scales.append(scale)
+    levels = _resolution_level_count(meta)
+    if levels > 0 and len(scales) > levels:
+        return scales[:levels]
     return scales
 
 
@@ -640,7 +815,7 @@ def _thumbnail_level_for_meta(meta: dict[str, Any], max_size: int) -> int | None
                 break
         return best if best > 0 else None
 
-    levels = _meta_int(meta, "image_num_resolution_levels")
+    levels = _resolution_level_count(meta)
     if levels <= 1:
         return None
     level = 0

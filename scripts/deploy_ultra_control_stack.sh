@@ -16,8 +16,21 @@ ULTRA_DEEPAGENTS_VENV_ROOT="${ULTRA_DEEPAGENTS_VENV_ROOT:-$ULTRA_RELEASE_ROOT/de
 UV_PYTHON_VERSION="${UV_PYTHON_VERSION:-3.11}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
+# Node role selects which units + build steps run. Default "all" preserves the
+# legacy single-node behavior (control + workers together). "edge" = control +
+# Postgres + NATS; "compute" = image-service + convert + agent/rarespot workers
+# (no control, no DB migration, no Go build).
+DEPLOY_ROLE="${DEPLOY_ROLE:-all}"
+case "$DEPLOY_ROLE" in
+  all)     ROLE_CONTROL=1; ROLE_WORKERS=1 ;;
+  edge)    ROLE_CONTROL=1; ROLE_WORKERS=0 ;;
+  compute) ROLE_CONTROL=0; ROLE_WORKERS=1 ;;
+  *) echo "Unknown DEPLOY_ROLE=$DEPLOY_ROLE (expected all|edge|compute)" >&2; exit 1 ;;
+esac
+
 CONTROL_DIR="$RELEASE_DIR/backend/controlplane"
 DEEPAGENTS_DIR="$RELEASE_DIR/backend/deepagents_runtime"
+SANDBOX_DOCKERFILE="$RELEASE_DIR/deploy/docker/deepagents-sandbox.Dockerfile"
 BIN_DIR="$RELEASE_DIR/bin"
 DEEPAGENTS_VENV_DIR="$ULTRA_DEEPAGENTS_VENV_ROOT/$RELEASE_SHA"
 CONTROL_HEALTH_URL="${ULTRA_CONTROL_HEALTH_URL:-http://127.0.0.1:8000/v1/health}"
@@ -94,14 +107,49 @@ check_systemctl() {
   fi
 }
 
+build_sandbox_image() {
+  local image
+
+  if [ "${ULTRA_DEEPAGENTS_SKIP_SANDBOX_IMAGE_BUILD:-0}" = "1" ]; then
+    echo "Skipping Deep Agents sandbox image build by request."
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "docker is required to build the Deep Agents sandbox image." >&2
+    exit 1
+  fi
+
+  if [ ! -f "$SANDBOX_DOCKERFILE" ]; then
+    echo "Deep Agents sandbox Dockerfile not found: $SANDBOX_DOCKERFILE" >&2
+    exit 1
+  fi
+
+  image="${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}"
+  if [ "${ULTRA_DEEPAGENTS_FORCE_SANDBOX_IMAGE_BUILD:-0}" != "1" ] \
+    && docker image inspect "$image" >/dev/null 2>&1; then
+    echo "Deep Agents sandbox image already present: $image"
+    return 0
+  fi
+
+  echo "Building Deep Agents sandbox image: $image"
+  docker build -f "$SANDBOX_DOCKERFILE" -t "$image" "$RELEASE_DIR"
+}
+
 install_systemd_units() {
-  local unit
-  for unit in \
-    ultra-control.service \
-    ultra-deepagents-worker.service \
-    ultra-rarespot-worker.service \
-    ultra-control-stack.target
-  do
+  local unit units
+  case "$DEPLOY_ROLE" in
+    all)
+      units="ultra-control.service ultra-deepagents-worker.service ultra-rarespot-worker.service ultra-control-stack.target"
+      ;;
+    edge)
+      units="ultra-control.service ultra-postgres.service ultra-nats.service"
+      ;;
+    compute)
+      units="ultra-imgsvc.service ultra-image-convert-worker.service ultra-deepagents-worker-node.service ultra-rarespot-worker.service"
+      ;;
+  esac
+  for unit in $units; do
     install -m 0644 "$RELEASE_DIR/deploy/systemd/$unit" "$SYSTEMD_UNIT_DIR/$unit"
   done
 }
@@ -122,7 +170,9 @@ if [ ! -d "$DEEPAGENTS_DIR" ]; then
   exit 1
 fi
 
-UV_BIN="$(resolve_uv_bin)"
+if [ "$ROLE_WORKERS" = 1 ]; then
+  UV_BIN="$(resolve_uv_bin)"
+fi
 load_backend_env
 require_env ULTRA_CONTROL_DATABASE_URL
 require_env ULTRA_CONTROL_NATS_URL
@@ -142,6 +192,7 @@ if [ -n "${ULTRA_CONTROL_UPLOAD_ROOT:-}" ]; then
   mkdir -p "$ULTRA_CONTROL_UPLOAD_ROOT"
 fi
 
+if [ "$ROLE_CONTROL" = 1 ]; then
 echo "Building ultra-control"
 if [ "${ULTRA_CONTROL_SKIP_BUILD:-0}" = "1" ]; then
   if [ ! -x "$BIN_DIR/ultra-control" ]; then
@@ -155,7 +206,9 @@ else
     go build -trimpath -o "$BIN_DIR/ultra-control" ./cmd/ultra-control
   )
 fi
+fi
 
+if [ "$ROLE_WORKERS" = 1 ]; then
 echo "Preparing Deep Agents worker environment"
 rm -rf "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 env UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
@@ -167,33 +220,58 @@ env UV_PYTHON="$UV_PYTHON_VERSION" \
   "$UV_BIN" sync --frozen --extra rarespot --project "$DEEPAGENTS_DIR"
 ln -sfn "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 
-echo "Applying Go control-plane migrations with ultra-control migrate"
-(
-  cd "$CONTROL_DIR"
-  "$BIN_DIR/ultra-control" migrate
-)
+build_sandbox_image
+fi
+
+if [ "$ROLE_CONTROL" = 1 ]; then
+  echo "Applying Go control-plane migrations with ultra-control migrate"
+  (
+    cd "$CONTROL_DIR"
+    "$BIN_DIR/ultra-control" migrate
+  )
+fi
 
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 check_systemctl
 install_systemd_units
 systemctl daemon-reload
 
-systemctl restart ultra-control
-wait_for_health "$CONTROL_HEALTH_URL" "ultra-control"
+if [ "$DEPLOY_ROLE" = "edge" ]; then
+  systemctl enable ultra-postgres ultra-nats >/dev/null 2>&1 || true
+fi
 
-systemctl restart ultra-deepagents-worker
-systemctl restart ultra-rarespot-worker
-sleep 2
+if [ "$ROLE_CONTROL" = 1 ]; then
+  systemctl enable ultra-control >/dev/null 2>&1 || true
+  systemctl restart ultra-control
+  wait_for_health "$CONTROL_HEALTH_URL" "ultra-control"
+fi
 
-systemctl is-active --quiet ultra-deepagents-worker
-echo "ultra-deepagents-worker active"
-systemctl is-active --quiet ultra-rarespot-worker
-echo "ultra-rarespot-worker active"
+if [ "$ROLE_WORKERS" = 1 ]; then
+  if [ "$DEPLOY_ROLE" = "compute" ]; then
+    for unit in ultra-imgsvc ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker; do
+      systemctl enable "$unit" >/dev/null 2>&1 || true
+      systemctl restart "$unit"
+    done
+    wait_for_health "${ULTRA_IMGSVC_HEALTH_URL:-http://127.0.0.1:8099/healthz}" "ultra-imgsvc"
+    sleep 2
+    for unit in ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker; do
+      systemctl is-active --quiet "$unit" && echo "$unit active" || echo "WARNING: $unit not active" >&2
+    done
+  else
+    systemctl restart ultra-deepagents-worker
+    systemctl restart ultra-rarespot-worker
+    sleep 2
+    systemctl is-active --quiet ultra-deepagents-worker && echo "ultra-deepagents-worker active"
+    systemctl is-active --quiet ultra-rarespot-worker && echo "ultra-rarespot-worker active"
+  fi
+fi
 
-if curl -fsS "$CONTROL_ADMIN_URL" >/dev/null 2>&1; then
-  echo "Control admin overview reachable: $CONTROL_ADMIN_URL"
-else
-  echo "WARNING: Control admin overview was not reachable without an admin session: $CONTROL_ADMIN_URL" >&2
+if [ "$ROLE_CONTROL" = 1 ]; then
+  if curl -fsS "$CONTROL_ADMIN_URL" >/dev/null 2>&1; then
+    echo "Control admin overview reachable: $CONTROL_ADMIN_URL"
+  else
+    echo "WARNING: Control admin overview was not reachable without an admin session: $CONTROL_ADMIN_URL" >&2
+  fi
 fi
 
 echo "Go control-stack deploy complete for $RELEASE_SHA"

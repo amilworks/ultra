@@ -1,0 +1,29 @@
+[Unit]
+Description=BisQue Ultra NATS JetStream (control-plane message hub)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# JetStream store on local disk (never NFS). Auth + bounded storage come from
+# nats-server.conf; ULTRA_NATS_TOKEN must be set in this env file before enabling
+# token auth (coordinate with the control-plane + worker NATS URLs).
+EnvironmentFile=-/etc/ultra/nats.env
+ExecStartPre=/bin/mkdir -p ${ULTRA_NATS_DATA_DIR:-/srv/ultra-local/nats-control}
+ExecStartPre=-/usr/bin/docker rm -f ultra-nats
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-nats \
+  --env-file=/etc/ultra/nats.env \
+  -p ${ULTRA_NATS_BIND:-0.0.0.0}:4222:4222 \
+  -p 127.0.0.1:8222:8222 \
+  -v ${ULTRA_NATS_DATA_DIR:-/srv/ultra-local/nats-control}:/data \
+  -v /etc/ultra/nats-server.conf:/etc/nats/nats-server.conf:ro \
+  nats:2.10-alpine -c /etc/nats/nats-server.conf'
+ExecStop=/usr/bin/docker stop ultra-nats
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -6,59 +6,53 @@ ${ULTRA_PUBLIC_HOST} {
     encode zstd gzip
 
     header {
+        # HSTS: confirm no sibling host under the parent domain must serve plain
+        # HTTP before enabling includeSubDomains; hold `preload` until verified.
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        # CSP tuned for the Vite SPA + WebGL/WASM scientific viewer (blob/data for
+        # tiles & workers). VERIFY the viewer works after deploy and tighten; if a
+        # feature breaks, switch this header to Content-Security-Policy-Report-Only
+        # first, observe, then enforce.
+        Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
         X-Content-Type-Options "nosniff"
         Referrer-Policy "strict-origin-when-cross-origin"
         X-Frame-Options "SAMEORIGIN"
         -Server
     }
 
-    handle /v2/* {
+    # All API paths -> the single control-plane instance (loopback). flush_interval
+    # -1 keeps SSE (trace/chat) streaming unbuffered. BisQue/Keycloak platform paths
+    # are intentionally NOT proxied (out of scope this release).
+    @api path /v1/* /v2/* /v3/* /docs* /openapi.json
+    handle @api {
         reverse_proxy 127.0.0.1:8000 {
             flush_interval -1
         }
     }
 
-    handle /v1/health {
-        reverse_proxy 127.0.0.1:8000
-    }
-
-    handle /v1/config* {
-        reverse_proxy 127.0.0.1:8000
-    }
-
-    handle /v1/session* {
-        reverse_proxy 127.0.0.1:8000
-    }
-
-    handle /v1/* {
-        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
-    }
-
-    handle /v3/* {
-        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
-    }
-
-    handle /openapi.json {
-        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
-    }
-
-    handle /docs* {
-        reverse_proxy 127.0.0.1:8001 127.0.0.1:8002
-    }
-
-    @bisque path /admin* /auth_service* /blob_service* /client_service* /core* /data_service* /dataset_service* /engine_service* /export* /export_service* /features* /image_service* /import* /mex* /module_service* /notebook_service* /registration* /services* /stats* /table_service* /usage*
-    handle @bisque {
-        reverse_proxy ${BISQUE_UPSTREAM}
-        header >Set-Cookie "(.*)" "$$1; Secure"
-    }
-
-    redir /bisque /client_service/ 302
-    redir /bisque/ /client_service/ 302
-
+    # SPA: static files with history-API fallback (the app has no client router).
     handle {
         root * /srv/ultra/frontend-current
         try_files {path} /index.html
         file_server
     }
 }
+
+# --- Scaling notes (not active config) --------------------------------------
+# Control-plane: single instance for beta. To scale, replace the single
+# `reverse_proxy 127.0.0.1:8000` upstream with a load-balanced list and add a
+# shared cache; needs session/affinity review for the in-process image cache.
+#
+# Image-service fan-out: the control-plane calls ONE ULTRA_CONTROL_IMAGE_SERVICE_URL
+# (no built-in pool). To spread tile/convert load across N image nodes, run a
+# least-conn reverse proxy in front of them and point that env at it, e.g.:
+#   :8099 {
+#       reverse_proxy COMPUTE_A:8099 COMPUTE_B:8099 {
+#           lb_policy least_conn
+#           health_uri /healthz
+#       }
+#   }
+#
+# Login rate-limiting on /v2/auth/*: use the caddy-ratelimit plugin (requires an
+# xcaddy custom build; not in the stock Caddy binary). Lower priority while the
+# closed beta uses single-admin dev-auth.

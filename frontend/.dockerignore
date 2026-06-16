@@ -1,0 +1,8 @@
+node_modules
+dist
+.tmp
+*.log
+coverage
+playwright-report
+test-results
+.vite

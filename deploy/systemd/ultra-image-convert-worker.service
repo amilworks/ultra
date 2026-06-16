@@ -1,0 +1,31 @@
+[Unit]
+Description=BisQue Ultra image convert worker (upload -> tiled pyramid)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Same image as ultra-imgsvc, run as the NATS convert-worker (durable consumer on
+# the image-jobs subject). Running this on N nodes auto-shares convert load via
+# the JetStream queue group. No published port.
+EnvironmentFile=/etc/ultra/ultra-imgsvc.env
+ExecStartPre=/bin/mkdir -p ${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch}
+ExecStartPre=-/usr/bin/docker rm -f ultra-image-convert-worker
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-image-convert-worker \
+  --env-file /etc/ultra/ultra-imgsvc.env \
+  -v ${ULTRA_CONTROL_UPLOAD_ROOT:-/srv/ultra/shared/uploads}:${ULTRA_CONTROL_UPLOAD_ROOT:-/srv/ultra/shared/uploads} \
+  -v ${ULTRA_CONTROL_ARTIFACT_ROOT:-/srv/ultra/shared/artifacts}:${ULTRA_CONTROL_ARTIFACT_ROOT:-/srv/ultra/shared/artifacts} \
+  -v ${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch}:${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch} \
+  -e TMPDIR=${ULTRA_IMGSVC_SCRATCH:-/srv/ultra-local/scratch} \
+  --entrypoint python \
+  ${ULTRA_IMGSVC_IMAGE:-ultra-image-service:current} \
+  -m ultra_deepagents.image_convert_worker'
+ExecStop=/usr/bin/docker stop ultra-image-convert-worker
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
+  <a href="#quick-start-docker-compose">Quick start (Docker)</a> ·
   <a href="#what-you-are-launching">What you launch</a> ·
-  <a href="#before-you-start">Before you start</a> ·
-  <a href="#step-1-create-your-local-env">Set your environment</a> ·
   <a href="#step-2-choose-an-openai-compatible-model-endpoint">Choose a model endpoint</a> ·
-  <a href="#step-4-start-the-control-stack">Start the control stack</a>
+  <a href="#run-from-source-advanced">Run from source</a> ·
+  <a href="#common-failure-modes">Troubleshooting</a>
 </p>
 
 BisQue Ultra gives you one surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. An existing BisQue service stores the data, the Go control plane owns runs and access, Deep Agents workers execute long-running tool work, and React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at any OpenAI-compatible server without rewriting the application around a single vendor.
@@ -22,26 +22,75 @@ If you want one sentence to hold the whole system in your head, use this one: Bi
 
 Production deployment and operator runbooks are intentionally kept in private internal documentation rather than the public repo.
 
+## Quick Start (Docker Compose)
+
+The fastest way to run the **entire** stack on a fresh Linux or macOS machine. You need only **Docker** (Docker Desktop on macOS, Docker Engine + Compose plugin on Linux) and a local model server — no Go, Node, Python, or `uv`/`pnpm` required; the images build everything.
+
+**1. Start a model server on your host.** [Ollama](https://ollama.com) is the shortest path:
+
+```bash
+ollama serve              # if it isn't already running
+ollama pull gpt-oss:20b   # the stack's default model (any OpenAI-compatible model works)
+```
+
+**2. Build and launch the whole stack:**
+
+```bash
+docker compose up --build
+```
+
+This builds and starts seven services — Postgres, NATS (JetStream), the libbioimage **image service** + its convert worker, the Go **control plane**, the Deep Agents **worker**, and the **frontend**. The first build compiles the native imaging engine (libbioimage/`imgcnv`) from source: budget **~10–30 minutes** the first time (fast on native amd64 Linux; emulated on Apple Silicon). Later runs start in seconds.
+
+**3. Open the app:** **http://localhost:5174**
+
+You are signed in automatically as a local guest (`dev` auth — no account, no cloud). Start chatting (the worker calls your Ollama), or open **Resources** to drag in a scientific image (CZI, ND2, OME-TIFF, NIfTI, DICOM, and 90+ more), a multi-page TIFF z-stack, or a video, and explore it in the Scientific Viewer (tiles, z-scrub, video posters).
+
+**Point at a different model** — no rebuild needed:
+
+```bash
+ULTRA_MODEL_NAME=qwen3:32b-fp16 docker compose up                      # another Ollama model
+# vLLM on the host instead of Ollama:
+ULTRA_MODEL_BASE_URL=http://host.docker.internal:8001/v1 \
+ULTRA_MODEL_NAME=openai/gpt-oss-120b docker compose up
+```
+
+To set the model, ports, or auth persistently, copy the template and pass it through:
+
+```bash
+cp .env.docker.example .env.docker     # then edit it
+docker compose --env-file .env.docker up --build
+```
+
+Stop with `docker compose down` (add `-v` to also wipe the database and uploaded files). The defaults reach a host model at `http://host.docker.internal:11434/v1` (`host-gateway` is wired for Linux). BisQue import features are off unless you set `ULTRA_BISQUE_ROOT_URL`.
+
+> Prefer to run the services directly from source (with hot reload, no Docker for the app code)? See [Run from source](#run-from-source-advanced) below.
+
 ## What You Are Launching
 
-You are starting six layers:
+You are starting seven layers:
 
-1. An existing BisQue deployment provides image, dataset, table, and metadata services.
-2. `backend/controlplane/` serves the BisQue Ultra API on `http://127.0.0.1:8000`.
-3. Local Postgres and NATS JetStream provide durable state and dispatch for development.
-4. `backend/deepagents_runtime/` runs durable Deep Agents and RareSpot workers.
-5. `frontend/` serves the web client on `http://localhost:5174`.
-6. Your model server, usually vLLM or Ollama, answers OpenAI-style chat requests.
+1. `backend/controlplane/` serves the BisQue Ultra API (port `8000`).
+2. Local **Postgres** and **NATS JetStream** provide durable state and job dispatch.
+3. The libbioimage **image service** (`backend/deepagents_runtime/Dockerfile.imaging`) decodes/serves 90+ scientific formats — tiles, slices, histograms, scalar volumes, and ffmpeg video posters — plus a convert worker that builds tiled pyramids on upload.
+4. `backend/deepagents_runtime/` runs the durable Deep Agents **worker**.
+5. `frontend/` serves the web client (port `5174`).
+6. Your **model server** (Ollama or vLLM) answers OpenAI-style chat requests.
+7. *(Optional)* An existing **BisQue** deployment provides shared image/dataset/metadata services when `ULTRA_BISQUE_ROOT_URL` is set.
 
 Those layers are deliberately separate. If a page loads but chat fails, the frontend is alive and the API, worker, model server, or durable transport is not. If BisQue imports fail, check the configured BisQue URL and linked credentials before debugging the frontend. That separation is a feature, because it lets you debug the system by following the symptom instead of guessing.
 
-## Before You Start
+## Run from source (advanced)
 
-Install the three tools this repo assumes:
+If you want hot reload or to iterate on the app code without rebuilding images, run the services directly from source instead of the Docker Compose path above. This needs the language toolchains installed and does **not** include the libbioimage image service unless you build and run it yourself (the Docker Compose path is the supported way to get the imaging engine). Leave `ULTRA_CONTROL_IMAGE_SERVICE_URL` empty to use the legacy native image path.
 
+### Before You Start
+
+Install the tools this path assumes:
+
+- [Go](https://go.dev/dl/) 1.25+ for the control plane
 - [uv](https://github.com/astral-sh/uv) for Python dependency management
-- [pnpm](https://pnpm.io/) for the frontend
-- Docker with Compose for local Postgres, NATS, and optional code-execution containers
+- [pnpm](https://pnpm.io/) 11.5+ (and Node 22+) for the frontend
+- Docker with Compose for local Postgres and NATS
 
 You also need access to a BisQue deployment. For local development, point the app at a reachable BisQue host in `.env`. For staging and production, set `ULTRA_CONTROL_BISQUE_ROOT_URL` in the server-side environment.
 

@@ -45,12 +45,23 @@ docker run -d --name "$NAME" \
   -e ULTRA_IMGSVC_WORKERS="$WORKERS" \
   "$IMAGE" bash -lc '
     set -e
-    export LD_LIBRARY_PATH=/build/bin PYTHONPATH=/app/src PATH=/build/bin:$PATH
+    export LD_LIBRARY_PATH=/build/bin PYTHONPATH=/app/src:/build/python/src PATH=/build/bin:$PATH
     cp /build/bin/libimgcnv.so.* /usr/local/lib/ 2>/dev/null || true; ldconfig 2>/dev/null || true
     # ffmpeg/ffprobe for video posters (libbioimage parses video containers but its
     # decoder is non-functional in this build). Idempotent across restarts.
     command -v ffmpeg >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y --no-install-recommends ffmpeg; } >/dev/null 2>&1 || true
-    pip install --quiet /build/python pillow fastapi uvicorn nats-py 2>&1 | tail -1
+    if [ -f /build/python/pyproject.toml ] || [ -f /build/python/setup.py ]; then
+      pip install --quiet /build/python pillow fastapi uvicorn nats-py 2>&1 | tail -1
+    else
+      pip install --quiet pillow fastapi uvicorn nats-py numpy lxml xarray 2>&1 | tail -1
+    fi
+    python3 - <<PY
+import libbioimage.libbioimage as bim
+formats = {str(name).lower() for name in getattr(bim, "formats", {})}
+if "czi" not in formats:
+    raise SystemExit(f"libbioimage loaded but CZI is missing from formats: {sorted(formats)}")
+print("libbioimage ready with CZI")
+PY
     # Convert worker: source -> tiled BigTIFF pyramid (image.derive_pyramid jobs).
     python3 -m ultra_deepagents.image_convert_worker >/tmp/convert-worker.log 2>&1 &
     # Image service: decode/convert over libbioimage (process pool).

@@ -14,6 +14,7 @@ engine CLI and is exercised where ``imgcnv`` is installed. The eventual
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -103,6 +104,11 @@ def derive_pyramid(
     path.
     """
     resolved = shutil.which(imgcnv_bin) or imgcnv_bin
+    # Ensure the destination directory exists — imgcnv won't create it and fails
+    # with "Cannot write into" otherwise (e.g. a fresh derived/ on first upload).
+    parent = os.path.dirname(str(dst))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     cmd = convert_command(src, dst, spec=spec, imgcnv_bin=resolved)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     result = ConvertResult(str(src), str(dst), proc.returncode, proc.stdout, proc.stderr)

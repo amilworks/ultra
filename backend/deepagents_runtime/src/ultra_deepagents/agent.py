@@ -183,7 +183,23 @@ Example: "all CT scans above age 50" -> bisque_search_resources(resource_type="i
 tag_query="modality:CT", metadata_filters=[{"tag":"age","op":"gt","value":"50"}],
 scope="owner", count_all=True). Keep string-equality tags (modality:CT) in tag_query for
 server-side narrowing and put the numeric comparison in metadata_filters.
+For BisQue module-execution (MEX) runs, use bisque_module_runs. Answer "what modules have I
+run recently on BisQue?" by calling it with no mex_uri (returns each run's module_name, status,
+and time); pass status="FINISHED" to filter. To pull a result from a finished run — e.g. a
+segmentation mask — call bisque_module_runs(mex_uri=<the run's uri>) to get its outputs, then
+take the output's resource_uri and call bisque_download_resource to materialize it into Ultra
+for analysis, or report the output's client_view_url so the user can view it on BisQue. Do not
+treat a mex as an image; its results live in its outputs.
 Never expose or ask for BisQue credentials in the answer; the control plane owns account auth.
+"""
+
+# Shown instead of BISQUE_GUIDANCE when BisQue tools are NOT registered for this run,
+# so the model never names or pretends to call a BisQue tool it does not have.
+BISQUE_UNLINKED_HINT = """
+BisQue tools are not connected for this run. If the user asks about BisQue — their images,
+datasets, or module-execution (MEX) runs — do not name or attempt to call any bisque_* tool and
+do not claim you cannot find a tool. Instead, tell the user to link their BisQue account from the
+Settings menu to enable BisQue access, then offer to retry.
 """
 
 
@@ -643,7 +659,13 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     sections.append(UPLOADED_FILE_GUIDANCE.strip())
     sections.append(PAPER_REVIEW_GUIDANCE.strip())
     sections.append(RARESPOT_GUIDANCE.strip())
-    sections.append(BISQUE_GUIDANCE.strip())
+    # Only advertise the BisQue tools when they are actually registered for this
+    # run; otherwise the model is told to call tools it does not have (the
+    # reported "bisque_module_runs is not among the registered tools" failure).
+    if context is None or _should_register_bisque_tools(context):
+        sections.append(BISQUE_GUIDANCE.strip())
+    else:
+        sections.append(BISQUE_UNLINKED_HINT.strip())
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -992,7 +1014,7 @@ def build_research_agent(
         name="ultra-research-agent",
         model=model or build_chat_model(settings),
         tools=resolved_tools,
-        system_prompt=build_system_prompt(settings),
+        system_prompt=build_system_prompt(settings, context),
         context_schema=AgentRunContext,
         subagents=all_subagents,
         skills=skills_sources,

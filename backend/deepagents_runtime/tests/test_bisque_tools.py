@@ -5,6 +5,8 @@ from ultra_deepagents.bisque.tools import (
     control_post_json,
     create_bisque_dataset,
     download_bisque_resources,
+    get_bisque_module_run,
+    list_bisque_module_runs,
     search_bisque_resources,
     upload_bisque_outputs,
     upload_bisque_workspace_files,
@@ -42,6 +44,7 @@ def test_research_agent_registers_bisque_tools_for_selected_resource_context(mon
     assert "bisque_download_resource" in tool_names
     assert "bisque_upload_files" in tool_names
     assert "bisque_create_dataset" in tool_names
+    assert "bisque_module_runs" in tool_names
     manifest_tool = next(
         tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
     )
@@ -531,6 +534,130 @@ def test_bisque_create_dataset_posts_members_to_control_plane(monkeypatch):
     assert result["ok"] is True
     assert result["resource_uniq"] == "00-DS"
     assert result["member_count"] == 2
+
+
+def test_bisque_list_module_runs_summarizes_status_and_module(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "count": 3,
+                "results": [
+                    {
+                        "resource_uri": "https://b/data_service/00-A",
+                        "resource_uniq": "00-A",
+                        "module_name": "nph_prediction_V2",
+                        "status": "FINISHED",
+                        "created_at": "2026-06-12T01:07:16",
+                        "client_view_url": "https://b/client_service/view?resource=https://b/data_service/00-A",
+                    },
+                    {
+                        "resource_uri": "https://b/data_service/00-B",
+                        "resource_uniq": "00-B",
+                        "module_name": "CellSegment3DUnet",
+                        "status": "FAILED",
+                        "created_at": "2023-03-01T03:37:50",
+                    },
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    result = list_bisque_module_runs(settings, status="FINISHED")
+    assert captured["url"] == "http://control.test/v2/bisque/search"
+    assert captured["json"]["resource_type"] == "mex"
+    # status filter keeps only the FINISHED run
+    assert [run["module_name"] for run in result["runs"]] == ["nph_prediction_V2"]
+    assert result["runs"][0]["status"] == "FINISHED"
+    assert result["runs"][0]["mex_uri"] == "https://b/data_service/00-A"
+
+
+def test_bisque_get_module_run_returns_outputs_for_download(monkeypatch):
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "resource_uri": "https://b/data_service/00-MEX",
+                "resource_type": "mex",
+                "status": "FINISHED",
+                "module_name": "nph_prediction_V2",
+                "outputs": [
+                    {
+                        "name": "Segmentation",
+                        "type": "image",
+                        "resource_uri": "https://b/data_service/00-SEG",
+                        "client_view_url": "https://b/client_service/view?resource=https://b/data_service/00-SEG",
+                    }
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    # Bare resource_uniq routes to mex_uniq; a full URI routes to mex_uri.
+    result = get_bisque_module_run(settings, mex_uri="00-MEX")
+    assert captured["url"] == "http://control.test/v2/bisque/module-run"
+    assert captured["json"] == {"mex_uniq": "00-MEX"}
+    assert result["ok"] is True
+    assert result["outputs"][0]["name"] == "Segmentation"
+    # The output resource_uri is what gets fed to bisque_download_resource.
+    assert result["outputs"][0]["resource_uri"] == "https://b/data_service/00-SEG"
+
+
+def test_bisque_get_module_run_requires_mex_uri():
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    assert get_bisque_module_run(settings, mex_uri="  ") == {"ok": False, "error": "mex_uri_required"}
 
 
 def test_bisque_create_dataset_requires_name_and_members():

@@ -66,6 +66,29 @@ def _parse_scales(raw: str) -> list[float]:
     return out
 
 
+def _resolution_level_count(meta: dict[str, Any]) -> int:
+    """Return the number of real pyramid levels, preferring format-reported actuals.
+
+    CZI/libbioimage can report a synthetic power-of-two level count alongside the
+    levels that are truly present in the file. Viewer tiles must follow the actual
+    file levels, matching Fiji/Bio-Formats, so we prefer the ``*_actual`` fields.
+    """
+    return _int(meta, "image_num_resolution_levels_actual") or _int(meta, "image_num_resolution_levels")
+
+
+def _resolution_scales(meta: dict[str, Any], levels_n: int) -> list[float]:
+    raw = (
+        meta.get("image_resolution_level_scales_actual")
+        or meta.get("image_res_l_scales_actual")
+        or meta.get("image_resolution_level_scales")
+        or meta.get("image_res_l_scales", "")
+    )
+    scales = _parse_scales(raw)
+    if levels_n > 0 and len(scales) > levels_n:
+        return scales[:levels_n]
+    return scales
+
+
 def _first_int(raw: Any, default: int) -> int:
     for part in str(raw or "").split(","):
         part = part.strip()
@@ -117,10 +140,8 @@ def build_tile_scheme(meta: dict[str, Any], tile_size_default: int = 256) -> dic
     """
     x = _int(meta, "image_num_x")
     y = _int(meta, "image_num_y")
-    levels_n = _int(meta, "image_num_resolution_levels")
-    # The real engine reports `image_resolution_level_scales`; older fixtures used
-    # the short alias `image_res_l_scales`. Accept either.
-    scales = _parse_scales(meta.get("image_resolution_level_scales") or meta.get("image_res_l_scales", ""))
+    levels_n = _resolution_level_count(meta)
+    scales = _resolution_scales(meta, levels_n)
     if x <= 0 or y <= 0 or levels_n <= 1 or len(scales) <= 1:
         return None
     tile_size = _first_int(meta.get("tile_size_x"), tile_size_default)
@@ -225,8 +246,214 @@ def build_channels(meta: dict[str, Any], channel_count: int) -> tuple[list[str],
     return names, colors
 
 
-def build_viewer_info(meta: dict[str, Any]) -> dict[str, Any]:
-    """Map a libbioimage ``meta`` dict to the viewer-info structure."""
+def build_acquisition(meta: dict[str, Any]) -> dict[str, Any]:
+    """Curated provenance + instrument facts pulled from the raw libbioimage meta.
+
+    libbioimage already parses the container's embedded metadata — OME-XML for
+    OME-TIFF (acquisition mode, objective, detector, experimenter), and TIFF/XMP
+    tags for everything else (software, capture date) — but ``build_viewer_info``
+    only forwarded a thin slice. This surfaces the scientifically meaningful,
+    single-valued fields (per-channel detail like names/colors comes from ``phys``;
+    the flat meta dict collapses per-channel/per-plane keys). Only present fields are
+    emitted, so a sparse file yields a short dict (the UI hides empty groups).
+    """
+    def first(*keys: str) -> str | None:
+        for k in keys:
+            value = meta.get(k)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.lower() not in ("-1", "unknown", "none", "nan"):
+                return text
+        return None
+
+    acq: dict[str, Any] = {}
+    software = first("TIFF/Software", "document/application", "OME/Creator")
+    if software:
+        acq["software"] = software
+    acquired = first("OME/Image/AcquisitionDate", "Xmp/pix4d/AcquisitionDateTimeUTC", "TIFF/DateTime")
+    if acquired:
+        acq["acquired"] = acquired
+    color_space = first("ColorProfile/color_space", "image_mode")
+    if color_space:
+        acq["color_space"] = color_space
+    objective = first("objectives/objective:0/name", "objectives/objective:0/magnification")
+    if objective:
+        acq["objective"] = objective
+    levels = _resolution_level_count(meta)
+    if levels > 1:
+        acq["pyramid_levels"] = levels
+    # OME-XML instrument context (microscopy). Single-valued in the flat dict.
+    for key, src in (
+        ("acquisition_mode", "OME/Image/Pixels/Channel/AcquisitionMode"),
+        ("objective_medium", "OME/Image/ObjectiveSettings/Medium"),
+        ("refractive_index", "OME/Image/ObjectiveSettings/RefractiveIndex"),
+        ("detector_binning", "OME/Image/Pixels/Channel/DetectorSettings/Binning"),
+        ("experimenter", "OME/Experimenter/UserName"),
+        ("source_name", "OME/Image/Name"),
+    ):
+        value = first(src)
+        if value:
+            acq[key] = value
+    return acq
+
+
+def build_mosaic(meta: dict[str, Any]) -> dict[str, Any] | None:
+    """Detect a tiled-mosaic acquisition (a stage scan of overlapping fields-of-view).
+
+    When such a scan is saved WITHOUT stitching, the reader assembles the fields by
+    stage position with no blending or flat-field correction, so the displayed image
+    shows per-field illumination seams (a checkerboard) — which looks like a rendering
+    bug but is the raw data. We surface it (tile count + stitch/overlap context) so the
+    viewer can label it instead of silently showing the artifact. Returns ``None`` for a
+    normal single-field image. Format-general: matches the metadata-key SUFFIX (the full
+    key path is container-specific) — e.g. CZI's ``.../Information/Image/SizeM``,
+    ``.../SampleHolder/IsOnlineStitchingEnabled``, ``.../SampleHolder/Overlap``.
+    """
+    def find_suffix(*suffixes: str) -> Any:
+        for key, value in meta.items():
+            ks = str(key)
+            for suf in suffixes:
+                if ks == suf or ks.endswith("/" + suf):
+                    return value
+        return None
+
+    tiles_raw = find_suffix("SizeM")  # CZI mosaic ("M") dimension = number of fields
+    try:
+        tiles = int(float(tiles_raw)) if tiles_raw is not None else 0
+    except (TypeError, ValueError):
+        tiles = 0
+    if tiles <= 1:
+        return None  # single field, not a mosaic
+
+    mosaic: dict[str, Any] = {"tiles": tiles}
+    stitch_raw = find_suffix("IsOnlineStitchingEnabled")
+    if stitch_raw is not None:
+        mosaic["stitched"] = str(stitch_raw).strip().lower() in ("true", "1")
+    overlap_raw = find_suffix("SampleHolder/Overlap")
+    try:
+        if overlap_raw is not None:
+            mosaic["overlap"] = round(float(overlap_raw), 4)
+    except (TypeError, ValueError):
+        pass
+    return mosaic
+
+
+def build_raw_header(meta: dict[str, Any]) -> dict[str, str]:
+    """A bounded, de-noised view of the container's raw tags (TIFF/XMP/OME/...) for
+    the collapsible 'Technical details' drawer — so nothing parsed is silently lost,
+    while the calm curated groups still lead. Excludes the pixel-grid/tile/per-channel
+    keys already shown elsewhere and the bulky per-plane OME entries, trims long
+    values, and caps the count so the drawer stays scannable.
+    """
+    skip_prefix = ("image_num", "image_pixel", "image_res", "tile_", "channels/")
+    skip_exact = {"image_dimensions", "image_mode", "format", "raw_endian", "metadata_version"}
+    header: dict[str, str] = {}
+    for key in sorted(meta.keys()):
+        if key in skip_exact or any(key.startswith(p) for p in skip_prefix):
+            continue
+        if "/Plane" in key or "/TiffData" in key or "/BinData" in key:
+            continue  # per-plane OME entries explode the dict
+        text = str(meta[key]).strip()
+        if not text or len(text) > 160:
+            continue
+        header[key] = text
+        if len(header) >= 80:
+            break
+    return header
+
+
+# Spatial-structure score (lag-1 autocorrelation, see engine._channel_signal_scores)
+# below which a channel is treated as noise / dead / segmentation-mask and excluded
+# from the default. Real imagery scores ~0.9+; pure noise ~0. The gap is enormous
+# (measured 0.01-0.03 noise vs 0.93-0.98 signal on real AICS data) so the threshold
+# is not delicate.
+SIGNAL_NOISE_THRESHOLD = 0.30
+
+
+def default_visible_channels(
+    names: list[str],
+    colors: list[dict[str, Any]],
+    channel_count: int,
+    channel_mode: str,
+    signal_scores: list[float] | None = None,
+) -> list[int]:
+    """Default channels shown for a composite multichannel view.
+
+    A multichannel fluorescence stack should open as a multichannel composite (so
+    cells/nuclei are visible), not a single channel that renders as one diffuse
+    blob in 3D. Pick ONE channel per distinct LUT color (so duplicate-color
+    channels like CMDRP/CMDRP_1 don't pile on), skip brightfield/transmitted-light
+    channels (near-white, or named bright/trans/bf/dic/phase), and cap the count to
+    keep the render + GPU bounded. Single-channel / non-composite stays [0].
+
+    ``signal_scores`` (per-channel spatial-structure, 0=noise..1=real imagery) lets
+    us pick the REAL channel within a color group and drop dead/noise channels:
+    files like the AICS OME-TIFFs carry paired channels (CMDRP/CMDRP_1, EGFP/EGFP_1)
+    where the ``_1`` variant is pure noise — defaulting to it renders a noise blob in
+    both 2D and 3D. With scores we keep the channel that actually contains structure
+    instead of just the first index. Without scores, fall back to first-per-color.
+    """
+    if channel_count <= 1 or channel_mode != "composite":
+        return [0]
+    max_default = 4
+    brightfield_markers = ("bright", "trans", "bf", "dic", "phase", "white")
+
+    def score(i: int) -> float:
+        if signal_scores is not None and i < len(signal_scores):
+            return float(signal_scores[i])
+        return 1.0  # no score available -> assume real
+
+    def is_noise(i: int) -> bool:
+        return signal_scores is not None and score(i) < SIGNAL_NOISE_THRESHOLD
+
+    def dominant_color_key(rgb: Any) -> str | None:
+        # Group channels by their DOMINANT primary (R/G/B) so near-duplicate LUT
+        # colors (e.g. #ff0000 vs #ff0014, both red) collapse to one, while distinct
+        # fluorophore colors stay separate. Achromatic (white/gray, hi-lo small) ->
+        # None (treated as brightfield-like and skipped).
+        if not isinstance(rgb, (list, tuple)) or len(rgb) < 3:
+            return None
+        r, g, b = float(rgb[0]), float(rgb[1]), float(rgb[2])
+        if max(r, g, b) - min(r, g, b) < 38:  # ~15% of 255 -> achromatic
+            return None
+        if r >= g and r >= b:
+            return "r"
+        return "g" if g >= b else "b"
+
+    def select(skip_noise: bool) -> list[int]:
+        # Best channel per color: highest structure score, then lowest index. When
+        # skip_noise, noise channels are excluded outright (so a color with only
+        # noise channels is dropped rather than rendered as a noise blob).
+        best_by_key: dict[str, int] = {}
+        for i in range(channel_count):
+            name = str(names[i]).lower() if i < len(names) else ""
+            key = dominant_color_key(colors[i].get("rgb") if i < len(colors) else None)
+            if key is None or any(k in name for k in brightfield_markers):
+                continue
+            if skip_noise and is_noise(i):
+                continue
+            cur = best_by_key.get(key)
+            if cur is None or (score(i), -i) > (score(cur), -cur):
+                best_by_key[key] = i
+        chosen = sorted(best_by_key.values())
+        return chosen[:max_default]
+
+    chosen = select(skip_noise=True)
+    if not chosen:  # every color was noise-only -> ignore scores rather than show nothing
+        chosen = select(skip_noise=False)
+    return chosen if chosen else [0]
+
+
+def build_viewer_info(
+    meta: dict[str, Any], signal_scores: list[float] | None = None
+) -> dict[str, Any]:
+    """Map a libbioimage ``meta`` dict to the viewer-info structure.
+
+    ``signal_scores`` (optional, per-channel spatial-structure 0..1) is supplied by
+    the engine for multichannel files so the default channel selection prefers real
+    imagery over noise/segmentation channels (see :func:`default_visible_channels`).
+    """
     x = _int(meta, "image_num_x")
     y = _int(meta, "image_num_y")
     # Fail closed on degenerate geometry. libbioimage will sometimes OPEN a malformed
@@ -311,29 +538,51 @@ def build_viewer_info(meta: dict[str, Any]) -> dict[str, Any]:
     # An RGB(A) photo renders its native colors directly (no per-channel LUT fuse),
     # so it is a single display surface, not a composite of science channels.
     channel_mode = "composite" if (c > 1 and not is_photo) else "single"
+    visible_channels = default_visible_channels(names, colors, c, channel_mode, signal_scores)
     # Photos use the display (full-colour) render path; scalar science data uses the
     # window/level intensity path. This drives the viewer to a plain zoomable image
     # instead of the composite channel-pills + window/level controls.
     render_policy = "display" if is_photo else "scalar"
-    available_surfaces = ["2d", "metadata"] + (["mpr"] if is_volume else [])
+    # A z>1 image is a 3D volume, so it earns BOTH 3D surfaces: the orthogonal
+    # The 3D surfaces (reslice + volume) are offered ONLY for medical (clinical)
+    # volumes, which have the mature scalar MPR/volume path. Non-medical z-stacks
+    # (microscopy/materials) are intentionally 2D-only for now: the multichannel 3D
+    # render is not yet reliable enough to ship, and a fast 2D view with first-class
+    # Z/T scrubbing is the better experience. volume_mode stays "slice_stack" so the
+    # 2D Z scrub still knows it is a stack — only the 3D SURFACES are withheld. (To
+    # re-enable microscopy 3D, drop the modality guard.)
+    volume_surfaces = ["mpr", "volume"] if (is_volume and modality == "medical") else []
+    available_surfaces = ["2d", "metadata"] + volume_surfaces
 
     phys = {
         "x": x, "y": y, "z": z, "t": t, "ch": c,
         "pixel_depth": depth, "pixel_format": pixel_format,
         "pixel_size": [spacing["x"], spacing["y"], spacing["z"], 1.0],
         "pixel_units": ["um", "um", "um", "frame"],
-        "channel_names": names, "display_channels": [0],
+        "channel_names": names, "display_channels": visible_channels,
         "channel_colors": colors, "units": "physical",
     }
     display_defaults = {
         "enhancement": "d", "negative": False, "rotate": 0, "fusion_method": "m",
-        "channel_mode": channel_mode, "channels": [0],
-        "time_index": 0, "z_index": z // 2, "volume_channel": 0,
+        "channel_mode": channel_mode, "channels": visible_channels,
+        "time_index": 0, "z_index": z // 2, "volume_channel": visible_channels[0],
     }
     metadata = {
         "reader": "libbioimage", "dims_order": dims, "array_dtype": dtype,
+        # The REAL container format (e.g. "OME-TIFF"/"BigTIFF"), distinct from the
+        # reader. The viewer's Format row should show this, not "libbioimage".
+        "format": fmt,
         "physical_spacing": spacing, "scene_count": 1, "warnings": [],
     }
+    acquisition = build_acquisition(meta)
+    if acquisition:
+        metadata["acquisition"] = acquisition
+    raw_header = build_raw_header(meta)
+    if raw_header:
+        metadata["header"] = raw_header
+    mosaic = build_mosaic(meta)
+    if mosaic:
+        metadata["mosaic"] = mosaic
     if names and modality == "microscopy":
         metadata["microscopy"] = {
             "channel_names": names, "objective": str(objective) if objective is not None else None,

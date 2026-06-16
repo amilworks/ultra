@@ -12,18 +12,22 @@
 # planning/2026-06-11-libbioimage-engine-understanding.md (the qmake Makefile.linux
 # PROJ recipe is broken for the pinned PROJ; geospatial is out of scope and left
 # disabled here). Two engine artifacts are required: imgcnv + libimgcnv.so.
+# BioImageConvert's qmake path emits x86/SSE flags, so this image is intentionally
+# built as linux/amd64 even when Docker Desktop's host default is arm64.
+ARG ULTRA_IMAGE_PLATFORM=linux/amd64
 
 # ---------- Stage 1: build the engine ----------
-FROM ubuntu:24.04 AS engine-build
+FROM --platform=${ULTRA_IMAGE_PLATFORM} ubuntu:24.04 AS engine-build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git pkg-config python3 python3-pip \
       qtbase5-dev qt5-qmake qtchooser \
-      autoconf automake libtool meson sqlite3 \
+      autoconf automake libtool meson sqlite3 libexpat1-dev \
       libfftw3-dev libbz2-dev liblzma-dev \
       libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
       libhdf5-dev libgdcm-dev libraw-dev libjpeg-turbo8-dev libpng-dev \
       libopenjp2-7-dev libtiff-dev libopenslide-dev libexiv2-dev \
+      libglib2.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev libxml2-dev \
       libwebp-dev liblcms2-dev libzstd-dev libeigen3-dev libsqlite3-dev \
       zlib1g-dev libjbig-dev libdeflate-dev liblerc-dev \
   && rm -rf /var/lib/apt/lists/*
@@ -39,31 +43,34 @@ WORKDIR /src/bioimageconvert
 # 2026-06-11 (the CMake path's internal proj4 handling mismatches the pinned
 # PROJ submodule). apply-engine-patches.sh applies the validated fixes: guard
 # GeoTIFF so it is optional (its qmake PROJ recipe is broken for the pinned
-# PROJ), disable the out-of-scope geospatial chain, and link zstd independently
-# (libtiff LERC). DICOM/NIfTI/OpenSlide/ND2 are on by default in this build.
+# PROJ), disable the out-of-scope geospatial chain, keep CZI enabled while
+# tolerating duplicated static JPEG-XR symbols at final link, and link zstd
+# independently (libtiff LERC). DICOM/NIfTI/CZI/OpenSlide/ND2 are on by default
+# in this build.
 COPY imaging-engine-build/apply-engine-patches.sh /tmp/apply-engine-patches.sh
 RUN bash /tmp/apply-engine-patches.sh .
-# NOTE: CZI ships ON by default. If the libCZI static link fails (CreateCZIReader /
-# CompressionModeToCompressionIdentifier undefined), apply the CZI-disable sed
-# printed by the patch script. Local emulated-amd64 validation used CZI off.
 RUN cp -f Makefile.linux Makefile \
   && python3 download_build_libs.py \
   && make -j"$(nproc)"
 # Format gate + collect the two artifacts.
-RUN test -f bin/imgcnv && LD_LIBRARY_PATH=bin bin/imgcnv -fmt | grep -iq dicom \
+RUN test -f bin/imgcnv \
+  && LD_LIBRARY_PATH=bin bin/imgcnv -fmt > /tmp/imgcnv-formats.txt \
+  && grep -iq dicom /tmp/imgcnv-formats.txt \
+  && grep -iq czi /tmp/imgcnv-formats.txt \
   && mkdir -p /opt/imgcnv/bin /opt/imgcnv/lib \
   && cp bin/imgcnv /opt/imgcnv/bin/ \
   && cp -P bin/libimgcnv.so* /opt/imgcnv/lib/
 
 # ---------- Stage 2: runtime + Python image service ----------
-FROM ubuntu:24.04 AS runtime
+FROM --platform=${ULTRA_IMAGE_PLATFORM} ubuntu:24.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip \
+      ffmpeg \
       libavformat60 libavcodec60 libswscale7 libavutil58 \
-      libhdf5-103-1t64 libgdcm3.0t64 libjpeg-turbo8 \
-      libopenslide0 libfftw3-3 liblzma5 libsqlite3-0 libraw23t64 \
-      libtiff6 libopenjp2-7 libpng16-16t64 libexiv2-27t64 libwebp7 \
+      libhdf5-103-1t64 libhdf5-cpp-103-1t64 libgdcm3.0t64 libjpeg-turbo8 \
+      libopenslide0 libfftw3-double3 liblzma5 libsqlite3-0 libraw23t64 \
+      libtiff6 libopenjp2-7 libpng16-16t64 libexiv2-27 libwebp7 \
       liblcms2-2 libzstd1 zlib1g libjbig0 libdeflate0 liblerc4 \
   && rm -rf /var/lib/apt/lists/*
 
@@ -72,16 +79,23 @@ COPY --from=engine-build /opt/imgcnv/lib/ /usr/local/lib/
 COPY --from=engine-build /opt/imgcnv/bin/imgcnv /usr/local/bin/imgcnv
 RUN ldconfig
 
-# Python image service from this repo + the libbioimage binding wheel. The wheel
-# does not bundle the .so; the binding finds /usr/local/lib/libimgcnv.so at import.
+# Python image service from this repo + the libbioimage binding from the
+# BioImageConvert source tree. The binding does not bundle the .so; it finds
+# /usr/local/lib/libimgcnv.so at import.
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv "${VIRTUAL_ENV}"
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+COPY --from=engine-build /src/bioimageconvert/python /opt/libbioimage-python
 COPY . /app/deepagents_runtime
 RUN pip install --no-cache-dir "/app/deepagents_runtime[imaging]" \
-  && pip install --no-cache-dir libbioimage
+  && pip install --no-cache-dir /opt/libbioimage-python
+RUN python -c 'import libbioimage.libbioimage as bim; formats = {str(name).lower() for name in getattr(bim, "formats", {})}; assert "czi" in formats, sorted(formats)'
 
 EXPOSE 8090
-# build_engine() selects LibBioImageEngine because libimgcnv.so is present;
-# pass --stub to force the deterministic engine for smoke tests.
-ENTRYPOINT ["python", "-m", "ultra_deepagents.image_service", "--host", "0.0.0.0", "--port", "8090"]
+# Default command runs the FastAPI image service; the same image also runs the
+# convert worker (compose overrides `command` with
+# `python -m ultra_deepagents.image_convert_worker`). build_engine() selects
+# LibBioImageEngine because libimgcnv.so is present; pass --stub to force the
+# deterministic engine for smoke tests. CMD (not ENTRYPOINT) so `command:` in
+# compose can swap roles cleanly.
+CMD ["python", "-m", "ultra_deepagents.image_service", "--host", "0.0.0.0", "--port", "8090", "--workers", "2"]

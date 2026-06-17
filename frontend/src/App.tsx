@@ -397,6 +397,31 @@ function AuthScreenLoadingFallback() {
   );
 }
 
+function UploadFlightChip({
+  inFlightCount,
+  onOpen,
+}: {
+  inFlightCount: number;
+  onOpen: () => void;
+}) {
+  if (inFlightCount <= 0) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      className="upload-flight-chip"
+      onClick={onOpen}
+      aria-label={`Uploading ${inFlightCount} ${
+        inFlightCount === 1 ? "file" : "files"
+      }. Open Resources.`}
+    >
+      <Loader className="upload-flight-chip-spinner" aria-hidden="true" />
+      <span className="upload-flight-chip-label">Uploading {inFlightCount}...</span>
+    </button>
+  );
+}
+
 function DeferredToaster({ theme }: { theme: "light" | "dark" }) {
   const [ready, setReady] = useState(false);
 
@@ -517,6 +542,43 @@ const showSuccessToast = (
   void loadSonnerModule().then(({ toast }) => {
     toast.success(message, options);
   });
+};
+
+type ToastErrorOptions = Parameters<SonnerModule["toast"]["error"]>[1];
+
+const showErrorToast = (
+  message: string,
+  options?: ToastErrorOptions
+): void => {
+  void loadSonnerModule().then(({ toast }) => {
+    toast.error(message, options);
+  });
+};
+
+const RESOURCE_UPLOAD_IN_FLIGHT_STATUSES = new Set([
+  "queued",
+  "creating",
+  "uploading",
+  "verifying",
+]);
+
+const summarizeResourceUploadProgress = (
+  items: ResourceUploadProgress[]
+): { inFlight: number; completed: number; failed: number } => {
+  let inFlight = 0;
+  let completed = 0;
+  let failed = 0;
+  for (const item of items) {
+    const status = String(item.status || "").toLowerCase();
+    if (status === "completed") {
+      completed += 1;
+    } else if (status === "failed") {
+      failed += 1;
+    } else if (RESOURCE_UPLOAD_IN_FLIGHT_STATUSES.has(status)) {
+      inFlight += 1;
+    }
+  }
+  return { inFlight, completed, failed };
 };
 
 const LazySam3AnnotationDialog = lazyNamed(
@@ -7784,6 +7846,10 @@ export function App() {
   );
   const resourceUploadProgressBatcherRef =
     useRef<ReturnType<typeof createResourceUploadProgressFrameBatcher> | null>(null);
+  const inFlightUploadCount = useMemo(
+    () => summarizeResourceUploadProgress(resourceUploadProgress).inFlight,
+    [resourceUploadProgress]
+  );
   if (resourceUploadProgressBatcherRef.current === null) {
     resourceUploadProgressBatcherRef.current = createResourceUploadProgressFrameBatcher({
       onFlush: (events) => {
@@ -7793,11 +7859,27 @@ export function App() {
             current
           );
           writeResourceUploadProgressToStorage(next);
+          const { inFlight, completed, failed } = summarizeResourceUploadProgress(next);
+          const previousInFlight = resourceUploadInFlightRef.current;
+          resourceUploadInFlightRef.current = inFlight;
+          // Drain edge: a batch just settled (in-flight went from >0 to 0).
+          if (previousInFlight > 0 && inFlight === 0 && completed + failed > 0) {
+            if (failed === 0) {
+              showSuccessToast(
+                `${completed} upload${completed === 1 ? "" : "s"} finished`
+              );
+            } else if (completed === 0) {
+              showErrorToast(`${failed} upload${failed === 1 ? "" : "s"} failed`);
+            } else {
+              showErrorToast(`${completed} finished, ${failed} failed`);
+            }
+          }
           return next;
         });
       },
     });
   }
+  const resourceUploadInFlightRef = useRef(0);
   const pausedResourceUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const resourceListKeyRef = useRef("");
   const [mobileConversationQuery, setMobileConversationQuery] = useState("");
@@ -14962,6 +15044,9 @@ export function App() {
         </AlertDialog>
       </SidebarInset>
       <DeferredToaster theme={resolvedTheme} />
+      {activePanel !== "resources" ? (
+        <UploadFlightChip inFlightCount={inFlightUploadCount} onOpen={openResourcesPanel} />
+      ) : null}
     </SidebarProvider>
   );
 }

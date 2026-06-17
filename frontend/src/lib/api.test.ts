@@ -6249,49 +6249,6 @@ describe("ApiClient V2 chat bridge", () => {
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
   });
 
-  it("posts interactive SAM3 segmentation requests to V2", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      void init;
-      const url = String(input);
-      if (url === "https://ultra.example.org/v2/segment/sam3/interactive") {
-        return new Response(
-          JSON.stringify({
-            success: true,
-            run_id: "run_sam3_test",
-            response_text: "segmentation accepted",
-            progress_events: [],
-            result: {
-              processed: 0,
-              total_files: 1,
-              total_masks_generated: 0,
-              files_processed: [],
-              preferred_upload_paths: [],
-              visualization_paths: [],
-              output_directories: [],
-              annotations: [],
-              run_id: "run_sam3_test",
-            },
-            warnings: [],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const response = await client.sam3InteractiveSegment({
-      file_ids: ["file-1"],
-      annotations: [{ file_id: "file-1", points: [], boxes: [] }],
-    });
-
-    expect(response.run_id).toBe("run_sam3_test");
-    const urls = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(urls).toEqual(["https://ultra.example.org/v2/segment/sam3/interactive"]);
-    expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
-  });
-
   it("posts BisQue resource imports to V2", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;

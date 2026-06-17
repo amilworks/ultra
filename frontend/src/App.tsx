@@ -194,7 +194,6 @@ import type {
   ResourceShareGrantRecord,
   RunEvent,
   RunTokenUsage,
-  Sam3InteractiveRequest,
   SelectionContext,
   UploadedFileRecord,
 } from "./types";
@@ -493,7 +492,6 @@ const lazyNamed = <TModule extends Record<string, unknown>>(
     };
   });
 
-const loadSam3AnnotationDialogModule = () => import("./components/Sam3AnnotationDialog");
 const loadUploadViewerSheetModule = () => import("./components/UploadViewerSheet");
 const loadAdminConsoleModule = () => import("./components/AdminConsole");
 const loadAppSettingsDialogModule = () => import("./components/AppSettingsDialog");
@@ -581,10 +579,6 @@ const summarizeResourceUploadProgress = (
   return { inFlight, completed, failed };
 };
 
-const LazySam3AnnotationDialog = lazyNamed(
-  loadSam3AnnotationDialogModule,
-  "Sam3AnnotationDialog"
-);
 const LazyUploadViewerSheet = lazyNamed(
   loadUploadViewerSheetModule,
   "UploadViewerSheet"
@@ -1063,19 +1057,6 @@ type ResourceViewerContext = {
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
 };
 
-type Sam3AnnotationSession = {
-  conversationId: string;
-  promptText: string;
-  uploadedFiles: UploadedFileRecord[];
-};
-
-const interactiveSegmentationModelLabel = (
-  value: string | null | undefined
-): string => {
-  const token = String(value || "medsam").trim().toLowerCase();
-  return token === "sam3" ? "SAM3" : "MedSAM2";
-};
-
 type PendingConversationDelete = {
   id: string;
   title: string;
@@ -1422,27 +1403,18 @@ type PromptWorkflowIntent = {
   asksForSegmentation: boolean;
   asksForDepth: boolean;
   asksForDetection: boolean;
-  asksForInteractiveSam3: boolean;
-  skipInteractiveSam3: boolean;
   isMultiToolWorkflow: boolean;
 };
 
 const inferPromptWorkflowIntent = (promptText: string): PromptWorkflowIntent => {
   const normalized = String(promptText || "").toLowerCase();
   const asksForSegmentation =
-    /\b(segment|segmentation|mask|masks|sam3|sam)\b/.test(normalized);
+    /\b(segment|segmentation|mask|masks)\b/.test(normalized);
   const asksForDepth = /\b(depth|depth map|depth estimation|depthpro|monocular depth)\b/.test(
     normalized
   );
   const asksForDetection =
     /\b(yolo|detect|detection|object detection|bbox|bounding boxes?)\b/.test(normalized);
-  const asksForInteractiveSam3 =
-    /\b(interactive|point prompt|prompt points?|click points?|boxes?|annotat(e|ion|ions)|manual)\b/.test(
-      normalized
-    );
-  const skipInteractiveSam3 = /\b(auto|automatic|without prompts?|no prompts?)\b/.test(
-    normalized
-  );
   const referencesPipeline =
     /\b(and then|then|after|follow(?:ed)? by|next|pipeline|chain|use .* output|using .* output|take .* output|feed .* into)\b/.test(
       normalized
@@ -1456,8 +1428,6 @@ const inferPromptWorkflowIntent = (promptText: string): PromptWorkflowIntent => 
     asksForSegmentation,
     asksForDepth,
     asksForDetection,
-    asksForInteractiveSam3,
-    skipInteractiveSam3,
     isMultiToolWorkflow,
   };
 };
@@ -1534,9 +1504,6 @@ const coerceComposerWorkflowPresetState = (
 const inferReuseToolNames = (promptText: string): string[] => {
   const intent = inferPromptWorkflowIntent(promptText);
   const selected: string[] = [];
-  if (intent.asksForSegmentation) {
-    selected.push("segment_image_sam2");
-  }
   if (intent.asksForDetection) {
     selected.push("yolo_detect");
   }
@@ -1555,12 +1522,6 @@ const normalizeSlashWorkflowQuery = (value: string): string => {
 };
 
 const reuseToolLabel = (toolName: string): string => {
-  if (toolName === "segment_image_sam2") {
-    return "MedSAM2 segmentation";
-  }
-  if (toolName === "segment_image_sam3") {
-    return "SAM3 segmentation";
-  }
   if (toolName === "yolo_detect") {
     return "YOLO detection";
   }
@@ -1571,8 +1532,6 @@ const reuseToolLabel = (toolName: string): string => {
 };
 
 const autoLoadReuseToolNames = new Set<string>([
-  "segment_image_sam2",
-  "segment_image_sam3",
   "yolo_detect",
   "estimate_depth_pro",
 ]);
@@ -1788,26 +1747,6 @@ const shouldAutoLoadReuseCandidate = (
     return false;
   }
   return candidate.toolNames.every((toolName) => autoLoadReuseToolNames.has(toolName));
-};
-
-const shouldOpenSam3InteractivePrompt = (
-  promptText: string,
-  uploads: UploadedFileRecord[]
-): boolean => {
-  const intent = inferPromptWorkflowIntent(promptText);
-  if (!intent.asksForSegmentation) {
-    return false;
-  }
-  if (!uploads.some((file) => isImageLikeUploadedFile(file))) {
-    return false;
-  }
-  if (intent.skipInteractiveSam3) {
-    return false;
-  }
-  if (intent.isMultiToolWorkflow) {
-    return false;
-  }
-  return intent.asksForInteractiveSam3;
 };
 
 const makeId = (): string =>
@@ -4332,8 +4271,6 @@ const buildToolResultCards = (
     const toolName = normalizeToolName(event.tool);
     if (
       toolName !== "segment_image_megaseg" &&
-      toolName !== "segment_image_sam2" &&
-      toolName !== "segment_image_sam3" &&
       toolName !== "yolo_detect" &&
       toolName !== "estimate_depth_pro" &&
       toolName !== "quantify_segmentation_masks" &&
@@ -5511,118 +5448,6 @@ const buildToolResultCards = (
           structureChannel: toNumber(megasegSummary.structure_channel),
           nucleusChannel: toNumber(megasegSummary.nucleus_channel),
         },
-      });
-      return;
-    }
-
-    if (toolName === "segment_image_sam2" || toolName === "segment_image_sam3") {
-      const isMedsam2 = toolName === "segment_image_sam2";
-      const segmentationTitle = isMedsam2 ? "MedSAM2 segmentation" : "SAM3 segmentation";
-      const artifactPattern = isMedsam2
-        ? /(medsam2|overlay|mask_preview|side_by_side)/i
-        : /(sam3|overlay|mask_preview|side_by_side)/i;
-      const summaryFiles = Array.isArray(summary?.files) ? summary?.files : [];
-      const coverageMean = toNumber(summary?.coverage_percent_mean);
-      const coverageMin = toNumber(summary?.coverage_percent_min);
-      const coverageMax = toNumber(summary?.coverage_percent_max);
-      const totalMasks = toNumber(summary?.total_masks_generated);
-      const processed = toNumber(summary?.processed);
-      const summaryMinPoints = toNumber(summary?.min_points);
-      const summaryMaxPoints = toNumber(summary?.max_points);
-
-      if (matchedImages.length === 0) {
-        runArtifacts
-          .filter((artifact) =>
-            artifactPattern.test(artifact.sourceName)
-          )
-          .slice(0, 3)
-          .forEach((artifact) => addMatchedImage(artifact));
-      }
-
-      const coverageRows = summaryFiles
-        .slice(0, 8)
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          rawFile: String(row.file ?? "file"),
-          file: toDisplayFileLabel(String(row.file ?? "file")),
-          coveragePercent: toNumber(row.coverage_percent),
-          masks: toNumber(row.total_masks),
-          avgPointsPerWindow: toNumber(row.avg_points_per_window),
-          minPoints: toNumber(row.min_points),
-          maxPoints: toNumber(row.max_points),
-        }));
-
-      const hoverDetailsByLookupKey = new Map<string, ToolImageHoverDetails>();
-      coverageRows.forEach((row) => {
-        const details: ToolImageHoverDetails = {
-          fileLabel: row.file,
-          masksGenerated: row.masks,
-          avgPointsPerWindow: row.avgPointsPerWindow,
-          minPoints: row.minPoints ?? summaryMinPoints,
-          maxPoints: row.maxPoints ?? summaryMaxPoints,
-        };
-        artifactLookupKeys(row.rawFile).forEach((key) => {
-          if (!hoverDetailsByLookupKey.has(key)) {
-            hoverDetailsByLookupKey.set(key, details);
-          }
-        });
-      });
-
-      const matchedSam3Images: ToolCardImage[] = [...matchedImages]
-        .sort((left, right) => Number(right.previewable) - Number(left.previewable))
-        .slice(0, 6)
-        .map((artifact) => {
-          const details =
-            artifactLookupKeys(artifact.sourceName)
-              .map((key) => hoverDetailsByLookupKey.get(key))
-              .find((value): value is ToolImageHoverDetails => value !== undefined) ??
-            undefined;
-          return {
-            ...artifact,
-            hoverDetails: details,
-          };
-        });
-
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: isMedsam2 ? "segment_image_sam2" : "segment_image_sam3",
-        title: segmentationTitle,
-        subtitle:
-          typeof summary?.model === "string" && summary.model.length > 0
-            ? summary.model
-            : undefined,
-        metrics: [
-          {
-            label: "Processed",
-            value:
-              processed !== null && toNumber(summary?.total_files) !== null
-                ? `${processed}/${toNumber(summary?.total_files)}`
-                : "n/a",
-          },
-          {
-            label: "Masks",
-            value: totalMasks !== null ? `${Math.round(totalMasks)}` : "n/a",
-          },
-          {
-            label: "Coverage",
-            value:
-              coverageMean !== null
-                ? `${coverageMean.toFixed(2)}% (${(coverageMin ?? 0).toFixed(2)}–${(coverageMax ?? 0).toFixed(2)})`
-                : "n/a",
-          },
-          {
-            label: "Point budget",
-            value:
-              summaryMinPoints !== null && summaryMaxPoints !== null
-                ? `${Math.round(summaryMinPoints)}–${Math.round(summaryMaxPoints)}`
-                : "n/a",
-          },
-        ],
-        classes: [],
-        images: matchedSam3Images,
-        resourceRows: [],
-        downloadRows: [],
       });
       return;
     }
@@ -7944,9 +7769,6 @@ export function App() {
     null
   );
   const [uiErrorBanner, setUiErrorBanner] = useState<string | null>(null);
-  const [sam3AnnotationSession, setSam3AnnotationSession] =
-    useState<Sam3AnnotationSession | null>(null);
-  const [sam3AnnotationBusy, setSam3AnnotationBusy] = useState(false);
   const [pendingReusePrompt, setPendingReusePrompt] = useState<PendingReusePrompt | null>(null);
   const [composerDraftsByConversationId, setComposerDraftsByConversationId] = useState<
     Record<string, string>
@@ -12203,95 +12025,6 @@ export function App() {
     }
   };
 
-  const runSam3InteractiveSegmentation = async (
-    payload: Sam3InteractiveRequest
-  ): Promise<void> => {
-    const session = sam3AnnotationSession;
-    if (!session) {
-      return;
-    }
-    const conversationId = session.conversationId;
-    const assistantMessageId = makeId();
-    const consumedSam3FileIds = new Set(
-      session.uploadedFiles.map((file) => file.file_id)
-    );
-
-    setSam3AnnotationSession(null);
-    setSam3AnnotationBusy(true);
-    const modelLabel = interactiveSegmentationModelLabel(payload.model);
-    updateConversation(conversationId, (conversation) => ({
-      ...conversation,
-      updatedAt: Date.now(),
-      sending: true,
-      chatError: null,
-      stagedUploadFileIds:
-        consumedSam3FileIds.size > 0
-          ? conversation.stagedUploadFileIds.filter(
-              (fileId) => !consumedSam3FileIds.has(fileId)
-            )
-          : conversation.stagedUploadFileIds,
-      messages: [
-        ...conversation.messages,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: `Running ${modelLabel} with your interactive prompts…`,
-          createdAt: Date.now(),
-          progressEvents: [],
-        },
-      ],
-    }));
-
-    try {
-      const response = await apiClient.sam3InteractiveSegment(payload);
-      const assistantText =
-        response.response_text?.trim() || `${modelLabel} interactive segmentation finished.`;
-      updateConversation(conversationId, (conversation) => ({
-        ...conversation,
-        updatedAt: Date.now(),
-        sending: false,
-        chatError: null,
-        messages: conversation.messages.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: assistantText,
-                runId: response.run_id,
-                progressEvents: response.progress_events ?? [],
-              }
-            : item
-        ),
-      }));
-      hydrateRunDetails(conversationId, assistantMessageId, response.run_id);
-    } catch (error) {
-      const message = normalizeApiError(error);
-      updateConversation(conversationId, (conversation) => ({
-        ...conversation,
-        updatedAt: Date.now(),
-        sending: false,
-        chatError: message,
-        messages: conversation.messages.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: `Error: ${message}`,
-              }
-            : item
-        ),
-      }));
-    } finally {
-      setSam3AnnotationBusy(false);
-      updateConversation(conversationId, (conversation) =>
-        conversation.sending
-          ? {
-              ...conversation,
-              sending: false,
-            }
-          : conversation
-      );
-    }
-  };
-
   const hydrateRunArtifacts = useCallback(async (
     conversationId: string,
     assistantMessageId: string,
@@ -13270,15 +13003,6 @@ export function App() {
 
       if (isChatStopRequested(conversationId)) {
         finalizeStoppedConversation({ conversationId, assistantMessageId, streamedText });
-        return;
-      }
-
-      if (shouldOpenSam3InteractivePrompt(promptForModel, currentUploads)) {
-        setSam3AnnotationSession({
-          conversationId,
-          promptText: promptForModel,
-          uploadedFiles: currentUploads.filter((file) => isImageLikeUploadedFile(file)),
-        });
         return;
       }
 
@@ -14815,25 +14539,6 @@ export function App() {
               bisqueLinksByFileId={viewerBisqueLinksByFileId}
               apiClient={apiClient}
               onUseHdf5DatasetInChat={useHdf5DatasetInChat}
-            />
-          </Suspense>
-        ) : null}
-        {sam3AnnotationSession ? (
-          <Suspense fallback={null}>
-            <LazySam3AnnotationDialog
-              open={Boolean(sam3AnnotationSession)}
-              onOpenChange={(open: boolean) => {
-                if (!open && !sam3AnnotationBusy) {
-                  setSam3AnnotationSession(null);
-                }
-              }}
-              files={sam3AnnotationSession?.uploadedFiles ?? []}
-              apiClient={apiClient}
-              busy={sam3AnnotationBusy}
-              portalContainer={sidebarInsetElement}
-              conversationId={sam3AnnotationSession?.conversationId ?? null}
-              initialPromptText={sam3AnnotationSession?.promptText ?? ""}
-              onSubmit={runSam3InteractiveSegmentation}
             />
           </Suspense>
         ) : null}

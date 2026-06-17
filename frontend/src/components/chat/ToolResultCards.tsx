@@ -201,8 +201,6 @@ export type ToolResultCard = {
   id: string;
   tool:
     | "segment_image_megaseg"
-    | "segment_image_sam2"
-    | "segment_image_sam3"
     | "yolo_detect"
     | "estimate_depth_pro"
     | "quantify_segmentation_masks"

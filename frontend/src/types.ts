@@ -58,7 +58,6 @@ export type ChatWorkflowHintId =
   | "add_tags_to_resource"
   | "bisque_fetch_xml"
   | "delete_bisque_resource"
-  | "segment_sam3"
   | "rarespot_ecology"
   | "detect_prairie_dog"
   | "detect_yolo"
@@ -1317,7 +1316,7 @@ export type ResourceComputationSuggestion = {
   requested_file_id: string;
   requested_file_name: string;
   requested_file_sha256: string;
-  tool_name: "segment_image_sam3" | "yolo_detect" | "estimate_depth_pro" | string;
+  tool_name: "yolo_detect" | "estimate_depth_pro" | string;
   run_id: string;
   run_status: string;
   run_goal?: string | null;
@@ -2338,67 +2337,6 @@ export type UploadCaptionResponse = {
   file_id: string;
   caption: string;
   source: "llm" | "fallback" | "cache";
-};
-
-export type Sam3PointAnnotation = {
-  x: number;
-  y: number;
-  label: 0 | 1 | "positive" | "negative" | "include" | "exclude";
-};
-
-export type Sam3BoxAnnotation = {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  label: 0 | 1 | "positive" | "negative" | "include" | "exclude";
-};
-
-export type Sam3ImageAnnotation = {
-  file_id: string;
-  points: Sam3PointAnnotation[];
-  boxes: Sam3BoxAnnotation[];
-};
-
-export type Sam3InteractiveRequest = {
-  file_ids: string[];
-  annotations: Sam3ImageAnnotation[];
-  model?: "sam3" | "medsam" | "medsam2" | string | null;
-  conversation_id?: string | null;
-  concept_prompt?: string | null;
-  save_visualizations?: boolean;
-  preset?: "fast" | "balanced" | "high_quality" | string | null;
-  threshold?: number | null;
-  point_box_size?: number;
-  min_points?: number | null;
-  max_points?: number | null;
-  tracker_prompt_mode?:
-    | "single_object_refine"
-    | "per_positive_point_instance";
-  force_rerun?: boolean;
-};
-
-export type Sam3InteractiveResponse = {
-  success: boolean;
-  run_id: string;
-  response_text: string;
-  progress_events: ProgressEvent[];
-  result: {
-    processed: number;
-    total_files: number;
-    total_masks_generated: number;
-    files_processed: Array<Record<string, unknown>>;
-    preferred_upload_paths: string[];
-    visualization_paths: Array<Record<string, unknown>>;
-    output_directories: string[];
-    coverage_percent_mean?: number | null;
-    coverage_percent_min?: number | null;
-    coverage_percent_max?: number | null;
-    model?: string | null;
-    annotations: Array<Record<string, unknown>>;
-    run_id: string;
-  };
-  warnings: string[];
 };
 
 export type PublicConfigResponse = {

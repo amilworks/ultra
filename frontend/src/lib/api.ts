@@ -115,8 +115,6 @@ import type {
   RunEventsResponse,
   RunEvent,
   RunResponse,
-  Sam3InteractiveRequest,
-  Sam3InteractiveResponse,
   SantaBarbaraWeatherResponse,
   TrainingDatasetCreateRequest,
   TrainingDatasetItemsRequest,
@@ -5059,21 +5057,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as UploadCaptionResponse;
-  }
-
-  async sam3InteractiveSegment(
-    request: Sam3InteractiveRequest
-  ): Promise<Sam3InteractiveResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/segment/sam3/interactive"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as Sam3InteractiveResponse;
   }
 
   async getRun(runId: string): Promise<RunResponse> {

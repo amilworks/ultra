@@ -515,6 +515,11 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/data-agent/jobs/{job_id}/lease", deps.handleAcquireDataAgentJobLease)
 			r.Patch("/data-agent/jobs/{job_id}/lease", deps.handleRenewDataAgentJobLease)
 			r.Delete("/data-agent/jobs/{job_id}/lease", deps.handleReleaseDataAgentJobLease)
+			// Batch model inference (MegaSeg / RareSpot): submit rides the data-agent backbone;
+			// the worker registers produced results via the outputs endpoint. Progress + cancel
+			// reuse GET /data-agent/jobs/{id} and POST /data-agent/jobs/{id}/control.
+			r.Post("/analysis/batch", deps.handleCreateBatchAnalysisJob)
+			r.Post("/data-agent/jobs/{job_id}/outputs", deps.handleRegisterAnalysisOutputs)
 			r.Get("/runs", deps.handleListRuns)
 			r.Get("/runs/{run_id}", deps.handleGetRun)
 			r.Get("/runs/{run_id}/user-profile", deps.handleGetRunUserProfile)

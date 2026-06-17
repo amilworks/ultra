@@ -5491,6 +5491,35 @@ RETURNING event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
 	return job, nil
 }
 
+// LinkDataAgentJobResource records a resource against a data-agent job. Used by the
+// batch-analysis worker to attach the OUTPUT resources it produces (io_role='output')
+// to the job, alongside the input images recorded at creation. Idempotent: re-running
+// a job (resume after restart) upserts the same row instead of duplicating.
+func (s *PostgresStore) LinkDataAgentJobResource(ctx context.Context, input domain.LinkDataAgentJobResourceInput) error {
+	jobID := strings.TrimSpace(input.JobID)
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if jobID == "" || resourceID == "" {
+		return ErrNotFound
+	}
+	ioRole := strings.ToLower(strings.TrimSpace(input.IORole))
+	if ioRole == "" {
+		ioRole = "input"
+	}
+	if _, err := s.pool.Exec(ctx, `
+INSERT INTO control_data_agent_job_resources (job_id, resource_id, position, io_role, metadata)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (job_id, resource_id) DO UPDATE SET io_role = EXCLUDED.io_role, metadata = EXCLUDED.metadata`,
+		jobID,
+		resourceID,
+		int64(input.Position),
+		ioRole,
+		jsonBytes(mapOrEmpty(input.Metadata)),
+	); err != nil {
+		return mapPgError(err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) GetDataAgentJobForUser(ctx context.Context, jobID string, userID string, orgID string) (domain.DataAgentJobRecord, error) {
 	job, err := scanDataAgentJobRow(s.pool.QueryRow(ctx, `
 SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
@@ -5632,8 +5661,11 @@ FOR UPDATE`,
 	if input.OutputSummary != nil {
 		outputSummary = cloneJSONMap(input.OutputSummary)
 	}
+	// Only replace metadata when the update carries some: status/progress updates send an
+	// empty map, and clobbering would drop create-time metadata (e.g. results_collection_id)
+	// that downstream output registration relies on.
 	metadata := existing.Metadata
-	if input.Metadata != nil {
+	if len(input.Metadata) > 0 {
 		metadata = cloneJSONMap(input.Metadata)
 	}
 	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `

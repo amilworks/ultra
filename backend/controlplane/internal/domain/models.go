@@ -741,6 +741,18 @@ type ControlDataAgentJobInput struct {
 	Metadata    JSONMap
 }
 
+// LinkDataAgentJobResourceInput records a resource against a data-agent job in the
+// control_data_agent_job_resources junction. IORole is "input" for the images a job
+// consumes (recorded at creation) or "output" for results a job produces (masks,
+// bbox CSV, report) — registered by the worker as each item completes.
+type LinkDataAgentJobResourceInput struct {
+	JobID      string
+	ResourceID string
+	IORole     string
+	Position   int
+	Metadata   JSONMap
+}
+
 type DataAgentJobListInput struct {
 	UserID    string
 	OrgID     string

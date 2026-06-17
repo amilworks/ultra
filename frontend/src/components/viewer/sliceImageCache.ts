@@ -46,10 +46,19 @@ export const clearSliceCache = (): void => {
   inflight.clear();
 };
 
-export const loadSliceBitmap = (url: string): Promise<ImageBitmap> => {
+/**
+ * onProgress maps to REAL load phases so a slow open looks like it is working, not
+ * broken: `null` while the backend is still decoding (request sent, no bytes yet —
+ * the viewer shows an indeterminate bar), then 0..1 as the plane's bytes stream in,
+ * then 1 when the response is fully received.
+ */
+export type SliceLoadProgress = (fraction: number | null) => void;
+
+export const loadSliceBitmap = (url: string, onProgress?: SliceLoadProgress): Promise<ImageBitmap> => {
   const cached = bitmapCache.get(url);
   if (cached) {
     promote(url, cached);
+    onProgress?.(1);
     return Promise.resolve(cached);
   }
   const pending = inflight.get(url);
@@ -62,6 +71,7 @@ export const loadSliceBitmap = (url: string): Promise<ImageBitmap> => {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 45000);
     let response: Response;
+    onProgress?.(null); // request in flight, backend decoding: indeterminate
     try {
       response = await fetch(url, { credentials: "include", signal: controller.signal });
     } catch (error) {
@@ -75,7 +85,27 @@ export const loadSliceBitmap = (url: string): Promise<ImageBitmap> => {
     if (!response.ok) {
       throw new Error(`Slice request failed: ${response.status}`);
     }
-    const blob = await response.blob();
+    let blob: Blob;
+    const total = Number(response.headers.get("content-length") || 0);
+    if (response.body && total > 0) {
+      // Stream the body so the bar reflects the real bytes received for this plane.
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          received += value.length;
+          onProgress?.(Math.min(0.99, received / total));
+        }
+      }
+      blob = new Blob(chunks as BlobPart[], { type: response.headers.get("content-type") || "image/png" });
+    } else {
+      blob = await response.blob();
+    }
+    onProgress?.(1);
     // WebGL ignores texture.flipY for ImageBitmap sources, so bake the vertical
     // flip in here — otherwise slices render upside-down vs the old TextureLoader
     // (HTMLImage) path, which had flipY honoured.

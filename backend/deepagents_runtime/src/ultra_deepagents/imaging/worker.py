@@ -42,6 +42,21 @@ def _resolve_meta_fn() -> Callable[[str], dict[str, Any]] | None:
     return None
 
 
+def _resolve_viewer_info_fn() -> Callable[[str], dict[str, Any]] | None:
+    """Return the real engine's ``viewer_info`` so the worker can pre-warm a source's
+    viewer-info sidecar right after deriving its pyramid (engine.viewer_info persists
+    the result to a shared sidecar). Best-effort: None without the native engine."""
+    try:
+        from ultra_deepagents.imaging.engine import LibBioImageEngine, build_engine
+
+        engine = build_engine(prefer_real=True)
+        if isinstance(engine, LibBioImageEngine):
+            return engine.viewer_info
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def extract_derive_pyramid_payload(envelope: dict[str, Any]) -> dict[str, Any] | None:
     """Return the derive-pyramid job params from a raw message, or None if not ours.
 
@@ -111,7 +126,11 @@ def _write_failure_marker(job: dict[str, Any] | None, exc: BaseException) -> Non
 
 
 async def _handle_message(
-    msg: Any, *, meta_fn: Callable[[str], dict[str, Any]] | None, max_deliver: int = DEFAULT_MAX_DELIVER
+    msg: Any,
+    *,
+    meta_fn: Callable[[str], dict[str, Any]] | None,
+    viewer_info_fn: Callable[[str], dict[str, Any]] | None = None,
+    max_deliver: int = DEFAULT_MAX_DELIVER,
 ) -> None:
     job: dict[str, Any] | None = None
     try:
@@ -126,6 +145,25 @@ async def _handle_message(
             result.get("resource_id"), result.get("derived_path"), result.get("levels"),
         )
         await _safe_ack_op(msg, "ack")
+        # Pre-warm the source's viewer-info sidecar so the FIRST viewer open is instant
+        # (engine.viewer_info persists it to a shared sidecar). Best-effort; never blocks.
+        src = (job or {}).get("src_path")
+        if viewer_info_fn is not None and src:
+            try:
+                await asyncio.to_thread(viewer_info_fn, str(src))
+            except Exception:  # noqa: BLE001
+                logger.debug("viewer-info pre-warm skipped for %s", src)
+        # Pre-populate the LOCAL pyramid cache so the FIRST viewer open is instant: the
+        # pyramid is served from local disk (it hangs over remote NFS), so copy it now,
+        # off the user's request path. Best-effort; never blocks the job.
+        dst = (job or {}).get("dst_path")
+        if dst:
+            try:
+                from ultra_deepagents.imaging.service import localize_pyramid
+
+                await asyncio.to_thread(localize_pyramid, str(dst))
+            except Exception:  # noqa: BLE001
+                logger.debug("pyramid cache pre-warm skipped for %s", dst)
     except Exception as exc:  # noqa: BLE001
         # Bound redelivery so a POISON job (corrupt / unsupported / OOM source that will
         # always fail) cannot wedge the consumer in an infinite nak->redeliver loop
@@ -159,6 +197,7 @@ async def run_worker_loop(
     subject = subject or os.environ.get("ULTRA_CONTROL_NATS_IMAGE_JOBS_SUBJECT", DEFAULT_SUBJECT)
     durable = durable or os.environ.get("ULTRA_CONTROL_NATS_IMAGE_WORKER_DURABLE", DEFAULT_DURABLE)
     meta_fn = _resolve_meta_fn()
+    viewer_info_fn = _resolve_viewer_info_fn()
     max_deliver = DEFAULT_MAX_DELIVER
     raw_max = os.environ.get("ULTRA_IMGSVC_MAX_DELIVER")
     if raw_max:
@@ -184,6 +223,6 @@ async def run_worker_loop(
             except Exception:  # noqa: BLE001 - fetch timeout when idle
                 continue
             for msg in msgs:
-                await _handle_message(msg, meta_fn=meta_fn, max_deliver=max_deliver)
+                await _handle_message(msg, meta_fn=meta_fn, viewer_info_fn=viewer_info_fn, max_deliver=max_deliver)
     finally:
         await nc.drain()

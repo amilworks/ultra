@@ -119,6 +119,40 @@ func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string,
 	return out, nil
 }
 
+// cachedImageServiceViewerInfo fetches /viewerinfo through the in-process image
+// response cache (keyed on path + file stat-stamp), so a repeated viewer open serves
+// the metadata from this node's RAM instead of re-hitting the sidecar. On a large
+// microscopy source over NFS, /viewerinfo is a multi-second cold decode; worse, the
+// image service's per-worker caches don't share across its N worker processes, so a
+// given open lands warm only by luck. A single shared cache here makes repeat opens
+// reliably instant. Returns a freshly-decoded map each call so callers may mutate it.
+func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path string) (map[string]any, error) {
+	query := url.Values{"path": {path}}
+	cache := deps.imageCache
+	if cache == nil {
+		return deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
+	}
+	key, ok := imageCacheKey("/viewerinfo", query)
+	if !ok {
+		return deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
+	}
+	if resp, hit := cache.get(key); hit {
+		var out map[string]any
+		if err := json.Unmarshal(resp.body, &out); err == nil {
+			return out, nil
+		}
+		// Corrupt cached entry: fall through and recompute.
+	}
+	out, err := deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
+	if err != nil {
+		return nil, err
+	}
+	if body, mErr := json.Marshal(out); mErr == nil {
+		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
+	}
+	return out, nil
+}
+
 // handleGetUploadViewerService backs /viewer with libbioimage metadata. The
 // source drives axis sizes/channels/spacing (so z-scrub planes stay correct);
 // when the source is not natively pyramidal, a derived pyramid's tile scheme is
@@ -137,7 +171,7 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		deps.writeNiftiUploadViewer(w, record, path)
 		return
 	}
-	core, err := deps.imageServiceGetJSON(r.Context(), "/viewerinfo", url.Values{"path": {path}})
+	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
 		// Graceful fallback to the legacy native viewer on any sidecar error.
 		deps.handleGetUploadViewer(w, r)
@@ -155,7 +189,7 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 			// source geometry (e.g. 256-px / 8 levels) while pixels come from the pyramid
 			// (512-px / 11 levels): every pyramid tile is decoded 4x and the engine is
 			// needlessly overloaded on deep zoom. Overriding here aligns grid with data.
-			if pyramid, perr := deps.imageServiceGetJSON(r.Context(), "/viewerinfo", url.Values{"path": {dp}}); perr == nil {
+			if pyramid, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
 				mergePyramidTileScheme(core, pyramid)
 			}
 		} else if core["tile_scheme"] == nil {
@@ -194,17 +228,29 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
 		servePath = dp
 	}
-	query := url.Values{"path": {servePath}}
-	// channels/colors enable additive multi-channel LUT compositing for
-	// fluorescence microscopy (libbioimage fuses the selected channels).
-	// full_resolution=false lets the engine serve a bounded pyramid level for fast
-	// scrub frames; full_resolution=true (settled/measurement view) reads native.
-	for _, key := range []string{"z", "t", "level", "channels", "channel_colors", "full_resolution"} {
-		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-			query.Set(key, v)
+	// channels/colors enable additive multi-channel LUT compositing for fluorescence
+	// microscopy (libbioimage fuses the selected channels). full_resolution=false serves
+	// a bounded pyramid level for fast scrub frames; true reads the native plane.
+	buildSliceQuery := func(p string) url.Values {
+		q := url.Values{"path": {p}}
+		for _, key := range []string{"z", "t", "level", "channels", "channel_colors", "full_resolution"} {
+			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+				q.Set(key, v)
+			}
+		}
+		return q
+	}
+	// Robustness: prefer the pyramid, but if it can't be served (a broken/unreadable
+	// derived pyramid -> 5xx) retry the SOURCE via the image service — slower but
+	// correct (honors z/channels) — then the native Go path. A bad pyramid degrades to
+	// a working read instead of "Failed to load image".
+	fallback := deps.handleServeUpload
+	if servePath != path {
+		fallback = func(w http.ResponseWriter, r *http.Request) {
+			deps.proxyImageServiceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
 		}
 	}
-	deps.proxyImageServiceCached(w, r, "/slice", query, deps.handleServeUpload)
+	deps.proxyImageServiceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
 }
 
 // handleGetUploadScalarVolumeService backs /scalar-volume for non-NIfTI volumes
@@ -300,6 +346,16 @@ func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *ht
 	servePath := path
 	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
 		servePath = dp // bounded read from a low pyramid level
+	}
+	// Same robustness as /slice, but only when a pyramid is actually in use: if the
+	// pyramid read stalls/fails (unreachable or the client-timeout the NFS hang trips),
+	// retry the source thumbnail via the image service, then the native Go path. The
+	// no-pyramid path keeps its original behavior (a clean upstream error).
+	if servePath != path {
+		deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {servePath}, "max_size": {"512"}}, func(w http.ResponseWriter, r *http.Request) {
+			deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}}, deps.handleServeUpload)
+		})
+		return
 	}
 	deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {servePath}, "max_size": {"512"}})
 }

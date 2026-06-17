@@ -19,9 +19,12 @@ return plain dicts; ``formats`` returns the engine's supported format names.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import math
 import os
+import tempfile
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -34,6 +37,56 @@ __all__ = ["ImageEngine", "LibBioImageEngine", "StubEngine", "EngineUnavailable"
 # frame stays crisp at typical viewports while decoding/transferring far less than
 # a native plane. Sub-target planes stay native (no downscale).
 SCRUB_MAX_DIMENSION = 1024
+
+
+# --- Persistent viewer-info sidecar cache -----------------------------------
+# build_viewer_info on a large source is a multi-second cold decode over (often
+# remote) NFS, and the engine's per-process caches don't share across the image
+# service's worker processes — so a repeat open lands warm only by luck. Persist
+# each result to a small JSON sidecar keyed on the source path + stat-stamp, so
+# every worker (and a process/container restart, and the convert worker that
+# pre-warms it at derivation) reads it instead of re-decoding. Location:
+# ULTRA_IMGSVC_VIEWERINFO_CACHE_DIR — point it at a dir both the image service and
+# convert worker mount (the convert scratch); set it to a barrel path to also
+# survive a node reboot. Best-effort: any error falls through to a recompute.
+def _viewerinfo_cache_dir() -> str:
+    d = os.environ.get("ULTRA_IMGSVC_VIEWERINFO_CACHE_DIR", "").strip()
+    return d or os.path.join(tempfile.gettempdir(), "ultra-viewerinfo-cache")
+
+
+def _viewerinfo_cache_path(path: str) -> str | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    stamp = f"{st.st_size}:{int(st.st_mtime_ns)}"
+    key = hashlib.sha256((str(path) + "|" + stamp).encode("utf-8")).hexdigest()
+    return os.path.join(_viewerinfo_cache_dir(), key + ".json")
+
+
+def read_viewerinfo_sidecar(path: str) -> dict[str, Any] | None:
+    cp = _viewerinfo_cache_path(path)
+    if not cp:
+        return None
+    try:
+        with open(cp, "rb") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def write_viewerinfo_sidecar(path: str, info: dict[str, Any]) -> None:
+    cp = _viewerinfo_cache_path(path)
+    if not cp:
+        return
+    try:
+        os.makedirs(os.path.dirname(cp), exist_ok=True)
+        tmp = f"{cp}.tmp.{os.getpid()}"
+        with open(tmp, "w") as fh:
+            json.dump(info, fh)
+        os.replace(tmp, cp)  # atomic publish
+    except OSError:
+        pass  # best-effort cache; never block serving
 
 
 class EngineUnavailable(RuntimeError):
@@ -478,8 +531,13 @@ class LibBioImageEngine:
         return out
 
     def viewer_info(self, path) -> dict[str, Any]:
+        cached = read_viewerinfo_sidecar(path)
+        if cached is not None:
+            return cached
         meta = dict(self._bim.meta(path, self._cache))
-        return viewerinfo.build_viewer_info(meta, signal_scores=self._channel_signal_scores(path, meta))
+        info = viewerinfo.build_viewer_info(meta, signal_scores=self._channel_signal_scores(path, meta))
+        write_viewerinfo_sidecar(path, info)
+        return info
 
     def _channel_signal_scores(self, path, meta) -> list[float] | None:
         """Per-channel spatial-structure score (lag-1 horizontal autocorrelation of

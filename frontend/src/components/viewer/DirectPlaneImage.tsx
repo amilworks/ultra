@@ -256,6 +256,8 @@ export const DirectPlaneImage = forwardRef<ViewerCanvasHandle, DirectPlaneImageP
   const [hasTexture, setHasTexture] = useState(false);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
+  // null = backend still decoding (indeterminate); 0..1 = real bytes received.
+  const [loadProgress, setLoadProgress] = useState<number | null>(null);
 
   const descriptorAspect = Math.max(VIEW_EPSILON, descriptor.aspect_ratio);
   const naturalAspect = imageSize ? imageSize.width / Math.max(1, imageSize.height) : descriptorAspect;
@@ -387,8 +389,15 @@ export const DirectPlaneImage = forwardRef<ViewerCanvasHandle, DirectPlaneImageP
     loadTokenRef.current = token;
     setLoadState("loading");
     setLoadError(null);
+    setLoadProgress(null);
 
-    const loadPromise = scalarSlice ? loadScalarSliceBitmap(scalarSlice) : loadSliceBitmap(primaryImageUrl);
+    const loadPromise = scalarSlice
+      ? loadScalarSliceBitmap(scalarSlice)
+      : loadSliceBitmap(primaryImageUrl, (fraction) => {
+          if (loadTokenRef.current === token) {
+            setLoadProgress(fraction);
+          }
+        });
     loadPromise
       .then((bitmap) => {
         if (loadTokenRef.current !== token || !meshRef.current) {
@@ -752,7 +761,22 @@ export const DirectPlaneImage = forwardRef<ViewerCanvasHandle, DirectPlaneImageP
         />
         {loadState === "loading" ? (
           <div className="viewer-direct-image-status" aria-live="polite">
-            <span>{hasTexture ? "Loading next image..." : "Loading image..."}</span>
+            <span>
+              {hasTexture ? "Loading next image..." : "Loading image..."}
+              {loadProgress != null ? ` ${Math.round(loadProgress * 100)}%` : ""}
+            </span>
+            <div
+              className="viewer-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={loadProgress != null ? Math.round(loadProgress * 100) : undefined}
+            >
+              <div
+                className={`viewer-progress-bar${loadProgress == null ? " viewer-progress-bar--indeterminate" : ""}`}
+                style={loadProgress != null ? { width: `${Math.round(loadProgress * 100)}%` } : undefined}
+              />
+            </div>
           </div>
         ) : null}
         {loadError ? (

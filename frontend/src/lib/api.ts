@@ -4790,7 +4790,11 @@ export class ApiClient {
     const response = await this.fetchWithTimeout(
       buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/viewer`),
       { method: "GET", headers: this.headers(), credentials: "include" },
-      15000,
+      // Cold viewer metadata for a large microscopy source (e.g. a 600MB OME-TIFF)
+      // is a one-time libbioimage decode over remote NFS that can take ~10-30s; the
+      // control-plane image-service client allows 60s, so match it rather than abort
+      // at 15s. (Repeat views are served warm in well under a second.)
+      60000,
       "Viewer metadata request",
     );
     if (!response.ok) {

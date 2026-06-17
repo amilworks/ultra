@@ -388,6 +388,8 @@ async def process_rarespot_job(
             "configuration": result.get("configuration") or {},
             "counts_by_class": result.get("counts_by_class") or {},
             "confidence_summary": result.get("confidence_summary") or {},
+            "stability_summary": result.get("stability_summary") or {},
+            "geospatial_summary": result.get("geospatial_summary") or {},
             "top_spectral_review_candidates": result.get("top_spectral_review_candidates") or [],
             "artifact_ids": [artifact_id for artifact_id in artifact_ids if artifact_id],
         }

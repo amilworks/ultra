@@ -8,7 +8,10 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
+import numpy as np
 import torch
+
+from ultra_deepagents.rarespot._matching import hungarian_min_cost
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,22 @@ class SpectralInstabilityScorer:
 
     @torch.no_grad()
     def create_energy_mask(self, energy_map: torch.Tensor) -> torch.Tensor:
+        """Energy-adaptive radial low-pass mask.
+
+        Chooses the SMALLEST centred disc whose enclosed spectral energy is at least
+        ``preservation_ratio`` of the total, then keeps that disc and zeroes the rest.
+        Because the spectrum is ``fftshift``-ed (DC at the centre, where energy
+        concentrates), this keeps the dominant low-frequency content and removes the
+        faint high-frequency tail — a genuine, per-image-adaptive perturbation whose
+        retained-energy fraction is ``preservation_ratio`` by construction.
+
+        The previous implementation was a FIXED geometric disc at ``preservation_ratio``
+        of the *radius* (energy values unused), which for natural feature spectra
+        retained ~99% of energy regardless — i.e. it barely perturbed anything, so the
+        discrepancy score was ~0 for almost every image (false "stable"). Tying the
+        cutoff to retained ENERGY makes the filter actually bite and makes the name
+        ("adaptive energy mask") accurate.
+        """
         height, width = energy_map.shape
         y, x = torch.meshgrid(
             torch.arange(height, device=energy_map.device),
@@ -39,9 +58,19 @@ class SpectralInstabilityScorer:
             indexing="ij",
         )
         center_y, center_x = height // 2, width // 2
-        dist = torch.sqrt((y - center_y) ** 2 + (x - center_x) ** 2)
-        max_radius = max(1.0, float(min(center_y, center_x)))
-        return (dist / max_radius <= float(self.config.preservation_ratio)).float()
+        dist = torch.sqrt(((y - center_y) ** 2 + (x - center_x) ** 2).float())
+        total = float(energy_map.sum().item())
+        if total <= 0.0:
+            return torch.ones_like(energy_map)
+        target = float(self.config.preservation_ratio) * total
+        order = torch.argsort(dist.flatten())
+        cumulative = torch.cumsum(energy_map.flatten()[order], dim=0)
+        reached = torch.nonzero(cumulative >= target, as_tuple=False)
+        if reached.numel() == 0:
+            return torch.ones_like(energy_map)
+        cutoff_radius = float(dist.flatten()[order][int(reached[0].item())].item())
+        # Keep the full ring at the cutoff radius so retained energy is >= target.
+        return (dist <= cutoff_radius).float()
 
     @torch.no_grad()
     def apply_adaptive_spectral_filter(
@@ -118,6 +147,42 @@ class SpectralInstabilityScorer:
         )
 
     @staticmethod
+    def _optimal_iou_matches(
+        ious: torch.Tensor,
+        *,
+        threshold: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Maximum-weight one-to-one matching (Hungarian) of original->filtered boxes,
+        keeping only pairs with IoU >= threshold.
+
+        Greedy-by-IoU can strand otherwise-matchable boxes (e.g. A-X=0.9, A-Y=0.6,
+        B-X=0.55 with threshold 0.5: greedy keeps only A-X = 1 match; optimal keeps
+        A-Y + B-X = 2 matches), which inflates lost/new and the instability score. The
+        Hungarian assignment maximises total matched IoU, giving correct counts."""
+        device = ious.device
+        empty = torch.empty((0,), device=device, dtype=torch.long)
+        empty_f = torch.empty((0,), device=device, dtype=torch.float32)
+        if ious.numel() == 0:
+            return empty, empty, empty_f
+        iou_np = ious.detach().cpu().float().numpy()
+        row_ind, col_ind = hungarian_min_cost(-iou_np)  # minimise -IoU == maximise IoU
+        rows: list[int] = []
+        cols: list[int] = []
+        scores: list[float] = []
+        for r, c in zip(row_ind, col_ind):
+            if r < iou_np.shape[0] and c < iou_np.shape[1] and float(iou_np[r, c]) >= float(threshold):
+                rows.append(int(r))
+                cols.append(int(c))
+                scores.append(float(iou_np[r, c]))
+        if not rows:
+            return empty, empty, empty_f
+        return (
+            torch.tensor(rows, device=device, dtype=torch.long),
+            torch.tensor(cols, device=device, dtype=torch.long),
+            torch.tensor(scores, device=device, dtype=torch.float32),
+        )
+
+    @staticmethod
     def _winning_confidence(detections: torch.Tensor) -> torch.Tensor:
         if detections.numel() == 0:
             return torch.empty((0,), device=detections.device, dtype=torch.float32)
@@ -143,7 +208,7 @@ class SpectralInstabilityScorer:
             return _empty_breakdown(lost=lost, score=score, normalized_score=score / max(lost, 1.0))
 
         ious = box_iou(pred_orig[:, :4], pred_filt[:, :4])
-        orig_idx, filt_idx, matched_ious = self._greedy_iou_matches(
+        orig_idx, filt_idx, matched_ious = self._optimal_iou_matches(
             ious,
             threshold=self.config.match_iou_thresh,
         )

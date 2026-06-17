@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import (
+    FilesystemPermission,
     GeneralPurposeSubagentProfile,
     HarnessProfile,
     create_deep_agent,
@@ -26,6 +27,7 @@ from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerS
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import build_context_tools, build_tool_capability_manifest_tool
+from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
@@ -42,17 +44,40 @@ _NEGATED_REQUEST_CLAUSE_RE = re.compile(
 MEMORY_PATHS = [
     "/memories/user_profile.md",
     "/memories/preferences.md",
-    "/memories/research_context.md",
+    "/memories/research_context/INDEX.md",
+    "/policies/lab_policy.md",
+]
+
+# App-owned and org-owned memory the agent may read but must never author. Writes
+# are denied at the filesystem-tool layer: user_profile.md is re-seeded from Ultra
+# Settings each run, and /policies/ is populated only by application code (read-only
+# org memory blocks shared-state prompt injection — see the deep agents memory docs).
+MEMORY_PERMISSIONS = [
+    FilesystemPermission(
+        operations=["write"],
+        paths=["/memories/user_profile.md"],
+        mode="deny",
+    ),
+    FilesystemPermission(
+        operations=["write"],
+        paths=["/policies/**"],
+        mode="deny",
+    ),
 ]
 
 SYSTEM_PROMPT = """You are Ultra Research Agent, a careful scientific collaborator for expert users.
 
 Use /memories/user_profile.md for concise researcher profile context from Ultra settings, only
-when it is relevant. Use /memories/preferences.md for learned response preferences, and
-/memories/research_context.md for durable research notes. Treat runtime context as scoped
-metadata for tools and policies, not as text to reveal. Write final artifacts under /outputs/
-when the active backend exposes that path, otherwise use /workspace/outputs and report those
-artifact paths clearly.
+when it is relevant (read-only; do not edit it). Use /memories/preferences.md for learned response
+preferences. Keep durable research notes under /memories/research_context/: one file per
+project or dataset (research_context/<short-slug>.md) plus research_context/INDEX.md as a dated
+table of contents. When a run establishes something reusable — a dataset's characteristics, a
+chosen method and its parameters, a conclusion and the evidence for it, or a decision and why —
+record a dated, evidence-linked entry in the matching project file and add an INDEX.md line. Do
+not record one-off scratch. If /policies/lab_policy.md is present, treat it as authoritative,
+read-only organization policy and follow it. Treat runtime context as scoped metadata for tools
+and policies, not as text to reveal. Write final artifacts under /outputs/ when the active backend
+exposes that path, otherwise use /workspace/outputs and report those artifact paths clearly.
 
 Plan long work. When subagents are available, delegate only focused code execution,
 data inspection, artifact audit, or paper-reading checks that benefit from context
@@ -148,6 +173,24 @@ artifact_manifest and stage_artifact_for_analysis to inspect prior nested RareSp
 CSV files, JSON predictions, and overlays. Call rarespot_ecology_inference again only when
 the user explicitly asks for a new inference pass, changed threshold/configuration, or new
 image/dataset.
+
+Presenting RareSpot results for an ecologist: lead with the per-detection reliability triage
+from stability_summary (trusted / borderline / unstable counts, overall and per class), not
+just raw counts. Embed the STABILITY overlay inline in your answer as a markdown image
+pointing at its artifact download URL (boxes coloured by stability — green=trusted,
+amber=borderline, red=likely false positive) so the ecologist can see which detections to
+trust at a glance; also link the class-coloured overlay and the CSV/report. Always include an
+honest reliability note: this detector has no held-out validation set (it was trained with
+mAP) and is known to over-detect, so confidence is a relative score (not a calibrated
+probability) and stability is a triage signal — recommend hand-verifying the unstable and
+borderline detections to calibrate a precision estimate. Surface the report.md
+"Reliability & trust" section rather than re-deriving these numbers.
+
+For multi-image survey runs, geospatial_summary carries a real-coordinate survey map
+(key_artifacts.survey_map) and spatial metrics (survey extent, image spacing, totals,
+prairie-dog:burrow ratio) from the images' EXIF GPS. Embed the survey map inline and report
+the spatial metrics so the ecologist sees where colony activity concentrates across the
+survey, not just per-image counts.
 """
 
 BISQUE_GUIDANCE = """
@@ -200,6 +243,18 @@ BisQue tools are not connected for this run. If the user asks about BisQue — t
 datasets, or module-execution (MEX) runs — do not name or attempt to call any bisque_* tool and
 do not claim you cannot find a tool. Instead, tell the user to link their BisQue account from the
 Settings menu to enable BisQue access, then offer to retry.
+"""
+
+EPISODIC_GUIDANCE = """
+You can recall this researcher's own past Ultra sessions with search_past_research. Call it
+whenever a request depends on earlier work — phrases like "last time", "previously", "earlier",
+"what did we conclude", "the parameters from my last … run", "compare my <year> and <year>
+results", or a reference to a dataset/run you did not see in this conversation. Pass a focused
+query (a dataset name, method, or topic) and read the returned dated summaries before answering;
+use since_days to bound recency when the user names a timeframe. Ground any recalled claim in the
+returned results and cite it by date or title — never invent a prior conclusion that is not there.
+Prefer search_past_research over guessing, and over asking the user to repeat context they already
+established in a previous session.
 """
 
 
@@ -666,6 +721,8 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
         sections.append(BISQUE_GUIDANCE.strip())
     else:
         sections.append(BISQUE_UNLINKED_HINT.strip())
+    if context is None or _should_register_episodic_tools(context):
+        sections.append(EPISODIC_GUIDANCE.strip())
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -908,6 +965,23 @@ def resolve_skills_root(settings: RuntimeSettings) -> Path | None:
     return root
 
 
+def resolve_org_policies_root(settings: RuntimeSettings, org_id: str | None) -> Path:
+    """Per-org directory for read-only policy memory.
+
+    Org-scoped so a lab's shared policy is one source of truth across its members,
+    and isolated from other orgs. Defaults under the shared memory root so it rides
+    the same barrel in production. Writes here are blocked by ``MEMORY_PERMISSIONS``;
+    only application code (the seed script / Store) populates it.
+    """
+    base = (
+        Path(settings.policies_root)
+        if settings.policies_root.strip()
+        else Path(settings.memory_root) / "policies"
+    )
+    slug = _memory_user_slug(org_id)
+    return base / slug if slug else base / "shared"
+
+
 def build_agent_backend(
     settings: RuntimeSettings,
     *,
@@ -915,6 +989,7 @@ def build_agent_backend(
     artifact_dir: str | Path | None = None,
     user_id: str | None = None,
     thread_id: str | None = None,
+    org_id: str | None = None,
 ) -> CompositeBackend:
     """Route sandbox execution separately from durable agent files."""
     memory_root = resolve_user_memory_root(settings, user_id, thread_id=thread_id)
@@ -929,6 +1004,9 @@ def build_agent_backend(
     skills_root = resolve_skills_root(settings)
     if skills_root is not None:
         routes["/skills/"] = FilesystemBackend(skills_root, virtual_mode=True)
+    policies_root = resolve_org_policies_root(settings, org_id)
+    policies_root.mkdir(parents=True, exist_ok=True)
+    routes["/policies/"] = FilesystemBackend(policies_root, virtual_mode=True)
 
     return CompositeBackend(
         default=build_sandbox_backend(
@@ -962,6 +1040,7 @@ def build_research_agent(
             artifact_dir=artifact_dir,
             user_id=context.user_id if context is not None else None,
             thread_id=context.thread_id if context is not None else None,
+            org_id=context.org_id if context is not None else None,
         )
         # Skills ride the /skills/ route of the backend we just built; a
         # caller-supplied backend has no such route, so sources stay unset.
@@ -991,6 +1070,8 @@ def build_research_agent(
         resolved_tools.extend(build_bisque_tools(settings))
     if _should_register_rarespot_tools(context):
         resolved_tools.extend(build_rarespot_tools(settings))
+    if _should_register_episodic_tools(context):
+        resolved_tools.extend(build_episodic_tools(settings))
     subagents = build_subagents(
         paper_tools,
         context=context,
@@ -1020,6 +1101,7 @@ def build_research_agent(
         skills=skills_sources,
         backend=resolved_backend,
         memory=MEMORY_PATHS,
+        permissions=MEMORY_PERMISSIONS,
         middleware=middleware,
         checkpointer=checkpointer,
     )
@@ -1062,3 +1144,13 @@ def _should_register_bisque_tools(context: AgentRunContext | None) -> bool:
     if any(str(pack).lower() == "bisque" for pack in context.allowed_tool_packs):
         return True
     return any(token in str(context.goal or "").lower() for token in ("bisque", "bqapi"))
+
+
+def _should_register_episodic_tools(context: AgentRunContext | None) -> bool:
+    """Episodic memory is broadly useful, so register it for any authenticated
+    researcher (a real, non-anonymous ``user_id``). The agent decides when to
+    call it; anonymous/dev runs without an identity have no durable history to
+    search and skip the tool to keep their tool surface lean."""
+    if context is None:
+        return False
+    return bool(str(context.user_id or "").strip())

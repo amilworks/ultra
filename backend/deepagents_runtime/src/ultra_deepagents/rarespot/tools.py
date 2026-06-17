@@ -366,6 +366,8 @@ def wait_for_rarespot_run(
                     "configuration": summary.get("configuration", {}),
                     "counts_by_class": summary.get("counts_by_class", {}),
                     "confidence_summary": summary.get("confidence_summary", {}),
+                    "stability_summary": summary.get("stability_summary", {}),
+                    "geospatial_summary": summary.get("geospatial_summary", {}),
                     "top_spectral_review_candidates": summary.get("top_spectral_review_candidates", []),
                     "artifact_ids": [artifact.get("artifact_id") for artifact in artifact_descriptors],
                     "artifacts": artifact_descriptors,
@@ -442,7 +444,9 @@ def select_key_artifacts(artifacts: list[dict[str, Any]]) -> dict[str, dict[str,
         category = str(artifact.get("category") or "").lower()
         kind = str(artifact.get("kind") or "").lower()
         title = str(artifact.get("title") or "").lower()
-        if "annotated_overlay" not in keys and category == "overlay" and kind == "image":
+        if "stability_overlay" not in keys and category == "overlay" and kind == "image" and "stability" in title:
+            keys["stability_overlay"] = artifact
+        if "annotated_overlay" not in keys and category == "overlay" and kind == "image" and "stability" not in title:
             keys["annotated_overlay"] = artifact
         if "detections_csv" not in keys and kind == "csv" and (
             category == "prediction" or "detection" in title
@@ -454,6 +458,10 @@ def select_key_artifacts(artifacts: list[dict[str, Any]]) -> dict[str, dict[str,
             category == "prediction" or "prediction" in title
         ):
             keys["predictions_json"] = artifact
+        if "survey_map" not in keys and kind == "image" and (
+            category == "geospatial" or "survey" in title
+        ):
+            keys["survey_map"] = artifact
     return keys
 
 

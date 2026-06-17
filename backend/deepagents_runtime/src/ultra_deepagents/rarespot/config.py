@@ -20,6 +20,11 @@ class RareSpotConfig:
     conf: float = 0.25
     iou: float = 0.45
     spectral: bool = True
+    # Per-detection stability (perturbation consensus): re-detect under blur/brightness/JPEG
+    # perturbations and score each box by how often it survives. The ecologist-facing trust
+    # signal; costs one extra detect pass over the tiles.
+    stability: bool = True
+    stability_match_iou: float = 0.5
     bisque_base_url: str = ""
     bisque_token: str = ""
     bisque_username: str = ""
@@ -52,6 +57,8 @@ class RareSpotConfig:
             conf=float(settings.rarespot_conf_threshold),
             iou=float(settings.rarespot_iou_threshold),
             spectral=_env_bool("ULTRA_RARESPOT_SPECTRAL", True),
+            stability=_env_bool("ULTRA_RARESPOT_STABILITY", True),
+            stability_match_iou=float(os.getenv("ULTRA_RARESPOT_STABILITY_MATCH_IOU", "0.5") or "0.5"),
             bisque_base_url=os.getenv("BISQUE_BASE_URL", ""),
             bisque_token=os.getenv("BISQUE_SERVICE_TOKEN", ""),
             bisque_username=os.getenv("BISQUE_SERVICE_USERNAME", ""),

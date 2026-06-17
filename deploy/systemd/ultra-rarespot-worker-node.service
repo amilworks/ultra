@@ -1,0 +1,24 @@
+[Unit]
+Description=BisQue Ultra RareSpot NATS worker (compute node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ultra
+Group=ultra
+WorkingDirectory=/srv/ultra/current/backend/deepagents_runtime
+EnvironmentFile=/etc/ultra/ultra-worker.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.rarespot_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-rarespot-worker
+
+[Install]
+WantedBy=multi-user.target

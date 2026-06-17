@@ -146,7 +146,7 @@ install_systemd_units() {
       units="ultra-control.service ultra-postgres.service ultra-nats.service"
       ;;
     compute)
-      units="ultra-imgsvc.service ultra-image-convert-worker.service ultra-deepagents-worker-node.service ultra-rarespot-worker.service ultra-analysis-worker.service"
+      units="ultra-imgsvc.service ultra-image-convert-worker.service ultra-deepagents-worker-node.service ultra-rarespot-worker-node.service ultra-analysis-worker.service"
       ;;
   esac
   for unit in $units; do
@@ -248,13 +248,13 @@ fi
 
 if [ "$ROLE_WORKERS" = 1 ]; then
   if [ "$DEPLOY_ROLE" = "compute" ]; then
-    for unit in ultra-imgsvc ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker ultra-analysis-worker; do
+    for unit in ultra-imgsvc ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker-node ultra-analysis-worker; do
       systemctl enable "$unit" >/dev/null 2>&1 || true
       systemctl restart "$unit"
     done
     wait_for_health "${ULTRA_IMGSVC_HEALTH_URL:-http://127.0.0.1:8099/healthz}" "ultra-imgsvc"
     sleep 2
-    for unit in ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker ultra-analysis-worker; do
+    for unit in ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker-node ultra-analysis-worker; do
       systemctl is-active --quiet "$unit" && echo "$unit active" || echo "WARNING: $unit not active" >&2
     done
   else

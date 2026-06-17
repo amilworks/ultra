@@ -11,7 +11,6 @@ import ultra_deepagents.analysis.processor as proc
 from ultra_deepagents.analysis.config import AnalysisSettings
 from ultra_deepagents.analysis.processor import AnalysisProcessor
 from ultra_deepagents.data_agent.worker import DataAgentJobEnvelope
-from ultra_deepagents.rarespot.uploads import UploadedFileResolution
 
 
 def _settings(tmp_path: Path) -> AnalysisSettings:
@@ -47,13 +46,8 @@ def test_megaseg_batch_registers_outputs_and_isolates_failures(tmp_path, monkeyp
     img_b = settings.upload_root / "file_b__b.tif"
     img_b.write_bytes(b"B")
 
-    async def fake_resolve(requested, *, upload_roots, database_url=""):
-        mapping = {"file_a": img_a, "file_b": img_b}
-        found = [r for r in requested if r in mapping]
-        return UploadedFileResolution(
-            image_paths=[mapping[r] for r in found],
-            missing_file_ids=[r for r in requested if r not in mapping],
-        )
+    def fake_resolve(file_id, upload_roots):
+        return {"file_a": img_a, "file_b": img_b}.get(file_id)
 
     def fake_infer(*, service_url, api_key, image_path, params, timeout, dest_dir):
         dest = Path(dest_dir)
@@ -80,7 +74,7 @@ def test_megaseg_batch_registers_outputs_and_isolates_failures(tmp_path, monkeyp
         registered.append((job_id, outputs, collection_id))
         return {"count": len(outputs)}
 
-    monkeypatch.setattr(proc, "resolve_uploaded_file_ids", fake_resolve)
+    monkeypatch.setattr(proc, "_resolve_source_path", fake_resolve)
     monkeypatch.setattr(proc, "run_megaseg_infer", fake_infer)
     monkeypatch.setattr(proc, "register_outputs", fake_register)
     monkeypatch.setattr(proc, "fetch_job", lambda **kwargs: {})
@@ -120,8 +114,8 @@ def test_megaseg_batch_resumes_already_done_items(tmp_path, monkeypatch):
     img_a = settings.upload_root / "file_a__a.tif"
     img_a.write_bytes(b"A")
 
-    async def fake_resolve(requested, *, upload_roots, database_url=""):
-        return UploadedFileResolution(image_paths=[img_a], missing_file_ids=[])
+    def fake_resolve(file_id, upload_roots):
+        return img_a if file_id == "file_a" else None
 
     infer_calls: list[str] = []
 
@@ -132,7 +126,7 @@ def test_megaseg_batch_resumes_already_done_items(tmp_path, monkeypatch):
         (dest / "mask.tif").write_bytes(b"M")
         return {"checkpoint_path": "/m/e.ckpt", "files": [{"mask_path": "mask.tif"}]}
 
-    monkeypatch.setattr(proc, "resolve_uploaded_file_ids", fake_resolve)
+    monkeypatch.setattr(proc, "_resolve_source_path", fake_resolve)
     monkeypatch.setattr(proc, "run_megaseg_infer", fake_infer)
     monkeypatch.setattr(proc, "register_outputs", lambda **kwargs: {})
     # Prior run already completed file_a — the processor must skip it (no second inference).

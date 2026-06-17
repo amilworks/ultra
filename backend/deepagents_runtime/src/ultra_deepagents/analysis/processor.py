@@ -19,13 +19,43 @@ from pathlib import Path
 from typing import Any
 
 from ..data_agent.worker import DataAgentJobEnvelope, DefaultDataAgentProcessor
-from ..rarespot.uploads import resolve_uploaded_file_ids, unique_file_ids
+from ..rarespot.uploads import SAFE_FILE_ID_RE, unique_file_ids
 from .client import fetch_job, register_outputs, run_megaseg_infer
 from .config import AnalysisSettings
 
 logger = logging.getLogger("ultra.analysis.worker")
 
 _CANCEL_POLL_EVERY = 5
+# Derived viewer artifacts live alongside the source in the upload store; the model needs
+# the ORIGINAL volume, never the pyramid.
+_DERIVED_MARKERS = ("__pyramid", "__thumbnail")
+
+
+def _resolve_source_path(file_id: str, upload_roots: tuple[Path, ...]) -> Path | None:
+    """Resolve a resource_id to its ORIGINAL uploaded file at <root>/<file_id>__<name>.
+
+    Deliberately a TOP-LEVEL (non-recursive) match: the original upload lands directly in the
+    upload root, while derived artifacts (e.g. <id>__pyramid.tif) live in a derived/ subdir.
+    A recursive scan would sort derived/ before the original and feed the model a pyramid,
+    which it cannot read — so we match top-level only and skip derived markers.
+    """
+    if not SAFE_FILE_ID_RE.fullmatch(file_id):
+        return None
+    for root in upload_roots:
+        base = Path(root).expanduser()
+        if not base.exists():
+            continue
+        matches = sorted(
+            candidate
+            for candidate in base.glob(f"{file_id}__*")
+            if candidate.is_file() and not any(marker in candidate.name for marker in _DERIVED_MARKERS)
+        )
+        if matches:
+            return matches[0]
+        exact = base / file_id
+        if exact.is_file():
+            return exact
+    return None
 
 
 def _copy_with_sha(src: Path, dst: Path) -> tuple[int, str]:
@@ -88,14 +118,11 @@ class AnalysisProcessor:
 
         items: dict[str, dict[str, Any]] = self._prior_items(job, principal)
 
-        resolution = await resolve_uploaded_file_ids(
-            requested,
-            upload_roots=settings.upload_roots,
-            database_url=settings.upload_database_url,
-        )
-        missing = set(resolution.missing_file_ids)
-        found_ids = [rid for rid in requested if rid not in missing]
-        path_by_id = dict(zip(found_ids, resolution.image_paths))
+        path_by_id: dict[str, Path] = {}
+        for rid in requested:
+            source = _resolve_source_path(rid, settings.upload_roots)
+            if source is not None:
+                path_by_id[rid] = source
 
         canceled = False
         for index, rid in enumerate(requested):

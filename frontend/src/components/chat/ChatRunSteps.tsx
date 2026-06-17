@@ -46,10 +46,7 @@ const TOOL_LABELS: Record<string, string> = {
   create_bisque_dataset: "Create BisQue dataset",
   estimate_depth_depthpro: "DepthPro estimation",
   resource_lookup: "Resolve uploaded resources",
-  sam2_prompt_image: "SAM2 prompting",
   search_bisque_resources: "Search BisQue resources",
-  segment_image_sam2: "MedSAM2 segmentation",
-  segment_image_sam3: "SAM3 segmentation",
   yolo_detect: "YOLO detection",
 };
 
@@ -87,8 +84,6 @@ const titleCaseWords = (value: string): string =>
     .filter(Boolean)
     .map((token) => {
       const lower = token.toLowerCase();
-      if (lower === "sam3") return "SAM3";
-      if (lower === "sam2") return "SAM2";
       if (lower === "yolo") return "YOLO";
       if (lower === "bisque") return "BisQue";
       return lower[0] ? lower[0].toUpperCase() + lower.slice(1) : lower;

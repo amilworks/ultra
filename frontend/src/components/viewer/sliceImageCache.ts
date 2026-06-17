@@ -86,7 +86,8 @@ export const loadSliceBitmap = (url: string, onProgress?: SliceLoadProgress): Pr
       throw new Error(`Slice request failed: ${response.status}`);
     }
     let blob: Blob;
-    const total = Number(response.headers.get("content-length") || 0);
+    const headers = response.headers;
+    const total = Number(headers?.get("content-length") || 0);
     if (response.body && total > 0) {
       // Stream the body so the bar reflects the real bytes received for this plane.
       const reader = response.body.getReader();
@@ -101,7 +102,7 @@ export const loadSliceBitmap = (url: string, onProgress?: SliceLoadProgress): Pr
           onProgress?.(Math.min(0.99, received / total));
         }
       }
-      blob = new Blob(chunks as BlobPart[], { type: response.headers.get("content-type") || "image/png" });
+      blob = new Blob(chunks as BlobPart[], { type: headers?.get("content-type") || "image/png" });
     } else {
       blob = await response.blob();
     }

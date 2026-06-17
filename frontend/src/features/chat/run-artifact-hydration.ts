@@ -56,11 +56,8 @@ type HydrationMessage = {
 
 const VISUAL_TOOL_NAMES = new Set<string>([
   "segment_image_megaseg",
-  "segment_image_sam2",
-  "segment_image_sam3",
   "estimate_depth_pro",
   "yolo_detect",
-  "segment_video_sam2",
 ]);
 
 const looksLikeLocalFilesystemPath = (value: string): boolean => {

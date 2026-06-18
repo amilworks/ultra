@@ -23,6 +23,7 @@ from ultra_deepagents.agent import (
     resolve_user_memory_root,
 )
 from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
+from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import stage_uploaded_files
@@ -37,7 +38,6 @@ from ultra_deepagents.events import (
     normalize_tool_call,
 )
 from ultra_deepagents.model import build_chat_model
-from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
     ingest_pdf_file,
@@ -51,6 +51,7 @@ from ultra_deepagents.rarespot.tools import (
     looks_report_only_rarespot_goal,
     wait_for_rarespot_run,
 )
+from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
 from ultra_deepagents.title_generation import (
     resolve_conversation_title_task,
@@ -333,6 +334,7 @@ async def _preload_rarespot_for_context(
             settings,
             thread_id=context.thread_id,
             body=body,
+            parent_run_id=context.run_id,
         )
         result = await asyncio.to_thread(
             wait_for_rarespot_run,
@@ -560,8 +562,19 @@ async def run_job(
     user_profile: dict[str, Any] | None = None,
     prior_usage: dict[str, Any] | None = None,
 ) -> str:
-    workspace_dir = Path(settings.workspace_root).expanduser() / job.run_id
+    workspace_root = Path(settings.workspace_root).expanduser()
+    workspace_dir = workspace_root / job.run_id
     artifact_dir = Path(settings.artifact_root).expanduser() / job.run_id
+    # Opportunistically reclaim expired scratch workspaces before creating this
+    # run's. Best-effort: never fail a run because retention GC could not run.
+    if settings.workspace_retention_seconds > 0:
+        try:
+            cleanup_expired_code_workspaces(
+                root_dir=workspace_root,
+                retention_seconds=settings.workspace_retention_seconds,
+            )
+        except Exception:
+            pass
     workspace_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     context = job.to_context(
@@ -1573,7 +1586,7 @@ _RIGOR_DISCRIMINATOR_RE = re.compile(
 )
 _RIGOR_LIMITATIONS_RE = re.compile(r"limitation", re.IGNORECASE)
 _DELEGATED_CLAIM_RE = re.compile(
-    r"\b(delegated|subagent|code-runner|data-analyst|task verification|task confirmed)\b",
+    r"\b(delegated|subagent|code-runner|task verification|task confirmed)\b",
     re.IGNORECASE,
 )
 _DELEGATION_FALLBACK_RE = re.compile(
@@ -2770,22 +2783,51 @@ def _deepagents_values_state(event: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _usage_from_stream_event(event: dict[str, Any]) -> dict[str, int] | None:
-    """Extract token usage from a model-call end event.
+def _v3_message_finish_data(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return ``(chunk, metadata)`` for a v3 deepagents ``message-finish`` event.
 
-    ``langchain-openai`` (with ``stream_usage=True``) reports the per-call token
-    totals on the ``on_chat_model_end`` event, where ``data.output`` is the fully
-    aggregated message carrying ``usage_metadata``. Returns ``None`` for every
-    other event so the caller can keep streaming normally.
+    The runner streams the compiled graph with ``version="v3"``, whose Pregel
+    "messages" protocol emits, once per model call, a chunk of the shape
+    ``{"event": "message-finish", "usage": {...}, "metadata": {...}}`` as
+    ``params.data[0]``; ``params.data[1]`` is the LangGraph metadata
+    (``ls_model_name``, ``langgraph_checkpoint_ns``, etc.). This is where
+    per-call token usage actually lives — the v3 protocol never emits the v2
+    ``on_chat_model_end`` event the older extractor keyed on. Returns ``None``
+    for any other event so the caller keeps streaming normally.
+    """
+    if event.get("method") != "messages":
+        return None
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return None
+    data = params.get("data")
+    if not isinstance(data, list | tuple) or not data:
+        return None
+    chunk = data[0]
+    if not isinstance(chunk, dict) or chunk.get("event") != "message-finish":
+        return None
+    metadata = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}
+    return chunk, metadata
+
+
+def _usage_from_stream_event(event: dict[str, Any]) -> dict[str, int] | None:
+    """Extract per-call token usage from a model-call completion event.
+
+    Handles the v3 Pregel ``message-finish`` event the runner actually streams,
+    and falls back to the v2 ``on_chat_model_end`` event (used by direct-model
+    streaming and the test harness). Returns ``None`` for every other event so
+    the caller can keep streaming normally.
     """
     if not isinstance(event, dict):
         return None
-    if str(event.get("event") or "").strip() != "on_chat_model_end":
-        return None
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return None
-    return _usage_metadata_from_output(data.get("output"))
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        return _normalize_usage_counts(finish[0].get("usage"))
+    if str(event.get("event") or "").strip() == "on_chat_model_end":
+        data = event.get("data")
+        if isinstance(data, dict):
+            return _usage_metadata_from_output(data.get("output"))
+    return None
 
 
 def _usage_metadata_from_output(output: Any) -> dict[str, int] | None:
@@ -2793,6 +2835,15 @@ def _usage_metadata_from_output(output: Any) -> dict[str, int] | None:
         meta = output.get("usage_metadata")
     else:
         meta = getattr(output, "usage_metadata", None)
+    return _normalize_usage_counts(meta)
+
+
+def _normalize_usage_counts(meta: Any) -> dict[str, int] | None:
+    """Coerce a ``{input,output,total}_tokens`` mapping to non-negative ints.
+
+    Shared by the v3 ``message-finish`` usage block and the v2
+    ``usage_metadata`` output, which carry the same three keys.
+    """
     if not isinstance(meta, dict):
         return None
     input_tokens = _coerce_int(meta.get("input_tokens"))
@@ -2815,6 +2866,19 @@ def _usage_event_id_from_stream_event(
     usage: dict[str, int],
     usage_index: int,
 ) -> str:
+    # v3 message-finish: the LangGraph checkpoint namespace is unique per model
+    # call within a run, so it is a stable dedup key across NATS redelivery and
+    # checkpoint resume (the control plane and UI both dedup on usage_event_id).
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        _, finish_metadata = finish
+        checkpoint_ns = _first_nonempty_string(
+            finish_metadata.get("langgraph_checkpoint_ns"),
+            finish_metadata.get("checkpoint_ns"),
+        )
+        if checkpoint_ns:
+            return f"{context.run_id}:model:{_stable_id_component(checkpoint_ns)}"
+
     data = event.get("data")
     metadata = event.get("metadata")
     output = data.get("output") if isinstance(data, dict) else None
@@ -2868,6 +2932,15 @@ def _stable_id_component(value: Any) -> str:
 
 
 def _model_name_from_event(event: dict[str, Any]) -> str:
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        _, finish_metadata = finish
+        name = _first_nonempty_string(
+            finish_metadata.get("ls_model_name"),
+            finish_metadata.get("model_name"),
+        )
+        if name:
+            return name
     metadata = event.get("metadata")
     if isinstance(metadata, dict):
         name = _first_nonempty_string(metadata.get("ls_model_name"), metadata.get("model_name"))

@@ -67,7 +67,7 @@ class FakeReportOnlyAgent:
 def test_run_job_preloads_rarespot_for_uploaded_detection_requests(monkeypatch, tmp_path: Path) -> None:
     calls: list[tuple[str, Any]] = []
 
-    def fake_create_rarespot_run(_settings, *, thread_id, body):
+    def fake_create_rarespot_run(_settings, *, thread_id, body, parent_run_id=""):
         calls.append(("create", thread_id, body))
         return {"run_id": "run-nested", "status": "queued"}
 
@@ -179,7 +179,7 @@ def test_run_job_failed_rarespot_preload_fails_parent_without_synthesizing(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    def fake_create_rarespot_run(_settings, *, thread_id, body):
+    def fake_create_rarespot_run(_settings, *, thread_id, body, parent_run_id=""):
         return {"run_id": "run-nested-failed", "status": "queued"}
 
     def fake_wait_for_rarespot_run(_settings, *, run_id, timeout_seconds):
@@ -267,7 +267,7 @@ def test_run_job_does_not_preload_rarespot_for_negated_report_only_request(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    def fail_create_rarespot_run(_settings, *, thread_id, body):
+    def fail_create_rarespot_run(_settings, *, thread_id, body, parent_run_id=""):
         raise AssertionError("report-only followups must not enqueue RareSpot inference")
 
     monkeypatch.setattr(

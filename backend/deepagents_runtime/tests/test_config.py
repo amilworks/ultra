@@ -6,6 +6,14 @@ from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.rarespot.config import RareSpotConfig
 
 
+@pytest.fixture(autouse=True)
+def _enable_async_subagents(monkeypatch):
+    """Async subagents are off unless explicitly enabled. Config-parsing tests
+    that exercise async spec validation need the kill switch on; tests asserting
+    the off/kill-switch behavior delenv it themselves."""
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS", "1")
+
+
 def test_runtime_settings_load_vllm_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8003/v1")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek_v4")
@@ -463,3 +471,59 @@ def test_agent_run_context_payload_is_snake_case_and_scoped():
     assert payload["run_id"] == "run-1"
     assert payload["selected_file_ids"] == ["file-1"]
     assert payload["allowed_tool_packs"] == ["workspace", "code"]
+
+
+def test_async_subagents_require_explicit_enable_flag(monkeypatch):
+    """Kill switch: a JSON value alone must NOT activate async subagents."""
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-runner",
+                    "description": "Runs long jobs.",
+                    "graph_id": "ultra-runner",
+                    "url": "https://langgraph.example.test",
+                }
+            ]
+        ),
+    )
+    # Enabled (autouse fixture sets the flag) -> the spec loads.
+    assert len(RuntimeSettings.from_env().async_subagents) == 1
+    # Disabled -> off regardless of JSON, with no parsing/validation.
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS", raising=False)
+    assert RuntimeSettings.from_env().async_subagents == ()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:2024",
+        "http://127.0.0.1:2024",
+        "https://10.0.0.5",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://192.168.1.10:8123",
+    ],
+)
+def test_runtime_settings_reject_private_async_subagent_urls(monkeypatch, url):
+    """Server URL must not target a private/loopback/link-local host (the run
+    context + task egress to it), unless the local-dev opt-out is set."""
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-runner",
+                    "description": "Runs long jobs.",
+                    "graph_id": "ultra-runner",
+                    "url": url,
+                }
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match=r"localhost/private/link-local"):
+        RuntimeSettings.from_env()
+
+    # Local-dev opt-out allows it.
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL", "1")
+    assert RuntimeSettings.from_env().async_subagents[0]["url"] == url

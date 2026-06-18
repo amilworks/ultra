@@ -138,6 +138,14 @@ class DockerSandboxBackend(BaseSandbox):
                 exit_code=124,
                 truncated=truncated,
             )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A host-level launch failure (PermissionError on the docker binary,
+            # ENOMEM/EAGAIN on fork, etc.) must surface as a structured result the
+            # model can react to, not an unhandled graph error.
+            return ExecuteResponse(
+                output=f"Sandbox launch failed: {exc}",
+                exit_code=127,
+            )
 
         output, truncated = _truncate_output(
             _combine_output(completed.stdout, completed.stderr),

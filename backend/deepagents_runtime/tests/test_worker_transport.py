@@ -1678,6 +1678,125 @@ def test_run_job_scopes_subagent_token_usage_events(tmp_path: Path):
     assert usage_event["payload"]["total_tokens"] == 42
 
 
+def _v3_message_finish_event(usage, *, checkpoint_ns, namespace=None, model="deepseek_v4"):
+    """A real v3 Pregel 'messages' event carrying per-call token usage.
+
+    Mirrors the shape the compiled graph actually emits under
+    ``astream_events(version="v3")``: ``params.data[0]`` is the
+    ``message-finish`` chunk with ``usage``; ``params.data[1]`` is the
+    LangGraph metadata. The legacy ``on_chat_model_end`` event the older
+    extractor keyed on is never emitted by v3, so these tests guard the real
+    production path rather than a synthetic v2 stand-in.
+    """
+    return {
+        "type": "event",
+        "method": "messages",
+        "params": {
+            "namespace": list(namespace or []),
+            "data": [
+                {"event": "message-finish", "usage": dict(usage), "metadata": {}},
+                {
+                    "langgraph_node": "model",
+                    "langgraph_checkpoint_ns": checkpoint_ns,
+                    "checkpoint_ns": checkpoint_ns,
+                    "ls_model_name": model,
+                    **({"lc_agent_name": namespace[-1]} if namespace else {}),
+                },
+            ],
+        },
+    }
+
+
+class FakeV3TokenUsageAgent:
+    """Coordinator + subagent model calls in the real v3 message-finish shape."""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        assert context.run_id == "run-1"
+        yield _v3_message_finish_event(
+            {"input_tokens": 6940, "output_tokens": 20, "total_tokens": 6960},
+            checkpoint_ns="model:aaaa1111-2222-3333-4444-555566667777",
+        )
+        # A subagent ("task" delegation) model call streams under a namespace.
+        yield _v3_message_finish_event(
+            {"input_tokens": 500, "output_tokens": 40, "total_tokens": 540},
+            checkpoint_ns="model:bbbb1111-2222-3333-4444-555566667777",
+            namespace=["data-analyst"],
+        )
+        # A duplicate of the first call (e.g. NATS redelivery) must not double-count.
+        yield _v3_message_finish_event(
+            {"input_tokens": 6940, "output_tokens": 20, "total_tokens": 6960},
+            checkpoint_ns="model:aaaa1111-2222-3333-4444-555566667777",
+        )
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": "Analyze the staged data."},
+                        {"role": "assistant", "content": "Done."},
+                    ]
+                },
+            },
+        }
+
+
+def test_run_job_captures_v3_message_finish_token_usage(tmp_path: Path):
+    """Regression guard: usage must be extracted from the v3 protocol the
+    runner actually streams, not only the v2 on_chat_model_end shape."""
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Analyze the staged data.",
+            messages=[{"role": "user", "content": "Analyze the staged data."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: FakeV3TokenUsageAgent(),
+        )
+        return published
+
+    events = asyncio.run(scenario())
+
+    usage_events = [event for event in events if event["event_kind"] == "run.token_usage"]
+    # Two distinct model calls captured; the redelivered duplicate dedupes by
+    # the checkpoint-ns-derived usage_event_id.
+    ids = [event["payload"]["usage_event_id"] for event in usage_events]
+    assert len(usage_events) == 3
+    assert ids[0] == ids[2] != ids[1]
+    # Coordinator call is unscoped; the subagent call is scoped by namespace.
+    scoped = {
+        event["payload"]["usage_event_id"]: event["payload"].get("subagent_name")
+        for event in usage_events
+    }
+    assert scoped[ids[1]] == "data-analyst"
+
+    completed = events[-1]
+    assert completed["event_kind"] == "run.completed"
+    # 6960 (coordinator) + 540 (subagent) + 6960 (duplicate, still summed in the
+    # attempt total) — the control plane dedupes persistence by usage_event_id.
+    assert completed["payload"]["usage"]["total_tokens"] == 14460
+    assert completed["payload"]["usage"]["model"] == "deepseek_v4"
+
+
 def test_run_job_completed_usage_includes_prior_persisted_usage(tmp_path: Path):
     async def scenario():
         settings = RuntimeSettings(

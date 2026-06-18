@@ -11,7 +11,17 @@ def cleanup_expired_code_workspaces(
     retention_seconds: int,
     now_seconds: float | None = None,
 ) -> list[Path]:
-    if retention_seconds < 0:
+    """Remove per-run scratch workspaces older than the retention window.
+
+    The live layout is flat: each direct child of ``root_dir`` is a per-run
+    workspace (``<workspace_root>/<run_id>``) holding scratch files — matplotlib
+    output, staged uploads, and staged repos. Durable deliverables live separately
+    under the artifact root, so reclaiming an expired run dir never deletes user
+    outputs. Best-effort and mtime-based: an active run keeps a recent mtime and
+    sits far inside any sane retention window. ``retention_seconds <= 0`` disables
+    the sweep.
+    """
+    if retention_seconds <= 0:
         return []
     root = Path(root_dir)
     if not root.exists():
@@ -20,25 +30,14 @@ def cleanup_expired_code_workspaces(
     now = time.time() if now_seconds is None else now_seconds
     expires_before = now - retention_seconds
     removed: list[Path] = []
-    for workspace in root.glob("*/*/*/workspace"):
+    for run_dir in sorted(root.iterdir()):
         try:
-            if not workspace.is_dir() or workspace.stat().st_mtime >= expires_before:
+            if not run_dir.is_dir():
                 continue
-            run_dir = workspace.parent
+            if run_dir.stat().st_mtime >= expires_before:
+                continue
             shutil.rmtree(run_dir)
             removed.append(run_dir)
-            _remove_empty_parents(run_dir.parent, stop_at=root)
         except OSError:
             continue
     return removed
-
-
-def _remove_empty_parents(path: Path, *, stop_at: Path) -> None:
-    stop = stop_at.resolve()
-    current = path
-    while current.exists() and current.resolve() != stop:
-        try:
-            current.rmdir()
-        except OSError:
-            return
-        current = current.parent

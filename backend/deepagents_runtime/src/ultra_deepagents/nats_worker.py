@@ -1023,7 +1023,7 @@ class NATSDeepAgentsWorker:
                 if run_lock is not None:
                     run_lock.release()
                 if should_ack:
-                    self._clear_checkpointer_thread(job.run_id)
+                    await self._delete_checkpointer_thread(job.run_id)
                     await _ack_message(message)
         finally:
             if user_context_token is not None:
@@ -1056,20 +1056,43 @@ class NATSDeepAgentsWorker:
         self._checkpoint_store = store
         self._checkpointer = DurableCheckpointer(store)
         logger.info("Durable run checkpointing enabled.")
+        # Reap abandoned checkpoint rows (runs that crashed before terminal ack)
+        # on worker startup. Completed runs already delete their own row on ack;
+        # this backstops stragglers without a long-lived background loop.
+        retention = self.settings.checkpoint_retention_seconds
+        if retention > 0:
+            try:
+                reaped = await self._checkpointer.gc(retention)
+                if reaped:
+                    logger.info(
+                        "Reaped abandoned durable checkpoint rows.",
+                        extra={"reaped": reaped},
+                    )
+            except Exception:
+                logger.warning("Durable checkpoint GC at startup failed.", exc_info=True)
         return self._checkpointer
 
-    def _clear_checkpointer_thread(self, run_id: str) -> None:
+    async def _delete_checkpointer_thread(self, run_id: str) -> None:
+        """Drop a terminal run's in-memory slice AND its durable row.
+
+        A run that reached terminal ack (succeeded/failed/canceled) will never be
+        redelivered or resumed, so its durable checkpoint row must be deleted to
+        keep the shared control-plane Postgres from accumulating completed-run
+        state forever. Best-effort: a cleanup failure never blocks the ack."""
         checkpointer = self._checkpointer
         if checkpointer is None:
             return
-        clear_thread = getattr(checkpointer, "clear_thread", None)
-        if clear_thread is None:
-            return
         try:
-            clear_thread(run_id)
+            delete_thread = getattr(checkpointer, "delete_thread", None)
+            if delete_thread is not None:
+                await delete_thread(run_id)
+                return
+            clear_thread = getattr(checkpointer, "clear_thread", None)
+            if clear_thread is not None:
+                clear_thread(run_id)
         except Exception:
             logger.warning(
-                "Checkpoint runtime cleanup failed; continuing after terminal run.",
+                "Checkpoint cleanup failed; continuing after terminal run.",
                 extra={"run_id": run_id},
                 exc_info=True,
             )

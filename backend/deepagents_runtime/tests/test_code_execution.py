@@ -214,16 +214,17 @@ def test_docker_sandbox_upload_and_download_use_workspace_paths(tmp_path: Path):
 
 
 def test_cleanup_expired_code_workspaces_removes_old_run_dirs(tmp_path: Path):
-    old_workspace = tmp_path / "org" / "user" / "old-run" / "workspace"
-    fresh_workspace = tmp_path / "org" / "user" / "fresh-run" / "workspace"
-    old_workspace.mkdir(parents=True)
-    fresh_workspace.mkdir(parents=True)
-    (old_workspace / "plot.png").write_bytes(b"old")
-    (fresh_workspace / "plot.png").write_bytes(b"fresh")
+    # Live layout is flat: <workspace_root>/<run_id> per run.
+    old_run = tmp_path / "old-run"
+    fresh_run = tmp_path / "fresh-run"
+    old_run.mkdir(parents=True)
+    fresh_run.mkdir(parents=True)
+    (old_run / "plot.png").write_bytes(b"old")
+    (fresh_run / "plot.png").write_bytes(b"fresh")
     old_mtime = 100.0
     fresh_mtime = 1_000.0
-    os.utime(old_workspace, (old_mtime, old_mtime))
-    os.utime(fresh_workspace, (fresh_mtime, fresh_mtime))
+    os.utime(old_run, (old_mtime, old_mtime))
+    os.utime(fresh_run, (fresh_mtime, fresh_mtime))
 
     removed = cleanup_expired_code_workspaces(
         root_dir=tmp_path,
@@ -231,6 +232,15 @@ def test_cleanup_expired_code_workspaces_removes_old_run_dirs(tmp_path: Path):
         now_seconds=1_000,
     )
 
-    assert old_workspace.parent in removed
-    assert not old_workspace.exists()
-    assert fresh_workspace.exists()
+    assert old_run in removed
+    assert not old_run.exists()
+    assert fresh_run.exists()
+
+
+def test_cleanup_expired_code_workspaces_disabled_when_retention_not_positive(tmp_path: Path):
+    run_dir = tmp_path / "ancient-run"
+    run_dir.mkdir(parents=True)
+    os.utime(run_dir, (1.0, 1.0))
+    # retention 0 disables the sweep entirely (no accidental "delete everything").
+    assert cleanup_expired_code_workspaces(root_dir=tmp_path, retention_seconds=0, now_seconds=1_000) == []
+    assert run_dir.exists()

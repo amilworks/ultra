@@ -59,7 +59,7 @@ def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
     )
     stream_chunk_timeout = request_timeout
-    return UltraChatOpenAI(
+    model = UltraChatOpenAI(
         model=settings.openai_model,
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
@@ -70,3 +70,13 @@ def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         # streamed response so the runner can account per-run token spend.
         stream_usage=True,
     )
+    # Publish the served model's context window so deepagents summarization uses
+    # adaptive fraction-based compaction (85% trigger / 10% keep) instead of the
+    # conservative no-profile fallback (170k tokens / keep 6 messages), which on a
+    # large-window model compacts long autonomous/batch runs far too early. We set
+    # ONLY max_input_tokens (never "structured_output"), so the subagent
+    # ToolStrategy auto-retry handoff is unaffected (langchain factory gates
+    # ProviderStrategy on profile["structured_output"], not on max_input_tokens).
+    if settings.model_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.model_max_input_tokens}
+    return model

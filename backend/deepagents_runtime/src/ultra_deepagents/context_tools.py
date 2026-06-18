@@ -9,6 +9,15 @@ from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
+from ultra_deepagents.code_execution.git_staging import (
+    GitStageError,
+    GitStagingConfig,
+    clone_repo_to_dir,
+    repo_slug,
+    validate_commit,
+    validate_git_repo_url,
+    validate_ref,
+)
 from ultra_deepagents.context import AgentRunContext
 
 
@@ -80,6 +89,133 @@ def stage_uploaded_files(
         "staged_files": staged_files,
         "missing_file_ids": missing,
     }
+
+
+def stage_catalog_resources(
+    context: AgentRunContext,
+    *,
+    upload_roots: Iterable[str | Path] = (),
+    resources: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Copy readability-verified catalog resources into /workspace/staged_resources.
+
+    ``resources`` are the control-plane-verified records (resource_id +
+    original_name + source_type) returned by the resource-resolve endpoint, so
+    the run owner's read access is already enforced there. Each resource's file is
+    located in the shared upload store by id (same store ``stage_uploaded_files``
+    reads) and copied in; resources with no locally stored file are reported under
+    ``unavailable`` so the agent can fall back (e.g. to BisQue) instead of silently
+    missing data. The resource id is re-validated against the safe id charset
+    before it reaches any filesystem glob — defense-in-depth so the worker enforces
+    its own invariant rather than trusting the upstream id shape.
+    """
+    roots = _resolved_upload_roots(upload_roots)
+    stage_root = Path(context.workspace_root).expanduser().resolve() / "staged_resources"
+    staged: list[dict[str, Any]] = []
+    unavailable: list[dict[str, Any]] = []
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        resource_id = str(resource.get("resource_id") or "").strip()
+        if not resource_id or not _safe_upload_file_id(resource_id):
+            continue
+        source = _find_uploaded_file(resource_id, roots)
+        if source is None:
+            unavailable.append(
+                {
+                    "resource_id": resource_id,
+                    "original_name": str(resource.get("original_name") or ""),
+                    "source_type": str(resource.get("source_type") or ""),
+                    "reason": "file_not_in_upload_store",
+                }
+            )
+            continue
+        target_name = _uploaded_original_name(source.name, resource_id)
+        token = _safe_path_token(resource_id)
+        target = stage_root / token / target_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        staged.append(
+            {
+                "resource_id": resource_id,
+                "original_name": str(resource.get("original_name") or target_name),
+                "resource_kind": str(resource.get("resource_kind") or ""),
+                "source_path": str(source),
+                "staged_path": str(target),
+                "sandbox_path": f"/workspace/staged_resources/{token}/{target_name}",
+            }
+        )
+    return {
+        "ok": len(staged) > 0,
+        "staged_resources": staged,
+        "unavailable": unavailable,
+    }
+
+
+def stage_git_repo(
+    context: AgentRunContext,
+    *,
+    repo_url: str,
+    ref: str = "",
+    commit: str = "",
+    config: GitStagingConfig,
+) -> dict[str, Any]:
+    """Clone an allowlisted public Git repo into /workspace/staged_repos/<slug>.
+
+    Runs host-side in the worker (which has controlled egress); the model then
+    runs the staged code in the unchanged network-none sandbox. All trust-boundary
+    controls (https-only, host allowlist, no credentials, pinned/depth/size caps)
+    live in :mod:`ultra_deepagents.code_execution.git_staging`.
+    """
+    if not config.enabled:
+        return {"ok": False, "error": "git_staging_disabled"}
+    try:
+        url = validate_git_repo_url(repo_url, allowed_hosts=config.allowed_hosts)
+        clean_ref = validate_ref(ref)
+        clean_commit = validate_commit(commit)
+    except GitStageError as exc:
+        return {"ok": False, "error": exc.code, "message": exc.message}
+
+    slug = repo_slug(url)
+    workspace_root = Path(context.workspace_root).expanduser().resolve()
+    stage_root = workspace_root / "staged_repos"
+    target = stage_root / slug
+    try:
+        info = clone_repo_to_dir(url, target, ref=clean_ref, commit=clean_commit, config=config)
+    except GitStageError as exc:
+        # git stderr can carry absolute host paths; relativize them to the sandbox
+        # mapping so a deliberately-failing clone cannot leak host filesystem layout.
+        message = exc.message.replace(str(workspace_root), "/workspace")
+        return {"ok": False, "error": exc.code, "message": message, "repo_url": url}
+
+    return {
+        "ok": True,
+        "repo_url": url,
+        "ref": clean_ref or None,
+        "resolved_commit": info["resolved_commit"],
+        "file_count": info["file_count"],
+        "total_bytes": info["total_bytes"],
+        "staged_path": str(target),
+        "sandbox_path": f"/workspace/staged_repos/{slug}",
+    }
+
+
+def stage_git_repo_for_analysis_text(
+    context: AgentRunContext,
+    *,
+    repo_url: str,
+    ref: str = "",
+    commit: str = "",
+    config: GitStagingConfig,
+) -> str:
+    """Return model-visible git staging output with sandbox paths only."""
+    return json.dumps(
+        _public_stage_result(
+            stage_git_repo(context, repo_url=repo_url, ref=ref, commit=commit, config=config)
+        ),
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def stage_artifact(context: AgentRunContext, *, artifact_id: str = "", path: str = "") -> dict[str, Any]:
@@ -184,6 +320,28 @@ def build_context_tools(upload_roots: Iterable[str | Path] = ()) -> list[Any]:
         )
 
     return [artifact_manifest, stage_artifact_for_analysis, stage_uploaded_files_for_analysis]
+
+
+def build_git_tools(config: GitStagingConfig) -> list[Any]:
+    """Tool surface for cloning an allowlisted public Git repo into the sandbox."""
+
+    @tool
+    def stage_git_repo_for_analysis(
+        runtime: ToolRuntime[AgentRunContext],
+        repo_url: str,
+        ref: str = "",
+        commit: str = "",
+    ) -> str:
+        """Clone a public Git repo (HTTPS, allowlisted host) into /workspace/staged_repos/<name> so execute() code can run that codebase on staged uploads/artifacts. Optionally pin ref (branch/tag) or commit (full SHA); the resolved commit SHA is returned for reproducibility. Public repos only — no credentials are sent."""
+        return stage_git_repo_for_analysis_text(
+            runtime.context,
+            repo_url=repo_url,
+            ref=ref,
+            commit=commit,
+            config=config,
+        )
+
+    return [stage_git_repo_for_analysis]
 
 
 def build_tool_capability_manifest(
@@ -303,6 +461,8 @@ def build_tool_capability_manifest(
             "memories": "/memories",
             "staged_uploads": "/workspace/staged_uploads",
             "staged_artifacts": "/workspace/staged_artifacts",
+            "staged_repos": "/workspace/staged_repos",
+            "staged_resources": "/workspace/staged_resources",
         },
     }
 
@@ -476,7 +636,7 @@ def _public_stage_result(result: dict[str, Any]) -> dict[str, Any]:
         if key == "artifact" and isinstance(value, dict):
             public[key] = _public_descriptor(value)
             continue
-        if key == "staged_files" and isinstance(value, list):
+        if key in {"staged_files", "staged_resources"} and isinstance(value, list):
             public[key] = [
                 _public_staged_file(item)
                 for item in value

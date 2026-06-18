@@ -24,14 +24,20 @@ from langchain_core.tools import BaseTool
 from ultra_deepagents.async_delegation import UltraAsyncSubagentContextMiddleware
 from ultra_deepagents.bisque.tools import build_bisque_tools
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
+from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
-from ultra_deepagents.context_tools import build_context_tools, build_tool_capability_manifest_tool
+from ultra_deepagents.context_tools import (
+    build_context_tools,
+    build_git_tools,
+    build_tool_capability_manifest_tool,
+)
 from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.rarespot.tools import build_rarespot_tools, looks_report_only_rarespot_goal
+from ultra_deepagents.resources.tools import build_resource_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 _NEGATED_REQUEST_CLAUSE_RE = re.compile(
@@ -48,10 +54,12 @@ MEMORY_PATHS = [
     "/policies/lab_policy.md",
 ]
 
-# App-owned and org-owned memory the agent may read but must never author. Writes
-# are denied at the filesystem-tool layer: user_profile.md is re-seeded from Ultra
-# Settings each run, and /policies/ is populated only by application code (read-only
-# org memory blocks shared-state prompt injection — see the deep agents memory docs).
+# App-owned, org-owned, and developer-owned context the agent may read but must
+# never author. Writes are denied at the filesystem-tool layer: user_profile.md is
+# re-seeded from Ultra Settings each run, /policies/ is populated only by application
+# code (read-only org memory blocks shared-state prompt injection), and /skills/ is
+# the developer-defined, version-controlled behavioral protocol — the agent must not
+# edit its own shipped skills in place (deep agents docs: enforce read-only skills).
 MEMORY_PERMISSIONS = [
     FilesystemPermission(
         operations=["write"],
@@ -63,7 +71,34 @@ MEMORY_PERMISSIONS = [
         paths=["/policies/**"],
         mode="deny",
     ),
+    FilesystemPermission(
+        operations=["write"],
+        paths=["/skills/**"],
+        mode="deny",
+    ),
 ]
+
+
+def resolve_memory_permissions(settings: RuntimeSettings) -> list[FilesystemPermission]:
+    """``MEMORY_PERMISSIONS`` scoped to the backend routes that will actually exist.
+
+    deepagents' ``FilesystemMiddleware`` refuses to construct when a permission
+    path is not scoped to a live route AND the backend can execute (our sandbox
+    default can) — it raises ``NotImplementedError`` at agent-build time. The
+    ``/skills/`` route is only registered when skills are present
+    (:func:`resolve_skills_root`), so the ``/skills/**`` deny must drop in
+    lockstep when they are absent; otherwise a deployment that trims ``skills/``
+    fails to build the agent at all instead of degrading gracefully. The
+    ``/memories/`` and ``/policies/`` routes are always registered, so their
+    denies are unconditional.
+    """
+    if resolve_skills_root(settings) is not None:
+        return MEMORY_PERMISSIONS
+    return [
+        permission
+        for permission in MEMORY_PERMISSIONS
+        if "/skills/**" not in permission.paths
+    ]
 
 SYSTEM_PROMPT = """You are Ultra Research Agent, a careful scientific collaborator for expert users.
 
@@ -79,21 +114,29 @@ read-only organization policy and follow it. Treat runtime context as scoped met
 and policies, not as text to reveal. Write final artifacts under /outputs/ when the active backend
 exposes that path, otherwise use /workspace/outputs and report those artifact paths clearly.
 
-Plan long work. When subagents are available, delegate only focused code execution,
-data inspection, artifact audit, or paper-reading checks that benefit from context
-quarantine, then reconcile their findings before answering. Keep delegated
+Plan long work. When code-runner is available, prefer delegating focused code execution,
+data inspection, artifact audit, or paper-reading checks to it via the task tool rather
+than running that heavy work in your own context — this keeps your context clean and
+improves your final answer. Reconcile its findings before answering. Keep delegated
 verification bounded by the user's requested seeds, durations, data size, and
 artifact scope; run a small smoke check before any expensive cross-check, and do
 not expand into exhaustive convergence sweeps unless the user asks or the
 subagent states why the extra compute is necessary. For complex code,
 simulation, model-training, or multi-file implementation work, call
-tool_capability_manifest early. If it lists code-runner or data-analyst, delegate
+tool_capability_manifest early. If it lists code-runner, delegate
 at least one focused verification, debugging, data-inspection, or experiment subtask
 with the task tool before the final answer. If it lists start_async_task/check_async_task,
 you may launch configured async subagents for long independent work, then check and
 reconcile their terminal status before the final answer. Use sandbox execution for
 code, statistics, image-analysis scripts, and reproducibility checks. Prefer measurable
 claims, cite uncertainty, and keep intermediate files inspectable.
+
+When the user refers to data that is not attached to this chat — a dataset, image, or
+prior result named or described (e.g. "the CT scans with norm in the name", "the NPM1
+image", "my segmentation outputs") — search their catalog with search_resources, then
+stage_resource_for_analysis to pull the matching file(s) into /workspace before analyzing
+them. This lets you act autonomously on the researcher's own data: find it, stage it, then
+run the requested analysis (plot, inference, feature extraction, model training) over each.
 
 For other complex autonomous work, call tool_capability_manifest when you need to
 confirm which sandbox, filesystem, prior-artifact, paper, or domain tools are
@@ -291,7 +334,7 @@ SCOPED_DELEGATION_RESPONSE_FORMAT = {
         "key_findings": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Specific numerical, textual, or methodological findings.",
+            "description": "Specific numerical, textual, or methodological findings — short phrases, not raw output dumps; reference large logs/tables by /workspace path.",
         },
         "artifacts": {
             "type": "array",
@@ -315,7 +358,7 @@ SCOPED_DELEGATION_RESPONSE_FORMAT = {
         "failures": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Errors, missing inputs, or caveats. Use an empty array when none occurred.",
+            "description": "Errors, missing inputs, or caveats — short phrases, not full tracebacks; reference large logs by /workspace path. Use an empty array when none occurred.",
         },
         "confidence": {
             "type": "string",
@@ -347,7 +390,10 @@ BASE_SUBAGENTS = [
         "name": "literature-reviewer",
         "description": (
             "Reads arXiv/PDF papers with narrow paper tools, searches exact pages, extracts "
-            "equations/figures/methods, and returns page-grounded review notes."
+            "equations/figures/methods, and returns page-grounded review notes. Use it "
+            "whenever a request depends on reading one or more papers in depth — extracting "
+            "claims, methods, equations, or figures from specific pages — so the long page "
+            "text stays out of the coordinator's context."
         ),
         "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
         "system_prompt": (
@@ -358,7 +404,9 @@ BASE_SUBAGENTS = [
             "figures/pages worth rendering, limitations, relevance to the user's task, "
             "missing evidence, and confidence. Cite claims as paper_id:pN. If the user asks "
             "about a figure, equation, proof, or architecture diagram, call render_paper_page "
-            "for the relevant page."
+            "for the relevant page. IMPORTANT: return only the distilled notes — do NOT paste "
+            "full page text or long quotes into your fields; cite by paper_id:pN and keep the "
+            "summary under ~200 words."
         ),
     },
 ]
@@ -369,12 +417,24 @@ SCOPED_DELEGATION_CONTEXT_TOOLS = {
     "stage_uploaded_files_for_analysis",
 }
 
+# Subagents that do computational work and benefit from the rigor/reporting
+# skills. literature-reviewer is page-grounded paper review and is excluded so it
+# does not re-pay the SkillsMiddleware overhead for skills it would never activate.
+_SKILL_BEARING_SUBAGENTS = {"code-runner"}
+
+# A single, unambiguous computational delegate. (A separate data-analyst was
+# dropped: it had a tool set identical to code-runner — deepagents injects
+# execute + filesystem into every subagent — and co-registered inseparably with
+# it, so the model never chose it. code-runner absorbs the data-inspection role.)
 SCOPED_DELEGATION_SUBAGENTS = [
     {
         "name": "code-runner",
         "description": (
             "Runs focused sandbox execution, debugging, reproducibility checks, plotting, "
-            "and numerical experiments, then returns concise findings and artifact paths."
+            "numerical experiments, and dataset/artifact inspection, then returns concise "
+            "findings and artifact paths. Use it whenever a request needs running, debugging, "
+            "profiling, or plotting code, a numerical experiment, a reproducibility check, or "
+            "staging and inspecting uploaded/prior data files."
         ),
         "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
         "system_prompt": (
@@ -382,38 +442,23 @@ SCOPED_DELEGATION_SUBAGENTS = [
             "sandbox execution tools for focused code, statistics, plotting, simulation, "
             "model-training, or reproducibility subtasks. Use the provided context tools to "
             "stage selected uploads and stage prior artifacts before code reads them; avoid "
-            "guessing paths. Keep intermediate files under /workspace and durable outputs under "
+            "guessing paths. For pure data-inspection subtasks you may stage and summarize "
+            "files (schema, shape, metadata, quality concerns) without running heavy code. "
+            "Keep intermediate files under /workspace and durable outputs under "
             "/outputs when available. Preserve the user's requested compute scope: do not add "
             "longer durations, finer step sizes, more seeds, or broader convergence sweeps unless "
             "the subtask explicitly asks for them or a short smoke check reveals a material "
             "uncertainty. Return a concise "
             "final report with commands/scripts run, key numerical results, generated "
-            "artifact paths, failures, and confidence. Set confidence=high only when "
+            "artifact paths, failures, and confidence. IMPORTANT: return only the distilled "
+            "result — do NOT paste raw stdout, full tracebacks, or large tables into your "
+            "fields; write large data to /workspace and reference it by path, and keep the "
+            "summary under ~200 words. Set confidence=high only when "
             "your evidence passes a stated decision rule (for example estimate "
             "magnitude above 3x its spread); otherwise use medium, low, or unresolved, "
             "and explain the basis in confidence_basis. Do not perform broad literature "
             "review, BisQue account operations, RareSpot inference, or user-facing final "
             "synthesis; the coordinator reconciles your result."
-        ),
-    },
-    {
-        "name": "data-analyst",
-        "description": (
-            "Stages selected uploads or prior artifacts, inspects data/manifests, summarizes "
-            "dataset structure, and returns analysis-ready evidence without broad synthesis."
-        ),
-        "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
-        "system_prompt": (
-            "You are Ultra's scoped data-analyst subagent. Use only the provided context "
-            "tools plus built-in filesystem tools to inspect selected uploads, prior "
-            "artifacts, manifests, tables, and derived analysis files. Stage files before "
-            "reading them from code, avoid guessing paths, and keep outputs concise. Return "
-            "what data/artifacts were inspected, important schema/shape/metadata facts, "
-            "quality concerns, recommended next analysis steps, and exact staged or durable "
-            "paths. Set confidence=high only when the evidence is direct and complete; "
-            "otherwise use medium, low, or unresolved, and explain the basis in "
-            "confidence_basis. Do not run RareSpot inference, manage BisQue accounts, or "
-            "write the final user answer."
         ),
     },
 ]
@@ -461,14 +506,16 @@ def build_subagents(
             subagent = dict(template)
             if "response_format" in subagent:
                 subagent["response_format"] = deepcopy(subagent["response_format"])
-            if subagent["name"] in {"code-runner", "data-analyst"}:
+            if subagent["name"] in _SKILL_BEARING_SUBAGENTS:
                 subagent["tools"] = delegation_context_tools
             subagents.append(subagent)
 
     for subagent in subagents:
-        if skills_sources:
-            # Subagents share the parent backend, so the same /skills/ route
-            # serves their rigor protocols during delegated verification work.
+        # Only the computational subagents benefit from the rigor/reporting
+        # protocols; literature-reviewer is page-grounded paper review and would
+        # just re-pay the per-subagent SkillsMiddleware overhead without ever
+        # activating them. Subagents share the parent backend's /skills/ route.
+        if skills_sources and subagent["name"] in _SKILL_BEARING_SUBAGENTS:
             subagent["skills"] = list(skills_sources)
         if text_only_model:
             subagent["middleware"] = [TextOnlyMultimodalMiddleware()]
@@ -712,8 +759,15 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
         sections.append(TEXT_ONLY_ARTIFACT_GUIDANCE.strip())
     sections.append(PRIOR_ARTIFACT_GUIDANCE.strip())
     sections.append(UPLOADED_FILE_GUIDANCE.strip())
-    sections.append(PAPER_REVIEW_GUIDANCE.strip())
-    sections.append(RARESPOT_GUIDANCE.strip())
+    # Only advertise domain workflows when they apply to this run; otherwise the
+    # model carries hundreds of tokens of instructions for tools it does not have
+    # (e.g. ~650 tok of phantom RareSpot+paper guidance on a generic run). Paper
+    # guidance keys on the paper-tool predicate; RareSpot keys on the broader
+    # domain predicate so report-only ecology runs (no inference tool) keep it.
+    if context is None or _should_register_paper_tools(context):
+        sections.append(PAPER_REVIEW_GUIDANCE.strip())
+    if context is None or _looks_rarespot_domain_goal(context):
+        sections.append(RARESPOT_GUIDANCE.strip())
     # Only advertise the BisQue tools when they are actually registered for this
     # run; otherwise the model is told to call tools it does not have (the
     # reported "bisque_module_runs is not among the registered tools" failure).
@@ -997,9 +1051,13 @@ def build_agent_backend(
     memory_root.mkdir(parents=True, exist_ok=True)
     artifact_root.mkdir(parents=True, exist_ok=True)
 
+    # /memories/ and /outputs/ can hold large memory notes and offloaded tool
+    # results; raise the grep size cap (default 10 MB only bounds the Python grep
+    # fallback skip, not read/write) so search recall covers big files when
+    # ripgrep is unavailable.
     routes: dict[str, Any] = {
-        "/memories/": FilesystemBackend(memory_root, virtual_mode=True),
-        "/outputs/": FilesystemBackend(artifact_root, virtual_mode=True),
+        "/memories/": FilesystemBackend(memory_root, virtual_mode=True, max_file_size_mb=128),
+        "/outputs/": FilesystemBackend(artifact_root, virtual_mode=True, max_file_size_mb=128),
     }
     skills_root = resolve_skills_root(settings)
     if skills_root is not None:
@@ -1072,6 +1130,12 @@ def build_research_agent(
         resolved_tools.extend(build_rarespot_tools(settings))
     if _should_register_episodic_tools(context):
         resolved_tools.extend(build_episodic_tools(settings))
+    if _should_register_resource_tools(context):
+        resolved_tools.extend(
+            build_resource_tools(settings, upload_roots=settings.rarespot_upload_roots)
+        )
+    if _should_register_git_tools(context, settings):
+        resolved_tools.extend(build_git_tools(git_staging_config(settings)))
     subagents = build_subagents(
         paper_tools,
         context=context,
@@ -1101,7 +1165,7 @@ def build_research_agent(
         skills=skills_sources,
         backend=resolved_backend,
         memory=MEMORY_PATHS,
-        permissions=MEMORY_PERMISSIONS,
+        permissions=resolve_memory_permissions(settings),
         middleware=middleware,
         checkpointer=checkpointer,
     )
@@ -1121,17 +1185,30 @@ def _has_ingested_papers(context: AgentRunContext) -> bool:
     return isinstance(ingested, list) and any(isinstance(item, dict) for item in ingested)
 
 
+_RARESPOT_DOMAIN_TOKENS = ("rarespot", "prairie dog", "prairie dogs", "burrow", "burrows")
+
+
+def _looks_rarespot_domain_goal(context: AgentRunContext | None) -> bool:
+    """True when the goal is RareSpot/ecology-domain at all (inference OR report-only).
+
+    Used to gate RARESPOT_GUIDANCE: report-only goals return False from
+    ``_should_register_rarespot_tools`` yet still need the report-only workflow
+    guidance, so the prompt must key on the broader domain predicate, not the
+    tool-registration predicate.
+    """
+    if context is None:
+        return False
+    lowered = str(context.goal or "").lower()
+    return any(token in lowered for token in _RARESPOT_DOMAIN_TOKENS)
+
+
 def _should_register_rarespot_tools(context: AgentRunContext | None) -> bool:
     if context is None:
         return True
     goal = str(context.goal or "")
     if looks_report_only_rarespot_goal(goal):
         return False
-    lowered = goal.lower()
-    return any(
-        token in lowered
-        for token in ("rarespot", "prairie dog", "prairie dogs", "burrow", "burrows")
-    )
+    return _looks_rarespot_domain_goal(context)
 
 
 def _should_register_bisque_tools(context: AgentRunContext | None) -> bool:
@@ -1146,11 +1223,62 @@ def _should_register_bisque_tools(context: AgentRunContext | None) -> bool:
     return any(token in str(context.goal or "").lower() for token in ("bisque", "bqapi"))
 
 
+_GIT_GOAL_TOKENS = (
+    "git clone",
+    "clone the repo",
+    "clone my repo",
+    "clone a repo",
+    "clone this repo",
+    "git repository",
+    ".git",
+)
+
+
+def _should_register_git_tools(
+    context: AgentRunContext | None, settings: RuntimeSettings
+) -> bool:
+    """Register the git staging tool only when the goal references a repo.
+
+    Keeps the tool surface lean (like paper/bisque/rarespot gating): triggers on
+    explicit git phrases or any allowlisted clone host appearing in the goal.
+    """
+    if context is None or not settings.git_staging_enabled:
+        return False
+    goal = str(context.goal or "").lower()
+    if any(token in goal for token in _GIT_GOAL_TOKENS):
+        return True
+    return any(
+        host.strip().lower() in goal
+        for host in settings.git_staging_allowed_hosts
+        if str(host or "").strip()
+    )
+
+
+def git_staging_config(settings: RuntimeSettings) -> GitStagingConfig:
+    return GitStagingConfig(
+        enabled=settings.git_staging_enabled,
+        allowed_hosts=tuple(settings.git_staging_allowed_hosts),
+        max_bytes=settings.git_staging_max_bytes,
+        timeout_seconds=settings.git_staging_timeout_seconds,
+        depth=settings.git_staging_depth,
+    )
+
+
 def _should_register_episodic_tools(context: AgentRunContext | None) -> bool:
     """Episodic memory is broadly useful, so register it for any authenticated
     researcher (a real, non-anonymous ``user_id``). The agent decides when to
     call it; anonymous/dev runs without an identity have no durable history to
     search and skip the tool to keep their tool surface lean."""
+    if context is None:
+        return False
+    return bool(str(context.user_id or "").strip())
+
+
+def _should_register_resource_tools(context: AgentRunContext | None) -> bool:
+    """Catalog search + staging is core to autonomous analysis (pull my own prior
+    data into the sandbox), so register it for any authenticated researcher. The
+    control plane scopes every query to the run owner, so anonymous runs without
+    an identity have no catalog to search and skip the tools."""
     if context is None:
         return False
     return bool(str(context.user_id or "").strip())

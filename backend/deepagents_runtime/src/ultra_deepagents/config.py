@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from dataclasses import dataclass
 from socket import gethostname
 from typing import Any
 from urllib.parse import urlparse
+
+
+def is_local_http_host(hostname: str | None) -> bool:
+    """True for localhost / loopback / private / link-local / unspecified hosts.
+
+    Shared by every async-subagent URL guard so the server-URL check and the
+    context-URI check can never drift apart. Note: this is a literal-host check
+    only — it does not resolve DNS, so a public name pointing at a private IP is
+    not caught here (defense-in-depth, not a complete SSRF control).
+    """
+    host = str(hostname or "").strip().lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+
+
+def allow_private_async_subagent_url() -> bool:
+    """Local-dev opt-out for the async-subagent private-host URL guard."""
+    return _env_bool("ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL", False)
 
 DEFAULT_WORKER_MAX_CONCURRENCY = 64
 
@@ -16,6 +40,15 @@ class RuntimeSettings:
     openai_model: str
     openai_api_key: str = "EMPTY"
     model_supports_multimodal: bool = False
+    # Served model's input context window. When >0 it is published on the chat
+    # model's profile (`max_input_tokens`), which flips deepagents summarization
+    # from the conservative no-profile fallback (trigger 170k tokens / keep 6
+    # messages) to adaptive fraction-based compaction (trigger 85% / keep 10% of
+    # the window). MUST match the served model: too high and the agent never
+    # summarizes before the model overflows. 0 keeps the safe fallback. Setting
+    # only max_input_tokens does NOT enable native structured output, so the
+    # subagent ToolStrategy auto-retry handoff is preserved.
+    model_max_input_tokens: int = 0
     request_timeout_seconds: float = 0.0
     model_stream_idle_timeout_seconds: float = 0.0
     model_stream_idle_max_recoveries: int = 2
@@ -69,6 +102,10 @@ class RuntimeSettings:
     # worker/replica restart. Uses the control-plane Postgres when configured.
     control_database_url: str = ""
     checkpointer_enabled: bool = True
+    # Reap abandoned durable checkpoint rows (runs that crashed before terminal
+    # ack and were never resumed) older than this. Completed runs delete their row
+    # on terminal ack, so this is only a backstop for stragglers. 0 disables.
+    checkpoint_retention_seconds: int = 72 * 3600
     workspace_root: str = "data/deepagents/workspaces"
     memory_root: str = "data/deepagents/memory"
     artifact_root: str = "data/artifacts"
@@ -76,6 +113,10 @@ class RuntimeSettings:
     # report contracts). Empty means the repo-shipped skills directory next to
     # the package; set to an absolute path to override per deployment.
     skills_root: str = ""
+    # Organization-level read-only policy memory (/policies/*.md), scoped per org.
+    # Empty resolves to ``<memory_root>/policies`` so it rides the same shared
+    # barrel as per-user memory in production.
+    policies_root: str = ""
     rarespot_tool_enabled: bool = True
     rarespot_control_base_url: str = "http://127.0.0.1:8088"
     rarespot_nats_url: str = "nats://127.0.0.1:4222"
@@ -97,6 +138,18 @@ class RuntimeSettings:
     rarespot_conf_threshold: float = 0.25
     rarespot_iou_threshold: float = 0.45
     rarespot_imgsz: int = 512
+    # Host-side Git repo staging (clone a public repo into /workspace so the
+    # network-none sandbox can run it on staged data). Trust boundary lives in
+    # code_execution/git_staging.py; the sandbox is never given network egress.
+    git_staging_enabled: bool = True
+    git_staging_allowed_hosts: tuple[str, ...] = ("github.com",)
+    git_staging_max_bytes: int = 2 * 1024**3
+    git_staging_timeout_seconds: int = 600
+    git_staging_depth: int = 1
+    # Retention sweep for per-run scratch workspaces (<workspace_root>/<run_id>).
+    # 0 disables. Durable artifacts live separately under artifact_root, so an
+    # expired scratch workspace never holds deliverables.
+    workspace_retention_seconds: int = 7 * 24 * 3600
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -107,6 +160,10 @@ class RuntimeSettings:
             model_supports_multimodal=_env_bool(
                 "ULTRA_DEEPAGENTS_MODEL_SUPPORTS_MULTIMODAL",
                 False,
+            ),
+            model_max_input_tokens=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS", "0")),
             ),
             request_timeout_seconds=float(os.getenv("ULTRA_DEEPAGENTS_TIMEOUT_SECONDS", "0")),
             model_stream_idle_timeout_seconds=max(
@@ -262,6 +319,10 @@ class RuntimeSettings:
             control_worker_token=os.getenv("ULTRA_CONTROL_WORKER_TOKEN", "").strip(),
             control_database_url=os.getenv("ULTRA_CONTROL_DATABASE_URL", "").strip(),
             checkpointer_enabled=_env_bool("ULTRA_DEEPAGENTS_CHECKPOINTER_ENABLED", True),
+            checkpoint_retention_seconds=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_CHECKPOINT_RETENTION_SECONDS", str(72 * 3600))),
+            ),
             control_status_timeout_seconds=float(
                 os.getenv("ULTRA_DEEPAGENTS_CONTROL_STATUS_TIMEOUT_SECONDS", "2")
             ),
@@ -289,6 +350,7 @@ class RuntimeSettings:
                 os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),
             ),
             skills_root=os.getenv("ULTRA_DEEPAGENTS_SKILLS_ROOT", "").strip(),
+            policies_root=os.getenv("ULTRA_DEEPAGENTS_POLICIES_ROOT", "").strip(),
             rarespot_tool_enabled=_env_bool("ULTRA_RARESPOT_TOOL_ENABLED", True),
             rarespot_control_base_url=os.getenv(
                 "ULTRA_CONTROL_BASE_URL",
@@ -335,6 +397,27 @@ class RuntimeSettings:
             rarespot_conf_threshold=float(os.getenv("PRAIRIE_FIXED_CONF_THRESHOLD", "0.25")),
             rarespot_iou_threshold=float(os.getenv("PRAIRIE_FIXED_IOU_THRESHOLD", "0.45")),
             rarespot_imgsz=int(os.getenv("PRAIRIE_FIXED_IMGSZ", "512")),
+            git_staging_enabled=_env_bool("ULTRA_DEEPAGENTS_ENABLE_GIT_STAGING", True),
+            git_staging_allowed_hosts=_env_host_tuple(
+                "ULTRA_DEEPAGENTS_GIT_STAGING_ALLOWED_HOSTS",
+                ("github.com",),
+            ),
+            git_staging_max_bytes=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_GIT_STAGING_MAX_BYTES", str(2 * 1024**3))),
+            ),
+            git_staging_timeout_seconds=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_GIT_STAGING_TIMEOUT_SECONDS", "600")),
+            ),
+            git_staging_depth=max(
+                1,
+                int(os.getenv("ULTRA_DEEPAGENTS_GIT_STAGING_DEPTH", "1")),
+            ),
+            workspace_retention_seconds=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_WORKSPACE_RETENTION_SECONDS", str(7 * 24 * 3600))),
+            ),
         )
 
 
@@ -355,7 +438,26 @@ def _env_tuple(name: str) -> tuple[str, ...]:
     return tuple(token.strip() for token in raw.split(os.pathsep) if token.strip())
 
 
+def _env_host_tuple(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Comma/space-separated lowercase host allowlist; falls back to ``default``."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    hosts = tuple(
+        host.strip().lower()
+        for host in raw.replace(",", " ").split()
+        if host.strip()
+    )
+    return hosts or default
+
+
 def _async_subagents_from_env() -> tuple[dict[str, Any], ...]:
+    # Experimental, off by default: requires an EXTERNAL Agent Protocol /
+    # LangGraph deployment that Ultra does not run in-process. Demand an explicit
+    # enable flag IN ADDITION to non-empty JSON so the feature can never activate
+    # by accident (a JSON value alone is not enough).
+    if not _env_bool("ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS", False):
+        return ()
     raw = os.getenv("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON", "").strip()
     if not raw:
         return ()
@@ -440,6 +542,12 @@ def _optional_async_subagent_url(
         )
     if parsed.username or parsed.password:
         raise ValueError(f"{prefix}.{field} must not include credentials")
+    if is_local_http_host(parsed.hostname) and not allow_private_async_subagent_url():
+        raise ValueError(
+            f"{prefix}.{field} must not target a localhost/private/link-local host "
+            "(the run context + task egress to it); set "
+            "ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL=1 for local dev"
+        )
     return value
 
 

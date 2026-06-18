@@ -25,7 +25,7 @@ def test_rarespot_tool_submits_selected_upload_file_ids_from_context(monkeypatch
     )
     captured: dict = {}
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         captured["thread_id"] = thread_id
         captured["body"] = body
         return {"run_id": "run-1", "status": "queued"}
@@ -62,7 +62,7 @@ def test_rarespot_tool_does_not_forward_sandbox_staged_upload_paths(monkeypatch)
     )
     captured: dict = {}
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         captured["thread_id"] = thread_id
         captured["body"] = body
         return {"run_id": "run-1", "status": "queued"}
@@ -101,7 +101,7 @@ def test_rarespot_tool_forwards_optional_inference_settings(monkeypatch):
     )
     captured: dict = {}
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         captured["thread_id"] = thread_id
         captured["body"] = body
         return {"run_id": "run-1", "status": "queued"}
@@ -156,7 +156,7 @@ def test_rarespot_tool_filters_host_workspace_paths_and_reuses_selected_file_ids
     )
     captured: dict = {}
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         captured["thread_id"] = thread_id
         captured["body"] = body
         return {"run_id": "run-1", "status": "queued"}
@@ -195,7 +195,7 @@ def test_rarespot_tool_idempotency_key_is_stable_for_same_parent_run_and_config(
     )
     keys: list[str] = []
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         keys.append(body["idempotency_key"])
         return {"run_id": f"run-{len(keys)}", "status": "queued"}
 
@@ -230,7 +230,7 @@ def test_rarespot_tool_skips_report_only_context_without_new_config(monkeypatch)
         selected_file_ids=("file-1",),
     )
 
-    def fail_create_run(settings, *, thread_id, body):
+    def fail_create_run(settings, *, thread_id, body, parent_run_id=""):
         raise AssertionError("report-only RareSpot synthesis should not enqueue inference")
 
     monkeypatch.setattr(rarespot_tools, "active_context", lambda: context)
@@ -265,7 +265,7 @@ def test_rarespot_tool_skips_report_only_context_with_negated_rerun(monkeypatch)
         selected_file_ids=("file-1",),
     )
 
-    def fail_create_run(settings, *, thread_id, body):
+    def fail_create_run(settings, *, thread_id, body, parent_run_id=""):
         raise AssertionError("negated rerun phrasing should not enqueue inference")
 
     monkeypatch.setattr(rarespot_tools, "active_context", lambda: context)
@@ -295,7 +295,7 @@ def test_rarespot_tool_allows_report_context_with_explicit_new_threshold(monkeyp
     )
     captured: dict = {}
 
-    def fake_create_run(settings, *, thread_id, body):
+    def fake_create_run(settings, *, thread_id, body, parent_run_id=""):
         captured["body"] = body
         return {"run_id": "run-1", "status": "queued"}
 
@@ -350,7 +350,7 @@ def test_wait_for_rarespot_run_uses_terminal_event_payload(monkeypatch):
             return self.payload
 
     class FakeClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, headers=None):
             self.timeout = timeout
 
         def __enter__(self):
@@ -449,7 +449,7 @@ def test_wait_for_rarespot_run_failed_status_returns_failure_hint(monkeypatch):
             return self.payload
 
     class FakeClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, headers=None):
             self.timeout = timeout
 
         def __enter__(self):
@@ -511,7 +511,7 @@ def test_create_rarespot_run_sends_idempotency_header(monkeypatch):
             return {"run_id": "run-1", "status": "queued"}
 
     class FakeClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, headers=None):
             self.timeout = timeout
 
         def __enter__(self):
@@ -536,3 +536,55 @@ def test_create_rarespot_run_sends_idempotency_header(monkeypatch):
 
     assert result == {"run_id": "run-1", "status": "queued"}
     assert captured["headers"]["Idempotency-Key"] == "rarespot-parent-config"
+
+
+def test_create_rarespot_run_sends_worker_auth_headers(monkeypatch):
+    # Regression: the dispatch must carry the worker token + parent run id so the
+    # WorkOS-enabled control plane authenticates it (else 401, which is exactly
+    # what broke prairie-dog detection in production).
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        rarespot_control_base_url="http://control.test",
+        control_worker_token="trace-worker-secret",
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"run_id": "run-1", "status": "queued"}
+
+    class FakeClient:
+        def __init__(self, timeout, headers=None):
+            captured["client_headers"] = headers or {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+        def get(self, url):
+            captured.setdefault("gets", []).append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    rarespot_tools.create_rarespot_run(
+        settings, thread_id="thread-1", body={}, parent_run_id="run-parent-7"
+    )
+    assert captured["headers"]["X-Ultra-Worker-Token"] == "trace-worker-secret"
+    assert captured["headers"]["X-Ultra-Run-Id"] == "run-parent-7"
+
+    # The poll loop must also carry worker auth (status + artifacts reads).
+    captured.clear()
+    rarespot_tools.wait_for_rarespot_run(settings, run_id="run-child-9", timeout_seconds=5)
+    assert captured["client_headers"]["X-Ultra-Worker-Token"] == "trace-worker-secret"
+    assert captured["client_headers"]["X-Ultra-Run-Id"] == "run-child-9"

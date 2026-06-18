@@ -1,6 +1,6 @@
 ---
 name: scientific-reporting
-description: Report contract and artifact hygiene for scientific deliverables — required sections (methods, uncertainties, verification, limitations, references), figure standards, subagent attribution, and durable-output discipline.
+description: Report contract and artifact hygiene for the write-up — required sections (methods, uncertainties, verification, limitations, references), figure standards, subagent attribution, and durable-output discipline. Use when writing a scientific report, a results summary for a researcher, or producing durable deliverables (figures, CSVs, code, markdown) — i.e. while communicating results, not while computing them.
 ---
 
 # Scientific Reporting

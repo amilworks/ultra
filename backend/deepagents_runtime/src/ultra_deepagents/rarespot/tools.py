@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import time
 from pathlib import Path
@@ -177,7 +177,12 @@ def build_rarespot_tools(settings: RuntimeSettings) -> list[StructuredTool]:
                 "rarespot_config": config_overrides,
             },
         }
-        run = create_rarespot_run(settings, thread_id=thread_id, body=body)
+        run = create_rarespot_run(
+            settings,
+            thread_id=thread_id,
+            body=body,
+            parent_run_id=context.run_id if context is not None else "",
+        )
         if not wait_for_completion:
             return json.dumps({"run_id": run["run_id"], "status": run.get("status"), "artifact_ids": []})
         return json.dumps(wait_for_rarespot_run(settings, run_id=run["run_id"], timeout_seconds=timeout_seconds))
@@ -298,12 +303,37 @@ def active_context() -> AgentRunContext | None:
         return None
 
 
-def create_rarespot_run(settings: RuntimeSettings, *, thread_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def _rarespot_control_headers(settings: RuntimeSettings, *, run_id: str = "") -> dict[str, str]:
+    """Run-anchored worker auth for the RareSpot dispatch/poll calls.
+
+    The control plane requires real auth (WorkOS in production), and the worker
+    has no session — only the worker token. The token plus the parent/child run
+    id let the control plane derive the run owner server-side (workerRunPrincipal)
+    so the child run is created and read as that owner, never unauthenticated."""
+    headers: dict[str, str] = {}
+    token = str(getattr(settings, "control_worker_token", "") or "").strip()
+    if token:
+        headers["X-Ultra-Worker-Token"] = token
+    rid = str(run_id or "").strip()
+    if rid:
+        headers["X-Ultra-Run-Id"] = rid
+    return headers
+
+
+def create_rarespot_run(
+    settings: RuntimeSettings,
+    *,
+    thread_id: str,
+    body: dict[str, Any],
+    parent_run_id: str = "",
+) -> dict[str, Any]:
     import httpx
 
     url = f"{settings.rarespot_control_base_url.rstrip('/')}/v2/threads/{thread_id}/runs"
     idempotency_key = str(body.get("idempotency_key") or (body.get("metadata") or {}).get("idempotency_key") or "").strip()
-    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+    headers = _rarespot_control_headers(settings, run_id=parent_run_id)
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     with httpx.Client(timeout=30.0) as client:
         response = client.post(url, json=body, headers=headers)
         response.raise_for_status()
@@ -321,7 +351,8 @@ def wait_for_rarespot_run(
     base_url = settings.rarespot_control_base_url.rstrip("/")
     deadline = time.monotonic() + float(timeout_seconds)
     last_run: dict[str, Any] = {}
-    with httpx.Client(timeout=30.0) as client:
+    headers = _rarespot_control_headers(settings, run_id=run_id)
+    with httpx.Client(timeout=30.0, headers=headers) as client:
         while time.monotonic() < deadline:
             run_response = client.get(f"{base_url}/v2/runs/{run_id}")
             run_response.raise_for_status()

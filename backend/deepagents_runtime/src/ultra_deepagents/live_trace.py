@@ -2805,7 +2805,7 @@ def _context_staging_tool_names() -> set[str]:
     }
 
 
-SCOPED_DELEGATION_SUBAGENT_NAMES = {"code-runner", "data-analyst"}
+SCOPED_DELEGATION_SUBAGENT_NAMES = {"code-runner"}
 _CONTEXT_TOOL_PRIVATE_PATH_KEYS = {"source_path", "storage_uri"}
 _MACOS_USER_PREFIX = "/" + "Users/"
 _HOST_PATH_PREFIXES = (

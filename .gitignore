@@ -60,3 +60,9 @@ data/runtime/MedSAM2/
 .DS_Store
 *.swp
 *.swo
+
+# Local-only MCP server config (personal; not shared with teammates)
+.mcp.json
+
+# Local agent/workflow scratch artifacts
+.workflow/

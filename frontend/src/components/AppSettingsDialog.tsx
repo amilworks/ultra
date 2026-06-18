@@ -54,13 +54,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { BisqueNavLinks } from "@/features/auth/bisqueNavigation";
 import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
-import { formatDurationSeconds, formatTokens } from "@/lib/format";
 import type {
   CurrentUserProfile,
   CurrentUserResponse,
   TokenUsageResponse,
 } from "@/types";
-import { TokenActivityHeatmap } from "./TokenActivityHeatmap";
+import { UserTokenUsagePanel } from "./UserTokenUsagePanel";
 import { SystemMessage } from "./prompt-kit/system-message";
 
 type ThemePreference = "system" | "light" | "dark";
@@ -124,15 +123,6 @@ const profileFormFromResponse = (response: CurrentUserResponse): ProfileFormStat
   researchInterests: response.profile.research_interests ?? "",
   bio: response.profile.bio ?? "",
 });
-
-function UsageStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="app-settings-usage-stat">
-      <div className="app-settings-usage-stat-value">{value}</div>
-      <div className="app-settings-usage-stat-label">{label}</div>
-    </div>
-  );
-}
 
 const THEME_OPTIONS: ThemeOption[] = [
   {
@@ -334,8 +324,6 @@ export function AppSettingsDialog({
       setProfileSaving(false);
     }
   };
-
-  const usageSummary = tokenUsage?.summary;
 
   const runAndClose = (action: () => void): void => {
     onOpenChange(false);
@@ -613,56 +601,12 @@ export function AppSettingsDialog({
 
             {usageEnabled ? (
               <TabsContent value="usage" className="app-settings-tab-content">
-                <div className="app-settings-panel-heading">
-                  <h2>Usage</h2>
-                  <p>Token activity across all of your runs.</p>
-                </div>
-                <Separator />
-                {usageLoading ? (
-                  <div className="app-settings-usage-loading">
-                    <Skeleton className="h-20 w-full" />
-                    <Skeleton className="h-32 w-full" />
-                  </div>
-                ) : usageError ? (
-                  <SystemMessage variant="error" fill>
-                    {usageError}
-                  </SystemMessage>
-                ) : usageSummary ? (
-                  <>
-                    <div className="app-settings-usage-stats">
-                      <UsageStat
-                        label="Lifetime tokens"
-                        value={formatTokens(usageSummary.lifetime_total_tokens)}
-                      />
-                      <UsageStat
-                        label="Peak day"
-                        value={formatTokens(usageSummary.peak_daily_total)}
-                      />
-                      <UsageStat
-                        label="Longest task"
-                        value={formatDurationSeconds(usageSummary.longest_task_seconds)}
-                      />
-                      <UsageStat
-                        label="Current streak"
-                        value={`${usageSummary.current_streak_days} day${
-                          usageSummary.current_streak_days === 1 ? "" : "s"
-                        }`}
-                      />
-                      <UsageStat
-                        label="Longest streak"
-                        value={`${usageSummary.longest_streak_days} day${
-                          usageSummary.longest_streak_days === 1 ? "" : "s"
-                        }`}
-                      />
-                    </div>
-                    <Separator />
-                    <TokenActivityHeatmap daily={tokenUsage?.daily ?? []} />
-                  </>
-                ) : (
-                  <div className="app-settings-unavailable">
-                    No token usage recorded yet. Run a task to start tracking.
-                  </div>
-                )}
+                <UserTokenUsagePanel
+                  tokenUsage={tokenUsage}
+                  loading={usageLoading}
+                  error={usageError}
+                  density="compact"
+                />
               </TabsContent>
             ) : null}
 

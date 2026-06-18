@@ -124,6 +124,7 @@ import {
   shouldDropHydratedLegacy404Message,
   shouldRecoverRunResultMessage,
 } from "./features/chat/run-recovery";
+import { extractRunTokenUsage } from "./features/chat/token-usage";
 import {
   findReusableBlankDraftConversation,
   shouldShowConversationInHistory,
@@ -171,6 +172,7 @@ import {
   getToolStatusThinkingText,
 } from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
+import { UserTokenUsagePanel } from "./components/UserTokenUsagePanel";
 import type {
   AdminCreateOrganizationRequest,
   AdminCreateUserRequest,
@@ -193,8 +195,8 @@ import type {
   ResourceRecord,
   ResourceShareGrantRecord,
   RunEvent,
-  RunTokenUsage,
   SelectionContext,
+  TokenUsageResponse,
   UploadedFileRecord,
 } from "./types";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
@@ -2615,6 +2617,8 @@ const ConversationMessageRow = memo(
       [message]
     );
     const tokenUsage = useMemo(() => extractRunTokenUsage(message), [message]);
+    const showAssistantMetadataLine =
+      Boolean(reasonedDurationLabel) || Boolean(summaryModeLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
       return (
         <Message
@@ -2686,25 +2690,7 @@ const ConversationMessageRow = memo(
         className="chat-width-frame mx-auto w-full justify-start px-4 sm:px-6"
       >
         <div className="group flex w-full flex-1 flex-col gap-2">
-          {thinkingBarText ? (
-            <div className="mb-1">
-              <ThinkingBar
-                text={thinkingBarText}
-                onStop={actions.onStopConversation}
-                stopLabel="Stop"
-              />
-            </div>
-          ) : null}
-          {isStreamingAssistant ? (
-            <Suspense fallback={null}>
-              <LazyChatRunSteps
-                runEvents={runEvents}
-                progressEvents={progressEvents}
-                isStreaming={isStreamingAssistant}
-                fallbackLabel={thinkingBarText}
-              />
-            </Suspense>
-          ) : reasonedDurationLabel || summaryModeLabel || tokenUsage ? (
+          {showAssistantMetadataLine ? (
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
               {reasonedDurationLabel ? (
                 <span>{`Reasoned for ${reasonedDurationLabel}`}</span>
@@ -2725,6 +2711,25 @@ const ConversationMessageRow = memo(
                 </span>
               ) : null}
             </div>
+          ) : null}
+          {thinkingBarText ? (
+            <div className="mb-1">
+              <ThinkingBar
+                text={thinkingBarText}
+                onStop={actions.onStopConversation}
+                stopLabel="Stop"
+              />
+            </div>
+          ) : null}
+          {isStreamingAssistant ? (
+            <Suspense fallback={null}>
+              <LazyChatRunSteps
+                runEvents={runEvents}
+                progressEvents={progressEvents}
+                isStreaming={isStreamingAssistant}
+                fallbackLabel={thinkingBarText}
+              />
+            </Suspense>
           ) : null}
           {showLeadingToolResultCards ? (
             <Suspense fallback={null}>
@@ -2940,8 +2945,9 @@ const ConversationMessageRow = memo(
 type ConversationTranscriptProps = {
   conversationHydrated: boolean;
   messages: UiMessage[];
-  welcomeHeadline: string;
-  welcomeSubtitle: string;
+  blankChatTokenUsage: TokenUsageResponse | null;
+  blankChatUsageLoading: boolean;
+  blankChatUsageError: string | null;
   streamingMessageId: string | null;
   copiedMessageId: string | null;
   uploadedFiles: UploadedFileRecord[];
@@ -2954,8 +2960,9 @@ const ConversationTranscript = memo(
   function ConversationTranscript({
     conversationHydrated,
     messages,
-    welcomeHeadline,
-    welcomeSubtitle,
+    blankChatTokenUsage,
+    blankChatUsageLoading,
+    blankChatUsageError,
     streamingMessageId,
     copiedMessageId,
     uploadedFiles,
@@ -2980,9 +2987,14 @@ const ConversationTranscript = memo(
             </p>
           </div>
         ) : messages.length === 0 ? (
-          <div className="hero-state">
-            <h2 className="hero-title hero-title-welcome">{welcomeHeadline}</h2>
-            <p className="hero-subtitle">{welcomeSubtitle}</p>
+          <div className="blank-chat-usage-state">
+            <UserTokenUsagePanel
+              tokenUsage={blankChatTokenUsage}
+              loading={blankChatUsageLoading}
+              error={blankChatUsageError}
+              className="blank-chat-usage-panel"
+              density="compact"
+            />
           </div>
         ) : (
           messages.map((message, index) => (
@@ -3006,8 +3018,9 @@ const ConversationTranscript = memo(
   (previousProps, nextProps) =>
     previousProps.conversationHydrated === nextProps.conversationHydrated &&
     previousProps.messages === nextProps.messages &&
-    previousProps.welcomeHeadline === nextProps.welcomeHeadline &&
-    previousProps.welcomeSubtitle === nextProps.welcomeSubtitle &&
+    previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
+    previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
+    previousProps.blankChatUsageError === nextProps.blankChatUsageError &&
     previousProps.streamingMessageId === nextProps.streamingMessageId &&
     previousProps.copiedMessageId === nextProps.copiedMessageId &&
     previousProps.uploadedFiles === nextProps.uploadedFiles &&
@@ -7035,60 +7048,6 @@ const formatReasoningDuration = (seconds: number | null | undefined): string | n
   return `${(value / 3600).toFixed(1)}h`;
 };
 
-const readTokenUsageRecord = (value: unknown): RunTokenUsage | null => {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const input = Number(record.input_tokens);
-  const output = Number(record.output_tokens);
-  const total = Number(record.total_tokens);
-  const safeInput = Number.isFinite(input) && input > 0 ? input : 0;
-  const safeOutput = Number.isFinite(output) && output > 0 ? output : 0;
-  const totalTokens =
-    Number.isFinite(total) && total > 0 ? total : safeInput + safeOutput;
-  if (!(totalTokens > 0)) {
-    return null;
-  }
-  return {
-    input_tokens: safeInput,
-    output_tokens: safeOutput,
-    total_tokens: totalTokens,
-    model: typeof record.model === "string" ? record.model : undefined,
-  };
-};
-
-const extractRunTokenUsage = (message: UiMessage): RunTokenUsage | null => {
-  const metadata = message.responseMetadata;
-  if (metadata && typeof metadata === "object") {
-    const fromMetadata = readTokenUsageRecord(
-      (metadata as Record<string, unknown>).usage
-    );
-    if (fromMetadata) {
-      return fromMetadata;
-    }
-  }
-  if (Array.isArray(message.runEvents)) {
-    for (let index = message.runEvents.length - 1; index >= 0; index -= 1) {
-      const event = message.runEvents[index] as unknown as Record<string, unknown>;
-      const kind = String(event?.event_kind ?? event?.event_type ?? "");
-      if (kind !== "run.completed") {
-        continue;
-      }
-      const payload = event?.payload;
-      if (payload && typeof payload === "object") {
-        const fromEvent = readTokenUsageRecord(
-          (payload as Record<string, unknown>).usage
-        );
-        if (fromEvent) {
-          return fromEvent;
-        }
-      }
-    }
-  }
-  return null;
-};
-
 const toolCardImagesFromBisqueResourceRows = (
   rows: ToolResourceRow[],
   limit: number = 6
@@ -7632,6 +7591,16 @@ export function App() {
   const hostedAuthRedirectAttemptedRef = useRef(false);
   const sessionRevalidatedAtRef = useRef(0);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [blankChatTokenUsage, setBlankChatTokenUsage] =
+    useState<TokenUsageResponse | null>(null);
+  const [blankChatUsageLoading, setBlankChatUsageLoading] = useState(false);
+  const [blankChatUsageError, setBlankChatUsageError] = useState<string | null>(null);
+  const blankChatUsageRequestRef = useRef({
+    key: "",
+    inFlight: false,
+    loaded: false,
+    failed: false,
+  });
   const isPhoneView = useBreakpoint(641);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
@@ -10015,6 +9984,80 @@ export function App() {
     [activeMessages, activeStreamingMessageId]
   );
   const activeStreamingRunId = activeStreamingMessage?.runId ?? null;
+  // Live token total for the in-flight turn, summed from run.token_usage events
+  // as each model call completes. Reuses the same dedupe-and-sum logic as the
+  // completed-message footer so the ticker and the final count agree.
+  const activeStreamingTokenUsage = useMemo(
+    () =>
+      activeStreamingMessage
+        ? extractRunTokenUsage({
+            responseMetadata: activeStreamingMessage.responseMetadata,
+            runEvents: activeStreamingMessage.runEvents,
+          })
+        : null,
+    [activeStreamingMessage]
+  );
+  const shouldShowBlankChatUsage =
+    authStatus === "authenticated" &&
+    activePanel === "chat" &&
+    activeConversationHydrated &&
+    activeMessages.length === 0;
+  const blankChatUsageKey = `${authMode ?? ""}:${authUser ?? ""}`;
+  useEffect(() => {
+    blankChatUsageRequestRef.current = {
+      key: blankChatUsageKey,
+      inFlight: false,
+      loaded: false,
+      failed: false,
+    };
+    return queueEffectUpdate(() => {
+      setBlankChatTokenUsage(null);
+      setBlankChatUsageError(null);
+      setBlankChatUsageLoading(false);
+    });
+  }, [blankChatUsageKey]);
+  useEffect(() => {
+    const requestState = blankChatUsageRequestRef.current;
+    if (!shouldShowBlankChatUsage || requestState.key !== blankChatUsageKey) {
+      return;
+    }
+    if (requestState.inFlight || requestState.loaded || requestState.failed) {
+      return;
+    }
+    let cancelled = false;
+    requestState.inFlight = true;
+    const cancelQueuedLoading = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setBlankChatUsageLoading(true);
+      setBlankChatUsageError(null);
+    });
+    void loadCurrentUserTokenUsage(365)
+      .then((response) => {
+        if (!cancelled) {
+          requestState.loaded = true;
+          setBlankChatTokenUsage(response);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          requestState.failed = true;
+          setBlankChatUsageError(normalizeApiError(error));
+        }
+      })
+      .finally(() => {
+        requestState.inFlight = false;
+        if (!cancelled) {
+          setBlankChatUsageLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+      requestState.inFlight = false;
+      cancelQueuedLoading();
+    };
+  }, [blankChatUsageKey, loadCurrentUserTokenUsage, shouldShowBlankChatUsage]);
   const requestChatScrollToBottom = useCallback((): void => {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
@@ -10104,9 +10147,6 @@ export function App() {
 	    updateConversation,
 	  ]);
 
-  const welcomeHeadline = "What are you working on?";
-  const welcomeSubtitle =
-    "Ask about your data, images, papers, models, or any scientific workflow you want to move forward.";
   const viewerUploadedFiles =
     resourceViewerContext?.uploadedFiles ?? activeAvailableUploadedFiles;
   const viewerBisqueLinksByFileId =
@@ -14075,8 +14115,9 @@ export function App() {
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
                   messages={activeMessages}
-                  welcomeHeadline={welcomeHeadline}
-                  welcomeSubtitle={welcomeSubtitle}
+                  blankChatTokenUsage={blankChatTokenUsage}
+                  blankChatUsageLoading={blankChatUsageLoading}
+                  blankChatUsageError={blankChatUsageError}
                   streamingMessageId={activeStreamingMessageId}
                   copiedMessageId={copiedMessageId}
                   uploadedFiles={activeAvailableUploadedFiles}
@@ -14155,7 +14196,14 @@ export function App() {
                   <div className="app-composer-card-body">
                     {activeSending ? (
                       <div className="composer-running">
-                        <Loader size="sm" text="BisQue Ultra is processing" />
+                        <Loader
+                          size="sm"
+                          text={
+                            activeStreamingTokenUsage
+                              ? `${formatTokens(activeStreamingTokenUsage.total_tokens)} tokens`
+                              : "BisQue Ultra is processing"
+                          }
+                        />
                       </div>
                     ) : null}
                     <PromptInputTextarea

@@ -7371,6 +7371,42 @@ func TestUploadCatalogMigrationSmokeExistingRoot(t *testing.T) {
 	}
 }
 
+func TestEnsureUploadCatalogMigratedDoesNotCacheTransientFailure(t *testing.T) {
+	// Regression: a one-time migration that failed (e.g. the triggering request's
+	// context was canceled mid-run) must NOT be cached as permanently failed. The
+	// previous sync.Once implementation cached the first error forever, so every
+	// later /v2/resources request returned "context canceled" until a restart.
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:   mem,
+	}
+	// Unique root so this test never collides with the package-level migration map.
+	root := filepath.Join(t.TempDir(), "uploads")
+
+	// First attempt fails for a non-context reason (root is a regular file, so the
+	// directory scan errors). The failure must not be cached.
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("seed non-directory root: %v", err)
+	}
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err == nil {
+		t.Fatal("expected migration to fail when the upload root is a regular file")
+	}
+
+	// Heal the root and retry against the SAME root string: the prior failure must
+	// not poison it — the migration retries and succeeds.
+	if err := os.Remove(root); err != nil {
+		t.Fatalf("remove seed file: %v", err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("recreate root as directory: %v", err)
+	}
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
+		t.Fatalf("migration must retry after a transient failure, got: %v", err)
+	}
+}
+
 func TestV2ResourceCollectionsCreateAndBulkAddResources(t *testing.T) {
 	t.Parallel()
 
@@ -14124,4 +14160,419 @@ func linkedBisqueSessionIDFromCookie(t *testing.T, cookies []*http.Cookie) strin
 	}
 	t.Fatalf("missing ultra_dev_auth cookie")
 	return ""
+}
+
+func TestV2EpisodicSearchIsRunAnchoredAndUserScoped(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	// Helper: create a thread + run for a user and complete it with response text.
+	completeRun := func(userID, title, goal, response string) domain.RunRecord {
+		thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: userID, Title: title})
+		if err != nil {
+			t.Fatalf("CreateThread: %v", err)
+		}
+		run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+			ThreadID: thread.ThreadID,
+			UserID:   userID,
+			Goal:     goal,
+			Messages: []domain.ThreadMessage{{Role: "user", Content: goal}},
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		if _, err := mem.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID, ResponseText: response}); err != nil {
+			t.Fatalf("CompleteRun: %v", err)
+		}
+		return run
+	}
+
+	// User A's history: a RareSpot conclusion and an unrelated run.
+	completeRun("user-a", "Prairie dog density 2024", "Compare 2024 prairie dog burrow density",
+		"The 2024 RareSpot run found a mean burrow density of 12.3 per hectare.")
+	completeRun("user-a", "Pendulum", "Run a damped pendulum study", "Only A=1.5 is chaotic.")
+	// User B's history mentions RareSpot too — must never leak to A.
+	completeRun("user-b", "Other lab RareSpot", "RareSpot detection for site Z",
+		"User B's confidential RareSpot density was 99.9 per hectare.")
+
+	// The current run (user A) issuing the search; must be excluded from results.
+	currentThread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "now"})
+	currentRun, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: currentThread.ThreadID, UserID: "user-a", Goal: "What did the RareSpot run find?",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "What did the RareSpot run find?"}},
+	})
+
+	search := func(token, runID, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/runs/"+runID+"/episodic-search", strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("X-Ultra-Worker-Token", token)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Anonymous (no worker token) is rejected by the WorkOS gate.
+	if rec := search("", currentRun.RunID, `{"query":"rarespot"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous episodic status = %d, want 401", rec.Code)
+	}
+	// Invalid worker token is rejected.
+	if rec := search("wrong-secret", currentRun.RunID, `{"query":"rarespot"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-token episodic status = %d, want 401", rec.Code)
+	}
+
+	// Worker token, run-anchored to user A: keyword search returns only A's RareSpot run.
+	rec := search("trace-worker-secret", currentRun.RunID, `{"query":"rarespot"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("episodic status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Hits []struct {
+			RunID           string `json:"run_id"`
+			Title           string `json:"title"`
+			Goal            string `json:"goal"`
+			ResponseSnippet string `json:"response_snippet"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	if len(resp.Hits) != 1 {
+		t.Fatalf("rarespot hits = %d, want 1: %+v", len(resp.Hits), resp.Hits)
+	}
+	if !strings.Contains(resp.Hits[0].ResponseSnippet, "12.3 per hectare") {
+		t.Fatalf("hit snippet = %q, want A's 2024 density", resp.Hits[0].ResponseSnippet)
+	}
+	for _, hit := range resp.Hits {
+		if strings.Contains(hit.ResponseSnippet, "99.9") {
+			t.Fatalf("user B's confidential history leaked into user A's search: %+v", hit)
+		}
+	}
+
+	// A natural multi-word query matches even when terms are not contiguous and span
+	// goal + response + title ("prairie"/"2024" in goal/title, "hectare" only in response).
+	recMulti := search("trace-worker-secret", currentRun.RunID, `{"query":"prairie 2024 hectare"}`)
+	if recMulti.Code != http.StatusOK {
+		t.Fatalf("multiword episodic status = %d", recMulti.Code)
+	}
+	_ = json.Unmarshal(recMulti.Body.Bytes(), &resp)
+	if len(resp.Hits) != 1 || !strings.Contains(resp.Hits[0].ResponseSnippet, "12.3") {
+		t.Fatalf("multiword query should match A's 2024 run via all-terms-AND: %+v", resp.Hits)
+	}
+
+	// Empty query (recency-only) returns A's two completed runs, never B's, never the current run.
+	recAll := search("trace-worker-secret", currentRun.RunID, `{}`)
+	if recAll.Code != http.StatusOK {
+		t.Fatalf("recency episodic status = %d", recAll.Code)
+	}
+	_ = json.Unmarshal(recAll.Body.Bytes(), &resp)
+	if len(resp.Hits) != 2 {
+		t.Fatalf("recency hits = %d, want 2 (A's completed runs, excluding current): %+v", len(resp.Hits), resp.Hits)
+	}
+	for _, hit := range resp.Hits {
+		if hit.RunID == currentRun.RunID {
+			t.Fatalf("current run must be excluded from its own episodic search")
+		}
+	}
+}
+
+func TestV2RunResourceSearchAndResolveAreRunAnchoredAndUserScoped(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		UploadRoot:  t.TempDir(),
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	now := domain.Now()
+	seed := func(resourceID, userID, name, kind string) {
+		if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: name,
+			ContentType:  "image/tiff",
+			ResourceKind: kind,
+			SourceType:   "upload",
+			SizeBytes:    1024,
+			SHA256:       "deadbeef",
+			StorageURI:   "file:///srv/secret/" + resourceID,
+			StoragePath:  "/srv/secret/" + resourceID,
+			OwnerUserID:  userID,
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+	}
+	// User A owns two images + a doc; user B owns a confidential image.
+	seed("file_npm1", "user-a", "NPM1_13054_IM.tiff", "image")
+	seed("file_norm_ct", "user-a", "norm_ct_scan_1.tiff", "image")
+	seed("file_report", "user-a", "report.pdf", "document")
+	seed("file_secret_b", "user-b", "secret_b.tiff", "image")
+
+	thread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "now"})
+	run, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID, UserID: "user-a", Goal: "plot the norm CT middle slice",
+	})
+
+	post := func(token, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("X-Ultra-Worker-Token", token)
+		}
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	searchPath := "/v2/runs/" + run.RunID + "/resource-search"
+	resolvePath := "/v2/runs/" + run.RunID + "/resource-resolve"
+
+	// Auth: no token / bad token are rejected.
+	if rec := post("", searchPath, `{"query":"norm"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous resource-search status = %d, want 401", rec.Code)
+	}
+	if rec := post("wrong", searchPath, `{"query":"norm"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-token resource-search status = %d, want 401", rec.Code)
+	}
+
+	type hit struct {
+		ResourceID   string `json:"resource_id"`
+		OriginalName string `json:"original_name"`
+		ResourceKind string `json:"resource_kind"`
+		StorageURI   string `json:"storage_uri"`
+		StoragePath  string `json:"storage_path"`
+	}
+	type searchResp struct {
+		Resources  []hit `json:"resources"`
+		TotalCount int   `json:"total_count"`
+	}
+
+	// Keyword "norm" matches only the norm CT scan.
+	rec := post("trace-worker-secret", searchPath, `{"query":"norm"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resource-search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var sr searchResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &sr); err != nil {
+		t.Fatalf("decode search: %v body=%s", err, rec.Body.String())
+	}
+	if len(sr.Resources) != 1 || sr.Resources[0].ResourceID != "file_norm_ct" {
+		t.Fatalf("norm query = %+v, want only file_norm_ct", sr.Resources)
+	}
+	// Host paths must never leak to the agent.
+	if sr.Resources[0].StorageURI != "" || sr.Resources[0].StoragePath != "" {
+		t.Fatalf("host path leaked in resource-search response: %+v", sr.Resources[0])
+	}
+	if strings.Contains(rec.Body.String(), "/srv/secret") {
+		t.Fatalf("host filesystem path leaked in body: %s", rec.Body.String())
+	}
+
+	// kind=image returns A's two images, never the pdf or user B's image.
+	rec = post("trace-worker-secret", searchPath, `{"kind":"image","limit":50}`)
+	_ = json.Unmarshal(rec.Body.Bytes(), &sr)
+	gotIDs := map[string]bool{}
+	for _, h := range sr.Resources {
+		gotIDs[h.ResourceID] = true
+		if h.ResourceID == "file_secret_b" {
+			t.Fatalf("user B's resource leaked into user A's search")
+		}
+	}
+	if !gotIDs["file_npm1"] || !gotIDs["file_norm_ct"] || gotIDs["file_report"] {
+		t.Fatalf("kind=image results = %+v, want the two A images only", sr.Resources)
+	}
+
+	// resource-resolve verifies ownership: A's id resolves; B's id and a missing id come back missing.
+	type resolveResp struct {
+		Resources []hit    `json:"resources"`
+		Missing   []string `json:"missing"`
+	}
+	rec = post("trace-worker-secret", resolvePath, `{"resource_ids":["file_npm1","file_secret_b","file_nope"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resource-resolve status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rr resolveResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &rr); err != nil {
+		t.Fatalf("decode resolve: %v body=%s", err, rec.Body.String())
+	}
+	if len(rr.Resources) != 1 || rr.Resources[0].ResourceID != "file_npm1" {
+		t.Fatalf("resolve resources = %+v, want only file_npm1 (owned)", rr.Resources)
+	}
+	if len(rr.Missing) != 2 {
+		t.Fatalf("resolve missing = %+v, want B's id + nonexistent id", rr.Missing)
+	}
+	if rr.Resources[0].StoragePath != "" || strings.Contains(rec.Body.String(), "/srv/secret") {
+		t.Fatalf("host path leaked in resource-resolve response: %s", rec.Body.String())
+	}
+}
+
+func TestV2RunResourceSearchHonorsShareGrants(t *testing.T) {
+	// Chosen product contract: the agent has the SAME access as the user in the
+	// Resources page — the owner's own resources PLUS any shared with them. A
+	// resource user B shared (publicly or to A) is reachable by A's run; a private
+	// one is not.
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		UploadRoot:  t.TempDir(),
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	now := domain.Now()
+	mk := func(id, owner, name string) {
+		if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID: id, OriginalName: name, ContentType: "image/tiff", ResourceKind: "image",
+			SourceType: "upload", SizeBytes: 1, OwnerUserID: owner, Status: "active",
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", id, err)
+		}
+	}
+	mk("file_shared_b", "user-b", "shared_dataset.tiff") // B shares this publicly
+	mk("file_private_b", "user-b", "private_b.tiff")     // B keeps this private
+	if _, err := mem.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		GrantID: "grant_pub_1", ResourceID: "file_shared_b", OwnerUserID: "user-b",
+		Public: true, Role: "read", Status: "active",
+	}); err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+
+	thread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "now"})
+	run, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID, UserID: "user-a", Goal: "analyze the shared dataset",
+	})
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("X-Ultra-Worker-Token", "trace-worker-secret")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Search: the publicly-shared resource is reachable; the private one is not.
+	var sr struct {
+		Resources []struct {
+			ResourceID string `json:"resource_id"`
+		} `json:"resources"`
+	}
+	rec := post("/v2/runs/"+run.RunID+"/resource-search", `{"query":"","limit":50}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &sr)
+	got := map[string]bool{}
+	for _, r := range sr.Resources {
+		got[r.ResourceID] = true
+	}
+	if !got["file_shared_b"] {
+		t.Fatalf("shared resource not reachable by grantee run: %+v", sr.Resources)
+	}
+	if got["file_private_b"] {
+		t.Fatalf("private resource of another user leaked: %+v", sr.Resources)
+	}
+
+	// Resolve: shared id resolves; private id is missing (not readable).
+	var rr struct {
+		Resources []struct {
+			ResourceID string `json:"resource_id"`
+		} `json:"resources"`
+		Missing []string `json:"missing"`
+	}
+	rec = post("/v2/runs/"+run.RunID+"/resource-resolve", `{"resource_ids":["file_shared_b","file_private_b"]}`)
+	_ = json.Unmarshal(rec.Body.Bytes(), &rr)
+	if len(rr.Resources) != 1 || rr.Resources[0].ResourceID != "file_shared_b" {
+		t.Fatalf("resolve resources = %+v, want only the shared id", rr.Resources)
+	}
+	if len(rr.Missing) != 1 || rr.Missing[0] != "file_private_b" {
+		t.Fatalf("resolve missing = %+v, want the private id", rr.Missing)
+	}
+}
+
+func TestV2WorkerCanDispatchChildRunRunAnchored(t *testing.T) {
+	// RareSpot inference dispatches a child run from the worker. The worker token
+	// + parent run id must authenticate it (the WorkOS-enabled control plane 401s
+	// otherwise), and the child run is created as the PARENT run's owner — a worker
+	// can never create a run on another user's thread.
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+
+	threadA, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "A"})
+	parentA, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{ThreadID: threadA.ThreadID, UserID: "user-a", Goal: "parent"})
+	threadB, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-b", Title: "B"})
+	parentB, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{ThreadID: threadB.ThreadID, UserID: "user-b", Goal: "parent-b"})
+
+	post := func(thread, token, runID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/threads/"+thread+"/runs", strings.NewReader(`{"goal":"child","workflow_hint":{"id":"rarespot_ecology"}}`))
+		if token != "" {
+			req.Header.Set("X-Ultra-Worker-Token", token)
+		}
+		if runID != "" {
+			req.Header.Set("X-Ultra-Run-Id", runID)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Worker token + parent run id -> child run created as the parent's owner.
+	rec := post(threadA.ThreadID, "trace-worker-secret", parentA.RunID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worker child-run dispatch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var child domain.RunRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &child); err != nil {
+		t.Fatalf("decode child run: %v", err)
+	}
+	if child.UserID != "user-a" {
+		t.Fatalf("child run owner = %q, want user-a (derived from parent run)", child.UserID)
+	}
+
+	// Worker token but NO parent run id -> not worker-scoped -> 401.
+	if rec := post(threadA.ThreadID, "trace-worker-secret", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("dispatch without run id status = %d, want 401", rec.Code)
+	}
+
+	// SECURITY: anchoring to user-b's run cannot create a run on user-a's thread
+	// (derived principal is user-b; GetThreadForUser(threadA, user-b) fails).
+	if rec := post(threadA.ThreadID, "trace-worker-secret", parentB.RunID); rec.Code == http.StatusOK {
+		t.Fatalf("worker created a run on another user's thread by anchoring to user-b's run: %s", rec.Body.String())
+	}
 }

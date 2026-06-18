@@ -80,10 +80,15 @@ const (
 const maxJSONBodyBytes int64 = 16 << 20
 
 var (
-	workerRunPathPattern        = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
-	workerRunEventsPathPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
-	workerLeasePathPattern      = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
-	workerRunUserProfilePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
+	workerRunPathPattern         = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
+	workerRunEventsPathPattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
+	workerLeasePathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+	workerRunUserProfilePattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
+	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
+	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
+	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
+	workerCreateRunPattern       = regexp.MustCompile(`^/v[12]/threads/[^/]+/runs$`)
+	workerRunArtifactsPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/artifacts$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -126,6 +131,23 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodGet && workerRunUserProfilePattern.MatchString(path):
 		return true
+	case r.Method == http.MethodPost && workerEpisodicSearchPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerResourceSearchPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerResourceResolvePattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerCreateRunPattern.MatchString(path):
+		// Deep Agents workers dispatch a child run (e.g. a RareSpot inference job)
+		// on behalf of a parent run. The parent run id is validated server-side
+		// (workerRunPrincipal -> the run's owner), and handleCreateRun's
+		// GetThreadForUser check ensures the target thread belongs to that owner,
+		// so a worker can only create runs for the parent run's own user.
+		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
+	case r.Method == http.MethodGet && workerRunArtifactsPattern.MatchString(path):
+		// Workers poll a dispatched child run's artifacts; the run id in the
+		// X-Ultra-Run-Id header scopes the read to that run's owner.
+		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
 	case workerLeasePathPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && (path == "/v1/workers/heartbeat" || path == "/v2/workers/heartbeat"):
@@ -186,6 +208,83 @@ type accountStore interface {
 	ListUsers(context.Context, int, string) ([]domain.UserAccount, error)
 	UpdateUserStatus(context.Context, string, string) (domain.UserAccount, error)
 	UpdateUserProfile(context.Context, domain.UpdateUserProfileInput) (domain.UserAccount, error)
+}
+
+// runHistorySearchStore is the optional capability backing episodic memory.
+type runHistorySearchStore interface {
+	SearchRunHistoryForUser(context.Context, string, domain.RunHistorySearchOptions) ([]domain.RunHistoryHit, error)
+}
+
+type episodicSearchRequest struct {
+	Query     string `json:"query"`
+	SinceDays int    `json:"since_days,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type episodicSearchResponse struct {
+	Hits []domain.RunHistoryHit `json:"hits"`
+}
+
+// runResourceHit is one resource surfaced to a Deep Agents run. It is a
+// model-safe projection of domain.ResourceRecord: it deliberately omits host
+// filesystem paths (StorageURI/StoragePath) so the agent only ever sees the
+// resource id, name, and metadata — never where the file lives on disk.
+type runResourceHit struct {
+	ResourceID   string         `json:"resource_id"`
+	OriginalName string         `json:"original_name"`
+	ContentType  string         `json:"content_type,omitempty"`
+	ResourceKind string         `json:"resource_kind,omitempty"`
+	SourceType   string         `json:"source_type,omitempty"`
+	SizeBytes    int64          `json:"size_bytes,omitempty"`
+	SHA256       string         `json:"sha256,omitempty"`
+	ProjectID    string         `json:"project_id,omitempty"`
+	Status       string         `json:"status,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Metadata     domain.JSONMap `json:"metadata,omitempty"`
+	CreatedAt    *time.Time     `json:"created_at,omitempty"`
+}
+
+func runResourceHitFromRecord(resource domain.ResourceRecord) runResourceHit {
+	hit := runResourceHit{
+		ResourceID:   resource.ResourceID,
+		OriginalName: resource.OriginalName,
+		ContentType:  resource.ContentType,
+		ResourceKind: resource.ResourceKind,
+		SourceType:   resource.SourceType,
+		SizeBytes:    resource.SizeBytes,
+		SHA256:       resource.SHA256,
+		ProjectID:    resource.ProjectID,
+		Status:       resource.Status,
+		Tags:         resource.Tags,
+		Metadata:     resource.Metadata,
+	}
+	if !resource.CreatedAt.IsZero() {
+		created := resource.CreatedAt
+		hit.CreatedAt = &created
+	}
+	return hit
+}
+
+type runResourceSearchRequest struct {
+	Query  string   `json:"query"`
+	Kind   string   `json:"kind,omitempty"`
+	Source string   `json:"source,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
+	Limit  int      `json:"limit,omitempty"`
+}
+
+type runResourceSearchResponse struct {
+	Resources  []runResourceHit `json:"resources"`
+	TotalCount int              `json:"total_count"`
+}
+
+type runResourceResolveRequest struct {
+	ResourceIDs []string `json:"resource_ids"`
+}
+
+type runResourceResolveResponse struct {
+	Resources []runResourceHit `json:"resources"`
+	Missing   []string         `json:"missing"`
 }
 
 type usageStatsStore interface {
@@ -371,8 +470,8 @@ type uploadSessionOperationalMetricsStore interface {
 }
 
 type uploadCatalogMigrationState struct {
-	once sync.Once
-	err  error
+	mu   sync.Mutex
+	done bool
 }
 
 var uploadCatalogMigrations sync.Map
@@ -523,6 +622,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/runs", deps.handleListRuns)
 			r.Get("/runs/{run_id}", deps.handleGetRun)
 			r.Get("/runs/{run_id}/user-profile", deps.handleGetRunUserProfile)
+			r.Post("/runs/{run_id}/episodic-search", deps.handleEpisodicSearch)
+			r.Post("/runs/{run_id}/resource-search", deps.handleRunResourceSearch)
+			r.Post("/runs/{run_id}/resource-resolve", deps.handleRunResourceResolve)
 			r.Post("/runs/{run_id}/lease", deps.handleAcquireRunLease)
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
@@ -2646,6 +2748,173 @@ func (deps ServerDeps) handleGetRunUserProfile(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, buildMeResponse(account))
+}
+
+// handleEpisodicSearch powers episodic memory: the Deep Agents worker (run-anchored
+// worker token) asks for the run owner's own past conversations. The owner is
+// resolved server-side from the run, so one user can never read another's history.
+func (deps ServerDeps) handleEpisodicSearch(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	history, ok := deps.Store.(runHistorySearchStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("run history search is not supported by this store"))
+		return
+	}
+	runID := strings.TrimSpace(chi.URLParam(r, "run_id"))
+	run, resolved := deps.runForWorkerOrUser(w, r, runID)
+	if !resolved {
+		return
+	}
+	var req episodicSearchRequest
+	if r.Body != nil {
+		// An empty body is valid (recency-only search); ignore decode EOF.
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
+	}
+	opts := domain.RunHistorySearchOptions{
+		Query:        strings.TrimSpace(req.Query),
+		Limit:        req.Limit,
+		ExcludeRunID: run.RunID,
+	}
+	if req.SinceDays > 0 {
+		since := domain.Now().AddDate(0, 0, -req.SinceDays)
+		opts.Since = &since
+	}
+	hits, err := history.SearchRunHistoryForUser(r.Context(), run.UserID, opts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if hits == nil {
+		hits = []domain.RunHistoryHit{}
+	}
+	writeJSON(w, http.StatusOK, episodicSearchResponse{Hits: hits})
+}
+
+// handleRunResourceSearch lets a Deep Agents run discover the run owner's
+// Resources library so the agent can pull a prior dataset/image into its
+// workspace and analyze it. The run OWNER is resolved server-side from the run
+// (run-anchored worker token) and is the access boundary: the agent sees exactly
+// the owner's READABLE catalog — the owner's own resources PLUS any shared with
+// them or their org via active share grants, the SAME set the owner sees in
+// their Resources page — and never another user's PRIVATE (un-shared) resources.
+// The agent acts as the owner, so this is the owner's own access, not a
+// cross-tenant escalation. The org from the trusted worker header only narrows
+// within that readable set; it can never widen access across owners.
+func (deps ServerDeps) handleRunResourceSearch(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("resource catalog is not supported by this store"))
+		return
+	}
+	runID := strings.TrimSpace(chi.URLParam(r, "run_id"))
+	run, resolved := deps.runForWorkerOrUser(w, r, runID)
+	if !resolved {
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var req runResourceSearchRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	page, err := catalog.ListResourcesForUser(r.Context(), domain.ResourceListInput{
+		UserID: run.UserID,
+		OrgID:  strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")),
+		Query:  strings.TrimSpace(req.Query),
+		Kind:   strings.ToLower(strings.TrimSpace(req.Kind)),
+		Source: strings.ToLower(strings.TrimSpace(req.Source)),
+		Tags:   req.Tags,
+		Status: "active",
+		Limit:  clampLimit(limit, 200),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	hits := make([]runResourceHit, 0, len(page.Resources))
+	for _, resource := range page.Resources {
+		hits = append(hits, runResourceHitFromRecord(resource))
+	}
+	writeJSON(w, http.StatusOK, runResourceSearchResponse{Resources: hits, TotalCount: page.TotalCount})
+}
+
+// handleRunResourceResolve verifies that each requested resource id is READABLE
+// by the run owner (defense-in-depth before the worker copies a file into the
+// sandbox) and returns its model-safe metadata. Readability is enforced via
+// GetResourceForUser against the run-derived user id — the owner's own resources
+// plus any shared with them — so the worker only ever stages files the owner can
+// access. Ids the owner cannot read come back in "missing", never as an error
+// that would leak existence.
+func (deps ServerDeps) handleRunResourceResolve(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("resource catalog is not supported by this store"))
+		return
+	}
+	runID := strings.TrimSpace(chi.URLParam(r, "run_id"))
+	run, resolved := deps.runForWorkerOrUser(w, r, runID)
+	if !resolved {
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var req runResourceResolveRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
+	}
+	orgID := strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id"))
+	resources := []runResourceHit{}
+	missing := []string{}
+	seen := map[string]bool{}
+	for _, raw := range req.ResourceIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		resource, err := catalog.GetResourceForUser(r.Context(), id, run.UserID, orgID)
+		if err != nil {
+			missing = append(missing, id)
+			continue
+		}
+		resources = append(resources, runResourceHitFromRecord(resource))
+	}
+	writeJSON(w, http.StatusOK, runResourceResolveResponse{Resources: resources, Missing: missing})
 }
 
 type tokenUsageSummaryResponse struct {
@@ -10274,10 +10543,25 @@ func (deps ServerDeps) ensureUploadCatalogMigrated(ctx context.Context, root str
 	}
 	stateValue, _ := uploadCatalogMigrations.LoadOrStore(root, &uploadCatalogMigrationState{})
 	state := stateValue.(*uploadCatalogMigrationState)
-	state.once.Do(func() {
-		state.err = deps.migrateUploadCatalog(ctx, root)
-	})
-	return state.err
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.done {
+		return nil
+	}
+	// This one-time, process-wide catalog backfill must not be tied to the
+	// triggering request's lifecycle. If that request is canceled (client abort,
+	// navigation, a superseded fetch) while the migration runs, a request-scoped
+	// context returns context.Canceled — and the previous sync.Once cached it, so
+	// EVERY later resource request returned "context canceled" until a restart.
+	// Detach cancellation (keep a bounded deadline) and only mark the migration
+	// done on success, so a genuine failure simply retries on the next request.
+	migrateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	if err := deps.migrateUploadCatalog(migrateCtx, root); err != nil {
+		return err
+	}
+	state.done = true
+	return nil
 }
 
 func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) error {

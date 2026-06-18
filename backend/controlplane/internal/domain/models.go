@@ -86,6 +86,27 @@ type RunRecord struct {
 	Metadata        JSONMap    `json:"metadata"`
 }
 
+// RunHistorySearchOptions parameterizes an episodic-memory search over a single
+// user's past runs. Query is matched (case-insensitively) against run goal,
+// final response, and thread title; Since bounds recency; ExcludeRunID drops the
+// current run so the agent never "recalls" the conversation it is in.
+type RunHistorySearchOptions struct {
+	Query        string
+	Since        *time.Time
+	Limit        int
+	ExcludeRunID string
+}
+
+// RunHistoryHit is one past run surfaced by episodic search.
+type RunHistoryHit struct {
+	RunID           string     `json:"run_id"`
+	ThreadID        string     `json:"thread_id,omitempty"`
+	Title           string     `json:"title,omitempty"`
+	Goal            string     `json:"goal"`
+	ResponseSnippet string     `json:"response_snippet,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
 type RunEventRecord struct {
 	EventID      string    `json:"event_id,omitempty"`
 	Sequence     int64     `json:"sequence,omitempty"`

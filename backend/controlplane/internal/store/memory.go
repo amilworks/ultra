@@ -1152,6 +1152,78 @@ func (s *MemoryStore) ListRunsForUser(ctx context.Context, userID string, thread
 	return take(runs, limit), nil
 }
 
+// SearchRunHistoryForUser mirrors the Postgres episodic search for tests/dev:
+// the user's own succeeded runs matching an optional keyword, most recent first.
+func (s *MemoryStore) SearchRunHistoryForUser(ctx context.Context, userID string, opts domain.RunHistorySearchOptions) ([]domain.RunHistoryHit, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []domain.RunHistoryHit{}, nil
+	}
+	terms := runHistorySearchTerms(opts.Query)
+	exclude := strings.TrimSpace(opts.ExcludeRunID)
+	limit := opts.Limit
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	hits := make([]domain.RunHistoryHit, 0)
+	for _, run := range s.runs {
+		if run.UserID != userID || string(run.Status) != string(domain.RunStatusSucceeded) {
+			continue
+		}
+		if exclude != "" && run.RunID == exclude {
+			continue
+		}
+		if opts.Since != nil && !opts.Since.IsZero() {
+			if run.CompletedAt == nil || run.CompletedAt.Before(*opts.Since) {
+				continue
+			}
+		}
+		title := ""
+		if thread, ok := s.threads[run.ThreadID]; ok {
+			title = thread.Title
+		}
+		if len(terms) > 0 {
+			haystack := strings.ToLower(run.Goal + "\n" + run.ResponseText + "\n" + title)
+			missing := false
+			for _, term := range terms {
+				if !strings.Contains(haystack, term) {
+					missing = true
+					break
+				}
+			}
+			if missing {
+				continue
+			}
+		}
+		snippet := run.ResponseText
+		if len(snippet) > runHistorySnippetChars {
+			snippet = snippet[:runHistorySnippetChars]
+		}
+		hits = append(hits, domain.RunHistoryHit{
+			RunID:           run.RunID,
+			ThreadID:        run.ThreadID,
+			Title:           title,
+			Goal:            run.Goal,
+			ResponseSnippet: snippet,
+			CompletedAt:     run.CompletedAt,
+		})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		ti, tj := hits[i].CompletedAt, hits[j].CompletedAt
+		if ti == nil {
+			return false
+		}
+		if tj == nil {
+			return true
+		}
+		return ti.After(*tj)
+	})
+	return take(hits, limit), nil
+}
+
 func (s *MemoryStore) GetRunLease(ctx context.Context, runID string) (domain.RunLeaseRecord, bool, error) {
 	_ = ctx
 	s.mu.RLock()

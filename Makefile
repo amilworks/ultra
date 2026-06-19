@@ -168,7 +168,12 @@ clean: ## Clean up generated files
 shell: ## Open a shell in the virtual environment
 	uv run bash
 
-codeexec-image: ## Build Python sandbox image for execute_python_job
+codeexec-image: ## Build Python sandbox image for execute_python_job (bakes RareSpot weights)
+	@test -f data/models/yolo/RareSpotWeights.pt || { \
+		echo "ERROR: data/models/yolo/RareSpotWeights.pt is missing — the prairie-dog-detection"; \
+		echo "Skill bakes it into the sandbox image. Stage it from the model store first, e.g.:"; \
+		echo "  mkdir -p data/models/yolo && cp /path/to/RareSpotWeights.pt data/models/yolo/"; \
+		exit 1; }
 	docker build -f deploy/docker/deepagents-sandbox.Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
 
 control-test: ## Run Go control plane tests
@@ -193,7 +198,7 @@ deepagents-test: ## Run Python Deep Agents runtime tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q
 
 deepagents-worker-test: ## Run Deep Agents worker transport, lease, and redelivery tests
-	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py tests/test_rarespot_worker.py
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py
 
 deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and routing tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \

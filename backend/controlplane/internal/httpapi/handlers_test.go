@@ -762,8 +762,10 @@ func TestV2ThreadRunArtifactHandlers(t *testing.T) {
 	if run["thread_id"] != threadID {
 		t.Fatalf("run thread = %v, want %s", run["thread_id"], threadID)
 	}
-	if run["workflow_kind"] != "rarespot_ecology" {
-		t.Fatalf("run workflow_kind = %v, want rarespot_ecology", run["workflow_kind"])
+	// RareSpot dispatch is retired (now the prairie-dog-detection Skill), so a run
+	// that requests the old tool now takes the default deep_agents path.
+	if run["workflow_kind"] != "deep_agents" {
+		t.Fatalf("run workflow_kind = %v, want deep_agents", run["workflow_kind"])
 	}
 	metadata, ok := run["metadata"].(map[string]any)
 	if !ok {
@@ -2236,21 +2238,20 @@ func TestV2AdminOverviewIncludesRuntimeTransportSummary(t *testing.T) {
 		ArtifactRoot: "/tmp/ultra-artifacts",
 		UploadRoot:   "/tmp/ultra-uploads",
 		Runtime: RuntimeSummary{
-			AppVersion:              "test-version",
-			StoreBackend:            "memory",
-			DispatchMode:            "nats_jetstream",
-			JobTransport:            "nats_jetstream",
-			EventTransport:          "nats_jetstream_to_local_fanout",
-			StubWorkerEnabled:       false,
-			NATSConfigured:          true,
-			NATSStream:              "ULTRA_RUNS",
-			NATSJobsSubject:         "ultra.runs.jobs",
-			NATSRareSpotJobsSubject: "ultra.runs.rarespot.jobs",
-			NATSEventsSubject:       "ultra.runs.events",
-			NATSCancelSubject:       "ultra.runs.cancel",
-			NATSEventConsumer:       "ultra-control-event-ingest",
-			ArtifactRoot:            "/tmp/ultra-artifacts",
-			UploadRoot:              "/tmp/ultra-uploads",
+			AppVersion:        "test-version",
+			StoreBackend:      "memory",
+			DispatchMode:      "nats_jetstream",
+			JobTransport:      "nats_jetstream",
+			EventTransport:    "nats_jetstream_to_local_fanout",
+			StubWorkerEnabled: false,
+			NATSConfigured:    true,
+			NATSStream:        "ULTRA_RUNS",
+			NATSJobsSubject:   "ultra.runs.jobs",
+			NATSEventsSubject: "ultra.runs.events",
+			NATSCancelSubject: "ultra.runs.cancel",
+			NATSEventConsumer: "ultra-control-event-ingest",
+			ArtifactRoot:      "/tmp/ultra-artifacts",
+			UploadRoot:        "/tmp/ultra-uploads",
 		},
 		QueueDiagnostics: fakeQueueDiagnosticsProvider{
 			diagnostics: eventbus.QueueDiagnostics{
@@ -14512,67 +14513,5 @@ func TestV2RunResourceSearchHonorsShareGrants(t *testing.T) {
 	}
 	if len(rr.Missing) != 1 || rr.Missing[0] != "file_private_b" {
 		t.Fatalf("resolve missing = %+v, want the private id", rr.Missing)
-	}
-}
-
-func TestV2WorkerCanDispatchChildRunRunAnchored(t *testing.T) {
-	// RareSpot inference dispatches a child run from the worker. The worker token
-	// + parent run id must authenticate it (the WorkOS-enabled control plane 401s
-	// otherwise), and the child run is created as the PARENT run's owner — a worker
-	// can never create a run on another user's thread.
-	t.Parallel()
-
-	ctx := context.Background()
-	mem := store.NewMemoryStore()
-	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
-	router := NewRouter(ServerDeps{
-		Version:     "test-version",
-		Runs:        service,
-		Store:       mem,
-		WorkerToken: "trace-worker-secret",
-		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
-	})
-
-	threadA, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "A"})
-	parentA, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{ThreadID: threadA.ThreadID, UserID: "user-a", Goal: "parent"})
-	threadB, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-b", Title: "B"})
-	parentB, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{ThreadID: threadB.ThreadID, UserID: "user-b", Goal: "parent-b"})
-
-	post := func(thread, token, runID string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v2/threads/"+thread+"/runs", strings.NewReader(`{"goal":"child","workflow_hint":{"id":"rarespot_ecology"}}`))
-		if token != "" {
-			req.Header.Set("X-Ultra-Worker-Token", token)
-		}
-		if runID != "" {
-			req.Header.Set("X-Ultra-Run-Id", runID)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-		return rec
-	}
-
-	// Worker token + parent run id -> child run created as the parent's owner.
-	rec := post(threadA.ThreadID, "trace-worker-secret", parentA.RunID)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("worker child-run dispatch status = %d body=%s", rec.Code, rec.Body.String())
-	}
-	var child domain.RunRecord
-	if err := json.Unmarshal(rec.Body.Bytes(), &child); err != nil {
-		t.Fatalf("decode child run: %v", err)
-	}
-	if child.UserID != "user-a" {
-		t.Fatalf("child run owner = %q, want user-a (derived from parent run)", child.UserID)
-	}
-
-	// Worker token but NO parent run id -> not worker-scoped -> 401.
-	if rec := post(threadA.ThreadID, "trace-worker-secret", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("dispatch without run id status = %d, want 401", rec.Code)
-	}
-
-	// SECURITY: anchoring to user-b's run cannot create a run on user-a's thread
-	// (derived principal is user-b; GetThreadForUser(threadA, user-b) fails).
-	if rec := post(threadA.ThreadID, "trace-worker-secret", parentB.RunID); rec.Code == http.StatusOK {
-		t.Fatalf("worker created a run on another user's thread by anchoring to user-b's run: %s", rec.Body.String())
 	}
 }

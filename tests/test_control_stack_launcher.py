@@ -82,7 +82,6 @@ def test_control_stack_launcher_stops_stale_repo_worker_processes():
 
     assert "kill_repo_python_module" in text
     assert '"ultra_deepagents.nats_worker"' in text
-    assert '"ultra_deepagents.rarespot_worker"' in text
     assert 'lsof -a -p "$pid" -d cwd' in text
 
 

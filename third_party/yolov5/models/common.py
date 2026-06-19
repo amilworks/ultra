@@ -21,7 +21,15 @@ import pandas as pd
 import requests
 import torch
 import torch.nn as nn
-from IPython.display import display
+
+# [ultra vendor patch] IPython is notebook-display-only (used at Detections.show);
+# make it optional so models.common imports in the headless, network-none code
+# sandbox (re-apply on sync). is_notebook() returns False without IPython, so the
+# display() branch is never taken.
+try:
+    from IPython.display import display
+except ImportError:
+    display = None
 from PIL import Image
 from torch.cuda import amp
 

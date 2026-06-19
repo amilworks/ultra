@@ -87,8 +87,6 @@ var (
 	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
 	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
 	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
-	workerCreateRunPattern       = regexp.MustCompile(`^/v[12]/threads/[^/]+/runs$`)
-	workerRunArtifactsPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/artifacts$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -137,17 +135,6 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodPost && workerResourceResolvePattern.MatchString(path):
 		return true
-	case r.Method == http.MethodPost && workerCreateRunPattern.MatchString(path):
-		// Deep Agents workers dispatch a child run (e.g. a RareSpot inference job)
-		// on behalf of a parent run. The parent run id is validated server-side
-		// (workerRunPrincipal -> the run's owner), and handleCreateRun's
-		// GetThreadForUser check ensures the target thread belongs to that owner,
-		// so a worker can only create runs for the parent run's own user.
-		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
-	case r.Method == http.MethodGet && workerRunArtifactsPattern.MatchString(path):
-		// Workers poll a dispatched child run's artifacts; the run id in the
-		// X-Ultra-Run-Id header scopes the read to that run's owner.
-		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
 	case workerLeasePathPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && (path == "/v1/workers/heartbeat" || path == "/v2/workers/heartbeat"):
@@ -2262,7 +2249,6 @@ type RuntimeSummary struct {
 	NATSConfigured           bool    `json:"nats_configured"`
 	NATSStream               string  `json:"nats_stream,omitempty"`
 	NATSJobsSubject          string  `json:"nats_jobs_subject,omitempty"`
-	NATSRareSpotJobsSubject  string  `json:"nats_rarespot_jobs_subject,omitempty"`
 	NATSDataAgentJobsSubject string  `json:"nats_data_agent_jobs_subject,omitempty"`
 	NATSEventsSubject        string  `json:"nats_events_subject,omitempty"`
 	NATSCancelSubject        string  `json:"nats_cancel_subject,omitempty"`

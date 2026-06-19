@@ -384,16 +384,6 @@ def test_runtime_settings_load_control_run_lease_options(monkeypatch):
     assert settings.control_run_lease_required is True
 
 
-def test_runtime_settings_load_rarespot_worker_identity(monkeypatch):
-    monkeypatch.setenv("ULTRA_RARESPOT_WORKER_ID", "rarespot-prod-1")
-    monkeypatch.setenv("ULTRA_RARESPOT_WORKER_KIND", "rarespot-gpu")
-
-    settings = RuntimeSettings.from_env()
-
-    assert settings.rarespot_worker_id == "rarespot-prod-1"
-    assert settings.rarespot_worker_kind == "rarespot-gpu"
-
-
 def test_runtime_settings_load_data_agent_worker_and_queue_defaults(monkeypatch):
     monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", raising=False)
     monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", raising=False)
@@ -427,14 +417,7 @@ def test_runtime_settings_load_rarespot_defaults(monkeypatch):
     assert settings.rarespot_conf_threshold == 0.25
     assert settings.rarespot_iou_threshold == 0.45
     assert settings.rarespot_imgsz == 512
-    assert settings.rarespot_nats_jobs_subject == "ultra.runs.rarespot.jobs"
-    assert settings.rarespot_nats_ack_wait_seconds == 120.0
-    assert settings.rarespot_nats_ack_progress_interval_seconds == 30.0
     assert settings.rarespot_weights_path == "data/models/yolo/RareSpotWeights.pt"
-    assert (
-        settings.rarespot_nats_ack_progress_interval_seconds
-        < settings.rarespot_nats_ack_wait_seconds
-    )
 
     config = RareSpotConfig.from_settings(settings)
     assert config.tile_size == 512

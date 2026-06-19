@@ -28,12 +28,18 @@ from typing import Optional
 from zipfile import ZipFile, is_zipfile
 
 import cv2
-import IPython
 import numpy as np
 import pandas as pd
 import torch
 import torchvision
 import yaml
+
+# [ultra vendor patch] IPython is notebook-display-only; make it optional so the
+# YOLOv5 runtime imports in the headless, network-none code sandbox (re-apply on sync).
+try:
+    import IPython
+except ImportError:
+    IPython = None
 
 from utils import TryExcept, emojis
 from utils.downloads import gsutil_getsize
@@ -78,6 +84,8 @@ def is_colab():
 
 def is_notebook():
     # Is environment a Jupyter notebook? Verified on Colab, Jupyterlab, Kaggle, Paperspace
+    if IPython is None:  # [ultra vendor patch] headless sandbox has no IPython
+        return False
     ipython_type = str(type(IPython.get_ipython()))
     return 'colab' in ipython_type or 'zmqshell' in ipython_type
 

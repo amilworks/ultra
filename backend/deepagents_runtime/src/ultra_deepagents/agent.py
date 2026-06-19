@@ -36,7 +36,7 @@ from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
-from ultra_deepagents.rarespot.tools import build_rarespot_tools, looks_report_only_rarespot_goal
+from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
@@ -196,44 +196,6 @@ call render_paper_page so the UI can display that page inline. For follow-up que
 call paper_manifest first, then search_paper/read_paper_pages on the cached paper before
 answering. Do not rely only on rendered page images or prior summaries for paper-specific
 follow-up claims.
-"""
-
-RARESPOT_GUIDANCE = """
-For prairie dog or burrow detection requests, use rarespot_ecology_inference as the production
-RareSpot path. If uploaded file IDs are present, call rarespot_ecology_inference directly and
-let the tool use the run context; do not stage uploaded files just to pass sandbox paths into
-RareSpot. The default production RareSpot configuration uses 512 px tiles with 25% overlap.
-After a successful RareSpot tool result, answer from its counts_by_class,
-confidence_summary, configuration, key_artifacts, and artifact IDs. Do not search the
-sandbox filesystem for RareSpot outputs, and do not rerun the same RareSpot configuration
-unless the user asks for a second inference pass or a changed threshold/configuration.
-Do not create stub or duplicate CSV, JSON, Markdown, or figure outputs for RareSpot results:
-the nested RareSpot tool result and its key_artifacts are canonical. Only create a new
-report, table, or comparison artifact when the user asks for derived synthesis across runs.
-For report-only or synthesis-only follow-ups such as "write a combined report across all
-RareSpot runs in this chat", do not call rarespot_ecology_inference again. Use
-artifact_manifest and stage_artifact_for_analysis to inspect prior nested RareSpot reports,
-CSV files, JSON predictions, and overlays. Call rarespot_ecology_inference again only when
-the user explicitly asks for a new inference pass, changed threshold/configuration, or new
-image/dataset.
-
-Presenting RareSpot results for an ecologist: lead with the per-detection reliability triage
-from stability_summary (trusted / borderline / unstable counts, overall and per class), not
-just raw counts. Embed the STABILITY overlay inline in your answer as a markdown image
-pointing at its artifact download URL (boxes coloured by stability — green=trusted,
-amber=borderline, red=likely false positive) so the ecologist can see which detections to
-trust at a glance; also link the class-coloured overlay and the CSV/report. Always include an
-honest reliability note: this detector has no held-out validation set (it was trained with
-mAP) and is known to over-detect, so confidence is a relative score (not a calibrated
-probability) and stability is a triage signal — recommend hand-verifying the unstable and
-borderline detections to calibrate a precision estimate. Surface the report.md
-"Reliability & trust" section rather than re-deriving these numbers.
-
-For multi-image survey runs, geospatial_summary carries a real-coordinate survey map
-(key_artifacts.survey_map) and spatial metrics (survey extent, image spacing, totals,
-prairie-dog:burrow ratio) from the images' EXIF GPS. Embed the survey map inline and report
-the spatial metrics so the ecologist sees where colony activity concentrates across the
-survey, not just per-image counts.
 """
 
 BISQUE_GUIDANCE = """
@@ -766,8 +728,6 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     # domain predicate so report-only ecology runs (no inference tool) keep it.
     if context is None or _should_register_paper_tools(context):
         sections.append(PAPER_REVIEW_GUIDANCE.strip())
-    if context is None or _looks_rarespot_domain_goal(context):
-        sections.append(RARESPOT_GUIDANCE.strip())
     # Only advertise the BisQue tools when they are actually registered for this
     # run; otherwise the model is told to call tools it does not have (the
     # reported "bisque_module_runs is not among the registered tools" failure).
@@ -1126,8 +1086,6 @@ def build_research_agent(
     resolved_tools.extend(paper_tools)
     if _should_register_bisque_tools(context):
         resolved_tools.extend(build_bisque_tools(settings))
-    if _should_register_rarespot_tools(context):
-        resolved_tools.extend(build_rarespot_tools(settings))
     if _should_register_episodic_tools(context):
         resolved_tools.extend(build_episodic_tools(settings))
     if _should_register_resource_tools(context):
@@ -1185,30 +1143,6 @@ def _has_ingested_papers(context: AgentRunContext) -> bool:
     return isinstance(ingested, list) and any(isinstance(item, dict) for item in ingested)
 
 
-_RARESPOT_DOMAIN_TOKENS = ("rarespot", "prairie dog", "prairie dogs", "burrow", "burrows")
-
-
-def _looks_rarespot_domain_goal(context: AgentRunContext | None) -> bool:
-    """True when the goal is RareSpot/ecology-domain at all (inference OR report-only).
-
-    Used to gate RARESPOT_GUIDANCE: report-only goals return False from
-    ``_should_register_rarespot_tools`` yet still need the report-only workflow
-    guidance, so the prompt must key on the broader domain predicate, not the
-    tool-registration predicate.
-    """
-    if context is None:
-        return False
-    lowered = str(context.goal or "").lower()
-    return any(token in lowered for token in _RARESPOT_DOMAIN_TOKENS)
-
-
-def _should_register_rarespot_tools(context: AgentRunContext | None) -> bool:
-    if context is None:
-        return True
-    goal = str(context.goal or "")
-    if looks_report_only_rarespot_goal(goal):
-        return False
-    return _looks_rarespot_domain_goal(context)
 
 
 def _should_register_bisque_tools(context: AgentRunContext | None) -> bool:

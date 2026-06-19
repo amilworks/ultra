@@ -120,18 +120,15 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert captured["tools"][0] is fake_tool
     tool_names = {getattr(tool, "name", "") for tool in captured["tools"]}
     assert "tool_capability_manifest" in tool_names
-    assert "rarespot_ecology_inference" in tool_names
+    # RareSpot detection is now a sandbox-run Skill (prairie-dog-detection), not a
+    # registered tool — assert the dispatch tool is gone, not present.
+    assert "rarespot_ecology_inference" not in tool_names
     manifest_tool = next(tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest")
     manifest = manifest_tool.invoke({})
     assert "execute" in manifest
     assert "artifact_manifest" in manifest
-    assert "rarespot_ecology_inference" in manifest
+    assert "rarespot_ecology_inference" not in manifest
     assert "selected_tool_names" in manifest
-    rarespot_tool = next(tool for tool in captured["tools"] if getattr(tool, "name", "") == "rarespot_ecology_inference")
-    assert "512 px tiles" in rarespot_tool.description
-    assert "25%" in rarespot_tool.description
-    assert "queued" in rarespot_tool.description.lower()
-    assert "runtime context" in rarespot_tool.description.lower()
     assert captured["context_schema"] is AgentRunContext
     assert captured["memory"] == [
         "/memories/user_profile.md",
@@ -818,7 +815,11 @@ def test_system_prompt_requires_delegation_for_complex_code_workflows():
     assert "before the final answer" in prompt
 
 
-def test_system_prompt_guides_rarespot_without_filesystem_hunting():
+def test_system_prompt_does_not_carry_retired_rarespot_dispatch():
+    """RareSpot prairie-dog detection is now the prairie-dog-detection Skill (run in
+    the code sandbox), so the always-on system prompt must NOT carry the retired
+    rarespot_ecology_inference dispatch guidance — the SKILL.md owns that guidance
+    and loads only via progressive disclosure."""
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
         openai_model="deepseek_v4",
@@ -826,13 +827,8 @@ def test_system_prompt_guides_rarespot_without_filesystem_hunting():
 
     prompt = " ".join(build_system_prompt(settings).lower().split())
 
-    assert "rarespot_ecology_inference" in prompt
-    assert "512 px tiles with 25% overlap" in prompt
-    assert "do not search the sandbox filesystem" in prompt
-    assert "do not rerun the same rarespot configuration" in prompt
-    assert "report-only or synthesis-only follow-ups" in prompt
-    assert "artifact_manifest and stage_artifact_for_analysis" in prompt
-    assert "do not create stub" in prompt
+    assert "rarespot_ecology_inference" not in prompt
+    assert "512 px tiles with 25% overlap" not in prompt
 
 
 def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
@@ -1484,9 +1480,10 @@ def _settings_factory() -> RuntimeSettings:
 
 
 def test_domain_guidance_is_gated_to_relevant_runs():
-    """Paper/RareSpot guidance must not load on runs whose tools are absent
-    (no ~650-tok phantom-tool guidance), while report-only RareSpot runs — which
-    have no inference tool but need the report workflow — still get it."""
+    """Paper guidance must not load on runs whose tools are absent (no ~650-tok
+    phantom-tool guidance). RareSpot detection is now the prairie-dog-detection
+    Skill, so the retired rarespot_ecology_inference dispatch guidance must never
+    load into the always-on prompt — on any goal, including a detection goal."""
     settings = _settings_factory()
 
     generic = AgentRunContext(
@@ -1505,20 +1502,13 @@ def test_domain_guidance_is_gated_to_relevant_runs():
     assert "render_paper_page" in build_system_prompt(settings, paper_ctx)
     assert "rarespot_ecology_inference" not in build_system_prompt(settings, paper_ctx)
 
+    # A prairie-dog detection goal no longer injects rarespot dispatch guidance —
+    # the prairie-dog-detection Skill owns that path via progressive disclosure.
     rarespot_ctx = AgentRunContext(
         assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
         run_id="r3", goal="Detect prairie dog burrows in these survey images.",
     )
-    assert "rarespot_ecology_inference" in build_system_prompt(settings, rarespot_ctx)
-
-    # Report-only RareSpot: no inference tool registered, but the report-only
-    # workflow guidance must still load (gate on domain, not on tool predicate).
-    report_only_ctx = AgentRunContext(
-        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
-        run_id="r4",
-        goal="Write a combined report across all my RareSpot runs in this chat.",
-    )
-    assert "rarespot" in build_system_prompt(settings, report_only_ctx).lower()
+    assert "rarespot_ecology_inference" not in build_system_prompt(settings, rarespot_ctx)
 
 
 def test_literature_reviewer_subagent_does_not_carry_skills(monkeypatch, tmp_path: Path):

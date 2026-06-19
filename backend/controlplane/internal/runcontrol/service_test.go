@@ -65,7 +65,7 @@ func TestServiceCreateRunEmitsAcceptedAndDispatches(t *testing.T) {
 	}
 }
 
-func TestServiceCreateRunRoutesRareSpotWorkflowAndPreservesInputMetadata(t *testing.T) {
+func TestServiceCreateRunWithRetiredRareSpotToolUsesDeepAgentsPathAndPreservesMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	mem := store.NewMemoryStore()
@@ -101,8 +101,11 @@ func TestServiceCreateRunRoutesRareSpotWorkflowAndPreservesInputMetadata(t *test
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	if run.WorkflowKind != "rarespot_ecology" {
-		t.Fatalf("workflow kind = %q, want rarespot_ecology", run.WorkflowKind)
+	// RareSpot dispatch is retired: a run that still requests the old tool/hint now
+	// takes the normal deep_agents path (the prairie-dog-detection Skill runs in the
+	// sandbox), instead of routing to a rarespot queue with no consumer.
+	if run.WorkflowKind != "deep_agents" {
+		t.Fatalf("workflow kind = %q, want deep_agents", run.WorkflowKind)
 	}
 	if run.Metadata["existing"] != "kept" {
 		t.Fatalf("metadata existing = %v, want kept", run.Metadata["existing"])
@@ -134,8 +137,8 @@ func TestServiceCreateRunRoutesRareSpotWorkflowAndPreservesInputMetadata(t *test
 
 	select {
 	case job := <-bus.Jobs():
-		if job.WorkflowKind != "rarespot_ecology" {
-			t.Fatalf("job workflow kind = %q, want rarespot_ecology", job.WorkflowKind)
+		if job.WorkflowKind != "deep_agents" {
+			t.Fatalf("job workflow kind = %q, want deep_agents", job.WorkflowKind)
 		}
 		if len(job.Messages) != 1 || job.Messages[0].Content != "Run RareSpot." {
 			t.Fatalf("job messages = %+v, want full prompt context", job.Messages)

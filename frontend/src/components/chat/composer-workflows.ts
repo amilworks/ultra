@@ -252,8 +252,11 @@ export const COMPOSER_WORKFLOWS: ComposerWorkflowDefinition[] = [
     category: "Vision",
     icon: Radar,
     prompt: "Run prairie dog detection on the selected image resources and summarize the detections.",
-    selectedToolNames: ["rarespot_ecology_inference"],
-    workflowHint: makeWorkflowHint("rarespot_ecology"),
+    // RareSpot detection is now the prairie-dog-detection Skill (run in the code
+    // sandbox), not a forced dispatch tool — the prompt + keywords trigger it via
+    // progressive disclosure, so no selected tool / workflow hint is needed.
+    selectedToolNames: [],
+    workflowHint: null,
     requiresAttachedFiles: true,
     opensResourcePickerOnSelect: false,
     clearsAfterResourcePick: false,

@@ -91,7 +91,6 @@ func New(cfg config.Config) (*App, error) {
 		NATSConfigured:           false,
 		NATSStream:               cfg.NATSStream,
 		NATSJobsSubject:          cfg.NATSJobsSubject,
-		NATSRareSpotJobsSubject:  cfg.NATSRareSpotJobsSubject,
 		NATSDataAgentJobsSubject: cfg.NATSDataAgentJobsSubject,
 		NATSEventsSubject:        cfg.NATSEventsSubject,
 		NATSCancelSubject:        cfg.NATSCancelSubject,
@@ -108,7 +107,6 @@ func New(cfg config.Config) (*App, error) {
 			URL:                    cfg.NATSURL,
 			Stream:                 cfg.NATSStream,
 			JobsSubject:            cfg.NATSJobsSubject,
-			RareSpotJobsSubject:    cfg.NATSRareSpotJobsSubject,
 			DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
 			EventsSubject:          cfg.NATSEventsSubject,
 			CancelSubject:          cfg.NATSCancelSubject,
@@ -116,7 +114,6 @@ func New(cfg config.Config) (*App, error) {
 			EventIngestConcurrency: cfg.NATSEventIngestConcurrency,
 			ConsumerTargets: []eventbus.QueueConsumerTarget{
 				{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
-				{Name: cfg.NATSRareSpotWorkerDurable, Role: "rarespot", Subject: cfg.NATSRareSpotJobsSubject},
 				{Name: cfg.NATSDataAgentWorkerDurable, Role: "data_agent", Subject: cfg.NATSDataAgentJobsSubject},
 				{Name: cfg.NATSEventConsumer, Role: "event_ingest", Subject: cfg.NATSEventsSubject},
 			},

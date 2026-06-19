@@ -35,7 +35,7 @@ class RareSpotConfig:
         return max(1, round(int(self.tile_size) * (1.0 - float(self.tile_overlap))))
 
     @classmethod
-    def from_settings(cls, settings: RuntimeSettings | None = None) -> "RareSpotConfig":
+    def from_settings(cls, settings: RuntimeSettings | None = None) -> RareSpotConfig:
         settings = settings or RuntimeSettings.from_env()
         allowed_roots = tuple(
             Path(value).expanduser().resolve()
@@ -66,8 +66,44 @@ class RareSpotConfig:
         )
 
     @classmethod
-    def from_env(cls) -> "RareSpotConfig":
+    def from_env(cls) -> RareSpotConfig:
         return cls.from_settings(RuntimeSettings.from_env())
+
+    @classmethod
+    def from_paths(
+        cls,
+        *,
+        weights_path: str | Path,
+        yolov5_path: str | Path,
+        artifact_root: str | Path,
+        allowed_input_roots: tuple[str | Path, ...] = (),
+        tile_size: int = 512,
+        tile_overlap: float = 0.25,
+        conf: float = 0.25,
+        iou: float = 0.45,
+        spectral: bool = True,
+        stability: bool = True,
+        stability_match_iou: float = 0.5,
+    ) -> RareSpotConfig:
+        """Construct a config from explicit absolute paths, for environments where
+        the repo-relative resolution (``_repo_root`` -> ``parents[5]``) does not
+        hold — e.g. the prairie-dog-detection Skill running inside the code sandbox
+        with the model/runtime baked at ``/opt/rarespot``."""
+        return cls(
+            weights_path=Path(weights_path).expanduser().resolve(),
+            yolov5_path=Path(yolov5_path).expanduser().resolve(),
+            artifact_root=Path(artifact_root).expanduser().resolve(),
+            allowed_input_roots=tuple(
+                Path(value).expanduser().resolve() for value in allowed_input_roots
+            ),
+            tile_size=int(tile_size),
+            tile_overlap=float(tile_overlap),
+            conf=float(conf),
+            iou=float(iou),
+            spectral=bool(spectral),
+            stability=bool(stability),
+            stability_match_iou=float(stability_match_iou),
+        )
 
 
 def _repo_root() -> Path:

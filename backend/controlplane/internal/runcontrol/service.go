@@ -1368,18 +1368,13 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 }
 
 func workflowKindForRun(req CreateRunRequest, metadata domain.JSONMap) string {
-	if containsRareSpotTool(req.SelectedToolNames) || metadataWorkflowHintIsRareSpot(req.WorkflowHint) {
-		return "rarespot_ecology"
-	}
-	if containsRareSpotTool(metadataStringSlice(metadata["selected_tool_names"])) {
-		return "rarespot_ecology"
-	}
-	if workflow, ok := metadata["workflow_hint"].(domain.JSONMap); ok && metadataWorkflowHintIsRareSpot(workflow) {
-		return "rarespot_ecology"
-	}
-	if workflow, ok := metadata["workflow_hint"].(map[string]any); ok && metadataWorkflowHintIsRareSpot(domain.JSONMap(workflow)) {
-		return "rarespot_ecology"
-	}
+	// RareSpot prairie-dog detection is now the prairie-dog-detection Skill, run by
+	// the normal Deep Agents worker in the code sandbox — there is no separate
+	// rarespot dispatch worker/subject, so every run takes the deep_agents path.
+	// (A stale client that still requests the old tool now falls through to the
+	// agent + Skill instead of hanging on an unconsumed rarespot queue.)
+	_ = req
+	_ = metadata
 	return "deep_agents"
 }
 
@@ -1401,26 +1396,6 @@ func isInternalRunRecord(run domain.RunRecord) bool {
 	}
 	if value, ok := run.Metadata["visible_in_thread"].(bool); ok && !value {
 		return true
-	}
-	return false
-}
-
-func containsRareSpotTool(values []string) bool {
-	for _, value := range values {
-		token := strings.ToLower(strings.TrimSpace(value))
-		if token == "rarespot_ecology" || token == "rarespot_ecology_inference" {
-			return true
-		}
-	}
-	return false
-}
-
-func metadataWorkflowHintIsRareSpot(workflow domain.JSONMap) bool {
-	for _, key := range []string{"id", "name", "workflow", "workflow_kind"} {
-		token := strings.ToLower(strings.TrimSpace(anyString(workflow[key])))
-		if token == "rarespot_ecology" || token == "rarespot_ecology_inference" {
-			return true
-		}
 	}
 	return false
 }

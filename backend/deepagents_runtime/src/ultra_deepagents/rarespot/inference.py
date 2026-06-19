@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ultra_deepagents.rarespot.artifacts import (
     artifact_record,
@@ -322,6 +322,11 @@ def run_yolov5_detect(
     `project_subdir` lets the main and stability passes write to distinct trees."""
     env = os.environ.copy()
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    # YOLOv5's detect.py runs check_requirements() at startup, which pip-installs
+    # any missing requirement. That dies in the code sandbox (--network none), so
+    # disable it; the runtime deps (torch, torchvision, ...) are pre-baked into the
+    # sandbox image. Harmless in the legacy worker (its venv already has them).
+    env["YOLOv5_AUTOINSTALL"] = "false"
     env["YOLOV5_CONFIG_DIR"] = str((output_dir / ".yolov5-config").resolve())
     env["PYTHONPATH"] = f"{config.yolov5_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
     command = [

@@ -10,7 +10,6 @@ ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 
 CONTROL_PID_FILE="$STATE_DIR/control.pid"
 WORKER_PID_FILE="$STATE_DIR/deepagents-worker.pid"
-RARESPOT_PID_FILE="$STATE_DIR/rarespot-worker.pid"
 FRONTEND_PID_FILE="$STATE_DIR/frontend.pid"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
@@ -45,7 +44,6 @@ FRONTEND_PORT="${FRONTEND_PORT:-5174}"
 ULTRA_STACK_USE_POSTGRES="${ULTRA_STACK_USE_POSTGRES:-1}"
 ULTRA_STACK_START_NATS="${ULTRA_STACK_START_NATS:-1}"
 ULTRA_STACK_START_WORKER="${ULTRA_STACK_START_WORKER:-1}"
-ULTRA_STACK_START_RARESPOT="${ULTRA_STACK_START_RARESPOT:-1}"
 ULTRA_STACK_START_FRONTEND="${ULTRA_STACK_START_FRONTEND:-1}"
 ULTRA_STACK_STOP_SCREEN_SESSIONS="${ULTRA_STACK_STOP_SCREEN_SESSIONS:-1}"
 
@@ -114,8 +112,6 @@ ULTRA_ARTIFACT_ROOT="${ULTRA_ARTIFACT_ROOT:-$ULTRA_CONTROL_ARTIFACT_ROOT}"
 ULTRA_UPLOAD_ROOTS="${ULTRA_UPLOAD_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT}"
 ULTRA_RARESPOT_UPLOAD_ROOTS="${ULTRA_RARESPOT_UPLOAD_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT}"
 ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS="${ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT:$ULTRA_CONTROL_ARTIFACT_ROOT}"
-YOLOV5_RUNTIME_PATH="${YOLOV5_RUNTIME_PATH:-$ROOT/third_party/yolov5}"
-YOLOV5_RARESPOT_WEIGHTS="${YOLOV5_RARESPOT_WEIGHTS:-$ROOT/data/models/yolo/RareSpotWeights.pt}"
 
 if [ "$ULTRA_STACK_USE_POSTGRES" != "1" ]; then
   ULTRA_CONTROL_DATABASE_URL=""
@@ -253,7 +249,7 @@ stop_screen_sessions() {
   if [ "$ULTRA_STACK_STOP_SCREEN_SESSIONS" != "1" ] || ! command -v screen >/dev/null 2>&1; then
     return 0
   fi
-  for session in ultra-main-control ultra-main-worker ultra-main-rarespot ultra-main-frontend; do
+  for session in ultra-main-control ultra-main-worker ultra-main-frontend; do
     while read -r screen_session; do
       case "$screen_session" in
         *."$session")
@@ -479,56 +475,6 @@ start_deepagents_worker() {
   fi
 }
 
-start_rarespot_worker() {
-  if [ "$ULTRA_STACK_START_RARESPOT" != "1" ]; then
-    return 0
-  fi
-  log "Starting RareSpot NATS worker"
-  local python_bin
-  python_bin="$(python_entrypoint)"
-  if [ "$python_bin" = "uv" ]; then
-    start_detached "$RARESPOT_PID_FILE" "$LOG_DIR/rarespot-worker.log" "$ROOT/backend/deepagents_runtime" "ultra-main-rarespot" \
-      env \
-      OPENAI_BASE_URL="$OPENAI_BASE_URL" \
-      OPENAI_MODEL="$OPENAI_MODEL" \
-      OPENAI_API_KEY="$OPENAI_API_KEY" \
-      ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
-      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
-      ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
-      ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
-      ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
-      ULTRA_CONTROL_ARTIFACT_ROOT="$ULTRA_CONTROL_ARTIFACT_ROOT" \
-      ULTRA_ARTIFACT_ROOT="$ULTRA_ARTIFACT_ROOT" \
-      ULTRA_RARESPOT_UPLOAD_ROOTS="$ULTRA_RARESPOT_UPLOAD_ROOTS" \
-      ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS="$ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS" \
-      YOLOV5_RUNTIME_PATH="$YOLOV5_RUNTIME_PATH" \
-      YOLOV5_RARESPOT_WEIGHTS="$YOLOV5_RARESPOT_WEIGHTS" \
-      PRAIRIE_FIXED_IMGSZ="${PRAIRIE_FIXED_IMGSZ:-512}" \
-      ULTRA_RARESPOT_TILE_OVERLAP="${ULTRA_RARESPOT_TILE_OVERLAP:-0.25}" \
-      uv run --python 3.11 python -m ultra_deepagents.rarespot_worker
-  else
-    start_detached "$RARESPOT_PID_FILE" "$LOG_DIR/rarespot-worker.log" "$ROOT/backend/deepagents_runtime" "ultra-main-rarespot" \
-      env \
-      OPENAI_BASE_URL="$OPENAI_BASE_URL" \
-      OPENAI_MODEL="$OPENAI_MODEL" \
-      OPENAI_API_KEY="$OPENAI_API_KEY" \
-      ULTRA_CONTROL_BASE_URL="http://$ULTRA_CONTROL_HTTP_ADDR" \
-      ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
-      ULTRA_CONTROL_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
-      ULTRA_CONTROL_DATABASE_URL="$ULTRA_CONTROL_DATABASE_URL" \
-      ULTRA_NATS_URL="$ULTRA_CONTROL_NATS_URL" \
-      ULTRA_CONTROL_ARTIFACT_ROOT="$ULTRA_CONTROL_ARTIFACT_ROOT" \
-      ULTRA_ARTIFACT_ROOT="$ULTRA_ARTIFACT_ROOT" \
-      ULTRA_RARESPOT_UPLOAD_ROOTS="$ULTRA_RARESPOT_UPLOAD_ROOTS" \
-      ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS="$ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS" \
-      YOLOV5_RUNTIME_PATH="$YOLOV5_RUNTIME_PATH" \
-      YOLOV5_RARESPOT_WEIGHTS="$YOLOV5_RARESPOT_WEIGHTS" \
-      PRAIRIE_FIXED_IMGSZ="${PRAIRIE_FIXED_IMGSZ:-512}" \
-      ULTRA_RARESPOT_TILE_OVERLAP="${ULTRA_RARESPOT_TILE_OVERLAP:-0.25}" \
-      "$python_bin" -m ultra_deepagents.rarespot_worker
-  fi
-}
-
 start_frontend() {
   if [ "$ULTRA_STACK_START_FRONTEND" != "1" ]; then
     return 0
@@ -540,11 +486,9 @@ start_frontend() {
 
 stop_services() {
   kill_pid_file "$FRONTEND_PID_FILE" "frontend"
-  kill_pid_file "$RARESPOT_PID_FILE" "RareSpot worker"
   kill_pid_file "$WORKER_PID_FILE" "Deep Agents worker"
   kill_pid_file "$CONTROL_PID_FILE" "Go control plane"
   stop_screen_sessions
-  kill_repo_python_module "ultra_deepagents.rarespot_worker" "RareSpot worker"
   kill_repo_python_module "ultra_deepagents.nats_worker" "Deep Agents worker"
   kill_port "$API_PORT" "Go control plane"
   if [ "$ULTRA_STACK_START_FRONTEND" = "1" ]; then
@@ -562,7 +506,6 @@ start_services() {
   start_control
   wait_for_http "http://$API_HOST:$API_PORT/v1/health" "Go control plane"
   start_deepagents_worker
-  start_rarespot_worker
   start_frontend
   if [ "$ULTRA_STACK_START_FRONTEND" = "1" ]; then
     wait_for_http "http://$FRONTEND_HOST:$FRONTEND_PORT" "Frontend"

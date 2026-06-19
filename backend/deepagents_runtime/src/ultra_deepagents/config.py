@@ -119,15 +119,6 @@ class RuntimeSettings:
     policies_root: str = ""
     rarespot_tool_enabled: bool = True
     rarespot_control_base_url: str = "http://127.0.0.1:8088"
-    rarespot_nats_url: str = "nats://127.0.0.1:4222"
-    rarespot_nats_stream: str = "ULTRA_RUNS"
-    rarespot_nats_jobs_subject: str = "ultra.runs.rarespot.jobs"
-    rarespot_nats_events_subject: str = "ultra.runs.events"
-    rarespot_nats_ack_wait_seconds: float = 120.0
-    rarespot_nats_ack_progress_interval_seconds: float = 30.0
-    rarespot_worker_id: str = "ultra-rarespot-worker"
-    rarespot_worker_kind: str = "rarespot"
-    rarespot_database_url: str = ""
     rarespot_artifact_root: str = "data/artifacts"
     rarespot_weights_path: str = "data/models/yolo/RareSpotWeights.pt"
     rarespot_yolov5_path: str = "third_party/yolov5"
@@ -356,28 +347,6 @@ class RuntimeSettings:
                 "ULTRA_CONTROL_BASE_URL",
                 "http://127.0.0.1:8088",
             ).rstrip("/"),
-            rarespot_nats_url=os.getenv("ULTRA_CONTROL_NATS_URL", "nats://127.0.0.1:4222"),
-            rarespot_nats_stream=os.getenv("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
-            rarespot_nats_jobs_subject=os.getenv(
-                "ULTRA_CONTROL_NATS_RARESPOT_JOBS_SUBJECT",
-                "ultra.runs.rarespot.jobs",
-            ),
-            rarespot_nats_events_subject=os.getenv(
-                "ULTRA_CONTROL_NATS_EVENTS_SUBJECT",
-                "ultra.runs.events",
-            ),
-            rarespot_nats_ack_wait_seconds=float(
-                os.getenv("ULTRA_RARESPOT_NATS_ACK_WAIT_SECONDS", "120")
-            ),
-            rarespot_nats_ack_progress_interval_seconds=float(
-                os.getenv("ULTRA_RARESPOT_NATS_ACK_PROGRESS_INTERVAL_SECONDS", "30")
-            ),
-            rarespot_worker_id=os.getenv(
-                "ULTRA_RARESPOT_WORKER_ID",
-                f"ultra-rarespot-worker@{gethostname()}:{os.getpid()}",
-            ),
-            rarespot_worker_kind=os.getenv("ULTRA_RARESPOT_WORKER_KIND", "rarespot"),
-            rarespot_database_url=os.getenv("ULTRA_CONTROL_DATABASE_URL", ""),
             rarespot_artifact_root=os.getenv(
                 "ULTRA_RARESPOT_ARTIFACT_ROOT",
                 os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),

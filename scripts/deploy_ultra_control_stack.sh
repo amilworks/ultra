@@ -18,7 +18,7 @@ SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
 # Node role selects which units + build steps run. Default "all" preserves the
 # legacy single-node behavior (control + workers together). "edge" = control +
-# Postgres + NATS; "compute" = image-service + convert + agent/rarespot workers
+# Postgres + NATS; "compute" = image-service + convert + agent workers
 # (no control, no DB migration, no Go build).
 DEPLOY_ROLE="${DEPLOY_ROLE:-all}"
 case "$DEPLOY_ROLE" in
@@ -140,13 +140,13 @@ install_systemd_units() {
   local unit units
   case "$DEPLOY_ROLE" in
     all)
-      units="ultra-control.service ultra-deepagents-worker.service ultra-rarespot-worker.service ultra-control-stack.target"
+      units="ultra-control.service ultra-deepagents-worker.service ultra-control-stack.target"
       ;;
     edge)
       units="ultra-control.service ultra-postgres.service ultra-nats.service"
       ;;
     compute)
-      units="ultra-imgsvc.service ultra-image-convert-worker.service ultra-deepagents-worker-node.service ultra-rarespot-worker-node.service ultra-analysis-worker.service"
+      units="ultra-imgsvc.service ultra-image-convert-worker.service ultra-deepagents-worker-node.service ultra-analysis-worker.service"
       ;;
   esac
   for unit in $units; do
@@ -248,21 +248,19 @@ fi
 
 if [ "$ROLE_WORKERS" = 1 ]; then
   if [ "$DEPLOY_ROLE" = "compute" ]; then
-    for unit in ultra-imgsvc ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker-node ultra-analysis-worker; do
+    for unit in ultra-imgsvc ultra-image-convert-worker ultra-deepagents-worker-node ultra-analysis-worker; do
       systemctl enable "$unit" >/dev/null 2>&1 || true
       systemctl restart "$unit"
     done
     wait_for_health "${ULTRA_IMGSVC_HEALTH_URL:-http://127.0.0.1:8099/healthz}" "ultra-imgsvc"
     sleep 2
-    for unit in ultra-image-convert-worker ultra-deepagents-worker-node ultra-rarespot-worker-node ultra-analysis-worker; do
+    for unit in ultra-image-convert-worker ultra-deepagents-worker-node ultra-analysis-worker; do
       systemctl is-active --quiet "$unit" && echo "$unit active" || echo "WARNING: $unit not active" >&2
     done
   else
     systemctl restart ultra-deepagents-worker
-    systemctl restart ultra-rarespot-worker
     sleep 2
     systemctl is-active --quiet ultra-deepagents-worker && echo "ultra-deepagents-worker active"
-    systemctl is-active --quiet ultra-rarespot-worker && echo "ultra-rarespot-worker active"
   fi
 fi
 

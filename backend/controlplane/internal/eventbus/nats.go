@@ -18,7 +18,6 @@ type NATSConfig struct {
 	URL                  string
 	Stream               string
 	JobsSubject          string
-	RareSpotJobsSubject  string
 	DataAgentJobsSubject string
 	EventsSubject        string
 	CancelSubject        string
@@ -119,7 +118,6 @@ func natsStreamSubjects(cfg NATSConfig) []string {
 		cfg.JobsSubject,
 		cfg.EventsSubject,
 		cfg.CancelSubject,
-		cfg.RareSpotJobsSubject,
 		cfg.DataAgentJobsSubject,
 	} {
 		if strings.TrimSpace(subject) != "" {
@@ -158,11 +156,7 @@ func natsStreamSubjectOverlapError(err error) bool {
 }
 
 func (b *NATSBus) PublishJob(ctx context.Context, job Job) error {
-	subject := b.cfg.JobsSubject
-	if job.WorkflowKind == "rarespot_ecology" && b.cfg.RareSpotJobsSubject != "" {
-		subject = b.cfg.RareSpotJobsSubject
-	}
-	return b.publish(ctx, subject, job, natsMessageIDForJob(job))
+	return b.publish(ctx, b.cfg.JobsSubject, job, natsMessageIDForJob(job))
 }
 
 func (b *NATSBus) PublishDataAgentJob(ctx context.Context, job DataAgentJob) error {
@@ -204,7 +198,6 @@ func (b *NATSBus) queueConsumerTargets() []QueueConsumerTarget {
 	}
 	return []QueueConsumerTarget{
 		{Name: "ultra-deepagents-worker", Role: "deepagents", Subject: b.cfg.JobsSubject},
-		{Name: "rarespot-ecology-worker", Role: "rarespot", Subject: b.cfg.RareSpotJobsSubject},
 		{Name: "ultra-data-agent-worker", Role: "data_agent", Subject: b.cfg.DataAgentJobsSubject},
 		{Name: firstNonEmptyString(b.cfg.EventConsumer, "ultra-control-event-ingest"), Role: "event_ingest", Subject: b.cfg.EventsSubject},
 	}

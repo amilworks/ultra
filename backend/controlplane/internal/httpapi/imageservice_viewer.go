@@ -198,6 +198,25 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		deps.writeNiftiUploadViewer(w, record, path)
 		return
 	}
+	// OME-Zarr (and other ngff-served special formats) is served natively by the
+	// ngff-service — its viewer-info comes from the zarr store, and the Lens viewer
+	// consumes it identically to a libbioimage image. Routed via an ngffDeps copy so the
+	// edge tile cache + backpressure + graceful fallback all apply unchanged.
+	if deps.servesViaNgff(record, path) {
+		ngff := deps.ngffDeps()
+		core, err := ngff.cachedImageServiceViewerInfo(r.Context(), path)
+		if err != nil {
+			if imageServiceUndecodable(err) {
+				deps.writeUnsupportedFormatViewer(w, record)
+				return
+			}
+			writeError(w, http.StatusBadGateway, fmt.Errorf("ngff viewer-info: %w", err))
+			return
+		}
+		injectControlPlaneViewerFields(core, record)
+		writeJSON(w, http.StatusOK, core)
+		return
+	}
 	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
 		// The engine recognized the file but cannot decode it (415/422): a permanent,
@@ -292,15 +311,15 @@ func (deps ServerDeps) writeUnsupportedFormatViewer(w http.ResponseWriter, recor
 		label = "this format"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"kind":          "unsupported",
-		"decodable":     false,
-		"file_id":       record.FileID,
-		"original_name": record.OriginalName,
-		"format":        ext,
-		"modality":      "image",
-		"backend_mode":  "none",
-		"dims_order":    "YX",
-		"axis_sizes":    map[string]int{"T": 1, "C": 1, "Z": 1, "Y": 0, "X": 0},
+		"kind":             "unsupported",
+		"decodable":        false,
+		"file_id":          record.FileID,
+		"original_name":    record.OriginalName,
+		"format":           ext,
+		"modality":         "image",
+		"backend_mode":     "none",
+		"dims_order":       "YX",
+		"axis_sizes":       map[string]int{"T": 1, "C": 1, "Z": 1, "Y": 0, "X": 0},
 		"selected_indices": map[string]int{"T": 0, "C": 0, "Z": 0},
 		"is_volume":        false,
 		"is_timeseries":    false,
@@ -326,6 +345,17 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
 		deps.handleServeUpload(w, r) // serveNiftiSliceAsPNG honors slice params
+		return
+	}
+	// OME-Zarr is rendered natively by the ngff-service from the store (bundle dir path).
+	if deps.servesViaNgff(record, path) {
+		q := url.Values{"path": {path}}
+		for _, key := range []string{"z", "t", "level", "channels", "full_resolution"} {
+			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+				q.Set(key, v)
+			}
+		}
+		deps.ngffDeps().proxyImageServiceCached(w, r, "/slice", q)
 		return
 	}
 	// Prefer the derived tiled pyramid when one exists: its native level 0 is
@@ -450,6 +480,11 @@ func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *ht
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) || goNativeThumbnailable(record) {
 		deps.handleServeUpload(w, r)
+		return
+	}
+	// OME-Zarr thumbnails come from the ngff-service (smallest multiscale level).
+	if deps.servesViaNgff(record, path) {
+		deps.ngffDeps().proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}})
 		return
 	}
 	servePath := path
@@ -691,6 +726,11 @@ func prefersBioioReader(name string) bool {
 // are routinely N-D and 50GB-class. Plain raster images only past a size where
 // tiling beats a direct read. NIfTI volumes are served via /scalar-volume.
 func shouldDerivePyramid(record resourceRecord) bool {
+	// Natively-served special formats (OME-Zarr) need no derived pyramid — the
+	// ngff-service serves the store directly.
+	if sf := detectSpecialFormatByName(record.OriginalName); sf != nil && sf.Serve == "ngff" {
+		return false
+	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
 		return false
 	}

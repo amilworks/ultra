@@ -34,6 +34,7 @@ type Config struct {
 	ArtifactRoot               string
 	UploadRoot                 string
 	ImageServiceURL            string
+	NgffServiceURL             string
 	BisqueRootURL              string
 	BisqueUsername             string
 	BisquePassword             string
@@ -91,6 +92,7 @@ func Load() Config {
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),
 		UploadRoot:                 envString("ULTRA_CONTROL_UPLOAD_ROOT", envString("ULTRA_RESOURCE_ROOT", envString("UPLOAD_STORE_ROOT", "data/uploads"))),
 		ImageServiceURL:            envString("ULTRA_CONTROL_IMAGE_SERVICE_URL", ""),
+		NgffServiceURL:             envString("ULTRA_CONTROL_NGFF_SERVICE_URL", ""),
 		BisqueRootURL:              envString("ULTRA_CONTROL_BISQUE_ROOT_URL", envString("BISQUE_ROOT", envString("BISQUE_SERVER", ""))),
 		BisqueUsername:             envString("ULTRA_CONTROL_BISQUE_USERNAME", envString("BISQUE_USERNAME", envString("BISQUE_USER", ""))),
 		BisquePassword:             envString("ULTRA_CONTROL_BISQUE_PASSWORD", envString("BISQUE_PASSWORD", "")),

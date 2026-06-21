@@ -73,16 +73,38 @@ func (deps ServerDeps) imageServiceConfigured() bool {
 // Auth and ownership are enforced here (identically to every other upload
 // handler) before the internal sidecar is reached.
 func (deps ServerDeps) handleServeUploadTiles(w http.ResponseWriter, r *http.Request) {
+	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	if !ok {
+		return
+	}
+	// OME-Zarr: a tile is a bounded DeepZoom read of the store at a multiscale level,
+	// served natively by the ngff-service (only the tile's covering chunks are decoded —
+	// a gigapixel/1 TB level-0 plane is never materialized). level maps 1:1 to the zarr
+	// multiscale level advertised in the tile_scheme.
+	if deps.servesViaNgff(record, path) {
+		q := url.Values{"path": {path}}
+		q.Set("level", chi.URLParam(r, "level"))
+		q.Set("col", chi.URLParam(r, "tile_x"))
+		q.Set("row", chi.URLParam(r, "tile_y"))
+		for _, key := range []string{"size", "channels", "t", "z"} {
+			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+				q.Set(key, v)
+			}
+		}
+		deps.ngffDeps().proxyImageServiceCached(w, r, "/tile", q)
+		return
+	}
 	if !deps.imageServiceConfigured() {
 		deps.handleNotConfigured("upload tile pyramid delivery requires the image service (set ULTRA_CONTROL_IMAGE_SERVICE_URL)")(w, r)
 		return
 	}
-	path, ok := deps.resolveUploadTilePathForImageService(w, r)
-	if !ok {
-		return
+	// libbioimage tiles read the derived tiled pyramid (its native level 0 is a bounded read).
+	servePath := path
+	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+		servePath = dp
 	}
 	query := url.Values{}
-	query.Set("path", path)
+	query.Set("path", servePath)
 	query.Set("level", chi.URLParam(r, "level"))
 	query.Set("col", chi.URLParam(r, "tile_x"))
 	query.Set("row", chi.URLParam(r, "tile_y"))

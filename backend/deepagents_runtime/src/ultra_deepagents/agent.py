@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -38,6 +39,7 @@ from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
+from ultra_deepagents.vision import build_vision_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 _NEGATED_REQUEST_CLAUSE_RE = re.compile(
@@ -102,6 +104,10 @@ def resolve_memory_permissions(settings: RuntimeSettings) -> list[FilesystemPerm
 
 SYSTEM_PROMPT = """You are Ultra Research Agent, a careful scientific collaborator for expert users.
 
+Always write in ENGLISH — both your internal reasoning and your final response — unless the user
+writes to you in another language, in which case reply in that language. Never switch language
+partway through a response.
+
 Use /memories/user_profile.md for concise researcher profile context from Ultra settings, only
 when it is relevant (read-only; do not edit it). Use /memories/preferences.md for learned response
 preferences. Keep durable research notes under /memories/research_context/: one file per
@@ -164,6 +170,63 @@ execute timeout arguments. Long-running analysis is allowed. Prefer scientifical
 meaningful convergence checks, smaller smoke-test data, checkpoints, and resumable
 artifacts over arbitrary wall-clock caps.
 """
+
+# Curated, decision-relevant subset of the sandbox image's preinstalled scientific
+# stack (deploy/docker/deepagents-sandbox.Dockerfile). Surfaced to the coordinator so
+# it reasons over what is actually importable in an offline container instead of
+# guessing or trying to pip install. Keep in rough sync with the Dockerfile.
+SANDBOX_KEY_PACKAGES = [
+    "numpy", "scipy", "pandas", "scikit-learn", "scikit-image", "matplotlib",
+    "seaborn", "networkx", "torch", "torchvision", "opencv-python-headless",
+    "Pillow", "imageio", "imagecodecs", "tifffile", "zarr", "ome-zarr", "dask",
+    "xarray", "h5py", "pyarrow", "SimpleITK", "itk", "nibabel", "nilearn",
+    "pydicom", "dicom2nifti", "highdicom", "monai", "dipy", "torchio", "bioio",
+    "bioio-ome-tiff", "bioio-czi", "bioio-nd2", "openslide-python", "pyvips",
+    "connected-components-3d", "mrcfile", "pynrrd", "ome-types", "roifile",
+]
+
+
+def build_sandbox_resources_guidance(settings: RuntimeSettings) -> str:
+    """One concise, run-adaptive paragraph telling the coordinator what the sandbox is.
+
+    The exact envelope (cores, memory, shm, GPU, full package list) lives in
+    tool_capability_manifest; this is the always-on summary so the model never tries to
+    pip install in an offline container or write GPU code the sandbox can't run.
+    """
+    if settings.sandbox_gpus.strip():
+        gpu_clause = (
+            "the sandbox has a GPU attached, so torch.cuda is usable for in-container code"
+        )
+    else:
+        gpu_clause = (
+            "the sandbox itself has no GPU (torch runs on CPU) — reach GPU inference "
+            "through the MegaSeg/RareSpot tools, not sandbox code"
+        )
+    network_clause = (
+        "an OFFLINE container (no internet): you cannot pip/conda install at runtime — use "
+        "only its preinstalled scientific Python stack (numpy/scipy/pandas, scikit-image/"
+        "scikit-learn, matplotlib, torch/torchvision, SimpleITK/nibabel/pydicom/monai/dipy, "
+        "bioio/tifffile/zarr/dask, and more)"
+        if settings.sandbox_network == "none"
+        else (
+            "a NETWORK-ENABLED container (outbound internet is ON): you may fetch URLs, call "
+            "HTTP APIs, and git clone at runtime, writing results under /workspace. To add a "
+            "Python package use `pip install --user <pkg>` — the rootfs is read-only, so --user "
+            "installs into /workspace and stays importable; a preinstalled scientific stack is "
+            "also available, prefer it when it already has what you need"
+        )
+    )
+    return (
+        "The code sandbox is "
+        + network_clause
+        + ". It has generous CPU and memory for heavy compute, but "
+        + gpu_clause
+        + ". Each execute() is a fresh, ephemeral container: only /workspace and /outputs "
+        "persist, and background processes (cmd &, nohup) do not survive a call, so "
+        "checkpoint long runs to files. Write large temp/intermediate files under "
+        "/workspace, not /tmp. Call tool_capability_manifest for the exact compute "
+        "envelope (cores, memory, shm, GPU, full package list)."
+    )
 
 TEXT_ONLY_ARTIFACT_GUIDANCE = """
 This deployment's active model is text-only. Do not call read_file on image, audio, video,
@@ -426,6 +489,147 @@ SCOPED_DELEGATION_SUBAGENTS = [
 ]
 
 
+# The "second pair of eyes": a vision-language reasoner the text coordinator
+# delegates visual-judgment to. It SEES pixels via the inspect_images tool (a
+# self-contained call to the on-prem Qwen3.6-27B VLM); its own loop model stays the
+# inherited text model, so it needs no per-subagent VLM model and no multimodal
+# middleware exemption (the tool returns text). Detection/counting stays with the
+# specialist models — this is a reasoner/verifier, not a detector.
+VISION_SUBAGENT = {
+    "name": "vision-reasoner",
+    "description": (
+        "A second pair of eyes that actually SEES images with a vision-language model. "
+        "Delegate visual-judgment tasks: verify whether a detector's box is a real object "
+        "or a false positive (it looks closer at a zoomed crop), describe an image in "
+        "detail, read or verify a plot/scientific figure (axes, values, error bars), OCR "
+        "figure text, give an advisory 'what is this structure?' hypothesis, or compare "
+        "multiple images. Use it whenever a decision depends on what is actually in an "
+        "image and you (the coordinator) cannot see pixels. Do NOT use it to COUNT many "
+        "small objects, measure pixels/areas/distances, or produce/correct bounding boxes "
+        "— those stay with the specialist detectors (YOLO/RareSpot/MegaSeg)."
+    ),
+    "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
+    "system_prompt": (
+        "You are Ultra's vision-reasoner subagent — a careful second pair of eyes backed by "
+        "a vision-language model. You can only SEE pixels by calling inspect_images; reason "
+        "over what it reports, then return the distilled structured result.\n"
+        "GROUNDED by default: inspect_images runs WITHOUT extended thinking unless you opt into "
+        "mode='reasoning'/'precise'. For an open-ended 'what does this image show / does it show "
+        "condition D' judgment, KEEP it grounded and report ONLY what the pixels support — "
+        "extended thinking makes this model reason itself INTO a plausible-but-false finding "
+        "(it will narrate an entire condition that is not present). Use reasoning/precise ONLY "
+        "for a narrow, specific check: one detection crop, or one exact figure/number read.\n"
+        "How to work: (1) From the goal, identify the image path(s) (/workspace/..., "
+        "/outputs/...) and the precise visual question. (2) Call inspect_images with a "
+        "focused question; to verify a single detection, pass its bbox so the object is "
+        "cropped and zoomed. For MORE THAN ~3-4 images/slices you MUST screen first: ONE "
+        "screen_images call over the whole set (fast, no extended thinking, batched + "
+        "concurrent) returns a per-image line; then deep-read with inspect_images (grounded — "
+        "the default) ONLY on the slices/items the screen flags as decisive or genuinely "
+        "ambiguous. NEVER "
+        "loop deep inspect_images over a whole stack of slices — that is the slow, "
+        "wrong path that wastes the fast screen. How MANY deep reads is yours to choose by what "
+        "the screen flags: a clear case needs ~2-3, a hard or multi-finding case needs more, "
+        "and for false-positive verification deep-read every genuinely ambiguous positive — "
+        "TRUST the screen result for the rest. (3) Synthesize a concise verdict in your "
+        "fields. Be precise and "
+        "conservative: only assert a property (e.g. a 'declining trend') when the image clearly "
+        "shows it; ambiguous or trendless images (e.g. random scatter) are NOT positives.\n"
+        "For false-positive verification, ask inspect_images for a structured verdict and "
+        "require >=2 concrete visual observations; if the evidence is thin or the crop is "
+        "ambiguous, report uncertain rather than guessing. The detector over-detects and is "
+        "not calibrated — do not anchor on its raw confidence.\n"
+        "HARD LIMITS — you are NOT a detector. Never COUNT many small objects, never measure "
+        "pixels/areas/distances, never emit or correct bounding-box coordinates, never hunt "
+        "for 'missed' detections across a whole image. If asked to, return "
+        "confidence=unresolved with a failures entry redirecting to the specialist detector "
+        "— never a fabricated count or measurement.\n"
+        "Keep summary under ~200 words; return only the distilled verdict (do not paste long "
+        "model output). Set confidence=high only when the visual evidence is unambiguous, "
+        "else medium/low/unresolved with the basis in confidence_basis. The coordinator "
+        "reconciles your verdict; it augments, never replaces, the detector's measurement."
+    ),
+}
+
+_VISION_GOAL_TOKENS = (
+    "image",
+    "images",
+    "photo",
+    "picture",
+    "figure",
+    "plot",
+    "chart",
+    "diagram",
+    "overlay",
+    "screenshot",
+    "snapshot",
+    "visual",
+    "look at",
+    "second pair of eyes",
+    "false positive",
+    "false-positive",
+    "verify the detection",
+    "detection",
+    "detections",
+    "detector",
+    "yolo",
+    "rarespot",
+    "prairie dog",
+    "prairie dogs",
+    "burrow",
+    "burrows",
+    "microscopy",
+    "histology",
+    "scan",
+    "segmentation",
+    "cell",
+    "cells",
+)
+
+VISION_DELEGATION_GUIDANCE = """
+A vision-reasoner subagent is available — a second pair of eyes that can SEE images (you
+cannot). Delegate to it via the task tool whenever a decision depends on what is actually in
+an image: verifying whether a detector flagged a false positive (it inspects a zoomed crop of
+the box), describing an image in detail, reading/verifying a plot or scientific figure, OCRing
+figure text, or comparing images. Pass the image path(s) (/workspace/... or /outputs/...) and a
+precise visual question; for a detection, include its bounding box. Do NOT ask it to count many
+small objects, measure pixels/areas, or produce coordinates — that is the specialist detectors'
+job; vision-reasoner verifies and reasons, it does not replace the detector's measurement. Its
+verdict augments (never overwrites) detector counts; reconcile it as a second opinion.
+When you hand it a SET of slices/images, tell it to screen the whole set in ONE pass first and
+then deep-inspect only the few decisive slices — do not delegate "inspect each." A measurable or
+quantitative question (an index, ratio, count, or slope with a known reference range) is YOURS to
+COMPUTE in the sandbox; the vision pass corroborates the number, it does not produce it.
+""".strip()
+
+
+def _should_register_vision_subagent(
+    context: AgentRunContext | None, settings: RuntimeSettings
+) -> bool:
+    """Register the vision-reasoner when the VLM is enabled AND the run plausibly
+    involves images. Unlike ``looks_scoped_delegation_goal`` (which EXCLUDES
+    rarespot/prairie/burrow goals), this INCLUDES them — verifying a RareSpot
+    detection is the headline vision use case."""
+    if not settings.qwen_vlm_enabled or context is None:
+        return False
+    # Fail safe, not silently broken: if the VLM is enabled but no key resolved, do not
+    # register a tool that can only error on first use; warn the operator instead.
+    if not settings.qwen_vlm_api_key or settings.qwen_vlm_api_key == "EMPTY":
+        logging.getLogger(__name__).warning(
+            "qwen_vlm_enabled but no API key resolved (set QWEN_VLM_API_KEY or "
+            "QWEN_VLM_API_KEY_FILE); vision-reasoner will NOT be registered."
+        )
+        return False
+    if (
+        context.selected_file_ids
+        or context.selected_resource_uris
+        or context.selected_dataset_uris
+    ):
+        return True
+    goal = " ".join(str(context.goal or "").lower().split())
+    return any(token in goal for token in _VISION_GOAL_TOKENS)
+
+
 _ULTRA_HARNESS_PROFILE_REGISTERED = False
 
 
@@ -450,6 +654,7 @@ def build_subagents(
     context_tools: Sequence[BaseTool | Any] | None = None,
     text_only_model: bool = True,
     skills_sources: Sequence[str] | None = None,
+    vision_tools: Sequence[BaseTool | Any] | None = None,
 ) -> list[dict[str, Any]]:
     subagents: list[dict[str, Any]] = []
 
@@ -458,6 +663,15 @@ def build_subagents(
         literature["response_format"] = deepcopy(literature["response_format"])
         literature["tools"] = list(paper_tools)
         subagents.append(literature)
+
+    if vision_tools:
+        # The vision-reasoner sees pixels only through inspect_images; its loop model
+        # is the inherited text model, so the text-only middleware below is harmless
+        # (no image blocks ever reach it) and no per-subagent VLM model is needed.
+        vision = dict(VISION_SUBAGENT)
+        vision["response_format"] = deepcopy(vision["response_format"])
+        vision["tools"] = list(vision_tools)
+        subagents.append(vision)
 
     if _should_register_scoped_delegation_subagents(context):
         delegation_context_tools = _filter_tools_by_name(
@@ -716,6 +930,7 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
         SYSTEM_PROMPT.strip(),
         PLOT_WORKFLOW_GUIDANCE.strip(),
         SANDBOX_RUNTIME_GUIDANCE.strip(),
+        build_sandbox_resources_guidance(settings),
     ]
     if not settings.model_supports_multimodal:
         sections.append(TEXT_ONLY_ARTIFACT_GUIDANCE.strip())
@@ -737,6 +952,10 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
         sections.append(BISQUE_UNLINKED_HINT.strip())
     if context is None or _should_register_episodic_tools(context):
         sections.append(EPISODIC_GUIDANCE.strip())
+    # Advertise the vision-reasoner only when it is actually registered for the run,
+    # so generic text runs do not pay for delegation guidance to an absent subagent.
+    if context is not None and _should_register_vision_subagent(context, settings):
+        sections.append(VISION_DELEGATION_GUIDANCE)
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -900,11 +1119,76 @@ def build_runtime_prompt_middleware(settings: RuntimeSettings) -> Any:
     return UltraRunContextPromptMiddleware(settings)
 
 
+def sandbox_compute_resources(settings: RuntimeSettings) -> dict[str, Any]:
+    """Structured compute envelope of the code sandbox, for tool_capability_manifest.
+
+    Lets the coordinator size work to the host instead of guessing: how many cores it
+    may parallelize across, how much memory it has, that the container is offline with a
+    fixed package set and ephemeral per call, and where GPU compute actually lives.
+    Sourced from the same RuntimeSettings the live sandbox is built from, so the manifest
+    can never drift from the actual ``docker run`` flags.
+    """
+    offline = settings.sandbox_network == "none"
+    gpus = settings.sandbox_gpus.strip()
+    return {
+        "execution_model": (
+            "Each execute() runs a FRESH, ephemeral container; only files under "
+            "/workspace and /outputs persist between calls. In-memory state and "
+            "background processes (cmd &, nohup) do NOT survive a call — there is no "
+            "long-lived daemon to poll. Checkpoint long work to /workspace files."
+        ),
+        "cpus": (
+            "all available host cores"
+            if settings.sandbox_cpus <= 0
+            else settings.sandbox_cpus
+        ),
+        "memory_limit": (
+            settings.sandbox_memory.strip() or "host-limited (no per-container cap)"
+        ),
+        "pids_limit": settings.sandbox_pids_limit or "unbounded",
+        "shm_size": (
+            settings.sandbox_shm_size.strip()
+            or "Docker default (~64MB) — keep /dev/shm and DataLoader-worker use small"
+        ),
+        "gpu": (
+            f"available in-sandbox ({gpus}); torch.cuda is usable"
+            if gpus
+            else (
+                "NONE in-sandbox (torch runs on CPU). For GPU inference use the "
+                "MegaSeg/RareSpot tools/services, not the code sandbox."
+            )
+        ),
+        "network": (
+            "offline (no internet)"
+            if offline
+            else f"ENABLED ({settings.sandbox_network}) — outbound internet available"
+        ),
+        "package_installs": (
+            "DISABLED — the sandbox is offline; pip/conda install will fail. Use only "
+            "the preinstalled stack in preinstalled_packages."
+            if offline
+            else (
+                "ENABLED — network is on. Install with `pip install --user <pkg>` because the "
+                "rootfs is read-only (--user writes to /workspace and stays importable). Prefer "
+                "preinstalled_packages when they already cover the need."
+            )
+        ),
+        "wall_clock_cap_seconds": settings.sandbox_timeout_seconds or "none",
+        "filesystem": (
+            "rootfs is read-only; write everything under /workspace (durable deliverables "
+            "to /outputs). HOME=/workspace and TMPDIR=/workspace/.tmp; /tmp is a small "
+            "RAM-backed tmpfs, so write large temp/intermediate files under /workspace."
+        ),
+        "preinstalled_packages": list(SANDBOX_KEY_PACKAGES),
+    }
+
+
 def build_sandbox_backend(
     settings: RuntimeSettings,
     *,
     workspace_dir: str | Path,
     outputs_dir: str | Path | None = None,
+    run_id: str = "",
 ) -> DockerSandboxBackend:
     return DockerSandboxBackend(
         workspace_dir=workspace_dir,
@@ -915,8 +1199,12 @@ def build_sandbox_backend(
             cpus=settings.sandbox_cpus,
             memory=settings.sandbox_memory,
             pids_limit=settings.sandbox_pids_limit,
+            shm_size=settings.sandbox_shm_size,
+            gpus=settings.sandbox_gpus,
             timeout_seconds=settings.sandbox_timeout_seconds,
             output_limit_bytes=settings.sandbox_output_limit_bytes,
+            worker_id=settings.worker_id,
+            run_id=run_id,
         ),
     )
 
@@ -1004,6 +1292,7 @@ def build_agent_backend(
     user_id: str | None = None,
     thread_id: str | None = None,
     org_id: str | None = None,
+    run_id: str | None = None,
 ) -> CompositeBackend:
     """Route sandbox execution separately from durable agent files."""
     memory_root = resolve_user_memory_root(settings, user_id, thread_id=thread_id)
@@ -1031,6 +1320,7 @@ def build_agent_backend(
             settings,
             workspace_dir=workspace_dir,
             outputs_dir=artifact_root,
+            run_id=run_id or "",
         ),
         routes=routes,
         artifacts_root="/outputs/.deepagents",
@@ -1059,6 +1349,7 @@ def build_research_agent(
             user_id=context.user_id if context is not None else None,
             thread_id=context.thread_id if context is not None else None,
             org_id=context.org_id if context is not None else None,
+            run_id=context.run_id if context is not None else None,
         )
         # Skills ride the /skills/ route of the backend we just built; a
         # caller-supplied backend has no such route, so sources stay unset.
@@ -1094,12 +1385,23 @@ def build_research_agent(
         )
     if _should_register_git_tools(context, settings):
         resolved_tools.extend(build_git_tools(git_staging_config(settings)))
+    vision_tools = (
+        build_vision_tools(
+            settings,
+            workspace_dir=workspace_dir,
+            artifact_dir=artifact_dir,
+            upload_roots=settings.rarespot_upload_roots,
+        )
+        if _should_register_vision_subagent(context, settings)
+        else []
+    )
     subagents = build_subagents(
         paper_tools,
         context=context,
         context_tools=context_tools,
         text_only_model=not settings.model_supports_multimodal,
         skills_sources=skills_sources,
+        vision_tools=vision_tools,
     )
     async_subagents = build_async_subagents(settings, context=context)
     if async_subagents:
@@ -1109,13 +1411,16 @@ def build_research_agent(
             resolved_tools,
             available_subagents=subagents,
             available_async_subagents=async_subagents,
+            compute_resources=sandbox_compute_resources(settings),
         )
     )
     all_subagents = [*subagents, *async_subagents]
 
+    resolved_model = model or build_chat_model(settings)
+
     return create_deep_agent(
         name="ultra-research-agent",
-        model=model or build_chat_model(settings),
+        model=resolved_model,
         tools=resolved_tools,
         system_prompt=build_system_prompt(settings, context),
         context_schema=AgentRunContext,

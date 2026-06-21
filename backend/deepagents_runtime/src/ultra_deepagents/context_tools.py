@@ -163,9 +163,9 @@ def stage_git_repo(
     """Clone an allowlisted public Git repo into /workspace/staged_repos/<slug>.
 
     Runs host-side in the worker (which has controlled egress); the model then
-    runs the staged code in the unchanged network-none sandbox. All trust-boundary
-    controls (https-only, host allowlist, no credentials, pinned/depth/size caps)
-    live in :mod:`ultra_deepagents.code_execution.git_staging`.
+    runs the staged code in the sandbox (isolated by default — sandbox_network="none").
+    All trust-boundary controls (https-only, host allowlist, no credentials,
+    pinned/depth/size caps) live in :mod:`ultra_deepagents.code_execution.git_staging`.
     """
     if not config.enabled:
         return {"ok": False, "error": "git_staging_disabled"}
@@ -349,6 +349,7 @@ def build_tool_capability_manifest(
     *,
     available_subagents: Iterable[dict[str, Any]] = (),
     available_async_subagents: Iterable[dict[str, Any]] = (),
+    compute_resources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the model-visible manifest for the active Deep Agents tool surface."""
     registered_tool_names = sorted(
@@ -446,7 +447,7 @@ def build_tool_capability_manifest(
                 },
             ]
         )
-    return {
+    manifest: dict[str, Any] = {
         "deepagents_builtin_tools": builtin_tools,
         "registered_tools": registered_tool_names,
         "available_subagents": subagent_descriptors,
@@ -465,6 +466,9 @@ def build_tool_capability_manifest(
             "staged_resources": "/workspace/staged_resources",
         },
     }
+    if compute_resources:
+        manifest["compute_resources"] = compute_resources
+    return manifest
 
 
 def _public_subagent_descriptors(
@@ -526,12 +530,14 @@ def build_tool_capability_manifest_tool(
     *,
     available_subagents: Iterable[dict[str, Any]] = (),
     available_async_subagents: Iterable[dict[str, Any]] = (),
+    compute_resources: dict[str, Any] | None = None,
 ) -> Any:
     """Expose a compact, model-visible manifest of the active tool surface."""
     manifest = build_tool_capability_manifest(
         registered_tools,
         available_subagents=available_subagents,
         available_async_subagents=available_async_subagents,
+        compute_resources=compute_resources,
     )
 
     @tool

@@ -13,10 +13,12 @@ from ultra_deepagents.agent import (
     build_research_agent,
     build_run_context_brief,
     build_sandbox_backend,
+    build_sandbox_resources_guidance,
     build_system_prompt,
     resolve_memory_permissions,
     resolve_skills_root,
     resolve_user_memory_root,
+    sandbox_compute_resources,
 )
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend
 from ultra_deepagents.config import RuntimeSettings
@@ -231,6 +233,107 @@ def test_tool_capability_manifest_does_not_advertise_undescribed_async_subagents
     assert manifest["available_async_subagents"] == []
 
 
+def test_tool_capability_manifest_omits_compute_resources_when_absent():
+    manifest = build_tool_capability_manifest([])
+    assert "compute_resources" not in manifest
+
+
+def test_tool_capability_manifest_surfaces_compute_resources():
+    resources = sandbox_compute_resources(
+        RuntimeSettings(
+            openai_base_url="x",
+            openai_model="m",
+            sandbox_network="none",
+            sandbox_cpus=0.0,
+            sandbox_memory="64g",
+            sandbox_shm_size="8g",
+            sandbox_gpus="",
+            sandbox_timeout_seconds=21600,
+        )
+    )
+    manifest = build_tool_capability_manifest([], compute_resources=resources)
+
+    cr = manifest["compute_resources"]
+    assert cr["cpus"] == "all available host cores"
+    assert cr["memory_limit"] == "64g"
+    assert cr["shm_size"] == "8g"
+    assert "offline" in cr["network"]
+    assert "DISABLED" in cr["package_installs"]
+    assert "NONE in-sandbox" in cr["gpu"]
+    assert cr["wall_clock_cap_seconds"] == 21600
+    assert "numpy" in cr["preinstalled_packages"]
+
+
+def test_sandbox_compute_resources_reports_gpu_when_enabled():
+    cr = sandbox_compute_resources(
+        RuntimeSettings(
+            openai_base_url="x",
+            openai_model="m",
+            sandbox_network="none",
+            sandbox_gpus="all",
+        )
+    )
+    assert "available in-sandbox (all)" in cr["gpu"]
+
+
+def test_sandbox_resources_guidance_adapts_to_gpu_and_network():
+    offline_cpu = build_sandbox_resources_guidance(
+        RuntimeSettings(
+            openai_base_url="x", openai_model="m", sandbox_network="none", sandbox_gpus=""
+        )
+    )
+    assert "OFFLINE" in offline_cpu
+    assert "no GPU" in offline_cpu
+
+    gpu_on = build_sandbox_resources_guidance(
+        RuntimeSettings(
+            openai_base_url="x", openai_model="m", sandbox_network="none", sandbox_gpus="all"
+        )
+    )
+    assert "GPU attached" in gpu_on
+
+
+def test_sandbox_resources_adapt_when_network_enabled():
+    # With a non-"none" network the coordinator must be told the network is ON and how to
+    # install (the rootfs is read-only, so naive `pip install` fails — `--user` works).
+    settings = RuntimeSettings(
+        openai_base_url="x", openai_model="m", sandbox_network="bridge"
+    )
+
+    guidance = build_sandbox_resources_guidance(settings)
+    assert "NETWORK-ENABLED" in guidance
+    assert "pip install --user" in guidance
+    assert "OFFLINE" not in guidance
+
+    cr = sandbox_compute_resources(settings)
+    assert cr["network"] == "ENABLED (bridge) — outbound internet available"
+    assert "ENABLED" in cr["package_installs"]
+    assert "--user" in cr["package_installs"]
+
+
+def test_sandbox_compute_resources_unset_fallbacks():
+    # All caps at their defaults (unbounded) — the manifest must report the fallback
+    # strings, never a false cap, so the coordinator sizes work correctly.
+    cr = sandbox_compute_resources(RuntimeSettings(openai_base_url="x", openai_model="m"))
+    assert cr["cpus"] == "all available host cores"
+    assert cr["memory_limit"] == "host-limited (no per-container cap)"
+    assert cr["pids_limit"] == "unbounded"
+    assert "Docker default" in cr["shm_size"]
+    assert cr["wall_clock_cap_seconds"] == 21600  # armed default
+
+    # Positive cpus flows through as the float (the only branch the set-value tests miss).
+    cr_cpu = sandbox_compute_resources(
+        RuntimeSettings(openai_base_url="x", openai_model="m", sandbox_cpus=4.0)
+    )
+    assert cr_cpu["cpus"] == 4.0
+
+    # A disabled wall-clock cap reports "none", not 0.
+    cr_nocap = sandbox_compute_resources(
+        RuntimeSettings(openai_base_url="x", openai_model="m", sandbox_timeout_seconds=0)
+    )
+    assert cr_nocap["wall_clock_cap_seconds"] == "none"
+
+
 def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
@@ -240,6 +343,8 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
         sandbox_cpus=3.5,
         sandbox_memory="8g",
         sandbox_pids_limit=512,
+        sandbox_shm_size="8g",
+        sandbox_gpus="all",
         sandbox_timeout_seconds=1800,
         sandbox_output_limit_bytes=500_000,
     )
@@ -262,6 +367,8 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     assert backend.config.cpus == 3.5
     assert backend.config.memory == "8g"
     assert backend.config.pids_limit == 512
+    assert backend.config.shm_size == "8g"
+    assert backend.config.gpus == "all"
     assert backend.config.timeout_seconds == 1800
     assert backend.config.output_limit_bytes == 500_000
 

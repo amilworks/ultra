@@ -12,11 +12,62 @@ from ultra_deepagents.model import build_chat_model
 
 MAX_TITLE_CHARS = 52
 TITLE_PROMPT_SYSTEM = (
-    "You write compact sidebar titles for a scientific AI workspace. "
-    "Return exactly one JSON object with a title field. The title must be "
-    "3 to 7 words, <=52 characters, specific to the scientific task, and "
-    "must not include quotes, trailing punctuation, dates, or generic words "
-    "such as chat, conversation, request, help, analysis task, or discussion."
+    "You write short, specific sidebar titles for a scientific AI workspace. "
+    'Return exactly one JSON object: {"title": "..."}. '
+    "Title the user's core task or question, not incidental details from the "
+    "answer. The title must be 2 to 6 words, Title Case, at most 52 characters, "
+    "and name the concrete subject (dataset, file type, method, or organism) "
+    "when there is one. Write the title in English. Do not use quotes, trailing "
+    "punctuation, dates, or generic words such as chat, conversation, request, "
+    "help, or discussion."
+)
+
+# Canonical casing for domain terms so titles read consistently regardless of
+# how the model (or the deterministic fallback) emitted them.
+_ACRONYMS: dict[str, str] = {
+    "2d": "2D",
+    "3d": "3D",
+    "api": "API",
+    "arxiv": "arXiv",
+    "bisque": "BisQue",
+    "csv": "CSV",
+    "ct": "CT",
+    "dicom": "DICOM",
+    "fmri": "fMRI",
+    "hdf5": "HDF5",
+    "json": "JSON",
+    "mri": "MRI",
+    "nifti": "NIfTI",
+    "npm1": "NPM1",
+    "nph": "NPH",
+    "ome": "OME",
+    "ome-tiff": "OME-TIFF",
+    "pca": "PCA",
+    "png": "PNG",
+    "rarespot": "RareSpot",
+    "roi": "ROI",
+    "sha": "SHA",
+    "tif": "TIF",
+    "tiff": "TIFF",
+    "unet": "UNet",
+    "yolo": "YOLO",
+}
+
+# Lowercased mid-title connectors (kept lowercase unless first/last word).
+_SMALL_WORDS = frozenset(
+    {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "via", "vs", "with"}
+)
+
+# Structural/filler words that carry no concrete subject. A title made entirely
+# of these (e.g. "Image Content Analysis") is generic and worth regenerating
+# with the answer once it exists.
+_GENERIC_TITLE_WORDS = frozenset(
+    {
+        "analysis", "analyze", "assessment", "content", "contents", "data", "dataset",
+        "describe", "description", "details", "file", "files", "identification", "image",
+        "images", "info", "information", "inquiry", "inspection", "overview", "result",
+        "results", "review", "summary", "task",
+    }
 )
 
 
@@ -113,6 +164,7 @@ async def resolve_conversation_title_task(
     response_text: str,
     artifact_events: list[dict[str, Any]],
     grace_seconds: float = 2.0,
+    model_factory: Callable[[RuntimeSettings], Any] = build_chat_model,
 ) -> ConversationTitleResult:
     """Join the early title task at run completion.
 
@@ -156,6 +208,25 @@ async def resolve_conversation_title_task(
             model=result.model,
             reason=result.reason,
         )
+    # Smart upgrade: a request-only title that came out generic (no concrete
+    # subject) gets one response-aware regeneration now that the answer exists.
+    # Clear prompts already produce specific titles and skip the extra call.
+    if response_text.strip() and _is_generic_title(result.title):
+        upgraded = await generate_conversation_title(
+            settings=settings,
+            goal=goal,
+            messages=messages,
+            response_text=response_text,
+            artifact_events=artifact_events,
+            model_factory=model_factory,
+        )
+        if upgraded.strategy == "llm" and not _is_generic_title(upgraded.title):
+            return ConversationTitleResult(
+                title=upgraded.title,
+                strategy="llm",
+                model=upgraded.model,
+                reason="response_aware_upgrade",
+            )
     return result
 
 
@@ -236,7 +307,9 @@ def fallback_conversation_title(text: str) -> str:
 
 
 def sanitize_generated_title(value: str) -> str:
-    title = _normalize_text(value)
+    # Reasoning models can wrap the answer in <think>...</think> before the JSON;
+    # strip that first so the title parse never trips on the chain-of-thought.
+    title = _normalize_text(_strip_reasoning(str(value or "")))
     if not title:
         return ""
     parsed = _json_title(title)
@@ -248,12 +321,74 @@ def sanitize_generated_title(value: str) -> str:
     title = _strip_generic_edges(title)
     if not title or title.lower() in {"new conversation", "chat", "conversation"}:
         return ""
+    title = _to_title_case(title)
     if len(title) <= MAX_TITLE_CHARS:
         return title
     truncated = title[:MAX_TITLE_CHARS].rstrip(" -,:;")
     if " " in truncated:
         truncated = truncated.rsplit(" ", 1)[0]
     return truncated.strip() or title[:MAX_TITLE_CHARS].rstrip()
+
+
+def _strip_reasoning(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks (closed or trailing-unclosed)."""
+    cleaned = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<think>.*$", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _to_title_case(title: str) -> str:
+    words = title.split()
+    last = len(words) - 1
+    out: list[str] = []
+    for index, word in enumerate(words):
+        out.append(_title_case_word(word, is_edge=index == 0 or index == last))
+    return " ".join(out)
+
+
+def _title_case_word(word: str, *, is_edge: bool) -> str:
+    lowered = word.lower()
+    if lowered in _ACRONYMS:
+        return _ACRONYMS[lowered]
+    # Preserve intentional internal casing or alphanumerics (NPM1, fMRI, x^2).
+    if any(ch.isdigit() for ch in word) or any(ch.isupper() for ch in word[1:]):
+        return word
+    if not is_edge and lowered in _SMALL_WORDS:
+        return lowered
+    if "-" in word:
+        return "-".join(_capitalize_token(part) for part in word.split("-"))
+    return _capitalize_token(word)
+
+
+def _capitalize_token(token: str) -> str:
+    lowered = token.lower()
+    if lowered in _ACRONYMS:
+        return _ACRONYMS[lowered]
+    return f"{token[:1].upper()}{token[1:].lower()}" if token else token
+
+
+def _is_generic_title(title: str) -> bool:
+    """True when a title names no concrete subject — only filler words.
+
+    Such a title is what a request-only call produces for a vague prompt
+    ("describe this image" -> "Image Content Analysis"); regenerating it with
+    the answer usually recovers a specific subject (the modality, dataset, etc.).
+    """
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+/.#-]*", title)
+    significant = [word for word in words if word.lower() not in _SMALL_WORDS]
+    if not significant:
+        return True
+    for word in significant:
+        lowered = word.lower()
+        if lowered in _ACRONYMS:  # NPH, CT, NPM1, BisQue-family acronyms
+            return False
+        if any(ch.isdigit() for ch in word):
+            return False
+        if any(ch.isupper() for ch in word[1:]):  # internal caps: BisQue, fMRI
+            return False
+        if lowered not in _GENERIC_TITLE_WORDS:
+            return False
+    return True
 
 
 def _build_title_model(
@@ -333,7 +468,7 @@ def _title_prompt(
         ("Goal", goal),
         ("First user message", user_messages[0] if user_messages else ""),
         ("Latest user message", user_messages[-1] if user_messages else ""),
-        ("Assistant result", _trim(response_text, 900)),
+        ("Assistant result", _trim(response_text, 400)),
         ("Artifacts/tools", _artifact_summary(artifact_events)),
     ]
     lines = [f"{label}: {_trim(value, 900)}" for label, value in sections if _normalize_text(value)]
@@ -395,14 +530,22 @@ def _response_content(response: Any) -> str:
 
 
 def _json_title(text: str) -> str:
-    if not text.startswith("{"):
-        return ""
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return ""
-    if isinstance(parsed, dict):
-        return str(parsed.get("title") or "")
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("title"):
+            return str(parsed["title"])
+    # The title JSON can be embedded in surrounding prose; find the first object
+    # that carries a title field.
+    for match in re.finditer(r"\{[^{}]*\}", text, flags=re.DOTALL):
+        try:
+            candidate = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("title"):
+            return str(candidate["title"])
     return ""
 
 
@@ -429,18 +572,7 @@ def _keyword_title(text: str) -> str:
 
 def _display_token(token: str) -> str:
     normalized = token.strip()
-    acronym = {
-        "api": "API",
-        "arxiv": "arXiv",
-        "bisque": "BisQue",
-        "ct": "CT",
-        "hdf5": "HDF5",
-        "ome": "OME",
-        "ome-tiff": "OME-TIFF",
-        "pca": "PCA",
-        "rarespot": "RareSpot",
-        "unet": "UNet",
-    }.get(normalized.lower())
+    acronym = _ACRONYMS.get(normalized.lower())
     if acronym:
         return acronym
     return normalized[:1].upper() + normalized[1:]

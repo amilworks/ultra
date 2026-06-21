@@ -3,7 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from socket import gethostname
 from typing import Any
 from urllib.parse import urlparse
@@ -38,7 +39,7 @@ DEFAULT_WORKER_MAX_CONCURRENCY = 64
 class RuntimeSettings:
     openai_base_url: str
     openai_model: str
-    openai_api_key: str = "EMPTY"
+    openai_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
     model_supports_multimodal: bool = False
     # Served model's input context window. When >0 it is published on the chat
     # model's profile (`max_input_tokens`), which flips deepagents summarization
@@ -50,9 +51,35 @@ class RuntimeSettings:
     # subagent ToolStrategy auto-retry handoff is preserved.
     model_max_input_tokens: int = 0
     request_timeout_seconds: float = 0.0
-    model_stream_idle_timeout_seconds: float = 0.0
+    # Idle/stall watchdog: if the agent's event stream produces NOTHING for this long
+    # the run is recovered instead of hanging forever. Generous (1h) so it only trips on
+    # a true dead-transport stall, never on slow-but-alive work (which keeps emitting
+    # subagent/reasoning/tool events that reset the deadline). 0 disables (was the default
+    # that let a stalled vision call wedge a worker for 1h43m).
+    model_stream_idle_timeout_seconds: float = 3600.0
     model_stream_idle_max_recoveries: int = 2
     max_retries: int = 1
+    # Qwen3.6-27B vision-language model (the "vision-reasoner" subagent's own model,
+    # distinct from the text coordinator above). On-prem vLLM, OpenAI-compatible.
+    # Enabled per-env; when disabled the subagent is never registered. The endpoint
+    # is multimodal+thinking; max_input_tokens is its 128K window (prompt+images+
+    # thinking+answer must all fit). client_max_edge bounds image longest-side before
+    # send (the V100 engine crashes on huge images; server also caps ~1024px).
+    qwen_vlm_enabled: bool = False
+    qwen_vlm_base_url: str = "http://tesla.ece.ucsb.edu:8000/v1"
+    qwen_vlm_model: str = "Qwen3.6-27B"
+    qwen_vlm_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
+    qwen_vlm_max_input_tokens: int = 131072
+    qwen_vlm_max_tokens: int = 32768
+    qwen_vlm_client_max_edge: int = 1280
+    qwen_vlm_request_timeout_seconds: float = 180.0
+    # Cap concurrent VLM calls so a many-image run (the agent may fan out parallel
+    # inspect_images calls) cannot overwhelm the server's max-num-seqs. Matches the
+    # served vLLM's max-num-seqs (4) — the throughput sweet spot.
+    qwen_vlm_max_concurrency: int = 4
+    # Max images per single VLM prompt — MUST match the served vLLM's
+    # --limit-mm-per-prompt image count (4); exceeding it is a hard 400 from the server.
+    qwen_vlm_max_images_per_call: int = 4
     title_generation_enabled: bool = False
     title_generation_timeout_seconds: float = 8.0
     # Sidebar titles need ~12 tokens; on hybrid-reasoning models the thinking
@@ -65,8 +92,31 @@ class RuntimeSettings:
     sandbox_cpus: float = 0.0
     sandbox_memory: str = ""
     sandbox_pids_limit: int = 0
-    sandbox_timeout_seconds: int = 0
+    # /dev/shm size for the sandbox (e.g. "8g"). Docker's 64MB default crashes any
+    # parallel scientific workload (torch DataLoader workers, joblib/loky, OpenCV,
+    # multiprocessing shared arrays) with an opaque "Bus error". Empty = Docker default.
+    sandbox_shm_size: str = ""
+    # GPU passthrough for in-sandbox code (e.g. "all"). Empty = no GPU in the sandbox
+    # (GPU inference is reached via the MegaSeg/RareSpot services). Opt-in per node:
+    # only set where the Docker daemon has the NVIDIA container runtime.
+    sandbox_gpus: str = ""
+    # Generous-but-finite ceiling on a single execute() so a hung/zombie sandbox call
+    # cannot await forever (subprocess.run kills the docker process on expiry). Sized
+    # for long scientific batch work (6h) — true zombies are still bounded, while the
+    # stream-idle watchdog + per-container memory cgroup catch runaways sooner. Long
+    # analysis is allowed up to this cap; 0 disables it (a latent infinite-hang).
+    sandbox_timeout_seconds: int = 21600
     sandbox_output_limit_bytes: int = 0
+    # Sandbox-container reaper (code_execution/cleanup.reap_orphaned_sandbox_containers).
+    # --rm is the primary cleanup; this best-effort backstop removes leftover stopped
+    # containers (rare AutoRemove-failure/daemon-restart residue) and force-kills running
+    # orphans (a container older than its own cap+grace, whose launching execute() already
+    # timed out). interval 0 disables the periodic loop (the startup sweep still runs).
+    # grace must comfortably exceed any worker/daemon clock skew. max_per_sweep bounds the
+    # docker work one sweep can do so a backlog cannot make a sweep run unbounded.
+    sandbox_reaper_interval_seconds: int = 300
+    sandbox_reaper_grace_seconds: int = 600
+    sandbox_reaper_max_per_sweep: int = 200
     completion_max_continuations: int = 8
     async_subagents: tuple[dict[str, Any], ...] = ()
     nats_url: str = "nats://127.0.0.1:4222"
@@ -130,8 +180,11 @@ class RuntimeSettings:
     rarespot_iou_threshold: float = 0.45
     rarespot_imgsz: int = 512
     # Host-side Git repo staging (clone a public repo into /workspace so the
-    # network-none sandbox can run it on staged data). Trust boundary lives in
-    # code_execution/git_staging.py; the sandbox is never given network egress.
+    # sandbox can run it on staged data). Trust boundary lives in
+    # code_execution/git_staging.py. NOTE: staging's containment assumes the sandbox
+    # has no egress (sandbox_network="none", the default). When an operator sets
+    # sandbox_network to a real network, staged third-party code and /workspace data
+    # can egress like any other in-sandbox code — that is the operator's deliberate choice.
     git_staging_enabled: bool = True
     git_staging_allowed_hosts: tuple[str, ...] = ("github.com",)
     git_staging_max_bytes: int = 2 * 1024**3
@@ -159,13 +212,38 @@ class RuntimeSettings:
             request_timeout_seconds=float(os.getenv("ULTRA_DEEPAGENTS_TIMEOUT_SECONDS", "0")),
             model_stream_idle_timeout_seconds=max(
                 0.0,
-                float(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "0")),
+                # Default armed (3600 = the field default); only an explicit env 0 disables it.
+                float(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "3600")),
             ),
             model_stream_idle_max_recoveries=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", "2")),
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
+            qwen_vlm_enabled=_env_bool("QWEN_VLM_ENABLED", False),
+            qwen_vlm_base_url=os.getenv(
+                "QWEN_VLM_BASE_URL", "http://tesla.ece.ucsb.edu:8000/v1"
+            ),
+            qwen_vlm_model=os.getenv("QWEN_VLM_MODEL", "Qwen3.6-27B"),
+            qwen_vlm_api_key=_resolve_secret(
+                "QWEN_VLM_API_KEY", "QWEN_VLM_API_KEY_FILE", default="EMPTY"
+            ),
+            qwen_vlm_max_input_tokens=max(
+                0, int(os.getenv("QWEN_VLM_MAX_INPUT_TOKENS", "131072"))
+            ),
+            qwen_vlm_max_tokens=max(256, int(os.getenv("QWEN_VLM_MAX_TOKENS", "32768"))),
+            qwen_vlm_client_max_edge=max(
+                256, int(os.getenv("QWEN_VLM_CLIENT_MAX_EDGE", "1280"))
+            ),
+            qwen_vlm_request_timeout_seconds=max(
+                1.0, float(os.getenv("QWEN_VLM_REQUEST_TIMEOUT_SECONDS", "180"))
+            ),
+            qwen_vlm_max_concurrency=max(
+                1, int(os.getenv("QWEN_VLM_MAX_CONCURRENCY", "4"))
+            ),
+            qwen_vlm_max_images_per_call=max(
+                1, int(os.getenv("QWEN_VLM_MAX_IMAGES_PER_CALL", "4"))
+            ),
             title_generation_enabled=_env_bool(
                 "ULTRA_DEEPAGENTS_TITLE_GENERATION_ENABLED",
                 True,
@@ -194,11 +272,23 @@ class RuntimeSettings:
             sandbox_cpus=float(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_CPUS", "0")),
             sandbox_memory=os.getenv("ULTRA_DEEPAGENTS_SANDBOX_MEMORY", ""),
             sandbox_pids_limit=int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT", "0")),
+            sandbox_shm_size=os.getenv("ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE", "").strip(),
+            sandbox_gpus=os.getenv("ULTRA_DEEPAGENTS_SANDBOX_GPUS", "").strip(),
             sandbox_timeout_seconds=int(
-                os.getenv("ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS", "0")
+                # Default armed (21600 = the field default); only an explicit env 0 disables it.
+                os.getenv("ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS", "21600")
             ),
             sandbox_output_limit_bytes=int(
                 os.getenv("ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES", "0")
+            ),
+            sandbox_reaper_interval_seconds=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_REAPER_INTERVAL_SECONDS", "300"))
+            ),
+            sandbox_reaper_grace_seconds=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_REAPER_GRACE_SECONDS", "600"))
+            ),
+            sandbox_reaper_max_per_sweep=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_REAPER_MAX_PER_SWEEP", "200"))
             ),
             completion_max_continuations=max(
                 0,
@@ -405,6 +495,26 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_tuple(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
     return tuple(token.strip() for token in raw.split(os.pathsep) if token.strip())
+
+
+def _resolve_secret(env_name: str, file_env_name: str, *, default: str = "EMPTY") -> str:
+    """Resolve a secret from an env var, else a file whose path is in ``file_env_name``.
+
+    Used for the Qwen VLM key: ``QWEN_VLM_API_KEY`` wins; otherwise read the file at
+    ``QWEN_VLM_API_KEY_FILE`` (e.g. the gitignored ``qwen36-vllm.api-key``). Never logs
+    the value; a missing/unreadable file degrades to ``default``."""
+    direct = os.getenv(env_name)
+    if direct and direct.strip():
+        return direct.strip()
+    file_path = os.getenv(file_env_name)
+    if file_path and file_path.strip():
+        try:
+            content = Path(file_path).expanduser().read_text(encoding="utf-8").strip()
+            if content:
+                return content
+        except OSError:
+            pass
+    return default
 
 
 def _env_host_tuple(name: str, default: tuple[str, ...]) -> tuple[str, ...]:

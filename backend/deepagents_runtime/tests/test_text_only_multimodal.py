@@ -5,7 +5,6 @@ from typing import Any, cast
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from ultra_deepagents.multimodal import (
     TextOnlyMultimodalMiddleware,
     sanitize_messages_for_text_only_model,

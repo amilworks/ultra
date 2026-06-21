@@ -9,7 +9,6 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-
 from ultra_deepagents.rarespot._matching import hungarian_min_cost, matched_source_indices
 from ultra_deepagents.rarespot.stability import (
     assign_stability,

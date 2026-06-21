@@ -206,6 +206,87 @@ class EarlyFakeTitleModel:
         return EarlyFakeTitleResponse()
 
 
+class _Resp:
+    def __init__(self, content):
+        self.content = content
+
+
+class SmartFakeModel:
+    """Generic title when called request-only; specific title once the answer is
+    in the prompt (the response-aware upgrade includes an 'Assistant result')."""
+
+    model_name = "deepseek_v4"
+
+    async def ainvoke(self, messages):
+        joined = "\n".join(str(message.get("content", "")) for message in messages)
+        if "Assistant result" in joined:
+            return _Resp('{"title": "CT Head Scan Analysis"}')
+        return _Resp('{"title": "Image Content Analysis"}')
+
+
+def test_resolve_upgrades_generic_request_only_title_with_response(tmp_path):
+    async def scenario():
+        factory = lambda _settings: SmartFakeModel()  # noqa: E731
+        task = start_conversation_title_task(
+            settings=_settings(tmp_path),
+            goal="Describe this image.",
+            messages=[{"role": "user", "content": "Describe this image."}],
+            model_factory=factory,
+        )
+        assert task is not None
+        return await resolve_conversation_title_task(
+            task,
+            settings=_settings(tmp_path),
+            goal="Describe this image.",
+            messages=[{"role": "user", "content": "Describe this image."}],
+            response_text="This is a head CT showing enlarged ventricles consistent with NPH.",
+            artifact_events=[],
+            model_factory=factory,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert result.title == "CT Head Scan Analysis"
+    assert result.strategy == "llm"
+    assert result.reason == "response_aware_upgrade"
+
+
+def test_resolve_keeps_specific_request_only_title_without_extra_call(tmp_path):
+    calls = {"n": 0}
+
+    class CountingModel:
+        model_name = "deepseek_v4"
+
+        async def ainvoke(self, _messages):
+            calls["n"] += 1
+            return _Resp('{"title": "RareSpot Prairie Dog Analysis"}')
+
+    async def scenario():
+        factory = lambda _settings: CountingModel()  # noqa: E731
+        task = start_conversation_title_task(
+            settings=_settings(tmp_path),
+            goal="Run RareSpot on this prairie dog image.",
+            messages=[{"role": "user", "content": "Run RareSpot on this prairie dog image."}],
+            model_factory=factory,
+        )
+        return await resolve_conversation_title_task(
+            task,
+            settings=_settings(tmp_path),
+            goal="Run RareSpot on this prairie dog image.",
+            messages=[{"role": "user", "content": "Run RareSpot on this prairie dog image."}],
+            response_text="Detected prairie dogs and burrows.",
+            artifact_events=[],
+            model_factory=factory,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert result.title == "RareSpot Prairie Dog Analysis"
+    assert result.strategy == "llm"
+    # Specific title -> no response-aware upgrade -> only the early call ran.
+    assert calls["n"] == 1
+
+
 def test_resolve_conversation_title_task_falls_back_when_unresolved(tmp_path):
     async def scenario():
         task = start_conversation_title_task(

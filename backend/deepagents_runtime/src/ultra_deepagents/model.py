@@ -80,3 +80,34 @@ def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
     if settings.model_max_input_tokens > 0:
         model.profile = {"max_input_tokens": settings.model_max_input_tokens}
     return model
+
+
+def build_vision_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
+    """The vision-reasoner's own Qwen3.6-27B VLM (on-prem vLLM, OpenAI-compatible),
+    distinct from the text coordinator's ``build_chat_model``.
+
+    Sampling presets (thinking/reasoning vs precise) are applied PER REQUEST by the
+    vision tool via ``.bind`` — this returns the bare transport. ``UltraChatOpenAI``
+    already lifts the streamed ``reasoning`` delta, and ``stream_usage`` routes the
+    VLM's token spend through the existing per-run accounting (deduped by a distinct
+    ``checkpoint_ns`` and grouped by ``model_name``). Like ``build_chat_model`` we set
+    ONLY ``max_input_tokens`` on the profile (never ``structured_output``), preserving
+    the subagent ToolStrategy auto-retry handoff.
+    """
+    timeout = (
+        settings.qwen_vlm_request_timeout_seconds
+        if settings.qwen_vlm_request_timeout_seconds > 0
+        else None
+    )
+    model = UltraChatOpenAI(
+        model=settings.qwen_vlm_model,
+        base_url=settings.qwen_vlm_base_url,
+        api_key=settings.qwen_vlm_api_key,
+        timeout=timeout,
+        stream_chunk_timeout=timeout,
+        max_retries=settings.max_retries,
+        stream_usage=True,
+    )
+    if settings.qwen_vlm_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.qwen_vlm_max_input_tokens}
+    return model

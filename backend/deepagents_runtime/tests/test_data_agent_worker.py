@@ -4,8 +4,8 @@ import asyncio
 import contextlib
 import json
 import os
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -16,15 +16,14 @@ from urllib import request as urllib_request
 
 import nats
 import pytest
-
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.data_agent.worker import (
+    TERMINAL_DATA_AGENT_JOB_STATUSES,
     ControlPlaneDataAgentJobLease,
     DataAgentJobEnvelope,
     DataAgentLeaseConflict,
     DefaultDataAgentProcessor,
     NATSDataAgentWorker,
-    TERMINAL_DATA_AGENT_JOB_STATUSES,
     acquire_control_plane_data_agent_job_lease,
     build_data_agent_consumer_config,
     data_agent_ack_extension_interval,
@@ -758,14 +757,14 @@ def _upload_smoke_resource(
     boundary = f"ultra-smoke-{uuid.uuid4().hex}"
     body = b"".join(
         [
-            f"--{boundary}\r\n".encode("utf-8"),
+            f"--{boundary}\r\n".encode(),
             (
                 f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
                 "Content-Type: application/octet-stream\r\n\r\n"
-            ).encode("utf-8"),
+            ).encode(),
             content,
             b"\r\n",
-            f"--{boundary}--\r\n".encode("utf-8"),
+            f"--{boundary}--\r\n".encode(),
         ]
     )
     request = urllib_request.Request(

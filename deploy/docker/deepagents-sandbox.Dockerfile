@@ -104,4 +104,10 @@ COPY data/models/yolo/RareSpotWeights.pt /opt/rarespot/RareSpotWeights.pt
 RUN : > /opt/rarespot/ultra_deepagents/__init__.py \
     && python -c "import sys; sys.path.insert(0, '/opt/rarespot'); import torchvision; from ultra_deepagents.rarespot.inference import run_rarespot_inference; print('rarespot bake OK', torchvision.__version__)"
 
+# Bake the medical-volume-slices CLI: the medical-volume-slices Skill runs it to turn a
+# 3D/4D volume (CT/MRI/fMRI/DICOM/tractography) into VLM-optimal 2D slices. Uses the imaging
+# stack already installed above (nibabel, SimpleITK, dipy, pillow) — no new deps.
+COPY backend/deepagents_runtime/skills/medical-volume-slices/volume_slices.py /opt/medvol/volume_slices.py
+RUN python -c "import nibabel, SimpleITK, PIL, numpy; import ast; ast.parse(open('/opt/medvol/volume_slices.py').read()); print('medvol bake OK')"
+
 WORKDIR /workspace

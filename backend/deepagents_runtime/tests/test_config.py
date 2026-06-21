@@ -41,6 +41,8 @@ def test_runtime_settings_default_to_no_hidden_long_run_caps(monkeypatch):
         "ULTRA_DEEPAGENTS_SANDBOX_CPUS",
         "ULTRA_DEEPAGENTS_SANDBOX_MEMORY",
         "ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT",
+        "ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE",
+        "ULTRA_DEEPAGENTS_SANDBOX_GPUS",
         "ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS",
         "ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES",
     ):
@@ -52,16 +54,34 @@ def test_runtime_settings_default_to_no_hidden_long_run_caps(monkeypatch):
     assert settings.sandbox_cpus == 0.0
     assert settings.sandbox_memory == ""
     assert settings.sandbox_pids_limit == 0
-    assert settings.sandbox_timeout_seconds == 0
+    # shm/gpu are opt-in: empty by default (no GPU in-sandbox; Docker-default /dev/shm).
+    assert settings.sandbox_shm_size == ""
+    assert settings.sandbox_gpus == ""
+    # A generous finite ceiling (6h) is armed by default so a hung/zombie sandbox call
+    # cannot await forever; long scientific batch work is allowed up to it. (Was 0 = unbounded.)
+    assert settings.sandbox_timeout_seconds == 21600
     assert settings.sandbox_output_limit_bytes == 0
 
 
-def test_runtime_settings_default_to_no_model_stream_idle_timeout(monkeypatch):
-    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", raising=False)
+def test_runtime_settings_load_sandbox_shm_and_gpus(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE", "8g")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_GPUS", "all")
 
     settings = RuntimeSettings.from_env()
 
-    assert settings.model_stream_idle_timeout_seconds == 0.0
+    assert settings.sandbox_shm_size == "8g"
+    assert settings.sandbox_gpus == "all"
+
+
+def test_runtime_settings_arm_idle_watchdog_by_default(monkeypatch):
+    # The idle/stall watchdog is now ARMED by default (1h) so a stalled tool call cannot
+    # wedge a run/worker forever (it did, for 1h43m, when this defaulted to 0). An explicit
+    # env 0 is still honored as the operator escape hatch.
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert RuntimeSettings.from_env().model_stream_idle_timeout_seconds == 3600.0
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "0")
+    assert RuntimeSettings.from_env().model_stream_idle_timeout_seconds == 0.0
 
 
 def test_runtime_settings_load_model_stream_liveness_guard(monkeypatch):

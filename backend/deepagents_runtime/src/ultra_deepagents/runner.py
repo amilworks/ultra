@@ -566,6 +566,7 @@ async def run_job(
         messages=list(job.messages or [{"role": "user", "content": job.goal}]),
         response_text=response_text,
         artifact_events=artifact_events,
+        model_factory=title_model_factory or build_chat_model,
     )
     await publish_event(
         sequencer.stamp(
@@ -647,7 +648,10 @@ async def _stream_agent_attempt(
     }
     # Resuming a redelivered run: pass None so LangGraph continues from the last
     # checkpoint instead of appending the original messages again.
-    payload = None if resume_from_checkpoint else {"messages": messages}
+    if resume_from_checkpoint:
+        payload = None
+    else:
+        payload = {"messages": messages}
     stream = _start_agent_event_stream(
         agent,
         payload,
@@ -669,7 +673,14 @@ async def _stream_agent_attempt(
     stream_iter = stream.__aiter__()
     while True:
         try:
-            if model_stream_idle_timeout_seconds > 0 and not active_tool_calls:
+            # The idle watchdog must fire REGARDLESS of active_tool_calls. The previous
+            # `and not active_tool_calls` gate disarmed it during tool execution — the exact
+            # window in which a stalled vision call (an uncancellable to_thread blocked in
+            # httpx) wedged a worker for 1h43m. Wrapping every __anext__ in wait_for resets
+            # the deadline on each received event (heartbeat semantics), so slow-but-alive
+            # work — which keeps emitting subagent/reasoning/tool/usage events — never trips
+            # it; only a true dead-transport stall (zero events for the generous window) does.
+            if model_stream_idle_timeout_seconds > 0:
                 try:
                     event = await asyncio.wait_for(
                         stream_iter.__anext__(),
@@ -925,6 +936,15 @@ _SKIP_OUTPUT_DIRS = {
     "frames",
     "animation_frames",
     "tmp_frames",
+    # RareSpot detector scratch — the CLI writes hundreds of intermediate crops/tiles under
+    # the run dir (e.g. 704 stability_tiles + 176 tiles); these must NOT be registered as
+    # durable Resources (they polluted the user's catalog). The deliverables — detections.csv,
+    # predictions.json, report.md, the survey map, and overlays/ — live at the run root.
+    "tiles",
+    "stability_tiles",
+    "stability_yolov5",
+    "prediction_xml",
+    "yolov5",
 }
 _SKIP_OUTPUT_FILES = {"lease.json", "run.lock", "matplotlibrc"}
 _CODE_SUFFIXES = {".py", ".ipynb", ".r", ".R", ".js", ".ts", ".tsx", ".jsx", ".jl", ".m", ".sh"}

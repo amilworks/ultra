@@ -44,6 +44,29 @@ export default tseslint.config(
       ],
       "@typescript-eslint/no-explicit-any": "off",
       "no-console": "off",
+      // Guard the icon bundle: a namespace/dynamic lucide import defeats
+      // tree-shaking and would balloon vendor-ui by hundreds of kB. Use named
+      // imports only (`import { Foo } from "lucide-react"`).
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportDeclaration[source.value='lucide-react'] ImportNamespaceSpecifier",
+          message:
+            "Import lucide icons by name (import { Foo } from 'lucide-react'); a namespace import defeats tree-shaking.",
+        },
+      ],
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "lucide-react/dynamicIconImports",
+              message: "Do not use lucide dynamicIconImports — it bundles the full icon set.",
+            },
+          ],
+        },
+      ],
     },
   }
 );

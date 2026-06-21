@@ -80,6 +80,8 @@ import {
 } from "@/components/ui/sidebar";
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
 import {
@@ -131,7 +133,6 @@ import {
   shouldPersistConversationSnapshot,
 } from "./features/chat/conversation-draft";
 import {
-  fallbackConversationTitleFromText,
   resolveConversationTitle,
 } from "./features/chat/conversation-title";
 import {
@@ -238,6 +239,8 @@ import type {
 import {
   ArrowUp,
   Check,
+  CircleAlert,
+  CircleSlash,
   ChevronDown,
   Copy,
   Database,
@@ -253,9 +256,11 @@ import {
   Pencil,
   Plus,
   PlusIcon,
+  RotateCcw,
   Settings,
   Shield,
   Square,
+  SquarePen,
   Sun,
   Table2,
   ThumbsDown,
@@ -483,16 +488,10 @@ const formatBisqueShortcutLabel = (
   }`;
 };
 
-const lazyNamed = <TModule extends Record<string, unknown>>(
-  loader: () => Promise<TModule>,
-  exportName: keyof TModule
-) =>
-  lazy(async () => {
-    const module = await loader();
-    return {
-      default: module[exportName] as ComponentType<any>,
-    };
-  });
+// Hardened against ChunkLoadError: retries transient import failures and
+// recovers from stale-deploy chunk-hash rotation with a single guarded reload
+// rather than crashing the whole app via the top-level boundary.
+const lazyNamed = lazyNamedWithRetry;
 
 const loadUploadViewerSheetModule = () => import("./components/UploadViewerSheet");
 const loadAdminConsoleModule = () => import("./components/AdminConsole");
@@ -667,11 +666,18 @@ const preloadSecondaryPanelModules = ({
   ]);
 };
 
+type UiMessageStatus = "stopped" | "failed";
+
 type UiMessage = {
   id: string;
   role: UiRole;
   content: string;
   createdAt: number;
+  // A turn that the user stopped, or that failed to complete. Drives the calm
+  // inline recovery affordance (Retry / Edit) instead of a silent dead-end.
+  status?: UiMessageStatus;
+  // Raw technical detail for a failed turn, shown in muted monospace.
+  errorReason?: string;
   runId?: string;
   durationSeconds?: number;
   progressEvents?: ProgressEvent[];
@@ -694,6 +700,10 @@ type HistoryItem = {
   running: boolean;
   messageCount: number;
 };
+
+// Module constant so the history grouping keeps a stable array reference (it is
+// re-derived on every App render, including each keystroke).
+const HISTORY_PERIOD_ORDER: HistoryPeriod[] = ["Today", "Yesterday", "Last 7 days", "Older"];
 
 type CollapsedSidebarRailProps = {
   recentItems: HistoryItem[];
@@ -2042,6 +2052,14 @@ const toUiMessages = (value: unknown, fallbackTime: number): UiMessage[] => {
         role,
         content: rawContent,
         createdAt: toMillis(row.createdAt, fallbackTime),
+        status:
+          row.status === "stopped" || row.status === "failed"
+            ? (row.status as UiMessageStatus)
+            : undefined,
+        errorReason:
+          typeof row.errorReason === "string" && row.errorReason.trim()
+            ? row.errorReason
+            : undefined,
         runId: row.runId ? String(row.runId) : undefined,
         durationSeconds: toNumber(row.durationSeconds ?? row.duration_seconds) ?? undefined,
         progressEvents: toProgressEvents(row.progressEvents),
@@ -2167,6 +2185,12 @@ const mergeConversationPage = (
     if (!current.hydrated && candidate.hydrated) {
       return candidate;
     }
+    // Both hydrated. Never let an empty hydrated record (e.g. a degraded server
+    // reconstruction) clobber a populated local transcript — an empty transcript
+    // replacing a real one is never correct. Otherwise prefer the newer record.
+    if (candidate.messages.length === 0 && current.messages.length > 0) {
+      return current;
+    }
     return current.updatedAt >= candidate.updatedAt ? current : candidate;
   });
   const incomingIds = new Set(incoming.map((conversation) => conversation.id));
@@ -2198,6 +2222,8 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
         role: message.role,
         content: message.content,
         createdAt: message.createdAt,
+        status: message.status,
+        errorReason: message.errorReason,
         runId: message.runId,
         durationSeconds: message.durationSeconds,
         progressEvents: message.progressEvents ?? [],
@@ -2483,7 +2509,68 @@ type ConversationTranscriptActions = {
   onCopyBisqueResourceUri: (resourceUri: string) => Promise<void>;
   onEditUserMessage: (content: string) => void;
   onDeleteUserMessage: (messageId: string) => void;
+  onRetryAssistant: (assistantMessageId: string, options: { edit: boolean }) => void;
 };
+
+type AssistantTurnRecoveryProps = {
+  status: UiMessageStatus;
+  errorReason?: string;
+  onRetry: () => void;
+  onEdit: () => void;
+};
+
+// Calm inline recovery affordance for a stopped or failed assistant turn —
+// understated muted status line + ghost Retry/Edit actions, matching the app's
+// "Could not …" voice. Replaces the previous silent dead-end.
+function AssistantTurnRecovery({
+  status,
+  errorReason,
+  onRetry,
+  onEdit,
+}: AssistantTurnRecoveryProps) {
+  const stopped = status === "stopped";
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5" role="status" aria-live="polite">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+          {stopped ? (
+            <CircleSlash aria-hidden className="size-3.5" />
+          ) : (
+            <CircleAlert aria-hidden className="size-3.5 text-destructive/70" />
+          )}
+          {stopped ? "You stopped this response." : "This response couldn’t be completed."}
+        </span>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 rounded-full px-2.5 text-muted-foreground hover:text-foreground"
+            onClick={onRetry}
+          >
+            <RotateCcw className="size-3.5" />
+            Retry
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 rounded-full px-2.5 text-muted-foreground hover:text-foreground"
+            onClick={onEdit}
+          >
+            <Pencil className="size-3.5" />
+            Edit
+          </Button>
+        </div>
+      </div>
+      {!stopped && errorReason ? (
+        <p className="font-mono text-[11px] leading-relaxed text-muted-foreground/75">
+          {errorReason}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 type ConversationMessageRowProps = {
   message: UiMessage;
@@ -2608,8 +2695,8 @@ const ConversationMessageRow = memo(
       () => proModeDevConversationForMessage(message),
       [message]
     );
-    const reasonedDurationLabel = useMemo(
-      () => formatReasoningDuration(message.durationSeconds),
+    const elapsedLabel = useMemo(
+      () => formatElapsedDuration(message.durationSeconds),
       [message.durationSeconds]
     );
     const summaryModeLabel = useMemo(
@@ -2618,7 +2705,7 @@ const ConversationMessageRow = memo(
     );
     const tokenUsage = useMemo(() => extractRunTokenUsage(message), [message]);
     const showAssistantMetadataLine =
-      Boolean(reasonedDurationLabel) || Boolean(summaryModeLabel) || Boolean(tokenUsage);
+      Boolean(elapsedLabel) || Boolean(summaryModeLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
       return (
         <Message
@@ -2692,44 +2779,53 @@ const ConversationMessageRow = memo(
         <div className="group flex w-full flex-1 flex-col gap-2">
           {showAssistantMetadataLine ? (
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
-              {reasonedDurationLabel ? (
-                <span>{`Reasoned for ${reasonedDurationLabel}`}</span>
-              ) : null}
               {summaryModeLabel ? (
                 <span className="text-[11px] font-medium tracking-[0.02em] text-sky-600/70 dark:text-sky-300/68">
                   {summaryModeLabel}
                 </span>
               ) : null}
-              {tokenUsage ? (
+              {tokenUsage || elapsedLabel ? (
                 <span
                   className="tabular-nums"
-                  title={`${tokenUsage.input_tokens.toLocaleString()} input · ${tokenUsage.output_tokens.toLocaleString()} output${
-                    tokenUsage.model ? ` · ${tokenUsage.model}` : ""
-                  }`}
+                  title={
+                    tokenUsage
+                      ? `${tokenUsage.input_tokens.toLocaleString()} input · ${tokenUsage.output_tokens.toLocaleString()} output${
+                          tokenUsage.model ? ` · ${tokenUsage.model}` : ""
+                        }`
+                      : undefined
+                  }
                 >
-                  {`${formatTokens(tokenUsage.total_tokens)} tokens`}
+                  {[
+                    tokenUsage ? `${formatTokens(tokenUsage.total_tokens)} tokens` : null,
+                    elapsedLabel,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </span>
               ) : null}
             </div>
           ) : null}
-          {thinkingBarText ? (
-            <div className="mb-1">
-              <ThinkingBar
-                text={thinkingBarText}
-                onStop={actions.onStopConversation}
-                stopLabel="Stop"
-              />
-            </div>
-          ) : null}
           {isStreamingAssistant ? (
-            <Suspense fallback={null}>
-              <LazyChatRunSteps
-                runEvents={runEvents}
-                progressEvents={progressEvents}
-                isStreaming={isStreamingAssistant}
-                fallbackLabel={thinkingBarText}
-              />
-            </Suspense>
+            <div className="mb-1">
+              <Suspense
+                fallback={
+                  <ThinkingBar
+                    text={thinkingBarText ?? undefined}
+                    onStop={actions.onStopConversation}
+                    stopLabel="Stop"
+                  />
+                }
+              >
+                <LazyChatRunSteps
+                  runEvents={runEvents}
+                  progressEvents={progressEvents}
+                  isStreaming={isStreamingAssistant}
+                  statusText={thinkingBarText}
+                  onStop={actions.onStopConversation}
+                  stopLabel="Stop"
+                />
+              </Suspense>
+            </div>
           ) : null}
           {showLeadingToolResultCards ? (
             <Suspense fallback={null}>
@@ -2881,6 +2977,14 @@ const ConversationMessageRow = memo(
               ))}
             </div>
           ) : null}
+          {message.status === "stopped" || message.status === "failed" ? (
+            <AssistantTurnRecovery
+              status={message.status}
+              errorReason={message.errorReason}
+              onRetry={() => actions.onRetryAssistant(message.id, { edit: false })}
+              onEdit={() => actions.onRetryAssistant(message.id, { edit: true })}
+            />
+          ) : null}
           <MessageActions
             className={cn(
               "-ml-2.5 gap-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100",
@@ -2944,6 +3048,7 @@ const ConversationMessageRow = memo(
 
 type ConversationTranscriptProps = {
   conversationHydrated: boolean;
+  isPhoneView: boolean;
   messages: UiMessage[];
   blankChatTokenUsage: TokenUsageResponse | null;
   blankChatUsageLoading: boolean;
@@ -2959,6 +3064,7 @@ type ConversationTranscriptProps = {
 const ConversationTranscript = memo(
   function ConversationTranscript({
     conversationHydrated,
+    isPhoneView,
     messages,
     blankChatTokenUsage,
     blankChatUsageLoading,
@@ -2988,28 +3094,57 @@ const ConversationTranscript = memo(
           </div>
         ) : messages.length === 0 ? (
           <div className="blank-chat-usage-state">
-            <UserTokenUsagePanel
-              tokenUsage={blankChatTokenUsage}
-              loading={blankChatUsageLoading}
-              error={blankChatUsageError}
-              className="blank-chat-usage-panel"
-              density="compact"
-            />
+            {isPhoneView ? (
+              <div className="mobile-chat-hero">
+                <h2 className="mobile-chat-hero-title">What can I help with?</h2>
+                <p className="mobile-chat-hero-subtitle">
+                  Ask anything below — add an image or a resource whenever you like.
+                </p>
+                <details className="mobile-usage-disclosure">
+                  <summary className="mobile-usage-summary">
+                    <span>Your usage</span>
+                    <ChevronDown className="mobile-usage-chevron size-4" aria-hidden />
+                  </summary>
+                  <div className="mobile-usage-body">
+                    <UserTokenUsagePanel
+                      tokenUsage={blankChatTokenUsage}
+                      loading={blankChatUsageLoading}
+                      error={blankChatUsageError}
+                      className="blank-chat-usage-panel"
+                      density="compact"
+                    />
+                  </div>
+                </details>
+              </div>
+            ) : (
+              <UserTokenUsagePanel
+                tokenUsage={blankChatTokenUsage}
+                loading={blankChatUsageLoading}
+                error={blankChatUsageError}
+                className="blank-chat-usage-panel"
+                density="compact"
+              />
+            )}
           </div>
         ) : (
           messages.map((message, index) => (
-            <ConversationMessageRow
+            <ErrorBoundary
               key={message.id}
-              message={message}
-              isLastMessage={index === messages.length - 1}
-              isStreamingAssistant={streamingMessageId === message.id}
-              copiedMessageId={copiedMessageId}
-              conversationRunArtifacts={conversationRunArtifacts}
-              uploadedFiles={uploadedFiles}
-              bisqueLinksByFileId={bisqueLinksByFileId}
-              apiClient={apiClient}
-              actions={actions}
-            />
+              source="message-row"
+              resetKeys={[message.id, message.content, message.runId]}
+            >
+              <ConversationMessageRow
+                message={message}
+                isLastMessage={index === messages.length - 1}
+                isStreamingAssistant={streamingMessageId === message.id}
+                copiedMessageId={copiedMessageId}
+                conversationRunArtifacts={conversationRunArtifacts}
+                uploadedFiles={uploadedFiles}
+                bisqueLinksByFileId={bisqueLinksByFileId}
+                apiClient={apiClient}
+                actions={actions}
+              />
+            </ErrorBoundary>
           ))
         )}
       </ChatContainerContent>
@@ -3017,6 +3152,7 @@ const ConversationTranscript = memo(
   },
   (previousProps, nextProps) =>
     previousProps.conversationHydrated === nextProps.conversationHydrated &&
+    previousProps.isPhoneView === nextProps.isPhoneView &&
     previousProps.messages === nextProps.messages &&
     previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
     previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
@@ -3039,8 +3175,28 @@ const summarizePrompt = (value: string, maxLen = 46): string => {
   return `${singleLine.slice(0, maxLen - 1)}…`;
 };
 
-const summarizeConversationTitle = (value: string, maxWords = 6): string => {
-  return fallbackConversationTitleFromText(value, maxWords);
+// Optimistic, placeholder-only title shown while the model-generated title is
+// still being produced (and as a calm last resort if generation fails). A
+// readable trim of the prompt's first sentence reads far better than the old
+// keyword-mangled summary ("Describe Image Inspect Tell ...").
+const summarizeConversationTitle = (value: string): string => {
+  const singleLine = value
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "");
+  if (!singleLine) {
+    return "New conversation";
+  }
+  const firstSentence = singleLine.split(/(?<=[.?!])\s+/)[0] || singleLine;
+  const base = firstSentence.length >= 12 ? firstSentence : singleLine;
+  if (base.length <= 48) {
+    return base;
+  }
+  const truncated = base.slice(0, 47);
+  const atWord = truncated.includes(" ")
+    ? truncated.slice(0, truncated.lastIndexOf(" "))
+    : truncated;
+  return `${atWord.trim()}…`;
 };
 
 const normalizeConversationTitle = (value: string): string => {
@@ -7031,21 +7187,24 @@ const proModeDevConversationForMessage = (
   return conversation;
 };
 
-const formatReasoningDuration = (seconds: number | null | undefined): string | null => {
+// Compact elapsed-time label for the assistant metadata line, e.g. "8s",
+// "1m 12s", "2h 3m". Returns null when there is no positive duration.
+const formatElapsedDuration = (seconds: number | null | undefined): string | null => {
   const value = Number(seconds ?? 0);
   if (!Number.isFinite(value) || value <= 0) {
     return null;
   }
-  if (value < 10) {
-    return `${value.toFixed(1)}s`;
-  }
   if (value < 60) {
-    return `${value.toFixed(0)}s`;
+    return `${Math.max(1, Math.round(value))}s`;
   }
   if (value < 3600) {
-    return `${(value / 60).toFixed(1)}m`;
+    const minutes = Math.floor(value / 60);
+    const secs = Math.round(value % 60);
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
   }
-  return `${(value / 3600).toFixed(1)}h`;
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.round((value % 3600) / 60);
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 };
 
 const toolCardImagesFromBisqueResourceRows = (
@@ -7739,6 +7898,10 @@ export function App() {
   );
   const [uiErrorBanner, setUiErrorBanner] = useState<string | null>(null);
   const [pendingReusePrompt, setPendingReusePrompt] = useState<PendingReusePrompt | null>(null);
+  // Set by "Retry" on a stopped/failed turn: after the stale pair is removed
+  // (which triggers a re-render), an effect re-sends this prompt through the
+  // normal submit pipeline. A ref avoids an extra render + cascading setState.
+  const pendingRetryRef = useRef<{ conversationId: string; prompt: string } | null>(null);
   const [composerDraftsByConversationId, setComposerDraftsByConversationId] = useState<
     Record<string, string>
   >(() => readComposerDraftsFromStorage());
@@ -8270,33 +8433,60 @@ export function App() {
     replaceConversationIdInLocation(resolvedConversationId);
   }, [activeConversationId, authStatus, conversations, conversationsHydrated]);
 
+  const flushConversationSnapshots = useCallback(() => {
+    if (authStatus !== "authenticated" || !conversationsHydrated) {
+      return;
+    }
+    const records = conversations
+      .filter(shouldPersistConversationSnapshot)
+      .map(conversationToRecord);
+    const previousHashes = persistedConversationHashesRef.current;
+    const nextHashes: Record<string, string> = {};
+    const changedRecords = records.filter((record) => {
+      const fingerprint = JSON.stringify(record);
+      nextHashes[record.conversation_id] = fingerprint;
+      return previousHashes[record.conversation_id] !== fingerprint;
+    });
+    persistedConversationHashesRef.current = nextHashes;
+    if (changedRecords.length === 0) {
+      return;
+    }
+    void Promise.allSettled(
+      changedRecords.map((record) => apiClient.upsertConversation(record))
+    );
+  }, [apiClient, authStatus, conversations, conversationsHydrated]);
+
   useEffect(() => {
     if (authStatus !== "authenticated" || !conversationsHydrated) {
       return;
     }
-    const timeoutId = window.setTimeout(() => {
-      const records = conversations
-        .filter(shouldPersistConversationSnapshot)
-        .map(conversationToRecord);
-      const previousHashes = persistedConversationHashesRef.current;
-      const nextHashes: Record<string, string> = {};
-      const changedRecords = records.filter((record) => {
-        const fingerprint = JSON.stringify(record);
-        nextHashes[record.conversation_id] = fingerprint;
-        return previousHashes[record.conversation_id] !== fingerprint;
-      });
-      persistedConversationHashesRef.current = nextHashes;
-      if (changedRecords.length === 0) {
-        return;
-      }
-      void Promise.allSettled(
-        changedRecords.map((record) => apiClient.upsertConversation(record))
-      );
-    }, 250);
+    const timeoutId = window.setTimeout(flushConversationSnapshots, 250);
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [apiClient, authStatus, conversations, conversationsHydrated]);
+  }, [authStatus, conversationsHydrated, flushConversationSnapshots]);
+
+  // Belt-and-suspenders: persist the latest snapshot synchronously when the tab
+  // is hidden or the page is being unloaded, so the user's just-sent message is
+  // durable before they navigate away (closing the debounce-window gap).
+  const flushConversationSnapshotsRef = useRef(flushConversationSnapshots);
+  useEffect(() => {
+    flushConversationSnapshotsRef.current = flushConversationSnapshots;
+  }, [flushConversationSnapshots]);
+  useEffect(() => {
+    const flush = () => flushConversationSnapshotsRef.current();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flush();
+      }
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     let isCancelled = false;
@@ -9067,22 +9257,21 @@ export function App() {
     }): void => {
       const partialText = streamedText.trim();
       updateConversation(conversationId, (conversation) => {
+        // Keep the turn (even with no streamed text) and mark it "stopped" so the
+        // user sees a calm Retry / Edit affordance instead of a silent dead-end.
         const messages = assistantMessageId
-          ? conversation.messages.flatMap((message) => {
+          ? conversation.messages.map((message) => {
               if (message.id !== assistantMessageId) {
-                return [message];
+                return message;
               }
               const preservedText = partialText || message.content.trim();
-              if (!preservedText) {
-                return [];
-              }
-              return [
-                {
-                  ...message,
-                  content: preservedText,
-                  liveStream: undefined,
-                },
-              ];
+              return {
+                ...message,
+                content: preservedText,
+                liveStream: undefined,
+                status: "stopped" as const,
+                errorReason: undefined,
+              };
             })
           : conversation.messages;
         return {
@@ -12555,6 +12744,53 @@ export function App() {
     [updateActiveConversation]
   );
 
+  // Retry / Edit a stopped or failed assistant turn. Both remove the stale
+  // user+assistant pair so the retry is a clean re-ask rather than a duplicate;
+  // "Retry" re-sends immediately (via pendingRetryPrompt), "Edit" loads the
+  // prompt back into the composer for the user to adjust first.
+  const retryAssistantResponse = useCallback(
+    (assistantMessageId: string, options: { edit: boolean }): void => {
+      const conversation = activeConversation;
+      if (!conversation) {
+        return;
+      }
+      const assistantIndex = conversation.messages.findIndex(
+        (message) => message.id === assistantMessageId
+      );
+      if (assistantIndex < 0) {
+        return;
+      }
+      let originatingUserMessage: UiMessage | null = null;
+      for (let index = assistantIndex; index >= 0; index -= 1) {
+        if (conversation.messages[index].role === "user") {
+          originatingUserMessage = conversation.messages[index];
+          break;
+        }
+      }
+      if (!originatingUserMessage) {
+        return;
+      }
+      const prompt = originatingUserMessage.content;
+      const originatingUserMessageId = originatingUserMessage.id;
+      const conversationId = conversation.id;
+      stopRequestedConversationIdsRef.current.delete(conversationId);
+      updateConversation(conversationId, (current) => ({
+        ...current,
+        updatedAt: Date.now(),
+        messages: removeMessageWithPairedResponse(current.messages, originatingUserMessageId),
+        chatError: null,
+        sending: false,
+        streamingMessageId: null,
+      }));
+      if (options.edit) {
+        setActivePromptValue(prompt);
+      } else {
+        pendingRetryRef.current = { conversationId, prompt };
+      }
+    },
+    [activeConversation, updateConversation, setActivePromptValue]
+  );
+
   const handleStreamingRenderComplete = useCallback(
     (messageId: string): void => {
       const conversationId = activeConversation?.id;
@@ -12587,6 +12823,10 @@ export function App() {
     [activeConversation?.id, updateConversation]
   );
 
+  // PERF (load-bearing): the message-row memo comparators deliberately ignore
+  // `actions`, so this bag must stay referentially stable across keystrokes.
+  // Every dep below must be keystroke-stable — adding a value that changes on
+  // each render (e.g. the draft string) would re-render every message row.
   const transcriptActions = useMemo<ConversationTranscriptActions>(
     () => ({
       onStopConversation: stopActiveConversation,
@@ -12598,6 +12838,7 @@ export function App() {
       onCopyBisqueResourceUri: copyBisqueResourceUri,
       onEditUserMessage: setActivePromptValue,
       onDeleteUserMessage: handleDeleteUserMessage,
+      onRetryAssistant: retryAssistantResponse,
     }),
     [
       copyBisqueResourceUri,
@@ -12607,19 +12848,21 @@ export function App() {
       importBisqueResourcesIntoConversation,
       openConversationFilesInViewer,
       promptBisqueAuthentication,
+      retryAssistantResponse,
       setActivePromptValue,
       stopActiveConversation,
     ]
   );
 
-  const handleSubmit = async (): Promise<void> => {
+  const handleSubmit = async (overridePrompt?: string): Promise<void> => {
     const conversation = activeConversation;
     if (!conversation) {
       return;
     }
 
     const composerWorkflowPreset = conversation.composerWorkflowPreset;
-    const text = activePrompt.trim();
+    // A retry passes the originating prompt explicitly; normal sends read the composer.
+    const text = (typeof overridePrompt === "string" ? overridePrompt : activePrompt).trim();
     if (!text || conversation.sending || slashMenuOpen || composerResourcePickerOpen) {
       return;
     }
@@ -13080,6 +13323,9 @@ export function App() {
           },
         ],
       }));
+      // Wall-clock start, used as a fallback elapsed time when the backend run
+      // record does not report duration_seconds.
+      const runStartedAt = Date.now();
       const chatRequest = {
         messages: chatMessages,
         uploaded_files: [],
@@ -13180,6 +13426,7 @@ export function App() {
 
       if (assistantMessageId) {
         const messageId = assistantMessageId;
+        const elapsedSeconds = Math.max(0, (Date.now() - runStartedAt) / 1000);
         updateConversation(conversationId, (current) => ({
           ...current,
           updatedAt: Date.now(),
@@ -13202,7 +13449,12 @@ export function App() {
                 ...item,
                 content: assistantText,
                 runId: response.run_id,
-                durationSeconds: response.duration_seconds ?? item.durationSeconds,
+                // Prefer the backend's run duration; fall back to measured
+                // wall-clock so the elapsed time is always shown.
+                durationSeconds:
+                  response.duration_seconds && response.duration_seconds > 0
+                    ? response.duration_seconds
+                    : elapsedSeconds,
                 progressEvents: response.progress_events ?? [],
                 runEvents: item.runEvents ?? [],
                 responseMetadata: response.metadata ?? item.responseMetadata ?? null,
@@ -13325,12 +13577,14 @@ export function App() {
       const message = normalizeApiError(finalError);
       if (assistantMessageId) {
         const partial = streamedText.trim();
-        const fallbackContent = partial || `Error: ${message}`;
+        // Mark the turn failed and stash the technical detail (rendered in muted
+        // monospace by the inline notice). The inline card is the single calm
+        // error surface, so the composer-level banner is cleared.
         updateConversation(conversationId, (current) => ({
           ...current,
           updatedAt: Date.now(),
           sending: false,
-          chatError: message,
+          chatError: null,
           streamingMessageId: null,
           stagedUploadFileIds:
             consumedUploadFileIds.size > 0
@@ -13342,8 +13596,10 @@ export function App() {
             item.id === assistantMessageId
                 ? {
                     ...item,
-                    content: fallbackContent,
+                    content: partial,
                     liveStream: undefined,
+                    status: "failed" as const,
+                    errorReason: message,
                 }
               : item
           ),
@@ -13358,15 +13614,17 @@ export function App() {
           ...current,
           updatedAt: Date.now(),
           sending: false,
-          chatError: message,
+          chatError: null,
           streamingMessageId: null,
           messages: [
             ...withoutStreamingMessage,
             {
               id: makeId(),
               role: "assistant",
-              content: `Error: ${message}`,
+              content: "",
               createdAt: Date.now(),
+              status: "failed" as const,
+              errorReason: message,
             },
           ],
         };
@@ -13389,6 +13647,30 @@ export function App() {
       );
     }
   };
+
+  // Keep a stable handle to the latest handleSubmit so the retry effect can call
+  // it without re-running every render (handleSubmit is intentionally unmemoized).
+  const handleSubmitRef = useRef(handleSubmit);
+  useEffect(() => {
+    handleSubmitRef.current = handleSubmit;
+  });
+
+  // Fire a queued "Retry" once the stale turn has been removed from state. The
+  // removal re-renders with the old pair gone, so the resend appends cleanly.
+  useEffect(() => {
+    const pending = pendingRetryRef.current;
+    if (!pending) {
+      return;
+    }
+    if (!activeConversation || activeConversation.id !== pending.conversationId) {
+      return;
+    }
+    if (activeConversation.sending) {
+      return;
+    }
+    pendingRetryRef.current = null;
+    void handleSubmitRef.current(pending.prompt);
+  }, [activeConversation]);
 
   const historyItems: HistoryItem[] = useMemo(() => {
     return [...conversations]
@@ -13447,19 +13729,33 @@ export function App() {
     });
   }, [historyItems, normalizedMobileConversationQuery]);
 
-  const periodOrder: HistoryPeriod[] = [
-    "Today",
-    "Yesterday",
-    "Last 7 days",
-    "Older",
-  ];
-  const historyGroups = periodOrder
-    .map((period) => ({
-      period,
-      conversations: filteredHistoryItems.filter((item) => item.period === period),
-    }))
-    .filter((group) => group.conversations.length > 0);
+  // Memoized so typing in the composer (which re-runs the App body) doesn't
+  // re-allocate/re-filter the grouped history, and so the sidebar history list
+  // keeps a stable reference and its memoized rows skip reconciliation.
+  const historyGroups = useMemo(
+    () =>
+      HISTORY_PERIOD_ORDER.map((period) => ({
+        period,
+        conversations: filteredHistoryItems.filter((item) => item.period === period),
+      })).filter((group) => group.conversations.length > 0),
+    [filteredHistoryItems]
+  );
   const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
+  // Contextual title for the mobile top bar: the panel name, or the active
+  // conversation's title once it has a real exchange (else the app name).
+  const mobileShellTitle =
+    activePanel === "resources"
+      ? "Resources"
+      : activePanel === "training"
+        ? "Training"
+        : activePanel === "admin"
+          ? "Admin"
+          : activePanel === "scientific-viewer"
+            ? "Lens"
+            : activeConversation &&
+                activeConversation.messages.some((message) => message.role === "user")
+              ? activeConversation.title
+              : "BisQue Ultra";
   const pendingReuseCandidate = pendingReusePrompt?.candidate ?? null;
   const pendingReuseToolLabels = pendingReuseCandidate
     ? pendingReuseCandidate.toolNames
@@ -13893,7 +14189,20 @@ export function App() {
               aria-label="Open navigation"
               title="Open navigation"
             />
-            <div className="app-mobile-shell-brand">BisQue Ultra</div>
+            <div className="app-mobile-shell-title">{mobileShellTitle}</div>
+            {activePanel === "chat" ? (
+              <button
+                type="button"
+                className="app-mobile-shell-action"
+                onClick={createNewConversation}
+                aria-label="New chat"
+                title="New chat"
+              >
+                <SquarePen className="size-5" aria-hidden />
+              </button>
+            ) : (
+              <span className="app-mobile-shell-action-spacer" aria-hidden />
+            )}
           </div>
 
           {showAppShellBanner ? (
@@ -14114,6 +14423,7 @@ export function App() {
                 />
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
+                  isPhoneView={isPhoneView}
                   messages={activeMessages}
                   blankChatTokenUsage={blankChatTokenUsage}
                   blankChatUsageLoading={blankChatUsageLoading}

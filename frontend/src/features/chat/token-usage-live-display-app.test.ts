@@ -22,7 +22,10 @@ describe("assistant token usage live display wiring", () => {
     expect(leadingCardsStart).toBeGreaterThan(assistantReturnStart);
 
     const assistantHeader = appSource.slice(assistantReturnStart, leadingCardsStart);
-    expect(assistantHeader).toContain("{tokenUsage ? (");
+    // Token usage (now shown alongside the elapsed time) must render directly,
+    // not behind a completed-message-only branch.
+    expect(assistantHeader).toContain("{tokenUsage || elapsedLabel ? (");
+    expect(assistantHeader).toContain("formatTokens(tokenUsage.total_tokens)");
     expect(assistantHeader).not.toContain(
       ") : reasonedDurationLabel || summaryModeLabel || tokenUsage ? ("
     );

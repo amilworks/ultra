@@ -36,7 +36,7 @@ const cases = [
   },
   {
     name: "scientific-viewer-route",
-    buttonSelector: '.app-sidebar-static button[title="Scientific Viewer"]',
+    buttonSelector: '.app-sidebar-static button[title^="Lens"]',
     readySelector: ".viewer-workspace",
   },
 ];

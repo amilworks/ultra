@@ -3,6 +3,7 @@ export type RecoverableRunMessage = {
   runId?: string | null;
   content?: string | null;
   liveStream?: unknown;
+  status?: "stopped" | "failed" | string | null;
 };
 
 const LEGACY_RUN_RESULT_404_PATTERN =
@@ -16,6 +17,11 @@ export const shouldRecoverRunResultMessage = (
   options: { isStreamingMessage?: boolean } = {}
 ): boolean => {
   if (message.role !== "assistant" || !message.runId) {
+    return false;
+  }
+  // A turn the user stopped, or that we have already marked failed, must not be
+  // silently re-recovered — that would overwrite the calm Retry/Edit affordance.
+  if (message.status === "stopped" || message.status === "failed") {
     return false;
   }
   if (options.isStreamingMessage && message.liveStream) {

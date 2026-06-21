@@ -94,3 +94,40 @@ describe("normalizeUploadViewerInfo scalar medical defaults", () => {
     expect(viewer.display_defaults?.volume_camera_mode).toBeUndefined();
   });
 });
+
+describe("normalizeUploadViewerInfo unsupported formats", () => {
+  it("preserves the undecodable signal so the viewer can show a download card", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "unsupported",
+      decodable: false,
+      file_id: "file-lif",
+      original_name: "Training_20240812-czQC.lif",
+      modality: "image",
+      backend_mode: "none",
+      dims_order: "YX",
+      axis_sizes: { T: 1, C: 1, Z: 1, Y: 0, X: 0 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      is_volume: false,
+      service_urls: { download: "/v2/resources/file-lif/download" },
+      message: "LIF files can't be previewed by the image engine yet.",
+    });
+    expect(viewer.kind).toBe("unsupported");
+    expect(viewer.decodable).toBe(false);
+    expect(viewer.message).toContain("LIF");
+  });
+
+  it("treats a normal decodable image as decodable (no false positive)", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-png",
+      original_name: "plate.png",
+      dims_order: "YX",
+      axis_sizes: { T: 1, C: 3, Z: 1, Y: 256, X: 256 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      is_volume: false,
+      service_urls: {},
+    });
+    expect(viewer.kind).toBe("image");
+    expect(viewer.decodable).toBeUndefined();
+  });
+});

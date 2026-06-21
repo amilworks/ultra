@@ -6,14 +6,9 @@ import {
   StepsItem,
   StepsTrigger,
 } from "@/components/prompt-kit/steps";
+import { TextShimmer } from "@/components/prompt-kit/text-shimmer";
 import type { ProgressEvent, RunEvent } from "@/types";
-import {
-  CheckCircle2,
-  CircleAlert,
-  Loader2,
-  Wrench,
-  Workflow,
-} from "lucide-react";
+import { Check, CircleAlert, Loader2 } from "lucide-react";
 import {
   DEFAULT_THINKING_TEXT,
   getPhaseDetail,
@@ -24,7 +19,10 @@ type ChatRunStepsProps = {
   runEvents: RunEvent[];
   progressEvents: ProgressEvent[];
   isStreaming: boolean;
-  fallbackLabel?: string | null;
+  /** Calm phase-level status (from runStepCopy) shown when no tool step is active. */
+  statusText?: string | null;
+  onStop?: () => void;
+  stopLabel?: string;
   className?: string;
 };
 
@@ -39,15 +37,29 @@ type ChatStepItem = {
   status: StepStatus;
 };
 
+// Calm, human phrases in the present tense — never raw tool identifiers.
 const TOOL_LABELS: Record<string, string> = {
-  bisque_advanced_search: "Advanced BisQue search",
-  bisque_download_resource: "Download BisQue resource",
-  bisque_find_assets: "Find BisQue assets",
-  create_bisque_dataset: "Create BisQue dataset",
-  estimate_depth_depthpro: "DepthPro estimation",
-  resource_lookup: "Resolve uploaded resources",
-  search_bisque_resources: "Search BisQue resources",
-  yolo_detect: "YOLO detection",
+  artifact_manifest: "Reviewing prior outputs",
+  bisque_advanced_search: "Searching your BisQue library",
+  bisque_download_resource: "Fetching a BisQue resource",
+  bisque_find_assets: "Finding BisQue assets",
+  bisque_search_resources: "Searching your BisQue library",
+  create_bisque_dataset: "Creating a BisQue dataset",
+  edit_file: "Editing a file",
+  estimate_depth_depthpro: "Estimating depth",
+  execute: "Running code",
+  glob: "Looking through files",
+  grep: "Searching the files",
+  ls: "Looking through files",
+  read_file: "Reading a file",
+  resource_lookup: "Resolving your resources",
+  search_bisque_resources: "Searching your BisQue library",
+  search_resources: "Searching your resources",
+  stage_git_repo_for_analysis: "Cloning a repository",
+  stage_resource_for_analysis: "Staging a resource",
+  stage_uploaded_files_for_analysis: "Preparing your files",
+  write_file: "Writing a file",
+  yolo_detect: "Detecting objects",
 };
 
 const toRecord = (value: unknown): Record<string, unknown> | null => {
@@ -265,36 +277,62 @@ const buildStepItems = (
     });
   }
 
-  return items.slice(0, 12);
+  // Collapse repeated identical labels (e.g. two "Looking through files") into a
+  // single calm line, keeping first-seen order and the most recent status.
+  const deduped: ChatStepItem[] = [];
+  const indexByLabel = new Map<string, number>();
+  for (const item of items) {
+    const existingIndex = indexByLabel.get(item.label);
+    if (existingIndex === undefined) {
+      indexByLabel.set(item.label, deduped.length);
+      deduped.push(item);
+    } else {
+      deduped[existingIndex] = { ...deduped[existingIndex], status: item.status };
+    }
+  }
+
+  return deduped.slice(0, 12);
 };
 
 const renderStepIcon = (item: ChatStepItem) => {
   if (item.status === "running") {
-    return <Loader2 className="size-4 animate-spin" />;
+    return <Loader2 className="size-3.5 animate-spin" />;
   }
   if (item.status === "failed") {
-    return <CircleAlert className="size-4" />;
+    return <CircleAlert className="size-3.5" />;
   }
-  if (item.kind === "tool") {
-    return <Wrench className="size-4" />;
-  }
-  return <CheckCircle2 className="size-4" />;
+  return <Check className="size-3.5" />;
 };
+
+function StopAffordance({ onStop, stopLabel }: { onStop: () => void; stopLabel: string }) {
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        // The trigger wraps this row; don't toggle the steps when stopping.
+        event.stopPropagation();
+        onStop();
+      }}
+      className="text-muted-foreground hover:text-foreground border-muted-foreground/50 hover:border-foreground shrink-0 border-b border-dotted text-sm transition-colors"
+    >
+      {stopLabel}
+    </button>
+  );
+}
 
 export function ChatRunSteps({
   runEvents,
   progressEvents,
   isStreaming,
-  fallbackLabel,
+  statusText,
+  onStop,
+  stopLabel = "Stop",
   className,
 }: ChatRunStepsProps) {
   if (!isStreaming) {
     return null;
   }
   const stepItems = buildStepItems(runEvents, progressEvents);
-  if (stepItems.length === 0) {
-    return null;
-  }
 
   let activeItem: ChatStepItem | null = null;
   for (let index = stepItems.length - 1; index >= 0; index -= 1) {
@@ -305,82 +343,66 @@ export function ChatRunSteps({
   }
   const lastItem = stepItems[stepItems.length - 1] ?? null;
   const hasFailure = stepItems.some((item) => item.status === "failed");
-  const triggerText = String(
-    activeItem?.label || lastItem?.label || fallbackLabel || DEFAULT_THINKING_TEXT
+  const liveLabel = String(
+    activeItem?.label || statusText || lastItem?.label || DEFAULT_THINKING_TEXT
   ).trim();
+  const hasSteps = stepItems.length > 0;
 
+  const shimmer = <TextShimmer className="font-medium">{liveLabel}</TextShimmer>;
+
+  // No steps yet: a single calm shimmer line + Stop, no chevron.
+  if (!hasSteps) {
+    return (
+      <div className={cn("chat-run-steps flex w-full items-center justify-between gap-3", className)}>
+        {shimmer}
+        {onStop ? <StopAffordance onStop={onStop} stopLabel={stopLabel} /> : null}
+      </div>
+    );
+  }
+
+  // Steps exist: same calm line, now an expandable disclosure (collapsed by default).
   return (
     <Steps
-      defaultOpen
+      defaultOpen={false}
       className={cn("chat-run-steps w-full", className)}
       data-testid="chat-run-steps"
     >
-      <StepsTrigger
-        className="chat-run-steps-trigger text-left"
-        leftIcon={
-          isStreaming ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : hasFailure ? (
-            <CircleAlert className="size-4" />
-          ) : (
-            <Workflow className="size-4" />
-          )
-        }
-      >
-        {`Steps: ${triggerText}`}
-      </StepsTrigger>
+      <div className="flex w-full items-center justify-between gap-3">
+        <StepsTrigger className="w-auto min-w-0 flex-1">{shimmer}</StepsTrigger>
+        {onStop ? <StopAffordance onStop={onStop} stopLabel={stopLabel} /> : null}
+      </div>
       <StepsContent
         className="chat-run-steps-content"
         bar={
           <StepsBar
-            className={cn(
-              "ml-1.5 mr-2",
-              hasFailure
-                ? "bg-destructive/35"
-                : isStreaming
-                  ? "bg-primary/35"
-                  : "bg-muted"
-            )}
+            className={cn("ml-1.5 mr-2", hasFailure ? "bg-destructive/30" : "bg-muted")}
           />
         }
       >
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {stepItems.map((item) => (
             <StepsItem key={item.id} className="chat-run-step-item">
-              <div className="flex items-start gap-2">
+              <div className="flex items-center gap-2">
                 <span
                   className={cn(
-                    "mt-0.5 shrink-0",
+                    "shrink-0",
                     item.status === "failed"
-                      ? "text-destructive"
+                      ? "text-destructive/70"
                       : item.status === "running"
-                        ? "text-primary"
-                        : item.kind === "tool"
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : "text-foreground"
+                        ? "text-muted-foreground"
+                        : "text-muted-foreground/60"
                   )}
                 >
                   {renderStepIcon(item)}
                 </span>
-                <div className="min-w-0">
-                  <div
-                    className={cn(
-                      "text-sm leading-5",
-                      item.status === "failed"
-                        ? "text-destructive"
-                        : item.status === "running"
-                          ? "text-foreground"
-                          : "text-foreground/90"
-                    )}
-                  >
-                    {item.label}
-                  </div>
-                  {item.detail ? (
-                    <p className="text-muted-foreground mt-0.5 text-xs leading-5">
-                      {item.detail}
-                    </p>
-                  ) : null}
-                </div>
+                <span
+                  className={cn(
+                    "min-w-0 truncate text-sm leading-5",
+                    item.status === "running" ? "text-foreground/80" : "text-muted-foreground"
+                  )}
+                >
+                  {item.label}
+                </span>
               </div>
             </StepsItem>
           ))}

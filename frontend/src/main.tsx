@@ -5,7 +5,10 @@ import "@fontsource/inter/latin-ext.css";
 import "@fontsource/jetbrains-mono/latin.css";
 import "@fontsource/jetbrains-mono/latin-ext.css";
 import { App } from "./App";
+import { installGlobalErrorReporting, reportClientError } from "./lib/client-diagnostics";
 import "./styles.css";
+
+installGlobalErrorReporting();
 
 type RootElement = HTMLElement & {
   __bisqueUltraRoot?: ReturnType<typeof createRoot>;
@@ -32,10 +35,12 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
   }
 
   componentDidCatch(error: unknown, errorInfo: ErrorInfo): void {
-    // Avoid crashing the whole app on unexpected render errors.
-    if (import.meta.env.DEV) {
-      console.error("App render failure", error, errorInfo);
-    }
+    // Capture the real error (name + component stack) so a whole-app crash is
+    // diagnosable in production instead of only showing the generic screen.
+    reportClientError(error, {
+      source: "react-render",
+      componentStack: errorInfo.componentStack ?? undefined,
+    });
   }
 
   render(): ReactNode {

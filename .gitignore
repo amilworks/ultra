@@ -31,6 +31,8 @@ frontend/.playwright-cli/
 .worktrees/
 .viewer-cache/
 .codex-artifacts/
+*.ome.zarr/
+test-prairie/
 legacy/
 data/
 # but DO track the committed RareSpot parity golden (the gate the CI/parity test reads)

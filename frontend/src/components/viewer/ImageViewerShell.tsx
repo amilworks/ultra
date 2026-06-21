@@ -958,6 +958,16 @@ export function ImageViewerShell({
     if (axisSizes.T > 1) {
       dimensionDetails.push({ label: "Timepoints (T)", value: formatNumber(axisSizes.T) });
     }
+    // Time-lapse cadence (e.g. OME-Zarr "1 hour" every frame over "60 hours"). Backend
+    // formats the value + unit; shown next to the timepoint count.
+    const timeInterval = md.microscopy?.timelapse_interval;
+    if (axisSizes.T > 1 && timeInterval != null && String(timeInterval).trim()) {
+      dimensionDetails.push({ label: "Time interval", value: String(timeInterval) });
+    }
+    const timeDuration = md.microscopy?.total_time_duration;
+    if (axisSizes.T > 1 && timeDuration != null && String(timeDuration).trim()) {
+      dimensionDetails.push({ label: "Duration", value: String(timeDuration) });
+    }
     if (md.scene || md.scene_count > 1) {
       dimensionDetails.push({
         label: "Scenes",
@@ -1574,7 +1584,14 @@ export function ImageViewerShell({
           cacheKey: previewCacheKey,
         })
       : null;
-  const direct2dImageUrl = direct2dDisplayUrl ?? direct2dSliceUrl;
+  // OME-Zarr (ngff) renders the 2D plane natively via the t/z-aware /slice — its /display is
+  // the same omero-aware render but t-agnostic, so a time-lapse/z-stack would freeze on one
+  // frame. Driving the slice URL makes the main plane track the time/z scrubber. libbioimage
+  // keeps its optimized /display.
+  const direct2dImageUrl =
+    viewerInfo.metadata.reader === "ngff"
+      ? direct2dSliceUrl
+      : (direct2dDisplayUrl ?? direct2dSliceUrl);
   const direct2dPreviewUrl = apiClient.uploadPreviewUrl(viewerInfo.file_id);
   const canUseDeepZoom2D =
     !viewerInfo.is_volume &&

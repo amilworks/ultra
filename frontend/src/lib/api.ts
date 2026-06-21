@@ -130,6 +130,7 @@ import type {
   UploadViewerHistogramResponse,
   UploadViewerInfo,
   UploadChunkResponse,
+  UploadedFileRecord,
   UploadFilesResponse,
   UploadSessionCreateRequest,
   UploadSessionFileCompleteResponse,
@@ -2874,6 +2875,21 @@ export class ApiClient {
     return (await response.json()) as UploadSessionFileCompleteResponse;
   }
 
+  // Commit directory-format bundles (OME-Zarr folder uploads) after all member files have
+  // completed: the server reconstructed the tree under bundles/{id} and finalize-bundle
+  // creates ONE catalog resource per bundle. Returns the bundle resources.
+  private async finalizeUploadBundle(sessionId: string): Promise<UploadedFileRecord[]> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/upload-sessions/${encodeURIComponent(sessionId)}/finalize-bundle`),
+      { method: "POST", headers: this.headers(), credentials: "include" }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    const data = (await response.json()) as { bundles?: UploadedFileRecord[] };
+    return data.bundles ?? [];
+  }
+
   private async buildV2UploadFilePlan(file: File, fileIndex: number): Promise<V2UploadFilePlan> {
     const fileToken = await this.uploadFileToken(file, fileIndex);
     const fingerprint = await this.fileFingerprint(file);
@@ -2987,6 +3003,16 @@ export class ApiClient {
       };
       const workerCount = Math.min(uploadSessionMaxParallelFiles(state), plans.length);
       await Promise.all(Array.from({ length: workerCount }, () => uploadNextFile()));
+      // Directory-format bundles (OME-Zarr folder upload): the per-member completes wrote
+      // into a bundle tree but created no per-file resources — finalize commits ONE resource
+      // per bundle and we return those instead of the N member stubs.
+      const bundleMap = state.session.metadata?.bundles;
+      if (bundleMap && typeof bundleMap === "object" && Object.keys(bundleMap as Record<string, unknown>).length > 0) {
+        const bundles = await this.finalizeUploadBundle(sessionId);
+        if (bundles.length > 0) {
+          return { file_count: bundles.length, uploaded: bundles };
+        }
+      }
       return { file_count: uploaded.length, uploaded };
     } catch (error) {
       const pausedError =

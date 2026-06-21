@@ -19,6 +19,7 @@ import {
   ChatContainerScrollAnchor,
   FileUpload,
   FileUploadTrigger,
+  FileUploadFolderTrigger,
   Loader,
   MarkdownResponseStream,
   Message,
@@ -84,6 +85,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
+import { groupPendingUploads } from "./lib/pendingBundles";
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
@@ -245,6 +247,7 @@ import {
   Copy,
   Database,
   FolderOpen,
+  FolderUp,
   ImageIcon,
   Images,
   Laptop,
@@ -10341,21 +10344,27 @@ export function App() {
   const viewerBisqueLinksByFileId =
     resourceViewerContext?.bisqueLinksByFileId ?? activeBisqueLinksByFileId;
 
-  const pendingPreviewFiles = useMemo(
-    () =>
-      activePendingFiles.map((file, index) => {
-        const canPreviewInBrowser = supportsBrowserPreview(file.name, file.type);
-        return {
-          key: `${file.name}-${file.size}-${file.lastModified}-${index}`,
-          name: file.name,
-          sizeLabel: formatBytes(file.size),
-          canPreviewInBrowser,
-          isScientific: isScientificUpload(file.name),
-          objectUrl: canPreviewInBrowser ? URL.createObjectURL(file) : null,
-        };
-      }),
-    [activePendingFiles]
-  );
+  const pendingPreviewFiles = useMemo(() => {
+    // Collapse a folder-picked directory format (OME-Zarr: many member files sharing a
+    // `*.zarr` top segment) into ONE chip — the backend commits them as one bundle resource.
+    return groupPendingUploads(activePendingFiles).map((group) => {
+      const firstFile = activePendingFiles[group.indices[0]];
+      const canPreviewInBrowser =
+        !group.isBundle && firstFile ? supportsBrowserPreview(firstFile.name, firstFile.type) : false;
+      return {
+        key: group.isBundle ? `bundle:${group.name}` : `${group.name}-${group.totalBytes}-${group.indices[0]}`,
+        name: group.name,
+        sizeLabel: group.isBundle
+          ? `${group.indices.length} files · ${formatBytes(group.totalBytes)}`
+          : formatBytes(group.totalBytes),
+        canPreviewInBrowser,
+        isScientific: group.isBundle || (firstFile ? isScientificUpload(firstFile.name) : false),
+        isBundle: group.isBundle,
+        objectUrl: canPreviewInBrowser && firstFile ? URL.createObjectURL(firstFile) : null,
+        indices: group.indices,
+      };
+    });
+  }, [activePendingFiles]);
 
   useEffect(() => {
     return () => {
@@ -14464,6 +14473,7 @@ export function App() {
                   }))
                 }
                 multiple
+                allowDirectories
               >
                 <PromptInput
                   isLoading={activeSending || !activeConversationHydrated}
@@ -14605,7 +14615,7 @@ export function App() {
                           </Button>
                         </div>
                         <div className="composer-preview-row">
-                          {pendingPreviewFiles.map((file, index) => (
+                          {pendingPreviewFiles.map((file) => (
                             <article key={file.key} className="composer-preview-card">
                               {file.objectUrl ? (
                                 <img
@@ -14615,7 +14625,7 @@ export function App() {
                                 />
                               ) : (
                                 <div className="composer-preview-fallback">
-                                  {file.isScientific ? "BIO" : "FILE"}
+                                  {file.isBundle ? "ZARR" : file.isScientific ? "BIO" : "FILE"}
                                 </div>
                               )}
                               <div className="composer-preview-meta">
@@ -14628,14 +14638,15 @@ export function App() {
                                 size="icon-xs"
                                 className="composer-preview-remove"
                                 aria-label={`Remove ${file.name}`}
-                                onClick={() =>
+                                onClick={() => {
+                                  const removeIndices = new Set(file.indices);
                                   updateActiveConversation((conversation) => ({
                                     ...conversation,
                                     pendingFiles: conversation.pendingFiles.filter(
-                                      (_, itemIndex) => itemIndex !== index
+                                      (_, itemIndex) => !removeIndices.has(itemIndex)
                                     ),
-                                  }))
-                                }
+                                  }));
+                                }}
                               >
                                 <X className="size-3.5" />
                               </Button>
@@ -14795,6 +14806,20 @@ export function App() {
                               <Plus size={18} />
                             </Button>
                           </FileUploadTrigger>
+                        </PromptInputAction>
+                        <PromptInputAction tooltip="Attach folder (OME-Zarr)">
+                          <FileUploadFolderTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label="Attach folder"
+                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
+                              disabled={!activeConversationHydrated}
+                            >
+                              <FolderUp size={18} />
+                            </Button>
+                          </FileUploadFolderTrigger>
                         </PromptInputAction>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>

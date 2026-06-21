@@ -3,7 +3,7 @@ export {
   ChatContainerRoot,
   ChatContainerScrollAnchor,
 } from "./chat-container";
-export { FileUpload, FileUploadContent, FileUploadTrigger } from "./file-upload";
+export { FileUpload, FileUploadContent, FileUploadTrigger, FileUploadFolderTrigger } from "./file-upload";
 export { CircularLoader, Loader } from "./loader";
 export {
   Message,

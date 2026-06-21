@@ -310,24 +310,30 @@ class LibBioImageEngine:
     def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
         meta = self._bim.meta(path, self._cache)
         paged = z is not None and t is None and viewerinfo.paged_depth(meta)
-        # A transient z-scrub frame (full_resolution=False, no explicit level) only
-        # needs to fill the viewport, so read a bounded pyramid level — far less to
-        # decode/transfer. The settled view (full_resolution=True) reads native, so
-        # measurements/pixel readouts stay on the true plane grid. Sub-viewport
-        # planes return None here and stay native.
-        if level is None and not full_resolution:
-            try:
-                level = _thumbnail_level_for_meta(dict(meta), SCRUB_MAX_DIMENSION)
-            except Exception:  # noqa: BLE001 - level selection is best-effort; native is the safe fallback
-                level = None
+        # A transient z-scrub frame (full_resolution=False) only needs to fill the
+        # viewport. Two complementary bounds keep it fast: read a bounded pyramid
+        # level when one exists, AND cap the long edge. The level alone is a no-op on
+        # a non-pyramidal source (a flat z-stack stays at level 0, so the full plane
+        # is decoded/encoded/transferred — measured no faster than full_resolution);
+        # the long-edge cap makes scrub fast for *any* source (a 2048² plane drops
+        # from ~4MB/0.47s to ~0.8MB/0.13s). The settled view (full_resolution=True)
+        # reads native, so measurements/pixel readouts stay on the true plane grid.
+        scrub_max_dim = None
+        if not full_resolution:
+            if level is None:
+                try:
+                    level = _thumbnail_level_for_meta(dict(meta), SCRUB_MAX_DIMENSION)
+                except Exception:  # noqa: BLE001 - level selection is best-effort; native is the safe fallback
+                    level = None
+            scrub_max_dim = SCRUB_MAX_DIMENSION
         out_depth = pipelines.DEPTH_SCALAR_F32 if colors else self._display_out_depth(path)
         # A paged z-stack (plain multi-page TIFF, etc.) addresses planes by page,
         # not by -slice z:N (which would return the first plane every time). When a
         # bare z is requested and the file is page-based, read that page directly.
         if paged:
-            pipeline = pipelines.page_plane(z, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth)
+            pipeline = pipelines.page_plane(z, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth, max_dim=scrub_max_dim)
         else:
-            pipeline = pipelines.slice_plane(z=z, t=t, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth)
+            pipeline = pipelines.slice_plane(z=z, t=t, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth, max_dim=scrub_max_dim)
         if colors:
             return self._render_fused(path, pipeline, colors, windows)
         return self._render(path, pipeline)

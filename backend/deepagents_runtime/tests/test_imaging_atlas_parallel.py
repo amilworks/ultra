@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
-
 from ultra_deepagents.imaging.atlas import assemble_atlas, compose_atlas_png  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")

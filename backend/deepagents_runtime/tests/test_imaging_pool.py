@@ -10,7 +10,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest  # noqa: E402
-
 from ultra_deepagents.imaging.pool import ImagePool  # noqa: E402
 
 pytest.importorskip("PIL")  # the StubEngine worker needs Pillow

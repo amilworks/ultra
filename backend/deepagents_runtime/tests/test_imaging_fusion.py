@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from ultra_deepagents.imaging import fusion
 
 
@@ -88,7 +87,6 @@ def test_parse_fusion_request_gates_and_aligns():
 def test_service_threads_channels_and_colors():
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
-
     from ultra_deepagents.imaging.pool import InlineRunner
     from ultra_deepagents.imaging.service import create_app
 

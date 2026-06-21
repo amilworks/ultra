@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -92,6 +93,29 @@ func clearPyramidFailureMarker(root, fileID string) {
 	_ = os.Remove(derivedPyramidFailedMarkerPath(root, fileID))
 }
 
+// imageServiceStatusError carries the HTTP status of a non-200 image-service
+// response so callers can distinguish "the engine recognized the file but cannot
+// decode it" (415/422 — a permanent, format-level failure) from a transport error
+// or sidecar outage (which should fall back to the legacy native path instead).
+type imageServiceStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *imageServiceStatusError) Error() string { return e.msg }
+
+// imageServiceUndecodable reports whether err is an image-service response that
+// means the source format cannot be decoded by this engine build (HTTP 415/422),
+// as opposed to a dial/timeout error. build_viewer_info raises (-> 415) on a file
+// with no pixel geometry, and the convert/render path returns 422 for the same.
+func imageServiceUndecodable(err error) bool {
+	var se *imageServiceStatusError
+	if errors.As(err, &se) {
+		return se.status == http.StatusUnsupportedMediaType || se.status == http.StatusUnprocessableEntity
+	}
+	return false
+}
+
 // imageServiceGetJSON fetches and decodes a JSON object from the image service.
 func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string, query url.Values) (map[string]any, error) {
 	base := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/")
@@ -110,7 +134,10 @@ func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string,
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("image service %s -> %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &imageServiceStatusError{
+			status: resp.StatusCode,
+			msg:    fmt.Sprintf("image service %s -> %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body))),
+		}
 	}
 	var out map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -173,9 +200,57 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	}
 	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
-		// Graceful fallback to the legacy native viewer on any sidecar error.
+		// The engine recognized the file but cannot decode it (415/422): a permanent,
+		// format-level failure (e.g. a Leica .lif — registered but non-functional in
+		// this libbioimage build). The legacy native Go viewer supports only a small
+		// raster subset, so probe whether it can produce a real plane; if not, surface
+		// an explicit "unsupported" descriptor so the viewer shows a clear message +
+		// download instead of a broken 1x1 canvas with an endless spinner.
+		if imageServiceUndecodable(err) {
+			// A bioio transcode->pyramid may already exist for this source (the convert
+			// worker reads LIF/etc. via bioio and writes an OME-TIFF pyramid libbioimage
+			// CAN serve). The source itself is undecodable, so drive the viewer off the
+			// derived pyramid's metadata.
+			if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+				if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
+					injectControlPlaneViewerFields(pcore, record)
+					writeJSON(w, http.StatusOK, pcore)
+					return
+				}
+			}
+			// No pyramid yet. The legacy native Go viewer reads only a small raster
+			// subset; if it can produce a real plane, use it.
+			if info := uploadImageDescriptorForPath(path, record.ContentType); info.Width >= 2 && info.Height >= 2 {
+				deps.handleGetUploadViewer(w, r)
+				return
+			}
+			// Kick off a bioio transcode->pyramid conversion so a later open renders it
+			// (bypassing the extension allowlist — the engine already recognized but
+			// couldn't decode this image, e.g. a series-suffixed ".lif_15" name), and
+			// meanwhile show a calm "preview unavailable" card.
+			deps.enqueuePyramidDerivation(r.Context(), root, record, path, "transcode")
+			deps.writeUnsupportedFormatViewer(w, record)
+			return
+		}
+		// Transport error / sidecar outage: graceful fallback to the legacy native viewer.
 		deps.handleGetUploadViewer(w, r)
 		return
+	}
+	// .czi / .zarr are preferentially read by bioio (the convert worker transcodes them to
+	// an OME-TIFF pyramid). libbioimage CAN decode a .czi, but renders Zeiss mosaics
+	// blocky/unstitched, so when the bioio pyramid exists drive the viewer entirely off it
+	// — its geometry/channels then match the pixels /slice and /thumbnail serve from that
+	// same pyramid. If it isn't converted yet, kick off the (preferred) derivation.
+	if prefersBioioReader(record.OriginalName) {
+		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+			if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
+				injectControlPlaneViewerFields(pcore, record)
+				writeJSON(w, http.StatusOK, pcore)
+				return
+			}
+		} else {
+			deps.enqueuePyramidDerivation(r.Context(), root, record, path, "prefer-bioio")
+		}
 	}
 	// A slice_stack volume (microscopy z-stack) derives to an OME-BigTIFF whose
 	// embedded -tile reader is broken (the OME wrapper); it serves 3D via /atlas
@@ -201,6 +276,40 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	}
 	injectControlPlaneViewerFields(core, record)
 	writeJSON(w, http.StatusOK, core)
+}
+
+// writeUnsupportedFormatViewer emits an explicit "this engine build cannot decode
+// this format" viewer descriptor. It returns HTTP 200 (not an error) so the frontend
+// receives structured fields — kind:"unsupported", decodable:false, the format, and a
+// download URL — and can render a calm "preview unavailable, download instead" card
+// rather than a broken 1x1 canvas stuck on "Loading…". axis_sizes is kept (zeroed) so
+// existing viewer-info parsers that read it unconditionally don't choke.
+func (deps ServerDeps) writeUnsupportedFormatViewer(w http.ResponseWriter, record resourceRecord) {
+	fileIDSegment := url.PathEscape(record.FileID)
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(record.OriginalName)), ".")
+	label := strings.ToUpper(ext)
+	if label == "" {
+		label = "this format"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"kind":          "unsupported",
+		"decodable":     false,
+		"file_id":       record.FileID,
+		"original_name": record.OriginalName,
+		"format":        ext,
+		"modality":      "image",
+		"backend_mode":  "none",
+		"dims_order":    "YX",
+		"axis_sizes":    map[string]int{"T": 1, "C": 1, "Z": 1, "Y": 0, "X": 0},
+		"selected_indices": map[string]int{"T": 0, "C": 0, "Z": 0},
+		"is_volume":        false,
+		"is_timeseries":    false,
+		"is_multichannel":  false,
+		"service_urls": map[string]any{
+			"download": "/v2/resources/" + fileIDSegment + "/download",
+		},
+		"message": fmt.Sprintf("%s files can't be previewed by the image engine yet. Download the original to open it in a desktop tool.", label),
+	})
 }
 
 // handleServeUploadSliceService backs /slice with a real libbioimage plane read
@@ -550,9 +659,27 @@ func hasPyramidMicroscopyExtension(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	for _, ext := range []string{
 		".czi", ".nd2", ".lsm", ".lif", ".oib", ".oif", ".vsi",
-		".scn", ".svs", ".ndpi", ".sld", ".ims", ".zvi", ".ipl", ".dv",
+		".scn", ".svs", ".ndpi", ".sld", ".ims", ".zvi", ".ipl",
+		".dv", ".r3d", ".mrc", ".sldy", // DeltaVision/MRC + 3i SlideBook (bioio plugins)
 	} {
-		if strings.HasSuffix(lower, ext) {
+		// Match a clean extension AND a series/page-suffixed export name (some tools
+		// write "scan.lif_15" for series 15) so those still derive a pyramid at upload.
+		if strings.HasSuffix(lower, ext) || strings.Contains(lower, ext+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+// prefersBioioReader reports whether a resource's format should be read via bioio (the
+// convert worker transcodes it to a pyramid) in preference to libbioimage's native read:
+// Zeiss .czi, where libbioimage renders mosaics blocky/unstitched. Mirrors the Python
+// PREFER_BIOIO_EXTENSIONS default in imaging/job.py. (.zarr is deferred until bioio-ome-zarr
+// is installed and OME-Zarr directory uploads are supported.)
+func prefersBioioReader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, ext := range []string{".czi"} {
+		if strings.HasSuffix(lower, ext) || strings.Contains(lower, ext+"_") {
 			return true
 		}
 	}
@@ -642,10 +769,21 @@ func (deps ServerDeps) maybeEnqueuePyramidDerivation(ctx context.Context, root s
 // the old fire-and-forget enqueue, a failed publish is logged (an operator can see
 // the drop) and left un-throttled-past-the-window so continued viewing retries it.
 func (deps ServerDeps) ensurePyramidDerivation(ctx context.Context, root string, record resourceRecord, path, trigger string) {
-	if deps.DataAgentJobs == nil || !deps.imageServiceConfigured() {
+	if !shouldDerivePyramid(record) {
 		return
 	}
-	if !shouldDerivePyramid(record) {
+	deps.enqueuePyramidDerivation(ctx, root, record, path, trigger)
+}
+
+// enqueuePyramidDerivation is ensurePyramidDerivation WITHOUT the format-eligibility
+// gate: it still no-ops when the queue/image service is absent, a pyramid already
+// exists, a recent derivation permanently failed, or one was enqueued recently. The
+// undecodable-source viewer path uses it to request a bioio transcode->pyramid for a
+// format libbioimage can't read (which shouldDerivePyramid's extension allowlist may
+// not list — e.g. a series-suffixed ".lif_15"), since the engine has already proven it
+// recognized-but-couldn't-decode the image.
+func (deps ServerDeps) enqueuePyramidDerivation(ctx context.Context, root string, record resourceRecord, path, trigger string) {
+	if deps.DataAgentJobs == nil || !deps.imageServiceConfigured() {
 		return
 	}
 	if derivedPyramidPath(root, record.FileID) != "" {

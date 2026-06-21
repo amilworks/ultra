@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,62 @@ backend: Agg
 figure.dpi: 300
 savefig.dpi: 300
 """
+
+# EX_TEMPFAIL: the sandbox is saturated but the request itself is fine — the caller
+# (the model, or a retry) may try again shortly. Distinct from a real failure exit.
+_SANDBOX_BUSY_EXIT_CODE = 75
+
+# Process-wide admission control for sandbox containers. A single worker runs up to
+# worker_max_concurrency (default 64) runs at once, and each run can launch a code-exec
+# container; with N worker replicas pointed at ONE Docker daemon the in-flight container
+# count is N x that. Without a shared ceiling, a burst of (by default unbounded-memory)
+# sandboxes can OOM the host. This semaphore bounds simultaneous `docker run`s per worker
+# PROCESS, so it is the guard to set before running multiple workers against one daemon.
+# 0 (the default) disables it, leaving single-worker behaviour unchanged. Mirrors the
+# git-clone semaphore in git_staging.py.
+_sandbox_slot_lock = threading.Lock()
+_sandbox_semaphore: threading.BoundedSemaphore | None = None
+_sandbox_semaphore_ready = False
+
+
+def _sandbox_max_concurrency_from_env() -> int:
+    try:
+        return max(0, int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY", "0")))
+    except ValueError:
+        return 0
+
+
+def _sandbox_queue_timeout_seconds() -> float:
+    """How long execute() waits for a free slot before returning a retryable busy
+    result. Bounded so a saturated cap can never block a worker thread forever; <=0
+    waits indefinitely (only safe when execute runs on a dedicated, not shared, pool)."""
+    try:
+        return max(0.0, float(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_QUEUE_TIMEOUT_SECONDS", "120")))
+    except ValueError:
+        return 120.0
+
+
+def _get_sandbox_semaphore() -> threading.BoundedSemaphore | None:
+    """Lazily build the process-wide sandbox semaphore from the env (None = disabled).
+
+    Built once and cached so every per-run DockerSandboxBackend shares one ceiling.
+    """
+    global _sandbox_semaphore, _sandbox_semaphore_ready
+    if not _sandbox_semaphore_ready:
+        with _sandbox_slot_lock:
+            if not _sandbox_semaphore_ready:
+                limit = _sandbox_max_concurrency_from_env()
+                _sandbox_semaphore = threading.BoundedSemaphore(limit) if limit > 0 else None
+                _sandbox_semaphore_ready = True
+    return _sandbox_semaphore
+
+
+def _reset_sandbox_semaphore_for_tests() -> None:
+    """Test-only: drop the cached semaphore so the next call re-reads the env."""
+    global _sandbox_semaphore, _sandbox_semaphore_ready
+    with _sandbox_slot_lock:
+        _sandbox_semaphore = None
+        _sandbox_semaphore_ready = False
 
 
 @dataclass(frozen=True)
@@ -185,45 +242,69 @@ class DockerSandboxBackend(BaseSandbox):
         # docker process on expiry (exit 124, recoverable) — instead of awaiting forever.
         _ = timeout
         timeout_seconds = self.config.timeout_seconds
+
+        # Aggregate, process-wide admission control: when an operator sets a cap
+        # (ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY > 0) bound how many sandbox
+        # containers this worker can have in flight at once. Acquire BEFORE launching,
+        # release in finally, and fail fast with a retryable busy result rather than
+        # blocking a worker thread forever when the cap is saturated.
+        semaphore = _get_sandbox_semaphore()
+        acquired = False
+        if semaphore is not None:
+            queue_timeout = _sandbox_queue_timeout_seconds()
+            acquired = semaphore.acquire(timeout=queue_timeout if queue_timeout > 0 else None)
+            if not acquired:
+                return ExecuteResponse(
+                    output=(
+                        "Sandbox is at capacity: the per-worker concurrency cap "
+                        "(ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY) is full. No code was "
+                        "run; retry shortly."
+                    ),
+                    exit_code=_SANDBOX_BUSY_EXIT_CODE,
+                )
         try:
-            completed = subprocess.run(
-                self.build_docker_command(command),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds if timeout_seconds > 0 else None,
-                check=False,
-            )
-        except FileNotFoundError:
-            return ExecuteResponse(output="Docker executable not found.", exit_code=127)
-        except subprocess.TimeoutExpired as exc:
-            output = _combine_output(exc.stdout, exc.stderr)
-            truncated_output, truncated = _truncate_output(
-                f"Command timed out after {timeout_seconds} seconds.\n{output}",
+            try:
+                completed = subprocess.run(
+                    self.build_docker_command(command),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds if timeout_seconds > 0 else None,
+                    check=False,
+                )
+            except FileNotFoundError:
+                return ExecuteResponse(output="Docker executable not found.", exit_code=127)
+            except subprocess.TimeoutExpired as exc:
+                output = _combine_output(exc.stdout, exc.stderr)
+                truncated_output, truncated = _truncate_output(
+                    f"Command timed out after {timeout_seconds} seconds.\n{output}",
+                    self.config.output_limit_bytes,
+                )
+                return ExecuteResponse(
+                    output=truncated_output,
+                    exit_code=124,
+                    truncated=truncated,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                # A host-level launch failure (PermissionError on the docker binary,
+                # ENOMEM/EAGAIN on fork, etc.) must surface as a structured result the
+                # model can react to, not an unhandled graph error.
+                return ExecuteResponse(
+                    output=f"Sandbox launch failed: {exc}",
+                    exit_code=127,
+                )
+
+            output, truncated = _truncate_output(
+                _combine_output(completed.stdout, completed.stderr),
                 self.config.output_limit_bytes,
             )
             return ExecuteResponse(
-                output=truncated_output,
-                exit_code=124,
+                output=output,
+                exit_code=completed.returncode,
                 truncated=truncated,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            # A host-level launch failure (PermissionError on the docker binary,
-            # ENOMEM/EAGAIN on fork, etc.) must surface as a structured result the
-            # model can react to, not an unhandled graph error.
-            return ExecuteResponse(
-                output=f"Sandbox launch failed: {exc}",
-                exit_code=127,
-            )
-
-        output, truncated = _truncate_output(
-            _combine_output(completed.stdout, completed.stderr),
-            self.config.output_limit_bytes,
-        )
-        return ExecuteResponse(
-            output=output,
-            exit_code=completed.returncode,
-            truncated=truncated,
-        )
+        finally:
+            if acquired:
+                semaphore.release()
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         responses: list[FileUploadResponse] = []

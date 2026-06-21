@@ -72,7 +72,10 @@ def _resolve_auto_fmt(meta: dict[str, Any] | None) -> str:
     t = _meta_int(meta, "image_num_t", 1)
     c = _meta_int(meta, "image_num_c", 1)
     pages = _meta_int(meta, "image_num_p", 1)
-    is_volume = z > 1 or (pages > 1 and c <= 1 and t <= 1)
+    # A z-stack, a TIME-LAPSE (t>1), or a paged stack all need OME-BigTIFF so the extra
+    # dimension survives — plain BigTIFF flattens it to one plane (a time-lapse would
+    # otherwise collapse to a single frame).
+    is_volume = z > 1 or t > 1 or (pages > 1 and c <= 1 and t <= 1)
     return "ome-bigtiff" if is_volume else "bigtiff"
 
 

@@ -4251,6 +4251,9 @@ def test_worker_fetches_new_jobs_while_previous_job_is_still_running(monkeypatch
             async def _ensure_stream(self, _js):
                 pass
 
+            async def _reap_sandbox_containers_once(self):
+                pass
+
             async def _subscribe(self, _js):
                 return self.connection.subscription
 
@@ -4332,6 +4335,9 @@ def test_worker_shutdown_naks_active_job_without_marking_user_canceled(monkeypat
             async def _ensure_stream(self, _js):
                 pass
 
+            async def _reap_sandbox_containers_once(self):
+                pass
+
             async def _subscribe(self, _js):
                 return self.connection.subscription
 
@@ -4385,6 +4391,9 @@ def test_worker_registers_async_cancel_subscription_callback(monkeypatch):
 
         class SubscribeWorker(NATSDeepAgentsWorker):
             async def _ensure_stream(self, _js):
+                pass
+
+            async def _reap_sandbox_containers_once(self):
                 pass
 
             async def _subscribe(self, _js):

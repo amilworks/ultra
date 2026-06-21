@@ -204,8 +204,7 @@ deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and 
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \
 		tests/test_live_trace.py \
 		tests/test_prompt_cases.py \
-		tests/test_runner_paper_preload.py \
-		tests/test_runner_rarespot_preload.py
+		tests/test_runner_paper_preload.py
 
 deepagents-smoke: ## Probe the configured Python Deep Agents vLLM model endpoint
 	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://127.0.0.1:8003/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke

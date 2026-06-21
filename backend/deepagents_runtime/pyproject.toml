@@ -91,6 +91,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ultra_deepagents"]
 
+# Ship the agent skills (SKILL.md protocols) INSIDE the wheel so a pip-installed
+# worker (the containerized deployment) finds them next to the package — otherwise
+# resolve_skills_root falls back to a source-tree path that does not exist in
+# site-packages and the agent silently runs with no skills.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "ultra_deepagents/skills"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

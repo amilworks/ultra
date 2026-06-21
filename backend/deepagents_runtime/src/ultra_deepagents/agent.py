@@ -1258,13 +1258,18 @@ def resolve_skills_root(settings: RuntimeSettings) -> Path | None:
     """
     if settings.skills_root.strip():
         root = Path(settings.skills_root).expanduser()
-    else:
-        root = Path(__file__).resolve().parents[2] / "skills"
-    if not root.is_dir():
+        if root.is_dir() and any(root.glob("*/SKILL.md")):
+            return root
         return None
-    if not any(root.glob("*/SKILL.md")):
-        return None
-    return root
+    candidates = [
+        Path(__file__).resolve().parent / "skills",  # shipped inside the wheel (site-packages)
+        Path(__file__).resolve().parents[2] / "skills",  # editable / source checkout (src/ layout)
+        Path("/app/deepagents_runtime/skills"),  # container build-context copy (belt-and-suspenders)
+    ]
+    for root in candidates:
+        if root.is_dir() and any(root.glob("*/SKILL.md")):
+            return root
+    return None
 
 
 def resolve_org_policies_root(settings: RuntimeSettings, org_id: str | None) -> Path:

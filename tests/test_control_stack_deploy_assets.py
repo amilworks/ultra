@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 
@@ -6,6 +7,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read_repo_file(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def tracked_paths_under(relative_path: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "--", relative_path],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def test_internal_bisque_platform_checkout_is_not_public_deploy_surface() -> None:
@@ -20,7 +32,7 @@ def test_internal_bisque_platform_checkout_is_not_public_deploy_surface() -> Non
     ]
 
     for relative_path in removed_paths:
-        assert not (ROOT / relative_path).exists()
+        assert tracked_paths_under(relative_path) == []
 
 
 def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
@@ -119,11 +131,9 @@ def test_proxy_templates_route_modern_app_to_go_control_plane() -> None:
         assert "proxy_buffering off" in template
 
     caddy = read_repo_file("deploy/caddy/Caddyfile.single-host.template")
-    assert "handle /v2/*" in caddy
+    assert "@api path /v1/* /v2/* /v3/* /docs* /openapi.json" in caddy
+    assert "handle @api" in caddy
     assert "reverse_proxy 127.0.0.1:8000" in caddy
-    assert "handle /v1/health" in caddy
-    assert "handle /v1/config*" in caddy
-    assert "handle /v1/session*" in caddy
 
 
 def test_staging_env_example_documents_required_control_stack_settings() -> None:

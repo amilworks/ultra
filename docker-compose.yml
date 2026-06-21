@@ -31,7 +31,11 @@ services:
 
   nats:
     image: nats:2.10-alpine
-    command: ["-js", "-m", "8222"]
+    # -sd persists JetStream to a named volume so durable run/job state survives
+    # `docker compose down` (without a store dir + volume it is lost on restart).
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - ultra-nats:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 5s
@@ -42,6 +46,10 @@ services:
     build:
       context: backend/deepagents_runtime
       dockerfile: Dockerfile.imaging
+      args:
+        # Pin to a known-good BioImageConvert commit for reproducible builds; the
+        # upstream default branch can drift. Override BIOIMAGE_REF in .env.docker.
+        BIOIMAGE_REF: ${BIOIMAGE_REF:-main}
     image: ultra-image-service:local
     platform: linux/amd64 # the libbioimage engine is x86/SSE (emulated on arm64)
     volumes:
@@ -70,6 +78,32 @@ services:
       image-service:
         condition: service_started
 
+  # OME-Zarr (NGFF) native serving — a stateless sibling to image-service, purpose-built
+  # for chunked multiscale zarr (blosc/zstd decode releases the GIL → thread-scalable; no
+  # Java/libbioimage, ~480MB). The control plane routes .ome.zarr resources here; it serves
+  # only the visible tiles/chunks so a 1 TB store is never fully read. Scale horizontally on
+  # the 128-core serving tier (docker compose up --scale ngff-service=N behind a local LB, or
+  # systemd ngff-service@.service replicas) — it is stateless and shares the upload volume.
+  ngff-service:
+    build:
+      context: backend/deepagents_runtime
+      dockerfile: Dockerfile.ngff
+    image: ultra-ngff-service:local
+    environment:
+      ULTRA_NGFF_WORKERS: "${ULTRA_NGFF_WORKERS:-2}"
+      # Decoded-plane cache (application chunk cache, layered above the OS page cache).
+      ULTRA_NGFF_DECODE_CACHE_BYTES: "${ULTRA_NGFF_DECODE_CACHE_BYTES:-268435456}"
+      ULTRA_NGFF_TILE_THRESHOLD: "${ULTRA_NGFF_TILE_THRESHOLD:-2048}"
+    volumes:
+      - ultra-uploads:/data/uploads
+    ports:
+      - "${NGFF_SERVICE_PORT:-8092}:8091"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8091/healthz').status==200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
   # Build-only: the worker runs this image (execute_python) via the host Docker
   # daemon, so it just needs to exist + be tagged. It builds on `up --build`, then
   # exits. Heavy (~9GB scientific Python). Skip with: docker compose up --scale codeexec-sandbox=0
@@ -94,6 +128,7 @@ services:
       # (see ULTRA_DATA_DIR note in the worker service).
       ULTRA_CONTROL_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
       ULTRA_CONTROL_IMAGE_SERVICE_URL: http://image-service:8090
+      ULTRA_CONTROL_NGFF_SERVICE_URL: ${ULTRA_CONTROL_NGFF_SERVICE_URL:-http://ngff-service:8091}
       ULTRA_CONTROL_AUTH_PROVIDER: ${ULTRA_AUTH_PROVIDER:-dev}
       ULTRA_CONTROL_DEV_ADMIN_ENABLED: "true"
       ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
@@ -108,6 +143,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      ngff-service:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health"]
       interval: 5s
@@ -140,6 +177,24 @@ services:
       # ULTRA_DATA_DIR host-bind below (not a named volume).
       ULTRA_DEEPAGENTS_SANDBOX_IMAGE: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
       ULTRA_DEEPAGENTS_SANDBOX_NETWORK: ${ULTRA_SANDBOX_NETWORK:-none}
+      # Aggregate per-worker cap on simultaneous sandbox containers. 0 = unbounded
+      # (fine for ONE worker). Set a finite value BEFORE `make scale-workers N=...`
+      # so N workers cannot oversubscribe this single host's Docker daemon.
+      ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY: ${ULTRA_SANDBOX_MAX_CONCURRENCY:-0}
+      ULTRA_DEEPAGENTS_SANDBOX_QUEUE_TIMEOUT_SECONDS: ${ULTRA_SANDBOX_QUEUE_TIMEOUT_SECONDS:-120}
+      # Per-container resource caps (empty = Docker default). Set a memory cap when
+      # scaling workers so one runaway sandbox cannot OOM the shared host.
+      ULTRA_DEEPAGENTS_SANDBOX_MEMORY: ${ULTRA_SANDBOX_MEMORY:-}
+      ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE: ${ULTRA_SANDBOX_SHM_SIZE:-}
+      # Optional external vision VLM — off unless ULTRA_QWEN_VLM_ENABLED=true and a
+      # reachable endpoint/key are set in .env.docker (we never host this GPU).
+      QWEN_VLM_ENABLED: ${ULTRA_QWEN_VLM_ENABLED:-false}
+      QWEN_VLM_BASE_URL: ${ULTRA_QWEN_VLM_BASE_URL:-}
+      QWEN_VLM_MODEL: ${ULTRA_QWEN_VLM_MODEL:-}
+      QWEN_VLM_API_KEY: ${ULTRA_QWEN_VLM_API_KEY:-}
+      # Optional external GPU MegaSeg inference service — off unless a URL is set.
+      MEGASEG_SERVICE_URL: ${ULTRA_MEGASEG_SERVICE_URL:-}
+      MEGASEG_SERVICE_API_KEY: ${ULTRA_MEGASEG_SERVICE_API_KEY:-}
     volumes:
       - ultra-uploads:/data/uploads
       - ${ULTRA_DATA_DIR:-/tmp/ultra-data}:${ULTRA_DATA_DIR:-/tmp/ultra-data}
@@ -167,3 +222,4 @@ services:
 volumes:
   ultra-pgdata:
   ultra-uploads:
+  ultra-nats:

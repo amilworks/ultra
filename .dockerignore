@@ -1,0 +1,60 @@
+# Build-context hygiene for repo-ROOT Docker builds.
+#
+# The code-exec sandbox image (deploy/docker/deepagents-sandbox.Dockerfile) builds with
+# `context: .`, so without this file `docker compose up --build` ships the ENTIRE working
+# tree (~85GB: an 84GB data/ tree, .venv, .git, node_modules, scratch datasets) to the
+# Docker daemon before the build can start. Keep ONLY what the root-context Dockerfiles
+# actually COPY (the RareSpot assets + third_party/yolov5 + the runtime sources).
+#
+# Per-service builds with their own context (control-plane -> backend/controlplane,
+# worker/image-service -> backend/deepagents_runtime, frontend -> frontend) are NOT
+# affected by this file — they have their own .dockerignore where needed.
+
+# Version control & CI
+.git
+.gitignore
+.github
+
+# Python envs / byte-compiled / tool caches
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+**/.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Node / frontend artifacts (frontend is never a root-context build input)
+**/node_modules
+frontend/dist
+
+# Local scratch, logs, planning, docs, editor cruft
+.tmp
+**/.tmp
+*.log
+.DS_Store
+planning
+docs
+.claude
+legacy
+output
+test-prairie
+
+# Large local/scratch datasets that are not build inputs
+*.ome.zarr
+**/*.ome.zarr
+
+# Local secrets / env files (never bake into an image)
+.env
+.env.*
+!.env.example
+
+# The runtime data tree is ~84GB and never a build input — EXCEPT the RareSpot
+# weights the sandbox image bakes in (deepagents-sandbox.Dockerfile COPYs
+# data/models/yolo/RareSpotWeights.pt). Exclude data/* contents, re-include models.
+data/*
+!data/models

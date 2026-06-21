@@ -3,6 +3,8 @@
 .env.local
 .env.*.local
 !.env.example
+.env.docker
+!.env.docker.example
 .claude/
 .clause/
 *.api-key

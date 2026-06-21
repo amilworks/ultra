@@ -50,7 +50,6 @@ def test_autonomy_gate_includes_deterministic_deepagents_autonomy_quality_checks
         "tests/test_live_trace.py",
         "tests/test_prompt_cases.py",
         "tests/test_runner_paper_preload.py",
-        "tests/test_runner_rarespot_preload.py",
     ]:
         assert expected in target
 

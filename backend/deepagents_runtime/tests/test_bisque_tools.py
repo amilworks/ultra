@@ -1,6 +1,4 @@
 from ultra_deepagents.agent import build_research_agent, build_run_context_brief
-from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.bisque.tools import (
     control_post_json,
     create_bisque_dataset,
@@ -11,6 +9,8 @@ from ultra_deepagents.bisque.tools import (
     upload_bisque_outputs,
     upload_bisque_workspace_files,
 )
+from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.context import AgentRunContext
 
 
 def test_research_agent_registers_bisque_tools_for_selected_resource_context(monkeypatch):

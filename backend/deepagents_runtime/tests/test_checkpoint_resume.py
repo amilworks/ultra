@@ -67,6 +67,10 @@ def test_durable_checkpointer_resumes_across_process_restart_without_repeating_c
             await app1.ainvoke({"steps": []}, config)
         except RuntimeError:
             crashed = True
+        # Persistence is debounced; in a real run the sub-second window elapses
+        # between super-steps, so the completed node's checkpoint is durable
+        # before a crash. Force the trailing persist to model that.
+        await saver1.flush()
 
         # Process 2: fresh memory; hydrate durable state, then resume with None.
         saver2 = DurableCheckpointer(store)
@@ -119,6 +123,7 @@ def test_durable_checkpointer_clear_thread_removes_only_runtime_state_and_preser
         app = graph.compile(checkpointer=saver)
         await app.ainvoke({"steps": []}, config_a)
         await app.ainvoke({"steps": []}, config_b)
+        await saver.flush()  # debounced persists land before we inspect durable state
         before = {
             "a_runtime": has_runtime_state("run-clear-a"),
             "b_runtime": has_runtime_state("run-clear-b"),
@@ -367,3 +372,88 @@ def test_postgres_checkpoint_store_round_trips_durable_resume():
     assert outcome["result"]["steps"] == ["A", "B", "C"]
     assert side_effects.count("A") == 1
     assert side_effects.count("C") == 1
+
+
+def test_durable_checkpointer_delete_thread_removes_runtime_and_durable_row():
+    import asyncio
+
+    store = InMemoryCheckpointStateStore()
+    saver = DurableCheckpointer(store, persist_debounce_seconds=0.0)
+    config = run_graph_config("run-del", recursion_limit=50)
+
+    async def scenario() -> dict:
+        app = _build_crashing_graph([], {"v": False}).compile(checkpointer=saver)
+        await app.ainvoke({"steps": []}, config)
+        await saver.flush()
+        durable_before = await store.load("run-del")
+        await saver.delete_thread("run-del")
+        return {
+            "durable_before": durable_before,
+            "durable_after": await store.load("run-del"),
+            "runtime_after": bool(saver.storage.get("run-del")),
+            "task_after": "run-del" in saver._persist_tasks,
+            "dirty_after": "run-del" in saver._dirty,
+        }
+
+    outcome = asyncio.run(scenario())
+    assert outcome["durable_before"] is not None  # was durably checkpointed
+    assert outcome["durable_after"] is None  # terminal delete removed the row
+    assert outcome["runtime_after"] is False  # in-memory slice cleared
+    assert outcome["task_after"] is False
+    assert outcome["dirty_after"] is False
+
+
+def test_durable_checkpointer_delete_thread_cancels_pending_persist_no_resurrection():
+    import asyncio
+
+    # A long debounce means the scheduled persist is still pending when we delete;
+    # delete_thread must cancel it so a late write can't recreate the row.
+    store = InMemoryCheckpointStateStore()
+    saver = DurableCheckpointer(store, persist_debounce_seconds=5.0)
+    config = run_graph_config("run-race", recursion_limit=50)
+
+    async def scenario() -> bytes | None:
+        app = _build_crashing_graph([], {"v": False}).compile(checkpointer=saver)
+        await app.ainvoke({"steps": []}, config)
+        assert "run-race" in saver._persist_tasks  # a persist is pending
+        await saver.delete_thread("run-race")
+        await asyncio.sleep(0.05)  # give any uncancelled task a chance to fire
+        return await store.load("run-race")
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_checkpoint_store_gc_reaps_only_rows_older_than_retention():
+    import asyncio
+
+    async def scenario() -> dict:
+        store = InMemoryCheckpointStateStore()
+        await store.save("old", b"x")
+        await store.save("fresh", b"y")
+        # Deterministic clock: now=1000, old saved at 0, fresh at 900, retention 500.
+        store._saved_at["old"] = 0.0
+        store._saved_at["fresh"] = 900.0
+        reaped = await store.delete_older_than(500, now_seconds=1000.0)
+        return {
+            "reaped": reaped,
+            "old": await store.load("old"),
+            "fresh": await store.load("fresh"),
+        }
+
+    outcome = asyncio.run(scenario())
+    assert outcome["reaped"] == 1
+    assert outcome["old"] is None
+    assert outcome["fresh"] is not None
+
+
+def test_durable_checkpointer_gc_wires_through_to_store():
+    import asyncio
+
+    async def scenario() -> int:
+        store = InMemoryCheckpointStateStore()
+        await store.save("abandoned", b"x")
+        store._saved_at["abandoned"] = store._saved_at["abandoned"] - 10_000
+        saver = DurableCheckpointer(store, persist_debounce_seconds=0.0)
+        return await saver.gc(retention_seconds=3600)
+
+    assert asyncio.run(scenario()) == 1

@@ -14,7 +14,6 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
-
 from ultra_deepagents.imaging.engine import (
     EngineUnavailable,
     LibBioImageEngine,
@@ -140,6 +139,25 @@ def _engine_with_render(meta, render_fn):
     engine._cache = object()
     engine._render = types.MethodType(render_fn, engine)
     return engine
+
+
+def test_slice_plane_scrub_caps_long_edge_without_pyramid():
+    # A flat (non-pyramidal) 2048-px plane: a transient z-scrub frame
+    # (full_resolution=False) can't drop a -res-level (there is no pyramid), so the
+    # long-edge cap is what keeps scrub fast (measured 0.47s/4.2MB -> 0.13s/0.8MB).
+    # The settled view (full_resolution=True) stays native for pixel-accurate readouts.
+    meta = {"image_num_x": 2048, "image_num_y": 2048, "image_num_z": 20}
+    seen: dict[str, str] = {}
+
+    def render(self, path, pipeline):
+        seen["pipeline"] = pipeline
+        return _PNG_MAGIC
+
+    engine = _engine_with_render(meta, render)
+    engine.slice_plane("/big.tif", z=10, full_resolution=False)
+    assert "-resize 1024,1024,BC,MX" in seen["pipeline"]
+    engine.slice_plane("/big.tif", z=10, full_resolution=True)
+    assert "resize" not in seen["pipeline"]
 
 
 def test_thumbnail_retries_transient_empty_region():

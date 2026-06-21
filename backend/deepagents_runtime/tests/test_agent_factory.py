@@ -13,9 +13,12 @@ from ultra_deepagents.agent import (
     build_research_agent,
     build_run_context_brief,
     build_sandbox_backend,
+    build_sandbox_resources_guidance,
     build_system_prompt,
+    resolve_memory_permissions,
     resolve_skills_root,
     resolve_user_memory_root,
+    sandbox_compute_resources,
 )
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend
 from ultra_deepagents.config import RuntimeSettings
@@ -119,30 +122,40 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert captured["tools"][0] is fake_tool
     tool_names = {getattr(tool, "name", "") for tool in captured["tools"]}
     assert "tool_capability_manifest" in tool_names
-    assert "rarespot_ecology_inference" in tool_names
+    # RareSpot detection is now a sandbox-run Skill (prairie-dog-detection), not a
+    # registered tool — assert the dispatch tool is gone, not present.
+    assert "rarespot_ecology_inference" not in tool_names
     manifest_tool = next(tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest")
     manifest = manifest_tool.invoke({})
     assert "execute" in manifest
     assert "artifact_manifest" in manifest
-    assert "rarespot_ecology_inference" in manifest
+    assert "rarespot_ecology_inference" not in manifest
     assert "selected_tool_names" in manifest
-    rarespot_tool = next(tool for tool in captured["tools"] if getattr(tool, "name", "") == "rarespot_ecology_inference")
-    assert "512 px tiles" in rarespot_tool.description
-    assert "25%" in rarespot_tool.description
-    assert "queued" in rarespot_tool.description.lower()
-    assert "runtime context" in rarespot_tool.description.lower()
     assert captured["context_schema"] is AgentRunContext
     assert captured["memory"] == [
         "/memories/user_profile.md",
         "/memories/preferences.md",
-        "/memories/research_context.md",
+        "/memories/research_context/INDEX.md",
+        "/policies/lab_policy.md",
     ]
+    # App-owned and org-owned memory are write-protected (read-only to the agent).
+    deny_paths = {
+        path
+        for rule in captured["permissions"]
+        if rule.mode == "deny"
+        for path in rule.paths
+    }
+    assert "/memories/user_profile.md" in deny_paths
+    assert "/policies/**" in deny_paths
+    assert "/skills/**" in deny_paths
     assert "/memories/" in captured["system_prompt"]
     assert "user_profile.md" in captured["system_prompt"]
     assert "preferences.md" in captured["system_prompt"]
+    assert "research_context/" in captured["system_prompt"]
     assert "token" not in captured["system_prompt"].lower()
     assert "/outputs/" in captured["system_prompt"]
-    assert "when subagents are available" in captured["system_prompt"].lower()
+    assert "when code-runner is available" in captured["system_prompt"].lower()
+    assert "prefer delegating" in captured["system_prompt"].lower()
     assert "code execution" in captured["system_prompt"].lower()
     assert "data inspection" in captured["system_prompt"].lower()
     assert "sandbox execution" in captured["system_prompt"].lower()
@@ -192,6 +205,8 @@ def test_tool_capability_manifest_describes_builtin_storage_and_registered_tools
         "memories": "/memories",
         "staged_uploads": "/workspace/staged_uploads",
         "staged_artifacts": "/workspace/staged_artifacts",
+        "staged_repos": "/workspace/staged_repos",
+        "staged_resources": "/workspace/staged_resources",
     }
     assert "selected_tool_names" in manifest
 
@@ -218,6 +233,107 @@ def test_tool_capability_manifest_does_not_advertise_undescribed_async_subagents
     assert manifest["available_async_subagents"] == []
 
 
+def test_tool_capability_manifest_omits_compute_resources_when_absent():
+    manifest = build_tool_capability_manifest([])
+    assert "compute_resources" not in manifest
+
+
+def test_tool_capability_manifest_surfaces_compute_resources():
+    resources = sandbox_compute_resources(
+        RuntimeSettings(
+            openai_base_url="x",
+            openai_model="m",
+            sandbox_network="none",
+            sandbox_cpus=0.0,
+            sandbox_memory="64g",
+            sandbox_shm_size="8g",
+            sandbox_gpus="",
+            sandbox_timeout_seconds=21600,
+        )
+    )
+    manifest = build_tool_capability_manifest([], compute_resources=resources)
+
+    cr = manifest["compute_resources"]
+    assert cr["cpus"] == "all available host cores"
+    assert cr["memory_limit"] == "64g"
+    assert cr["shm_size"] == "8g"
+    assert "offline" in cr["network"]
+    assert "DISABLED" in cr["package_installs"]
+    assert "NONE in-sandbox" in cr["gpu"]
+    assert cr["wall_clock_cap_seconds"] == 21600
+    assert "numpy" in cr["preinstalled_packages"]
+
+
+def test_sandbox_compute_resources_reports_gpu_when_enabled():
+    cr = sandbox_compute_resources(
+        RuntimeSettings(
+            openai_base_url="x",
+            openai_model="m",
+            sandbox_network="none",
+            sandbox_gpus="all",
+        )
+    )
+    assert "available in-sandbox (all)" in cr["gpu"]
+
+
+def test_sandbox_resources_guidance_adapts_to_gpu_and_network():
+    offline_cpu = build_sandbox_resources_guidance(
+        RuntimeSettings(
+            openai_base_url="x", openai_model="m", sandbox_network="none", sandbox_gpus=""
+        )
+    )
+    assert "OFFLINE" in offline_cpu
+    assert "no GPU" in offline_cpu
+
+    gpu_on = build_sandbox_resources_guidance(
+        RuntimeSettings(
+            openai_base_url="x", openai_model="m", sandbox_network="none", sandbox_gpus="all"
+        )
+    )
+    assert "GPU attached" in gpu_on
+
+
+def test_sandbox_resources_adapt_when_network_enabled():
+    # With a non-"none" network the coordinator must be told the network is ON and how to
+    # install (the rootfs is read-only, so naive `pip install` fails — `--user` works).
+    settings = RuntimeSettings(
+        openai_base_url="x", openai_model="m", sandbox_network="bridge"
+    )
+
+    guidance = build_sandbox_resources_guidance(settings)
+    assert "NETWORK-ENABLED" in guidance
+    assert "pip install --user" in guidance
+    assert "OFFLINE" not in guidance
+
+    cr = sandbox_compute_resources(settings)
+    assert cr["network"] == "ENABLED (bridge) — outbound internet available"
+    assert "ENABLED" in cr["package_installs"]
+    assert "--user" in cr["package_installs"]
+
+
+def test_sandbox_compute_resources_unset_fallbacks():
+    # All caps at their defaults (unbounded) — the manifest must report the fallback
+    # strings, never a false cap, so the coordinator sizes work correctly.
+    cr = sandbox_compute_resources(RuntimeSettings(openai_base_url="x", openai_model="m"))
+    assert cr["cpus"] == "all available host cores"
+    assert cr["memory_limit"] == "host-limited (no per-container cap)"
+    assert cr["pids_limit"] == "unbounded"
+    assert "Docker default" in cr["shm_size"]
+    assert cr["wall_clock_cap_seconds"] == 21600  # armed default
+
+    # Positive cpus flows through as the float (the only branch the set-value tests miss).
+    cr_cpu = sandbox_compute_resources(
+        RuntimeSettings(openai_base_url="x", openai_model="m", sandbox_cpus=4.0)
+    )
+    assert cr_cpu["cpus"] == 4.0
+
+    # A disabled wall-clock cap reports "none", not 0.
+    cr_nocap = sandbox_compute_resources(
+        RuntimeSettings(openai_base_url="x", openai_model="m", sandbox_timeout_seconds=0)
+    )
+    assert cr_nocap["wall_clock_cap_seconds"] == "none"
+
+
 def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
@@ -227,6 +343,8 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
         sandbox_cpus=3.5,
         sandbox_memory="8g",
         sandbox_pids_limit=512,
+        sandbox_shm_size="8g",
+        sandbox_gpus="all",
         sandbox_timeout_seconds=1800,
         sandbox_output_limit_bytes=500_000,
     )
@@ -249,6 +367,8 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     assert backend.config.cpus == 3.5
     assert backend.config.memory == "8g"
     assert backend.config.pids_limit == 512
+    assert backend.config.shm_size == "8g"
+    assert backend.config.gpus == "all"
     assert backend.config.timeout_seconds == 1800
     assert backend.config.output_limit_bytes == 500_000
 
@@ -669,7 +789,9 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     build_research_agent(settings, model=object(), backend=object(), context=context)
 
     subagent_names = {subagent["name"] for subagent in captured["subagents"]}
-    assert {"code-runner", "data-analyst"}.issubset(subagent_names)
+    assert "code-runner" in subagent_names
+    # data-analyst was dropped (runtime-identical to code-runner); no duplicate delegate.
+    assert "data-analyst" not in subagent_names
     assert "general-purpose" not in subagent_names
 
     code_runner = next(
@@ -700,29 +822,12 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     assert "stage prior artifacts" in code_runner["system_prompt"].lower()
     assert "preserve the user's requested compute scope" in code_runner["system_prompt"].lower()
     assert "longer durations, finer step sizes, more seeds" in code_runner["system_prompt"].lower()
-
-    data_analyst = next(
-        subagent for subagent in captured["subagents"] if subagent["name"] == "data-analyst"
-    )
-    data_response_format = data_analyst["response_format"]
-    assert data_response_format["type"] == "object"
-    assert data_response_format["required"] == [
-        "summary",
-        "key_findings",
-        "artifacts",
-        "failures",
-        "confidence",
-        "confidence_basis",
-    ]
-    data_tool_names = {getattr(tool, "name", "") for tool in data_analyst["tools"]}
-    assert data_tool_names == {
-        "artifact_manifest",
-        "stage_artifact_for_analysis",
-        "stage_uploaded_files_for_analysis",
-    }
+    # code-runner absorbed the data-inspection role and carries an anti-bloat instruction.
+    assert "data-inspection" in code_runner["system_prompt"].lower()
+    assert "do not paste raw stdout" in code_runner["system_prompt"].lower()
     assert all(
         isinstance(item, TextOnlyMultimodalMiddleware)
-        for item in data_analyst.get("middleware", [])
+        for item in code_runner.get("middleware", [])
     )
     manifest_tool = next(
         tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
@@ -757,16 +862,6 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
         {
             "name": "code-runner",
             "description": code_runner["description"],
-            "response_format": structured_handoff,
-            "tool_names": [
-                "artifact_manifest",
-                "stage_artifact_for_analysis",
-                "stage_uploaded_files_for_analysis",
-            ],
-        },
-        {
-            "name": "data-analyst",
-            "description": data_analyst["description"],
             "response_format": structured_handoff,
             "tool_names": [
                 "artifact_manifest",
@@ -827,7 +922,11 @@ def test_system_prompt_requires_delegation_for_complex_code_workflows():
     assert "before the final answer" in prompt
 
 
-def test_system_prompt_guides_rarespot_without_filesystem_hunting():
+def test_system_prompt_does_not_carry_retired_rarespot_dispatch():
+    """RareSpot prairie-dog detection is now the prairie-dog-detection Skill (run in
+    the code sandbox), so the always-on system prompt must NOT carry the retired
+    rarespot_ecology_inference dispatch guidance — the SKILL.md owns that guidance
+    and loads only via progressive disclosure."""
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
         openai_model="deepseek_v4",
@@ -835,13 +934,8 @@ def test_system_prompt_guides_rarespot_without_filesystem_hunting():
 
     prompt = " ".join(build_system_prompt(settings).lower().split())
 
-    assert "rarespot_ecology_inference" in prompt
-    assert "512 px tiles with 25% overlap" in prompt
-    assert "do not search the sandbox filesystem" in prompt
-    assert "do not rerun the same rarespot configuration" in prompt
-    assert "report-only or synthesis-only follow-ups" in prompt
-    assert "artifact_manifest and stage_artifact_for_analysis" in prompt
-    assert "do not create stub" in prompt
+    assert "rarespot_ecology_inference" not in prompt
+    assert "512 px tiles with 25% overlap" not in prompt
 
 
 def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
@@ -1483,3 +1577,182 @@ def test_runtime_prompt_suffix_appends_contract_only_for_pro_intelligence():
     assert "Active run context:" in code_suffix
 
     assert build_runtime_prompt_suffix(None) == ""
+
+
+def _settings_factory() -> RuntimeSettings:
+    return RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+
+
+def test_domain_guidance_is_gated_to_relevant_runs():
+    """Paper guidance must not load on runs whose tools are absent (no ~650-tok
+    phantom-tool guidance). RareSpot detection is now the prairie-dog-detection
+    Skill, so the retired rarespot_ecology_inference dispatch guidance must never
+    load into the always-on prompt — on any goal, including a detection goal."""
+    settings = _settings_factory()
+
+    generic = AgentRunContext(
+        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
+        run_id="r1", goal="Explain what a Lyapunov exponent measures in 3 sentences.",
+    )
+    prompt = build_system_prompt(settings, generic)
+    assert "rarespot_ecology_inference" not in prompt
+    assert "render_paper_page" not in prompt
+    assert "search_paper" not in prompt
+
+    paper_ctx = AgentRunContext(
+        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
+        run_id="r2", goal="Summarize this https://arxiv.org/abs/1706.03762 paper.",
+    )
+    assert "render_paper_page" in build_system_prompt(settings, paper_ctx)
+    assert "rarespot_ecology_inference" not in build_system_prompt(settings, paper_ctx)
+
+    # A prairie-dog detection goal no longer injects rarespot dispatch guidance —
+    # the prairie-dog-detection Skill owns that path via progressive disclosure.
+    rarespot_ctx = AgentRunContext(
+        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
+        run_id="r3", goal="Detect prairie dog burrows in these survey images.",
+    )
+    assert "rarespot_ecology_inference" not in build_system_prompt(settings, rarespot_ctx)
+
+
+def test_literature_reviewer_subagent_does_not_carry_skills(monkeypatch, tmp_path: Path):
+    """Skills go to the computational subagents only; literature-reviewer is
+    page-grounded paper review and should not re-pay the SkillsMiddleware cost."""
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "workspaces"),
+        memory_root=str(tmp_path / "memory"),
+        artifact_root=str(tmp_path / "artifacts"),
+    )
+    # Goal triggers BOTH paper review (arxiv) and computational delegation.
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent", org_id="o", user_id="u", project_id="p",
+        thread_id="t", run_id="run-lit-skills",
+        goal="Reproduce the simulation from https://arxiv.org/abs/1706.03762 and analyze the metrics.",
+    )
+    build_research_agent(
+        settings, model=object(),
+        workspace_dir=tmp_path / "workspaces" / "run-lit-skills", context=context,
+    )
+
+    by_name = {s["name"]: s for s in captured["subagents"]}
+    assert "literature-reviewer" in by_name
+    assert "code-runner" in by_name
+    assert "data-analyst" not in by_name
+    assert by_name["code-runner"]["skills"] == SKILLS_SOURCES
+    assert "skills" not in by_name["literature-reviewer"]
+
+
+def test_subagents_never_set_permissions_so_they_inherit_parent_denies(monkeypatch, tmp_path: Path):
+    """Subagents must NOT carry their own `permissions` key: deepagents REPLACES
+    (not merges) parent permissions when a subagent sets them, which would silently
+    drop the /skills/** and /policies/** write-denies on the subagent. Inheriting is
+    the only way the read-only guards survive into delegated work."""
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "workspaces"),
+        memory_root=str(tmp_path / "memory"),
+        artifact_root=str(tmp_path / "artifacts"),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent", org_id="o", user_id="u", project_id="p",
+        thread_id="t", run_id="run-perm",
+        goal="Reproduce the simulation from https://arxiv.org/abs/1706.03762 and analyze metrics.",
+    )
+    build_research_agent(
+        settings, model=object(),
+        workspace_dir=tmp_path / "workspaces" / "run-perm", context=context,
+    )
+    assert captured["subagents"], "expected scoped + paper subagents to register"
+    for subagent in captured["subagents"]:
+        assert "permissions" not in subagent, (
+            f"{subagent['name']} sets its own permissions, which would REPLACE the "
+            "parent /skills/** and /policies/** write-denies"
+        )
+
+
+def _write_skill(skills_root: Path, name: str = "demo") -> Path:
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A demo skill for tests.\n---\n\nDo the thing.\n"
+    )
+    return skills_root
+
+
+def _build_real_research_agent(tmp_path: Path, skills_root: Path):
+    """Build the REAL agent (no monkeypatched create_deep_agent) so the
+    FilesystemMiddleware permission/route guard actually runs."""
+    model = ToolCallingFakeOpenAIModel(responses=[AIMessage(content="ok")])
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "ws"),
+        memory_root=str(tmp_path / "mem"),
+        artifact_root=str(tmp_path / "art"),
+        skills_root=str(skills_root),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent", org_id="o", user_id="u",
+        project_id="p", thread_id="t", run_id="run-skills",
+        goal="Summarize findings.",
+    )
+    return build_research_agent(
+        settings, model=model,
+        workspace_dir=tmp_path / "ws" / "run-skills", context=context,
+    )
+
+
+def test_resolve_memory_permissions_drops_skills_deny_only_when_skills_absent(tmp_path: Path):
+    empty = tmp_path / "noskills"
+    empty.mkdir()
+    with_skills = _write_skill(tmp_path / "skills")
+    base = dict(openai_base_url="http://x/v1", openai_model="deepseek_v4")
+    deny_absent = {
+        path
+        for rule in resolve_memory_permissions(RuntimeSettings(**base, skills_root=str(empty)))
+        for path in rule.paths
+    }
+    deny_present = {
+        path
+        for rule in resolve_memory_permissions(RuntimeSettings(**base, skills_root=str(with_skills)))
+        for path in rule.paths
+    }
+    # The /skills/** deny must drop in lockstep with the (absent) /skills/ route...
+    assert "/skills/**" not in deny_absent
+    # ...while the always-registered /memories/ and /policies/ routes keep their denies.
+    assert "/policies/**" in deny_absent
+    assert "/memories/user_profile.md" in deny_absent
+    # With skills present, the full read-only deny set applies.
+    assert "/skills/**" in deny_present
+
+
+def test_build_research_agent_with_real_sandbox_backend_builds_with_and_without_skills(tmp_path: Path):
+    # Regression: an unconditional /skills/** deny against a conditional /skills/
+    # route made FilesystemMiddleware raise NotImplementedError at agent
+    # construction (execute-capable sandbox default) whenever skills were absent.
+    # Building the real agent both ways must not raise.
+    with_skills = _write_skill(tmp_path / "with" / "skills")
+    without_skills = tmp_path / "without"
+    without_skills.mkdir()
+    assert _build_real_research_agent(tmp_path / "with", with_skills) is not None
+    assert _build_real_research_agent(tmp_path / "without", without_skills) is not None

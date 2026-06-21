@@ -62,14 +62,16 @@ export default defineConfig({
             normalizedId.includes("lucide-react") ||
             normalizedId.includes("use-stick-to-bottom") ||
             normalizedId.includes("tailwind-merge") ||
-            normalizedId.includes("cmdk") ||
             normalizedId.includes("radix-ui") ||
             normalizedId.includes("@radix-ui") ||
             normalizedId.includes("@floating-ui")
           ) {
             return "vendor-ui";
           }
-          if (normalizedId.includes("@react-three") || normalizedId.includes("/three/")) {
+          // cmdk is only reached through lazy components (ComposerSlashMenu,
+          // Hdf5Navigator), so it is intentionally NOT forced into the eager
+          // vendor-ui chunk — Rolldown co-locates it with those lazy chunks.
+          if (normalizedId.includes("/three/")) {
             return "vendor-three";
           }
           return undefined;

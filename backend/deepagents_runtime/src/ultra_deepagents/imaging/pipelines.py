@@ -239,8 +239,14 @@ def slice_plane(
     plane_scale: float | None = None,
     out_depth: str = DEPTH_DISPLAY_8U,
     channels: Sequence[int] | None = None,
+    max_dim: int | None = None,
 ) -> str:
-    """Pipeline for a 2D plane (``/slice`` endpoint): pick z/t, optional downscale."""
+    """Pipeline for a 2D plane (``/slice`` endpoint): pick z/t, optional downscale.
+
+    ``max_dim`` bounds the long edge (keep AR, no upsample) — used for transient
+    z-scrub frames so a huge plane without a pyramid still returns a small, fast
+    image (``-res-level`` alone is a no-op on a non-pyramidal source).
+    """
     dims: dict[str, int] = {}
     if z is not None:
         dims["z"] = z
@@ -251,6 +257,7 @@ def slice_plane(
         res_level(level) if level is not None else None,
         scale(plane_scale) if plane_scale is not None else None,
         remap(channels) if channels else None,
+        resize(max_dim, max_dim, "BC", "MX") if max_dim else None,
         _depth_token(out_depth),
     )
 
@@ -262,6 +269,7 @@ def page_plane(
     plane_scale: float | None = None,
     out_depth: str = DEPTH_DISPLAY_8U,
     channels: Sequence[int] | None = None,
+    max_dim: int | None = None,
 ) -> str:
     """Pipeline for one *page* of a multi-page document (``-page N``).
 
@@ -269,7 +277,7 @@ def page_plane(
     document pages — reported as ``image_num_p`` with ``image_num_z == 1`` — which
     ``-slice z:N`` cannot address (it returns the first plane every time). This
     reads page ``N`` directly so a paged z-stack scrubs. Mirrors
-    :func:`slice_plane`'s level/scale/depth handling.
+    :func:`slice_plane`'s level/scale/depth/``max_dim`` handling.
     """
     _check_nonneg_int(page, "page")
     return build(
@@ -277,6 +285,7 @@ def page_plane(
         res_level(level) if level is not None else None,
         scale(plane_scale) if plane_scale is not None else None,
         remap(channels) if channels else None,
+        resize(max_dim, max_dim, "BC", "MX") if max_dim else None,
         _depth_token(out_depth),
     )
 

@@ -6,6 +6,14 @@ from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.rarespot.config import RareSpotConfig
 
 
+@pytest.fixture(autouse=True)
+def _enable_async_subagents(monkeypatch):
+    """Async subagents are off unless explicitly enabled. Config-parsing tests
+    that exercise async spec validation need the kill switch on; tests asserting
+    the off/kill-switch behavior delenv it themselves."""
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS", "1")
+
+
 def test_runtime_settings_load_vllm_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8003/v1")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek_v4")
@@ -33,6 +41,8 @@ def test_runtime_settings_default_to_no_hidden_long_run_caps(monkeypatch):
         "ULTRA_DEEPAGENTS_SANDBOX_CPUS",
         "ULTRA_DEEPAGENTS_SANDBOX_MEMORY",
         "ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT",
+        "ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE",
+        "ULTRA_DEEPAGENTS_SANDBOX_GPUS",
         "ULTRA_DEEPAGENTS_SANDBOX_TIMEOUT_SECONDS",
         "ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES",
     ):
@@ -44,16 +54,34 @@ def test_runtime_settings_default_to_no_hidden_long_run_caps(monkeypatch):
     assert settings.sandbox_cpus == 0.0
     assert settings.sandbox_memory == ""
     assert settings.sandbox_pids_limit == 0
-    assert settings.sandbox_timeout_seconds == 0
+    # shm/gpu are opt-in: empty by default (no GPU in-sandbox; Docker-default /dev/shm).
+    assert settings.sandbox_shm_size == ""
+    assert settings.sandbox_gpus == ""
+    # A generous finite ceiling (6h) is armed by default so a hung/zombie sandbox call
+    # cannot await forever; long scientific batch work is allowed up to it. (Was 0 = unbounded.)
+    assert settings.sandbox_timeout_seconds == 21600
     assert settings.sandbox_output_limit_bytes == 0
 
 
-def test_runtime_settings_default_to_no_model_stream_idle_timeout(monkeypatch):
-    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", raising=False)
+def test_runtime_settings_load_sandbox_shm_and_gpus(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_SHM_SIZE", "8g")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_GPUS", "all")
 
     settings = RuntimeSettings.from_env()
 
-    assert settings.model_stream_idle_timeout_seconds == 0.0
+    assert settings.sandbox_shm_size == "8g"
+    assert settings.sandbox_gpus == "all"
+
+
+def test_runtime_settings_arm_idle_watchdog_by_default(monkeypatch):
+    # The idle/stall watchdog is now ARMED by default (1h) so a stalled tool call cannot
+    # wedge a run/worker forever (it did, for 1h43m, when this defaulted to 0). An explicit
+    # env 0 is still honored as the operator escape hatch.
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert RuntimeSettings.from_env().model_stream_idle_timeout_seconds == 3600.0
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "0")
+    assert RuntimeSettings.from_env().model_stream_idle_timeout_seconds == 0.0
 
 
 def test_runtime_settings_load_model_stream_liveness_guard(monkeypatch):
@@ -376,16 +404,6 @@ def test_runtime_settings_load_control_run_lease_options(monkeypatch):
     assert settings.control_run_lease_required is True
 
 
-def test_runtime_settings_load_rarespot_worker_identity(monkeypatch):
-    monkeypatch.setenv("ULTRA_RARESPOT_WORKER_ID", "rarespot-prod-1")
-    monkeypatch.setenv("ULTRA_RARESPOT_WORKER_KIND", "rarespot-gpu")
-
-    settings = RuntimeSettings.from_env()
-
-    assert settings.rarespot_worker_id == "rarespot-prod-1"
-    assert settings.rarespot_worker_kind == "rarespot-gpu"
-
-
 def test_runtime_settings_load_data_agent_worker_and_queue_defaults(monkeypatch):
     monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", raising=False)
     monkeypatch.delenv("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", raising=False)
@@ -419,14 +437,7 @@ def test_runtime_settings_load_rarespot_defaults(monkeypatch):
     assert settings.rarespot_conf_threshold == 0.25
     assert settings.rarespot_iou_threshold == 0.45
     assert settings.rarespot_imgsz == 512
-    assert settings.rarespot_nats_jobs_subject == "ultra.runs.rarespot.jobs"
-    assert settings.rarespot_nats_ack_wait_seconds == 120.0
-    assert settings.rarespot_nats_ack_progress_interval_seconds == 30.0
     assert settings.rarespot_weights_path == "data/models/yolo/RareSpotWeights.pt"
-    assert (
-        settings.rarespot_nats_ack_progress_interval_seconds
-        < settings.rarespot_nats_ack_wait_seconds
-    )
 
     config = RareSpotConfig.from_settings(settings)
     assert config.tile_size == 512
@@ -463,3 +474,59 @@ def test_agent_run_context_payload_is_snake_case_and_scoped():
     assert payload["run_id"] == "run-1"
     assert payload["selected_file_ids"] == ["file-1"]
     assert payload["allowed_tool_packs"] == ["workspace", "code"]
+
+
+def test_async_subagents_require_explicit_enable_flag(monkeypatch):
+    """Kill switch: a JSON value alone must NOT activate async subagents."""
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-runner",
+                    "description": "Runs long jobs.",
+                    "graph_id": "ultra-runner",
+                    "url": "https://langgraph.example.test",
+                }
+            ]
+        ),
+    )
+    # Enabled (autouse fixture sets the flag) -> the spec loads.
+    assert len(RuntimeSettings.from_env().async_subagents) == 1
+    # Disabled -> off regardless of JSON, with no parsing/validation.
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS", raising=False)
+    assert RuntimeSettings.from_env().async_subagents == ()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:2024",
+        "http://127.0.0.1:2024",
+        "https://10.0.0.5",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://192.168.1.10:8123",
+    ],
+)
+def test_runtime_settings_reject_private_async_subagent_urls(monkeypatch, url):
+    """Server URL must not target a private/loopback/link-local host (the run
+    context + task egress to it), unless the local-dev opt-out is set."""
+    monkeypatch.setenv(
+        "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "remote-runner",
+                    "description": "Runs long jobs.",
+                    "graph_id": "ultra-runner",
+                    "url": url,
+                }
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match=r"localhost/private/link-local"):
+        RuntimeSettings.from_env()
+
+    # Local-dev opt-out allows it.
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL", "1")
+    assert RuntimeSettings.from_env().async_subagents[0]["url"] == url

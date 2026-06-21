@@ -24,14 +24,12 @@ type Config struct {
 	NATSURL                    string
 	NATSStream                 string
 	NATSJobsSubject            string
-	NATSRareSpotJobsSubject    string
 	NATSDataAgentJobsSubject   string
 	NATSEventsSubject          string
 	NATSCancelSubject          string
 	NATSEventConsumer          string
 	NATSEventIngestConcurrency int
 	NATSWorkerDurable          string
-	NATSRareSpotWorkerDurable  string
 	NATSDataAgentWorkerDurable string
 	ArtifactRoot               string
 	UploadRoot                 string
@@ -64,33 +62,31 @@ type Config struct {
 
 func Load() Config {
 	return Config{
-		AppName:                    envString("ULTRA_CONTROL_APP_NAME", "BisQue Ultra Control Plane"),
-		AppVersion:                 envString("ULTRA_CONTROL_APP_VERSION", "dev"),
-		Environment:                strings.ToLower(envString("ULTRA_CONTROL_ENVIRONMENT", envString("ENVIRONMENT", "development"))),
-		HTTPAddr:                   envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
-		ReadHeaderTimeout:          envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
-		ReadTimeout:                envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
-		WriteTimeout:               envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
-		IdleTimeout:                envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
-		DatabaseURL:                envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
-		DatabaseMaxConns:           envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
-		DatabaseMinConns:           envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
+		AppName:           envString("ULTRA_CONTROL_APP_NAME", "BisQue Ultra Control Plane"),
+		AppVersion:        envString("ULTRA_CONTROL_APP_VERSION", "dev"),
+		Environment:       strings.ToLower(envString("ULTRA_CONTROL_ENVIRONMENT", envString("ENVIRONMENT", "development"))),
+		HTTPAddr:          envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
+		ReadHeaderTimeout: envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
+		ReadTimeout:       envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
+		WriteTimeout:      envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
+		IdleTimeout:       envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
+		DatabaseURL:       envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
+		DatabaseMaxConns:  envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
+		DatabaseMinConns:  envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
 		// Per-query server-side timeout for the SERVING pool so one stuck/runaway query
 		// can't hold a connection from the small pool forever. Off by default (0), like
 		// ReadTimeout/WriteTimeout — operators opt in per their workload. Migrations are
 		// exempt (slow DDL is legitimate).
-		DatabaseStatementTimeout: envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
+		DatabaseStatementTimeout:   envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
 		NATSURL:                    envString("ULTRA_CONTROL_NATS_URL", ""),
 		NATSStream:                 envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
 		NATSJobsSubject:            envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),
-		NATSRareSpotJobsSubject:    envString("ULTRA_CONTROL_NATS_RARESPOT_JOBS_SUBJECT", "ultra.runs.rarespot.jobs"),
 		NATSDataAgentJobsSubject:   envString("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", "ultra.data_agent.jobs"),
 		NATSEventsSubject:          envString("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
 		NATSCancelSubject:          envString("ULTRA_CONTROL_NATS_CANCEL_SUBJECT", "ultra.runs.cancel"),
 		NATSEventConsumer:          envString("ULTRA_CONTROL_NATS_EVENT_CONSUMER", "ultra-control-event-ingest"),
 		NATSEventIngestConcurrency: envInt("ULTRA_CONTROL_NATS_EVENT_INGEST_CONCURRENCY", 4),
 		NATSWorkerDurable:          envString("ULTRA_CONTROL_NATS_WORKER_DURABLE", "ultra-deepagents-worker"),
-		NATSRareSpotWorkerDurable:  envString("ULTRA_CONTROL_NATS_RARESPOT_WORKER_DURABLE", "rarespot-ecology-worker"),
 		NATSDataAgentWorkerDurable: envString("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),
 		UploadRoot:                 envString("ULTRA_CONTROL_UPLOAD_ROOT", envString("ULTRA_RESOURCE_ROOT", envString("UPLOAD_STORE_ROOT", "data/uploads"))),

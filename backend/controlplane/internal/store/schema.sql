@@ -386,6 +386,13 @@ CREATE TABLE IF NOT EXISTS control_data_agent_job_resources (
   PRIMARY KEY (job_id, resource_id)
 );
 
+-- Batch-analysis jobs (analysis.megaseg / analysis.rarespot) register the resources
+-- they PRODUCE (masks, bbox CSV, report) in this same junction with io_role='output',
+-- distinct from the 'input' images. Lets a job report "what did you produce?".
+ALTER TABLE control_data_agent_job_resources ADD COLUMN IF NOT EXISTS io_role text NOT NULL DEFAULT 'input';
+CREATE INDEX IF NOT EXISTS idx_data_agent_job_resources_io_role
+  ON control_data_agent_job_resources (job_id, io_role);
+
 CREATE TABLE IF NOT EXISTS control_data_agent_job_events (
   event_id text PRIMARY KEY,
   job_id text NOT NULL REFERENCES control_data_agent_jobs(job_id) ON DELETE CASCADE,

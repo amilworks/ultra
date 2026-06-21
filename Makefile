@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke autonomy-gate
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
@@ -168,7 +168,12 @@ clean: ## Clean up generated files
 shell: ## Open a shell in the virtual environment
 	uv run bash
 
-codeexec-image: ## Build Python sandbox image for execute_python_job
+codeexec-image: ## Build Python sandbox image for execute_python_job (bakes RareSpot weights)
+	@test -f data/models/yolo/RareSpotWeights.pt || { \
+		echo "ERROR: data/models/yolo/RareSpotWeights.pt is missing — the prairie-dog-detection"; \
+		echo "Skill bakes it into the sandbox image. Stage it from the model store first, e.g.:"; \
+		echo "  mkdir -p data/models/yolo && cp /path/to/RareSpotWeights.pt data/models/yolo/"; \
+		exit 1; }
 	docker build -f deploy/docker/deepagents-sandbox.Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
 
 control-test: ## Run Go control plane tests
@@ -193,14 +198,13 @@ deepagents-test: ## Run Python Deep Agents runtime tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q
 
 deepagents-worker-test: ## Run Deep Agents worker transport, lease, and redelivery tests
-	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py tests/test_rarespot_worker.py
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py
 
 deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and routing tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \
 		tests/test_live_trace.py \
 		tests/test_prompt_cases.py \
-		tests/test_runner_paper_preload.py \
-		tests/test_runner_rarespot_preload.py
+		tests/test_runner_paper_preload.py
 
 deepagents-smoke: ## Probe the configured Python Deep Agents vLLM model endpoint
 	cd backend/deepagents_runtime && OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://127.0.0.1:8003/v1} OPENAI_MODEL=$${OPENAI_MODEL:-deepseek_v4} uv run --python 3.11 python -m ultra_deepagents.smoke
@@ -262,7 +266,20 @@ rigor-live-smoke: ## Run opt-in live Intelligence-Pro rigor results-contract tra
 		--min-artifacts 4 \
 		--min-response-chars 400
 
-async-delegation-live-smoke: ## Run opt-in live async/background subagent trace against a running stack
+episodic-live-smoke: ## Run opt-in live episodic-memory recall trace (seed a conclusion, recall it in a new thread)
+	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
+		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
+		--title "Episodic seed" \
+		--prompt "Record for later: in my synthetic benchmark, method Foo reached 91.2% accuracy and method Bar reached 87.5%. Acknowledge in one sentence." \
+		--followup "Search my past sessions: which method scored higher in my earlier synthetic benchmark, and by how much? Use your memory of past sessions, not a new computation." \
+		--timeout $${ULTRA_LIVE_TRACE_TIMEOUT_SECONDS:-400} \
+		--poll-interval $${ULTRA_LIVE_TRACE_POLL_INTERVAL_SECONDS:-2}
+
+async-delegation-live-smoke: ## Run opt-in live async/background subagent trace (requires a configured external Agent Protocol server)
+	@if [ -z "$$ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS" ] || [ -z "$$ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON" ]; then \
+		echo "SKIP: async subagents not configured (set ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS=1 + ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON pointing at a remote Agent Protocol server). This feature requires an external LangGraph deployment Ultra does not run by default."; \
+		exit 0; \
+	fi
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev python -m ultra_deepagents.live_trace \
 		--base-url $${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000} \
 		--title "Async delegation live smoke" \

@@ -23,6 +23,7 @@ import nats
 import nats.errors
 from nats.js.api import AckPolicy, ConsumerConfig
 
+from ultra_deepagents.code_execution.cleanup import reap_orphaned_sandbox_containers
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.runner import run_job
 from ultra_deepagents.schemas import RunJobEnvelope
@@ -649,13 +650,23 @@ class NATSDeepAgentsWorker:
         self._shutting_down = False
         self._checkpoint_store: Any | None = None
         self._checkpointer: Any | None = None
+        # Serialize sandbox-container sweeps so the startup sweep and the first periodic
+        # tick (or overlapping ticks) never issue redundant docker calls on the same IDs.
+        self._sandbox_reaper_lock = asyncio.Lock()
 
     async def run_forever(self) -> None:
         nc = await nats.connect(self.settings.nats_url)
         js = nc.jetstream()
         cancel_subscription = None
+        reaper_task: asyncio.Task | None = None
         try:
             await self._ensure_stream(js)
+            # Clear any orphaned/leftover sandbox containers from a previous (possibly
+            # crashed) worker before taking new jobs, then keep a lightweight periodic
+            # sweep running. Both are best-effort and never block the message pump.
+            await self._reap_sandbox_containers_once()
+            if self.settings.sandbox_reaper_interval_seconds > 0:
+                reaper_task = asyncio.create_task(self._sandbox_reaper_loop())
             async def handle_cancel_message(message: Any) -> None:
                 await self._handle_cancel_message(message, js)
 
@@ -698,12 +709,51 @@ class NATSDeepAgentsWorker:
                     active_message_tasks.add(asyncio.create_task(self._process_message(message, js)))
         finally:
             self._shutting_down = True
+            if reaper_task is not None:
+                reaper_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reaper_task
             if "active_message_tasks" in locals():
                 await _cancel_message_tasks(active_message_tasks)
             if cancel_subscription is not None:
                 with contextlib.suppress(Exception):
                     await cancel_subscription.unsubscribe()
             await nc.drain()
+
+    async def _sandbox_reaper_loop(self) -> None:
+        """Periodically reap orphaned/leftover sandbox containers until cancelled."""
+        interval = self.settings.sandbox_reaper_interval_seconds
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            await self._reap_sandbox_containers_once()
+
+    async def _reap_sandbox_containers_once(self) -> None:
+        """Run one best-effort sandbox-container sweep off the event loop.
+
+        Never raises: a docker/daemon problem only logs. Serialized by a lock so the
+        startup sweep and periodic ticks never duplicate work on the same container IDs.
+        """
+        try:
+            async with self._sandbox_reaper_lock:
+                reaped = await asyncio.to_thread(
+                    reap_orphaned_sandbox_containers,
+                    default_cap_seconds=self.settings.sandbox_timeout_seconds,
+                    grace_seconds=self.settings.sandbox_reaper_grace_seconds,
+                    max_per_sweep=self.settings.sandbox_reaper_max_per_sweep,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Sandbox container reap failed; continuing.", exc_info=True)
+            return
+        if reaped:
+            logger.info(
+                "Reaped orphaned sandbox containers.",
+                extra={"reaped": len(reaped)},
+            )
 
     async def _ensure_stream(self, js: Any) -> None:
         subjects = [
@@ -1023,7 +1073,7 @@ class NATSDeepAgentsWorker:
                 if run_lock is not None:
                     run_lock.release()
                 if should_ack:
-                    self._clear_checkpointer_thread(job.run_id)
+                    await self._delete_checkpointer_thread(job.run_id)
                     await _ack_message(message)
         finally:
             if user_context_token is not None:
@@ -1056,20 +1106,43 @@ class NATSDeepAgentsWorker:
         self._checkpoint_store = store
         self._checkpointer = DurableCheckpointer(store)
         logger.info("Durable run checkpointing enabled.")
+        # Reap abandoned checkpoint rows (runs that crashed before terminal ack)
+        # on worker startup. Completed runs already delete their own row on ack;
+        # this backstops stragglers without a long-lived background loop.
+        retention = self.settings.checkpoint_retention_seconds
+        if retention > 0:
+            try:
+                reaped = await self._checkpointer.gc(retention)
+                if reaped:
+                    logger.info(
+                        "Reaped abandoned durable checkpoint rows.",
+                        extra={"reaped": reaped},
+                    )
+            except Exception:
+                logger.warning("Durable checkpoint GC at startup failed.", exc_info=True)
         return self._checkpointer
 
-    def _clear_checkpointer_thread(self, run_id: str) -> None:
+    async def _delete_checkpointer_thread(self, run_id: str) -> None:
+        """Drop a terminal run's in-memory slice AND its durable row.
+
+        A run that reached terminal ack (succeeded/failed/canceled) will never be
+        redelivered or resumed, so its durable checkpoint row must be deleted to
+        keep the shared control-plane Postgres from accumulating completed-run
+        state forever. Best-effort: a cleanup failure never blocks the ack."""
         checkpointer = self._checkpointer
         if checkpointer is None:
             return
-        clear_thread = getattr(checkpointer, "clear_thread", None)
-        if clear_thread is None:
-            return
         try:
-            clear_thread(run_id)
+            delete_thread = getattr(checkpointer, "delete_thread", None)
+            if delete_thread is not None:
+                await delete_thread(run_id)
+                return
+            clear_thread = getattr(checkpointer, "clear_thread", None)
+            if clear_thread is not None:
+                clear_thread(run_id)
         except Exception:
             logger.warning(
-                "Checkpoint runtime cleanup failed; continuing after terminal run.",
+                "Checkpoint cleanup failed; continuing after terminal run.",
                 extra={"run_id": run_id},
                 exc_info=True,
             )

@@ -11,7 +11,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
-
 from ultra_deepagents.imaging import pipelines as p
 
 
@@ -39,10 +38,23 @@ def test_slice_plane_with_level_and_channels():
     assert p.slice_plane(z=2, level=1, channels=[1]) == "-slice z:2 -res-level 1 -remap 1 -depth 8,D,U"
 
 
+def test_slice_plane_max_dim_caps_long_edge_for_scrub():
+    # A transient z-scrub frame caps the long edge so a huge plane WITHOUT a pyramid
+    # (where -res-level is a no-op) still returns a small, fast image. The resize uses
+    # MX (bounding box, keep AR, no upsample) — same token /thumbnail uses.
+    assert p.slice_plane(z=5, max_dim=1024) == "-slice z:5 -resize 1024,1024,BC,MX -depth 8,D,U"
+    # The native (settled) read sends no max_dim -> full plane for measurements.
+    assert "resize" not in p.slice_plane(z=5)
+
+
 def test_page_plane_addresses_a_document_page():
     # Paged z-stacks (plain multi-page TIFF) are addressed by -page N, not -slice.
     assert p.page_plane(3) == "-page 3 -depth 8,D,U"
     assert p.page_plane(2, level=1, channels=[1]) == "-page 2 -res-level 1 -remap 1 -depth 8,D,U"
+
+
+def test_page_plane_max_dim_caps_long_edge_for_scrub():
+    assert p.page_plane(3, max_dim=1024) == "-page 3 -resize 1024,1024,BC,MX -depth 8,D,U"
 
 
 def test_thumbnail_zscrub_frame():

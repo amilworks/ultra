@@ -21,7 +21,7 @@ describe("sidebar collapse layout", () => {
     expect(appSource.includes("const collapsedRecentItems")).toBe(true);
   });
 
-  it("keeps the reference rail motion and calm welcome prompt", () => {
+  it("keeps the reference rail motion and usage-first blank chat", () => {
     expect(stylesSource.includes("--sidebar-motion-duration: 280ms;")).toBe(true);
     expect(stylesSource.includes(".app-collapsed-sidebar-rail")).toBe(true);
     expect(
@@ -34,11 +34,11 @@ describe("sidebar collapse layout", () => {
         '[data-slot="sidebar"][data-collapsible="icon"] + [data-slot="sidebar-inset"] .app-sidebar-trigger'
       )
     ).toBe(true);
-    expect(appSource.includes('const welcomeHeadline = "What are you working on?";')).toBe(true);
+    expect(appSource.includes("<UserTokenUsagePanel")).toBe(true);
+    expect(appSource.includes('const welcomeHeadline = "What are you working on?";')).toBe(false);
     expect(appSource.includes("Santa Barbara weather")).toBe(false);
-    expect(stylesSource).toMatch(/\.hero-title\s*\{[^}]*font-size:\s*clamp\(1\.65rem,\s*3\.2vw,\s*2\.35rem\);/s);
-    expect(stylesSource).toMatch(/\.dark \.hero-title\s*\{[^}]*color:\s*#ffffff;/s);
-    expect(stylesSource).toMatch(/\.hero-title-welcome\s*\{[^}]*font-weight:\s*300;/s);
+    expect(stylesSource).toMatch(/\.blank-chat-usage-state\s*\{/);
+    expect(stylesSource).toMatch(/\.user-token-usage-stats\s*\{[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\);/s);
     expect(stylesSource).toMatch(/\.app-shell-brand\s*\{[^}]*font-weight:\s*400;/s);
   });
 

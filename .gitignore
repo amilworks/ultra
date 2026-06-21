@@ -5,6 +5,7 @@
 !.env.example
 .claude/
 .clause/
+*.api-key
 
 # Python
 __pycache__/
@@ -30,8 +31,13 @@ frontend/.playwright-cli/
 .worktrees/
 .viewer-cache/
 .codex-artifacts/
+*.ome.zarr/
+test-prairie/
 legacy/
 data/
+# but DO track the committed RareSpot parity golden (the gate the CI/parity test reads)
+!backend/deepagents_runtime/tests/data/
+!backend/deepagents_runtime/tests/data/rarespot_parity_golden.json
 runs/
 output/
 outputs/
@@ -60,3 +66,9 @@ data/runtime/MedSAM2/
 .DS_Store
 *.swp
 *.swo
+
+# Local-only MCP server config (personal; not shared with teammates)
+.mcp.json
+
+# Local agent/workflow scratch artifacts
+.workflow/

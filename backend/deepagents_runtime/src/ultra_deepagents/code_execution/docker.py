@@ -25,8 +25,27 @@ class DockerSandboxConfig:
     cpus: float = 0.0
     memory: str = ""
     pids_limit: int = 0
+    # Size of /dev/shm inside the container. Docker's default is a tiny 64MB, which
+    # makes torch DataLoader(num_workers>0), OpenCV, joblib/loky, and any
+    # multiprocessing shared-memory array crash with an opaque "Bus error (core
+    # dumped)" the moment it fills. Scientific parallelism needs real shared memory,
+    # so set this generously (e.g. "8g"). Empty keeps the Docker default.
+    shm_size: str = ""
+    # GPU passthrough for in-sandbox code (e.g. "all" or "device=0"). Empty = no GPU
+    # in the sandbox (the default); GPU inference is otherwise reached via the
+    # MegaSeg/RareSpot services. Opt-in per deployment: only set on a node whose
+    # Docker daemon has the NVIDIA container runtime, or `docker run` fails outright.
+    gpus: str = ""
     timeout_seconds: int = 0
     output_limit_bytes: int = 0
+    # Identity stamped onto every container as Docker labels so the reaper
+    # (code_execution/cleanup.reap_orphaned_sandbox_containers) can find and remove
+    # leftover/orphaned sandbox containers WITHOUT ever touching a non-Ultra container
+    # on a shared daemon. worker_id/run_id are diagnostic-only (let an operator trace a
+    # leaked container back to its run); the reaper's kill set is gated by the
+    # ultra.sandbox=1 label plus the per-container ultra.sandbox.cap (= timeout_seconds).
+    worker_id: str = ""
+    run_id: str = ""
 
 
 class DockerSandboxBackend(BaseSandbox):
@@ -46,6 +65,7 @@ class DockerSandboxBackend(BaseSandbox):
         if self.outputs_dir is not None:
             self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_matplotlib_config()
+        self._ensure_writable_tmp()
         try:
             os.chmod(self.workspace_dir, 0o777)
             if self.outputs_dir is not None:
@@ -68,12 +88,37 @@ class DockerSandboxBackend(BaseSandbox):
             except OSError:
                 pass
 
+    def _ensure_writable_tmp(self) -> None:
+        # The container rootfs is read-only and the in-container /tmp is a small,
+        # RAM-backed tmpfs. Point TMPDIR (set in build_docker_command) at a disk-backed
+        # dir on the /workspace bind mount so large scientific temp files (Bio-Formats
+        # JVM scratch, dcm2niix, tifffile memmaps, intermediate arrays) land on real
+        # disk and are not capped at the tmpfs size. Created here, on the host, so the
+        # bind-mounted container sees it.
+        tmp_dir = self.workspace_dir / ".tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(tmp_dir, 0o777)
+        except OSError:
+            pass
+
     def build_docker_command(self, command: str) -> list[str]:
         workspace_mount = f"{self.workspace_dir.resolve()}:/workspace:rw"
         docker_command = [
             "docker",
             "run",
             "--rm",
+            # --rm is the primary cleanup (daemon-side AutoRemove fires on exit even if
+            # our docker CLI is killed). These labels make the container self-identifying
+            # so the reaper can back-stop the residual leak classes (running orphans whose
+            # launching execute() timed out; rare stopped residue after a daemon restart)
+            # while NEVER touching a non-Ultra container on a shared daemon. ultra.sandbox.cap
+            # records THIS container's wall-clock cap so the reaper's age>cap+grace orphan test
+            # uses the container's own cap even if the admin default changed since launch.
+            "--label",
+            "ultra.sandbox=1",
+            "--label",
+            f"ultra.sandbox.cap={self.config.timeout_seconds}",
             "--network",
             self.config.network,
             "--cap-drop",
@@ -93,6 +138,13 @@ class DockerSandboxBackend(BaseSandbox):
             "MPLCONFIGDIR=/workspace/.cache/matplotlib",
             "--env",
             "XDG_CACHE_HOME=/workspace/.cache",
+            # HOME defaults to read-only /root on this rootfs, which breaks libraries
+            # that write to ~ directly (astropy, numba, fontconfig, torch hub). Point it
+            # and TMPDIR at the writable, disk-backed /workspace bind mount.
+            "--env",
+            "HOME=/workspace",
+            "--env",
+            "TMPDIR=/workspace/.tmp",
         ]
         if self.outputs_dir is not None:
             docker_command.extend(
@@ -107,6 +159,16 @@ class DockerSandboxBackend(BaseSandbox):
             docker_command.extend(["--memory", self.config.memory])
         if self.config.pids_limit > 0:
             docker_command.extend(["--pids-limit", str(self.config.pids_limit)])
+        if self.config.shm_size.strip():
+            docker_command.extend(["--shm-size", self.config.shm_size])
+        if self.config.gpus.strip():
+            docker_command.extend(["--gpus", self.config.gpus])
+        # Diagnostic-only labels (NOT used by the reaper's kill filter) so an operator can
+        # trace a leaked container back to the worker/run that created it.
+        if self.config.worker_id.strip():
+            docker_command.extend(["--label", f"ultra.sandbox.worker={self.config.worker_id.strip()}"])
+        if self.config.run_id.strip():
+            docker_command.extend(["--label", f"ultra.sandbox.run={self.config.run_id.strip()}"])
         docker_command.extend([self.config.image, "bash", "-lc", command])
         return docker_command
 
@@ -115,6 +177,12 @@ class DockerSandboxBackend(BaseSandbox):
         if violation is not None:
             return ExecuteResponse(output=violation, exit_code=126)
 
+        # The model's per-call timeout is intentionally IGNORED — only the operator's admin
+        # ceiling (config.timeout_seconds) governs the sandbox, so the model can neither
+        # extend nor shrink its own runtime cap (a security boundary). The hang fix is that
+        # this admin ceiling now DEFAULTS non-zero (config.py / env), so a hung or zombie
+        # call (a codeexec container that died mid-run) is bounded — subprocess.run kills the
+        # docker process on expiry (exit 124, recoverable) — instead of awaiting forever.
         _ = timeout
         timeout_seconds = self.config.timeout_seconds
         try:
@@ -137,6 +205,14 @@ class DockerSandboxBackend(BaseSandbox):
                 output=truncated_output,
                 exit_code=124,
                 truncated=truncated,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A host-level launch failure (PermissionError on the docker binary,
+            # ENOMEM/EAGAIN on fork, etc.) must surface as a structured result the
+            # model can react to, not an unhandled graph error.
+            return ExecuteResponse(
+                output=f"Sandbox launch failed: {exc}",
+                exit_code=127,
             )
 
         output, truncated = _truncate_output(

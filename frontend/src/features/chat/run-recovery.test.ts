@@ -52,6 +52,26 @@ describe("shouldRecoverRunResultMessage", () => {
     ).toBe(false);
   });
 
+  it("never re-recovers a turn the user stopped or that we marked failed", () => {
+    // These carry the calm Retry/Edit affordance; auto-recovery would clobber it.
+    expect(
+      shouldRecoverRunResultMessage({
+        role: "assistant",
+        runId: "run_123",
+        content: "",
+        status: "stopped",
+      })
+    ).toBe(false);
+    expect(
+      shouldRecoverRunResultMessage({
+        role: "assistant",
+        runId: "run_123",
+        content: "",
+        status: "failed",
+      })
+    ).toBe(false);
+  });
+
   it("identifies old legacy 404 content independent of the Error prefix", () => {
     expect(
       isLegacyRunLookup404Content("Error: Request failed with status 404: 404 page not found")

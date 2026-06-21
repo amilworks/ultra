@@ -28,6 +28,33 @@ imaging = [
     "lxml>=5.0.0,<6",
     "fastapi>=0.110.0,<1",
     "uvicorn>=0.29.0,<1",
+    # bioio transcode fallback for formats libbioimage cannot decode: read via bioio ->
+    # write OME-TIFF -> pyramid (imaging/transcode.py). Used ONLY in the batch convert
+    # lane, never on the serving hot path.
+    #
+    # PLUGIN SELECTION: bioio + the readers for formats libbioimage can't decode (.lif/.dv)
+    # plus .czi (preferentially routed to bioio — it assembles Zeiss mosaics/scenes that
+    # libbioimage rendered blocky/unstitched; see PREFER_BIOIO_EXTENSIONS in imaging/job.py).
+    # bioio-bioformats is excluded by request (Java/scyjava — slow); the tiff/ome-tiff/imageio
+    # plugins are omitted as pure redundancy (libbioimage decodes those natively).
+    #
+    # bioio-sldy (.sldy) is EXCLUDED: it requires numpy<2, but bioio-lif (via readlif>=0.6.6)
+    # requires numpy>=2 — they are mutually exclusive (uv: "bioio-lif and bioio-sldy are
+    # incompatible"). .lif is the priority, so numpy>=2 wins and sldy is dropped.
+    #
+    # bioio is PINNED to 3.3.0: pip's backtracking resolver otherwise explores old bioio
+    # (1.x), which caps tifffile<2025.2.18 and conflicts with the modern stack, thrashing for
+    # hundreds of metadata fetches under QEMU. 3.3.0 resolves cleanly with lif+dv+czi against
+    # modern numpy2/pandas3/tifffile/dask (verified with uv's resolver). Leave the heavy
+    # transitive deps (pandas/dask/tifffile/zarr) UNPINNED — bioio 3.3.0 constrains them and
+    # every one resolves to a prebuilt cp312 wheel (no compiler).
+    "tifffile>=2024.1.0",
+    "bioio==3.3.0",
+    "bioio-lif>=1.4.2,<2",   # Leica .lif  (libbioimage's leica reader is non-functional)
+    "bioio-dv>=1.2.0,<2",    # DeltaVision .dv / .r3d  (mrc backend)
+    "bioio-czi>=2.7.2,<3",   # Zeiss .czi (preferred over libbioimage for mosaics)
+    "aicspylibczi>=3.3.1",   # czi native reader — pin to a cp312-wheel release (no compiler)
+    "pylibczirw>=6.0.1",     # czi native reader — pin to a cp312-wheel release (no compiler)
 ]
 rarespot = [
     "matplotlib>=3.8.0,<4",

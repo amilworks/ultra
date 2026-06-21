@@ -31,7 +31,6 @@ def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
     assert "ultra-control migrate" in script
     assert "systemctl restart ultra-control" in script
     assert "systemctl restart ultra-deepagents-worker" in script
-    assert "systemctl restart ultra-rarespot-worker" in script
     assert "SYSTEMD_UNIT_DIR" in script
     assert "ultra-control-stack.target" in script
     assert "ULTRA_CONTROL_DATABASE_URL" in script
@@ -94,7 +93,6 @@ def test_main_release_workflow_builds_uploadable_release_artifact() -> None:
 def test_systemd_units_run_go_control_and_deepagents_workers() -> None:
     control = read_repo_file("deploy/systemd/ultra-control.service")
     deepagents = read_repo_file("deploy/systemd/ultra-deepagents-worker.service")
-    rarespot = read_repo_file("deploy/systemd/ultra-rarespot-worker.service")
 
     assert "EnvironmentFile=/etc/ultra/ultra-backend.env" in control
     assert "ExecStart=/srv/ultra/current/bin/ultra-control serve" in control
@@ -103,10 +101,6 @@ def test_systemd_units_run_go_control_and_deepagents_workers() -> None:
     assert "After=ultra-control.service" in deepagents
     assert "ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.nats_worker" in deepagents
     assert "EnvironmentFile=/etc/ultra/ultra-backend.env" in deepagents
-
-    assert "After=ultra-control.service" in rarespot
-    assert "ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.rarespot_worker" in rarespot
-    assert "EnvironmentFile=/etc/ultra/ultra-backend.env" in rarespot
 
 
 def test_proxy_templates_route_modern_app_to_go_control_plane() -> None:

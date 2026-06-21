@@ -1,6 +1,6 @@
 ---
 name: computational-experiment-rigor
-description: Rigor protocol for simulations, numerical experiments, parameter studies, and quantitative claims — uncertainty quantification, convergence checks, classification thresholds, literature grounding, and reproducibility records.
+description: Rigor protocol for the analysis itself — uncertainty quantification, convergence checks, classification thresholds, literature grounding, and reproducibility records. Use when designing or running a simulation, numerical experiment, or parameter study, when computing estimates (exponents, rates, fits, spectra, regime classifications), or before making any quantitative claim — i.e. while producing the numbers, not while writing them up.
 ---
 
 # Computational Experiment Rigor
@@ -81,16 +81,10 @@ just "consistent".
 
 ## Results contract (Intelligence: Pro)
 On Pro-intelligence runs the harness enforces a results contract on the final
-chat answer and will send the run back for revision when these are missing:
-- every decision-relevant estimate as mean ± spread (≥3 seeds/ICs × ≥2
-  durations), including clearly-resolved cases, with the spread column in CSVs;
-- the decision rule stated verbatim and applied per row (definitive class only
-  when |estimate| > 3× spread AND an independent discriminator agrees;
-  otherwise marginal);
-- classification tables carrying ICs, duration, step size, discriminators,
-  class, and earned confidence;
-- projection-dependent structure claims reported under both views (e.g.
-  wrapped vs unwrapped strobe clusters) or the aliasing explained;
-- a basin/IC-dependence statement for borderline parameter values;
-- a Limitations paragraph in the chat answer itself.
-Meeting the contract on the first pass avoids a revision round-trip.
+answer (mean ± spread on every decision-relevant estimate, the decision rule
+stated and applied per row, a classification table, projection-aliasing noted,
+basin/IC-dependence for borderline cases, and a Limitations paragraph) and sends
+the run back for revision when any is missing. The authoritative wording is
+injected into the system prompt on those runs; follow it verbatim and meet it on
+the first pass to avoid a revision round-trip. The items above (UQ, the 3×-spread
+rule, triangulation, limitations) already satisfy it.

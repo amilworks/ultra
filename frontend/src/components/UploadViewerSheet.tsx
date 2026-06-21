@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, FileText, FileVideo, Layers3, RefreshCw } from "lucide-react";
+import { Download, ExternalLink, FileText, FileVideo, FileWarning, Layers3, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -297,6 +297,39 @@ function VideoViewerPanel({ file, apiClient }: { file: UploadedFileRecord; apiCl
   );
 }
 
+/**
+ * Calm fallback shown when the image engine recognized the file but cannot decode it
+ * (kind:"unsupported" / decodable:false — e.g. a Leica .lif). Replaces the broken 1×1
+ * canvas + endless "Loading…" with a clear message and a download-original action.
+ */
+function UnsupportedFormatPanel({
+  info,
+  apiClient,
+}: {
+  info: UploadViewerInfo;
+  apiClient: ApiClient;
+}) {
+  const downloadUrl = apiClient.resourceDownloadUrl(info.file_id);
+  const message =
+    info.message ?? "This file format can't be previewed by the image engine yet.";
+  return (
+    <section className="viewer-stage-document">
+      <div className="viewer-empty flex flex-col items-center gap-3 text-center">
+        <FileWarning className="size-8 opacity-60" aria-hidden />
+        <div className="text-base font-medium">Preview unavailable</div>
+        <p className="max-w-md text-sm opacity-70">{message}</p>
+        <p className="text-xs opacity-50">{info.original_name}</p>
+        <Button asChild size="sm" variant="secondary">
+          <a href={downloadUrl} download>
+            <Download className="mr-1.5 size-3.5" />
+            Download original
+          </a>
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 export function UploadViewerWorkspace({
   uploadedFiles,
   bisqueLinksByFileId,
@@ -567,6 +600,8 @@ export function UploadViewerWorkspace({
             <PdfViewerPanel file={selectedFile} apiClient={apiClient} />
           ) : selectedFileIsVideo && selectedFile ? (
             <VideoViewerPanel file={selectedFile} apiClient={apiClient} />
+          ) : selectedViewerInfo?.decodable === false ? (
+            <UnsupportedFormatPanel info={selectedViewerInfo} apiClient={apiClient} />
           ) : showBisqueFrame ? (
             <>
               <div className="viewer-stage-header">

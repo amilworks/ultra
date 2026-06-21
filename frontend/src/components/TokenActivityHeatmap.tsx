@@ -1,5 +1,11 @@
 import { useMemo, useState } from "react";
 
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { formatTokens } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { TokenUsageDailyPoint } from "@/types";
@@ -12,6 +18,7 @@ const MODES: { value: HeatmapMode; label: string }[] = [
   { value: "weekly", label: "Weekly" },
   { value: "cumulative", label: "Cumulative" },
 ];
+const exactTokenFormatter = new Intl.NumberFormat();
 
 type HeatmapCell = {
   key: string;
@@ -42,6 +49,11 @@ const formatDayLabel = (key: string): string => {
     year: "numeric",
     timeZone: "UTC",
   });
+};
+
+const formatExactTokens = (tokens: number): string => {
+  const safeTokens = Number.isFinite(tokens) && tokens > 0 ? Math.round(tokens) : 0;
+  return `${exactTokenFormatter.format(safeTokens)} token${safeTokens === 1 ? "" : "s"}`;
 };
 
 export function TokenActivityHeatmap({
@@ -119,59 +131,70 @@ export function TokenActivityHeatmap({
 
   return (
     <div className="token-heatmap">
-      <div className="token-heatmap-toolbar">
-        <div
-          className="token-heatmap-modes"
-          role="tablist"
-          aria-label="Activity view"
-        >
-          {MODES.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              role="tab"
-              aria-selected={mode === option.value}
-              className={cn(
-                "token-heatmap-mode",
-                mode === option.value && "is-active"
-              )}
-              onClick={() => setMode(option.value)}
+      <TooltipProvider delayDuration={120}>
+        <div className="token-heatmap-visual">
+          <div className="token-heatmap-toolbar">
+            <div
+              className="token-heatmap-modes"
+              role="tablist"
+              aria-label="Activity view"
             >
-              {option.label}
-            </button>
-          ))}
+              {MODES.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === option.value}
+                  className={cn(
+                    "token-heatmap-mode",
+                    mode === option.value && "is-active"
+                  )}
+                  onClick={() => setMode(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <span className="token-heatmap-peak">
+              {maxValue > 0
+                ? `Peak ${formatTokens(maxValue)} tokens`
+                : "No activity yet"}
+            </span>
+          </div>
+          <div className="token-heatmap-grid" role="img" aria-label="Token activity heatmap">
+            {cells.map((cell) => {
+              const tooltipLabel = `${formatDayLabel(cell.key)} - ${formatExactTokens(cell.value)}${
+                unitLabel ? ` ${unitLabel}` : ""
+              }`;
+              return cell.future ? (
+                <span key={cell.key} className="token-heatmap-cell is-future" aria-hidden="true" />
+              ) : (
+                <Tooltip key={cell.key}>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="token-heatmap-cell"
+                      data-level={cell.level}
+                      aria-label={tooltipLabel}
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={6}>
+                    {tooltipLabel}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </div>
+          <div className="token-heatmap-legend">
+            <span>Less</span>
+            <span className="token-heatmap-cell" data-level={0} aria-hidden="true" />
+            <span className="token-heatmap-cell" data-level={1} aria-hidden="true" />
+            <span className="token-heatmap-cell" data-level={2} aria-hidden="true" />
+            <span className="token-heatmap-cell" data-level={3} aria-hidden="true" />
+            <span className="token-heatmap-cell" data-level={4} aria-hidden="true" />
+            <span>More</span>
+          </div>
         </div>
-        <span className="token-heatmap-peak">
-          {maxValue > 0
-            ? `Peak ${formatTokens(maxValue)} tokens`
-            : "No activity yet"}
-        </span>
-      </div>
-      <div className="token-heatmap-grid" role="img" aria-label="Token activity heatmap">
-        {cells.map((cell) =>
-          cell.future ? (
-            <span key={cell.key} className="token-heatmap-cell is-future" aria-hidden="true" />
-          ) : (
-            <span
-              key={cell.key}
-              className="token-heatmap-cell"
-              data-level={cell.level}
-              title={`${formatDayLabel(cell.key)} — ${formatTokens(cell.value)} tokens${
-                unitLabel ? ` (${unitLabel})` : ""
-              }`}
-            />
-          )
-        )}
-      </div>
-      <div className="token-heatmap-legend">
-        <span>Less</span>
-        <span className="token-heatmap-cell" data-level={0} aria-hidden="true" />
-        <span className="token-heatmap-cell" data-level={1} aria-hidden="true" />
-        <span className="token-heatmap-cell" data-level={2} aria-hidden="true" />
-        <span className="token-heatmap-cell" data-level={3} aria-hidden="true" />
-        <span className="token-heatmap-cell" data-level={4} aria-hidden="true" />
-        <span>More</span>
-      </div>
+      </TooltipProvider>
     </div>
   );
 }

@@ -1199,8 +1199,16 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
     }
     : buildAtlasScheme(axisSizes, defaultPlane);
 
+  // The engine can recognize a container but not decode it (a Leica .lif, etc.); the
+  // control plane then sends kind:"unsupported" + decodable:false. Preserve that so the
+  // viewer can show a "preview unavailable, download instead" card instead of a broken
+  // 1×1 canvas. Everything else is filled with the usual (zeroed) image shape so any
+  // consumer reading axis_sizes/service_urls unconditionally still works.
+  const undecodable = source.decodable === false || String(source.kind ?? "").trim().toLowerCase() === "unsupported";
   return {
-    kind: "image",
+    kind: undecodable ? "unsupported" : "image",
+    decodable: undecodable ? false : undefined,
+    message: typeof source.message === "string" ? source.message : undefined,
     file_id: String(source.file_id ?? ""),
     original_name: originalName,
     modality,

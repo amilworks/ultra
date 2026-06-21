@@ -1378,6 +1378,88 @@ func (s *PostgresStore) ListRunsForUser(ctx context.Context, userID string, thre
 	return runs, nil
 }
 
+// runHistorySnippetChars bounds the response excerpt returned per episodic hit.
+const runHistorySnippetChars = 600
+
+// runHistorySearchTerms splits an episodic query into up to 10 lowercase terms.
+// Empty result means "no keyword filter" (recency-only).
+func runHistorySearchTerms(query string) []string {
+	terms := make([]string, 0, 10)
+	for _, field := range strings.Fields(strings.ToLower(query)) {
+		term := strings.TrimSpace(field)
+		if term == "" {
+			continue
+		}
+		if len(term) > 64 {
+			term = term[:64]
+		}
+		terms = append(terms, term)
+		if len(terms) >= 10 {
+			break
+		}
+	}
+	return terms
+}
+
+// SearchRunHistoryForUser powers episodic memory: it returns the user's own past
+// succeeded runs matching an optional keyword (over goal, final response, and
+// thread title), most recent first. Scoped to user_id at the DB level so it can
+// never surface another user's history. ILIKE over one user's bounded history on
+// the (user_id, status, updated_at) index — no full-text index required.
+func (s *PostgresStore) SearchRunHistoryForUser(ctx context.Context, userID string, opts domain.RunHistorySearchOptions) ([]domain.RunHistoryHit, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []domain.RunHistoryHit{}, nil
+	}
+	terms := runHistorySearchTerms(opts.Query)
+	limit := opts.Limit
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	var since *time.Time
+	if opts.Since != nil && !opts.Since.IsZero() {
+		t := opts.Since.UTC()
+		since = &t
+	}
+	// All-terms-match: every whitespace-separated query term must appear somewhere
+	// in goal+response+title (case-insensitive). A natural multi-word query like
+	// "ferret rna-seq interferon" matches even when the words are not contiguous.
+	rows, err := s.pool.Query(ctx, `
+SELECT r.run_id, r.thread_id, COALESCE(t.title, ''), r.goal,
+       LEFT(COALESCE(r.response_text, ''), $5), r.completed_at
+FROM control_runs r
+LEFT JOIN control_threads t ON t.thread_id = r.thread_id
+WHERE r.user_id = $1
+  AND r.status = 'succeeded'
+  AND (cardinality($2::text[]) = 0 OR NOT EXISTS (
+        SELECT 1 FROM unnest($2::text[]) AS term
+        WHERE (r.goal || ' ' || COALESCE(r.response_text, '') || ' ' || COALESCE(t.title, ''))
+              NOT ILIKE '%' || term || '%'
+      ))
+  AND ($3::timestamptz IS NULL OR r.completed_at >= $3)
+  AND ($4 = '' OR r.run_id <> $4)
+ORDER BY r.completed_at DESC NULLS LAST
+LIMIT $6`, userID, terms, since, strings.TrimSpace(opts.ExcludeRunID), runHistorySnippetChars, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hits := []domain.RunHistoryHit{}
+	for rows.Next() {
+		var hit domain.RunHistoryHit
+		var completedAt pgtype.Timestamptz
+		if err := rows.Scan(&hit.RunID, &hit.ThreadID, &hit.Title, &hit.Goal, &hit.ResponseSnippet, &completedAt); err != nil {
+			return nil, err
+		}
+		hit.CompletedAt = timePtr(completedAt)
+		hits = append(hits, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hits, nil
+}
+
 func (s *PostgresStore) GetRunLease(ctx context.Context, runID string) (domain.RunLeaseRecord, bool, error) {
 	lease, err := scanRunLease(s.pool.QueryRow(ctx, `
 SELECT run_id, worker_id, lease_token, lease_expires_at, created_at, updated_at
@@ -5491,6 +5573,35 @@ RETURNING event_id, job_id, sequence, event_type, COALESCE(actor_user_id, ''),
 	return job, nil
 }
 
+// LinkDataAgentJobResource records a resource against a data-agent job. Used by the
+// batch-analysis worker to attach the OUTPUT resources it produces (io_role='output')
+// to the job, alongside the input images recorded at creation. Idempotent: re-running
+// a job (resume after restart) upserts the same row instead of duplicating.
+func (s *PostgresStore) LinkDataAgentJobResource(ctx context.Context, input domain.LinkDataAgentJobResourceInput) error {
+	jobID := strings.TrimSpace(input.JobID)
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if jobID == "" || resourceID == "" {
+		return ErrNotFound
+	}
+	ioRole := strings.ToLower(strings.TrimSpace(input.IORole))
+	if ioRole == "" {
+		ioRole = "input"
+	}
+	if _, err := s.pool.Exec(ctx, `
+INSERT INTO control_data_agent_job_resources (job_id, resource_id, position, io_role, metadata)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (job_id, resource_id) DO UPDATE SET io_role = EXCLUDED.io_role, metadata = EXCLUDED.metadata`,
+		jobID,
+		resourceID,
+		int64(input.Position),
+		ioRole,
+		jsonBytes(mapOrEmpty(input.Metadata)),
+	); err != nil {
+		return mapPgError(err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) GetDataAgentJobForUser(ctx context.Context, jobID string, userID string, orgID string) (domain.DataAgentJobRecord, error) {
 	job, err := scanDataAgentJobRow(s.pool.QueryRow(ctx, `
 SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
@@ -5632,8 +5743,11 @@ FOR UPDATE`,
 	if input.OutputSummary != nil {
 		outputSummary = cloneJSONMap(input.OutputSummary)
 	}
+	// Only replace metadata when the update carries some: status/progress updates send an
+	// empty map, and clobbering would drop create-time metadata (e.g. results_collection_id)
+	// that downstream output registration relies on.
 	metadata := existing.Metadata
-	if input.Metadata != nil {
+	if len(input.Metadata) > 0 {
 		metadata = cloneJSONMap(input.Metadata)
 	}
 	job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `

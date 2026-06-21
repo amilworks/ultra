@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState, type MouseEvent, type WheelEvent } from "react";
 
-import { prefetchSliceBitmaps } from "./sliceImageCache";
 import { isScrubbable, neighborSliceUrls, nextZFromWheel, zFromPointerY } from "./zScrub";
 
 export type ZScrubThumbnailProps = {
@@ -21,6 +20,31 @@ export type ZScrubThumbnailProps = {
   onError?: () => void;
 };
 
+type SliceImageCacheModule = {
+  prefetchSliceBitmaps: (urls: Iterable<string>) => void;
+};
+
+let sliceImageCacheModulePromise: Promise<SliceImageCacheModule> | null = null;
+
+const loadSliceImageCacheModule = (): Promise<SliceImageCacheModule> => {
+  sliceImageCacheModulePromise ??= import("./sliceImageCache").catch((error: unknown) => {
+    sliceImageCacheModulePromise = null;
+    throw error;
+  });
+  return sliceImageCacheModulePromise;
+};
+
+const prefetchSliceBitmapsLazily = (urls: string[]): void => {
+  if (urls.length === 0) {
+    return;
+  }
+  void loadSliceImageCacheModule()
+    .then(({ prefetchSliceBitmaps }) => {
+      prefetchSliceBitmaps(urls);
+    })
+    .catch(() => undefined);
+};
+
 /**
  * A thumbnail that becomes a live z-scrubber on hover: the first hover lazily
  * loads the z-plane count, then moving the cursor up/down over the thumbnail
@@ -37,7 +61,7 @@ export function ZScrubThumbnail({
   loadZCount,
   className,
   prefetchRadius = 2,
-  prefetch = prefetchSliceBitmaps,
+  prefetch = prefetchSliceBitmapsLazily,
   onError,
 }: ZScrubThumbnailProps) {
   const [zCount, setZCount] = useState<number | null>(null);

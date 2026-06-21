@@ -12,7 +12,6 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("PIL")
 from fastapi.testclient import TestClient  # noqa: E402
-
 from ultra_deepagents.imaging.pool import InlineRunner  # noqa: E402
 from ultra_deepagents.imaging.service import create_app  # noqa: E402
 

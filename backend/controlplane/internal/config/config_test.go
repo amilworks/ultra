@@ -24,9 +24,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReadHeaderTimeout <= 0 {
 		t.Fatalf("ReadHeaderTimeout must have a positive default")
 	}
-	if cfg.NATSRareSpotJobsSubject != "ultra.runs.rarespot.jobs" {
-		t.Fatalf("NATSRareSpotJobsSubject = %q, want RareSpot subject", cfg.NATSRareSpotJobsSubject)
-	}
 	if cfg.NATSDataAgentJobsSubject != "ultra.data_agent.jobs" {
 		t.Fatalf("NATSDataAgentJobsSubject = %q, want Data Agent subject", cfg.NATSDataAgentJobsSubject)
 	}
@@ -35,9 +32,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.NATSWorkerDurable != "ultra-deepagents-worker" {
 		t.Fatalf("NATSWorkerDurable = %q, want Deep Agents durable", cfg.NATSWorkerDurable)
-	}
-	if cfg.NATSRareSpotWorkerDurable != "rarespot-ecology-worker" {
-		t.Fatalf("NATSRareSpotWorkerDurable = %q, want RareSpot durable", cfg.NATSRareSpotWorkerDurable)
 	}
 	if cfg.NATSDataAgentWorkerDurable != "ultra-data-agent-worker" {
 		t.Fatalf("NATSDataAgentWorkerDurable = %q, want Data Agent durable", cfg.NATSDataAgentWorkerDurable)

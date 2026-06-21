@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import tarfile
+import tempfile
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from fsspec.core import url_to_fs
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 logger = logging.getLogger("megaseg_service")
 REMOTE_SOURCE_SCHEMES = {"http", "https", "s3"}
@@ -146,6 +148,9 @@ class ServiceRuntime:
         self.model_checkpoint_path: Path | None = None
         self.health_error: str | None = None
         self.worker_task: asyncio.Task[Any] | None = None
+        # Serializes GPU access for the stateless /v1/infer path so concurrent requests
+        # don't run multiple inferences on one device at once (created on the loop).
+        self.infer_semaphore: asyncio.Semaphore | None = None
 
 
 def _job_record_path(settings: ServiceSettings, job_id: str) -> Path:
@@ -258,6 +263,67 @@ def _collect_artifact_manifest(results_dir: Path) -> list[ArtifactEntry]:
             )
         )
     return manifest
+
+
+def _relativize_result_paths(value: Any, base: Path) -> Any:
+    """Rewrite absolute artifact paths in a result payload to archive-relative POSIX
+    paths so the caller can locate each file inside the returned tarball."""
+    base_resolved = base.resolve()
+
+    def rel(path_str: str) -> str:
+        try:
+            return Path(path_str).resolve().relative_to(base_resolved).as_posix()
+        except Exception:  # noqa: BLE001 - leave non-results paths untouched
+            return path_str
+
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and (key.endswith("_path") or key == "path") and isinstance(item, str) and item:
+                out[key] = rel(item)
+            else:
+                out[key] = _relativize_result_paths(item, base)
+        return out
+    if isinstance(value, list):
+        return [_relativize_result_paths(item, base) for item in value]
+    return value
+
+
+def _build_infer_archive(results_dir: Path, result: dict[str, Any], tmp_dir: Path) -> Path:
+    """Write result.json (with archive-relative paths) into the results dir, then tar+gzip
+    the whole results dir. The caller extracts the archive and reads result.json to map
+    each artifact (mask, overlays, summary) to its file."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    relativized = _relativize_result_paths(result, results_dir)
+    (results_dir / "result.json").write_text(
+        json.dumps(relativized, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    archive_path = tmp_dir / "result.tar.gz"
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        archive.add(results_dir, arcname=".")
+    return archive_path
+
+
+def _run_infer_sync(runtime: ServiceRuntime, request: JobRequest, input_path: Path, output_dir: Path) -> dict[str, Any]:
+    if runtime.health_error:
+        raise RuntimeError(runtime.health_error)
+    model, checkpoint_path, device_name = _get_model_for_request(runtime, request)
+    return run_megaseg_batch(
+        file_paths=[str(input_path)],
+        output_dir=output_dir,
+        checkpoint_path=checkpoint_path,
+        structure_channel=int(request.structure_channel),
+        nucleus_channel=(int(request.nucleus_channel) if request.nucleus_channel is not None else None),
+        channel_index_base=int(request.channel_index_base),
+        mask_threshold=float(request.mask_threshold),
+        save_visualizations=bool(request.save_visualizations),
+        generate_report=bool(request.generate_report),
+        device=device_name,
+        structure_name=str(request.structure_name or "structure"),
+        model=model,
+        amp_enabled=(bool(request.amp_enabled) if request.amp_enabled is not None else bool(runtime.settings.amp_enabled)),
+    )
 
 
 def _extract_uploaded_archive(upload_path: Path, inputs_dir: Path) -> Path:
@@ -514,6 +580,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             runtime.health_error = str(exc)
             logger.exception("Megaseg service startup failed")
+        runtime.infer_semaphore = asyncio.Semaphore(max(1, int(runtime.settings.max_concurrent_jobs)))
         runtime.worker_task = asyncio.create_task(_worker_loop(app))
         for job_id in stale_queued:
             await runtime.queue.put(job_id)
@@ -558,6 +625,64 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             "status": record.status,
             "created_at": record.created_at,
         }
+
+    @app.post("/v1/infer")
+    async def infer(request: Request) -> FileResponse:
+        # Stateless input->output: take one image + params, run the resident model in a
+        # temp dir, return a results tarball, and delete the temp dir after streaming.
+        # Nothing is persisted on this node (the caller owns all storage).
+        _require_auth(request, runtime)
+        content_type = str(request.headers.get("content-type") or "").lower()
+        if "multipart/form-data" not in content_type:
+            raise HTTPException(status_code=400, detail="POST /v1/infer requires multipart/form-data with a file and params.")
+        form = await request.form()
+        raw_params = form.get("params")
+        if raw_params is None:
+            raw_params = form.get("request_json")
+        try:
+            params = JobRequest.model_validate_json(str(raw_params)) if raw_params is not None else JobRequest()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Invalid params: {exc}") from exc
+        upload = None
+        for _, value in form.multi_items():
+            if getattr(value, "filename", None) and getattr(value, "file", None) is not None:
+                upload = value
+                break
+        if upload is None:
+            raise HTTPException(status_code=400, detail="POST /v1/infer requires a file part.")
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="megaseg-infer-"))
+        try:
+            inputs_dir = tmp_dir / "inputs"
+            results_dir = tmp_dir / "results"
+            inputs_dir.mkdir(parents=True, exist_ok=True)
+            results_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = Path(str(upload.filename)).name or "input.bin"
+            input_path = inputs_dir / safe_name
+            with input_path.open("wb") as handle:
+                shutil.copyfileobj(upload.file, handle)
+            materialized = _materialize_uploaded_source(input_path, inputs_dir)
+            if runtime.infer_semaphore is None:
+                runtime.infer_semaphore = asyncio.Semaphore(max(1, int(runtime.settings.max_concurrent_jobs)))
+            async with runtime.infer_semaphore:
+                result = await asyncio.to_thread(_run_infer_sync, runtime, params, materialized, results_dir)
+            if not bool(result.get("success")):
+                raise HTTPException(status_code=422, detail=str(result.get("error") or "Megaseg inference failed."))
+            archive_path = _build_infer_archive(results_dir, result, tmp_dir)
+            _log_event("infer_completed", input=safe_name, artifacts=len(_collect_artifact_manifest(results_dir)))
+            return FileResponse(
+                archive_path,
+                media_type="application/gzip",
+                filename="megaseg_result.tar.gz",
+                background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+            )
+        except HTTPException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.exception("Megaseg /v1/infer failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/v1/jobs/{job_id}")
     async def get_job(job_id: str, request: Request) -> dict[str, Any]:

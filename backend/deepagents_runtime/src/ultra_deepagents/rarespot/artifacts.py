@@ -121,6 +121,49 @@ def render_overlay(*, source_path: Path, boxes: list[dict[str, Any]], output_pat
     return output_path
 
 
+STABILITY_COLORS = {
+    "trusted": (22, 163, 74),     # green  — survives nearly every perturbation
+    "borderline": (217, 119, 6),  # amber  — survives about half
+    "unstable": (220, 38, 38),    # red    — flickers; likely a false positive, review it
+}
+
+
+def render_stability_overlay(*, source_path: Path, boxes: list[dict[str, Any]], output_path: Path) -> Path:
+    """Annotated overlay coloured by per-detection STABILITY (green/amber/red) rather than
+    class, so an ecologist can see at a glance which detections to trust vs review. Labels
+    show class, confidence, and stability %."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source_path) as image:
+        rgb = image.convert("RGB")
+    draw = ImageDraw.Draw(rgb)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+    for box in boxes:
+        xyxy = box.get("xyxy") if isinstance(box.get("xyxy"), list) else []
+        if len(xyxy) != 4:
+            continue
+        x1, y1, x2, y2 = [float(value) for value in xyxy]
+        color = STABILITY_COLORS.get(str(box.get("stability_label") or ""), (107, 114, 128))
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+        parts = [str(box.get("class_name") or "det")]
+        confidence = box.get("confidence")
+        if isinstance(confidence, (float, int)):
+            parts.append(f"c{float(confidence):.2f}")
+        stability = box.get("stability")
+        if isinstance(stability, (float, int)):
+            parts.append(f"s{float(stability):.0%}")
+        label = " ".join(parts)
+        label_bbox = draw.textbbox((x1, max(0, y1 - 18)), label, font=font)
+        draw.rectangle(label_bbox, fill=(5, 5, 5))
+        draw.text((x1, max(0, y1 - 18)), label, fill=color, font=font)
+    rgb.save(output_path, format="PNG")
+    return output_path
+
+
 def write_report(path: Path, payload: dict[str, Any]) -> Path:
     summary = payload.get("summary") or {}
     counts = payload.get("counts_by_class") or {}
@@ -153,12 +196,76 @@ def write_report(path: Path, payload: dict[str, Any]) -> Path:
             )
     else:
         lines.append("- No confidence values were reported.")
+
+    stability = payload.get("stability") or {}
+    label_counts = stability.get("label_counts") or {}
+    lines.extend(["", "## Reliability & trust"])
+    if label_counts:
+        trials = int(stability.get("trials") or 0)
+        perturbations = ", ".join(stability.get("perturbations") or [])
+        trusted = int(label_counts.get("trusted", 0))
+        borderline = int(label_counts.get("borderline", 0))
+        unstable = int(label_counts.get("unstable", 0))
+        total = trusted + borderline + unstable
+        lines.extend(
+            [
+                "",
+                f"Per-detection stability under {trials} perturbations ({perturbations}). A "
+                "detection is **trusted** if a same-class box survives nearly every perturbation "
+                "and **unstable** if it flickers (a likely false positive).",
+                "",
+                "| Reliability | Detections | Guidance |",
+                "|---|---:|---|",
+                f"| Trusted (survives ≥75%) | {trusted} | Use with confidence |",
+                f"| Borderline (≥50%) | {borderline} | Spot-check |",
+                f"| Unstable (<50%) | {unstable} | Review — likely false positive |",
+                f"| Total | {total} | |",
+            ]
+        )
+        by_class = stability.get("by_class") or {}
+        if by_class:
+            lines.extend(["", "| Class | Trusted | Borderline | Unstable |", "|---|---:|---:|---:|"])
+            for class_name in sorted(by_class):
+                counts_for_class = by_class[class_name]
+                lines.append(
+                    f"| {class_name} | {counts_for_class.get('trusted', 0)} | "
+                    f"{counts_for_class.get('borderline', 0)} | {counts_for_class.get('unstable', 0)} |"
+                )
+    else:
+        lines.append("")
+        lines.append("- Per-detection stability was not computed for this run.")
     lines.extend(
         [
             "",
-            "## Spectral Review Candidates",
+            "_Caveat: this detector has no held-out validation set (it was trained with mAP) and is "
+            "known to over-detect (false positives). Confidence is the model's raw score, not a "
+            "calibrated probability of correctness. Treat confidence and stability together as "
+            "triage, not ground truth — to quantify accuracy, hand-verify the flagged "
+            "(unstable/borderline) detections, which calibrates a precision estimate for this imagery._",
         ]
     )
+
+    geospatial = payload.get("geospatial") or {}
+    if geospatial.get("points"):
+        metrics = geospatial.get("metrics") or {}
+        nearest = metrics.get("nearest_neighbor_m") or {}
+        totals = metrics.get("totals_by_class") or {}
+        lines.extend(["", "## Geospatial survey", ""])
+        lines.append(f"- Georeferenced images: {geospatial.get('georeferenced_image_count', 0)}")
+        if metrics.get("survey_extent_m") is not None:
+            lines.append(f"- Survey extent: {float(metrics['survey_extent_m']):.0f} m")
+        if nearest:
+            lines.append(
+                f"- Image spacing (nearest-neighbor): mean {float(nearest.get('mean', 0)):.0f} m "
+                f"(min {float(nearest.get('min', 0)):.0f}, max {float(nearest.get('max', 0)):.0f})"
+            )
+        if totals:
+            lines.append("- Totals across survey: " + ", ".join(f"{name}: {count}" for name, count in sorted(totals.items())))
+        if metrics.get("dog_per_burrow") is not None:
+            lines.append(f"- Prairie dog : burrow ratio: {float(metrics['dog_per_burrow']):.2f}")
+        lines.append("- See the survey detection map artifact (points sized by detections, coloured by reliability).")
+
+    lines.extend(["", "## Spectral Review Candidates"])
     if top_candidates:
         for candidate in top_candidates[:10]:
             lines.append(f"- {candidate.get('file_name')}: {float(candidate.get('score') or 0.0):.3f}")

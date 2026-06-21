@@ -4,8 +4,8 @@ import asyncio
 import contextlib
 import json
 import os
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -16,15 +16,14 @@ from urllib import request as urllib_request
 
 import nats
 import pytest
-
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.data_agent.worker import (
+    TERMINAL_DATA_AGENT_JOB_STATUSES,
     ControlPlaneDataAgentJobLease,
     DataAgentJobEnvelope,
     DataAgentLeaseConflict,
     DefaultDataAgentProcessor,
     NATSDataAgentWorker,
-    TERMINAL_DATA_AGENT_JOB_STATUSES,
     acquire_control_plane_data_agent_job_lease,
     build_data_agent_consumer_config,
     data_agent_ack_extension_interval,
@@ -625,13 +624,11 @@ def test_data_agent_worker_go_control_plane_live_smoke(tmp_path):
             "ULTRA_CONTROL_NATS_URL": nats_url,
             "ULTRA_CONTROL_NATS_STREAM": stream,
             "ULTRA_CONTROL_NATS_JOBS_SUBJECT": f"ultra.e2e.{suffix}.runs.jobs",
-            "ULTRA_CONTROL_NATS_RARESPOT_JOBS_SUBJECT": f"ultra.e2e.{suffix}.rarespot.jobs",
             "ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT": jobs_subject,
             "ULTRA_CONTROL_NATS_EVENTS_SUBJECT": f"ultra.e2e.{suffix}.runs.events",
             "ULTRA_CONTROL_NATS_CANCEL_SUBJECT": f"ultra.e2e.{suffix}.runs.cancel",
             "ULTRA_CONTROL_NATS_EVENT_CONSUMER": f"ultra-control-e2e-{suffix}",
             "ULTRA_CONTROL_NATS_WORKER_DURABLE": f"ultra-worker-e2e-{suffix}",
-            "ULTRA_CONTROL_NATS_RARESPOT_WORKER_DURABLE": f"rarespot-e2e-{suffix}",
             "ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE": durable,
             "ULTRA_CONTROL_UPLOAD_ROOT": str(tmp_path / "uploads"),
             "ULTRA_CONTROL_ARTIFACT_ROOT": str(tmp_path / "artifacts"),
@@ -760,14 +757,14 @@ def _upload_smoke_resource(
     boundary = f"ultra-smoke-{uuid.uuid4().hex}"
     body = b"".join(
         [
-            f"--{boundary}\r\n".encode("utf-8"),
+            f"--{boundary}\r\n".encode(),
             (
                 f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
                 "Content-Type: application/octet-stream\r\n\r\n"
-            ).encode("utf-8"),
+            ).encode(),
             content,
             b"\r\n",
-            f"--{boundary}--\r\n".encode("utf-8"),
+            f"--{boundary}--\r\n".encode(),
         ]
     )
     request = urllib_request.Request(

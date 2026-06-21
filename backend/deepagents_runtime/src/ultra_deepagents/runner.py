@@ -23,6 +23,7 @@ from ultra_deepagents.agent import (
     resolve_user_memory_root,
 )
 from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
+from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import stage_uploaded_files
@@ -37,20 +38,13 @@ from ultra_deepagents.events import (
     normalize_tool_call,
 )
 from ultra_deepagents.model import build_chat_model
-from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
     ingest_pdf_file,
     normalize_arxiv_id,
     paper_id_from_pdf_path,
 )
-from ultra_deepagents.rarespot.tools import (
-    build_rarespot_idempotency_key,
-    compact_config_overrides,
-    create_rarespot_run,
-    looks_report_only_rarespot_goal,
-    wait_for_rarespot_run,
-)
+from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
 from ultra_deepagents.title_generation import (
     resolve_conversation_title_task,
@@ -272,266 +266,6 @@ def _dedupe_ingested_papers(papers: list[dict[str, Any]]) -> list[dict[str, Any]
     return deduped
 
 
-async def _preload_rarespot_for_context(
-    context: AgentRunContext,
-    *,
-    settings: RuntimeSettings,
-    sequencer: RunEventSequencer,
-    publish_event: PublishEvent,
-) -> dict[str, Any] | None:
-    if not _should_preload_rarespot(context, settings=settings):
-        return None
-
-    text = _rarespot_request_text(context)
-    config_overrides = _rarespot_config_overrides_from_text(text)
-    idempotency_key = build_rarespot_idempotency_key(
-        parent_run_id=context.run_id,
-        selected_file_ids=list(context.selected_file_ids),
-        local_paths=[],
-        resource_uris=list(context.selected_resource_uris),
-        dataset_uris=list(context.selected_dataset_uris),
-        config_overrides=config_overrides,
-    )
-    body = {
-        "user_id": context.user_id or "researcher",
-        "goal": "Run RareSpot ecology inference.",
-        "messages": [{"role": "tool", "content": "RareSpot ecology inference requested."}],
-        "file_ids": list(context.selected_file_ids),
-        "resource_uris": list(context.selected_resource_uris),
-        "dataset_uris": list(context.selected_dataset_uris),
-        "selected_tool_names": ["rarespot_ecology_inference"],
-        "workflow_hint": {"id": "rarespot_ecology"},
-        "idempotency_key": idempotency_key,
-        "metadata": {
-            "idempotency_key": idempotency_key,
-            "file_ids": list(context.selected_file_ids),
-            "local_paths": [],
-            "tool_name": "rarespot_ecology_inference",
-            "tile_overlap": 0.25,
-            "spectral": True,
-            "rarespot_config": config_overrides,
-        },
-    }
-
-    await publish_event(
-        sequencer.stamp(
-            normalize_tool_call(
-                context,
-                "rarespot_ecology_inference",
-                "started",
-                {
-                    "source": "deterministic_preload",
-                    "input": body,
-                    "tool_call_id": f"preload_rarespot_{context.run_id}",
-                },
-            )
-        )
-    )
-    try:
-        run = await asyncio.to_thread(
-            create_rarespot_run,
-            settings,
-            thread_id=context.thread_id,
-            body=body,
-        )
-        result = await asyncio.to_thread(
-            wait_for_rarespot_run,
-            settings,
-            run_id=str(run["run_id"]),
-            timeout_seconds=3600,
-        )
-    except Exception as exc:
-        await publish_event(
-            sequencer.stamp(
-                normalize_tool_call(
-                    context,
-                    "rarespot_ecology_inference",
-                    "failed",
-                    {
-                        "source": "deterministic_preload",
-                        "error": str(exc),
-                        "tool_call_id": f"preload_rarespot_{context.run_id}",
-                    },
-                )
-            )
-        )
-        raise
-
-    output = json.dumps(result, default=str, sort_keys=True)
-    if _rarespot_result_failed(result):
-        error = _rarespot_result_error(result)
-        await publish_event(
-            sequencer.stamp(
-                normalize_tool_call(
-                    context,
-                    "rarespot_ecology_inference",
-                    "failed",
-                    {
-                        "source": "deterministic_preload",
-                        "error": error,
-                        "output": output,
-                        "output_size_chars": len(output),
-                        "tool_call_id": f"preload_rarespot_{context.run_id}",
-                    },
-                )
-            )
-        )
-        raise RuntimeError(f"RareSpot inference failed: {error}")
-    await publish_event(
-        sequencer.stamp(
-            normalize_tool_call(
-                context,
-                "rarespot_ecology_inference",
-                "completed",
-                {
-                    "source": "deterministic_preload",
-                    "output": output,
-                    "output_size_chars": len(output),
-                    "tool_call_id": f"preload_rarespot_{context.run_id}",
-                },
-            )
-        )
-    )
-    return result
-
-
-def _rarespot_result_failed(result: dict[str, Any]) -> bool:
-    status = str(result.get("status") or "").strip().lower()
-    return bool(status) and status != "succeeded"
-
-
-def _rarespot_result_error(result: dict[str, Any]) -> str:
-    for key in ("error", "reason", "message"):
-        value = str(result.get(key) or "").strip()
-        if value:
-            return value
-    status = str(result.get("status") or "failed").strip()
-    return f"RareSpot run {status}."
-
-
-def _should_preload_rarespot(context: AgentRunContext, *, settings: RuntimeSettings) -> bool:
-    if not settings.rarespot_tool_enabled:
-        return False
-    if not (
-        context.selected_file_ids
-        or context.selected_resource_uris
-        or context.selected_dataset_uris
-    ):
-        return False
-    text = _rarespot_request_text(context)
-    if looks_report_only_rarespot_goal(text):
-        return False
-    return _looks_like_rarespot_detection_request(text)
-
-
-def _rarespot_request_text(context: AgentRunContext) -> str:
-    return str(context.goal or "")
-
-
-def _looks_like_rarespot_detection_request(text: str) -> bool:
-    normalized = " ".join(str(text or "").lower().split())
-    if not normalized:
-        return False
-    detection_word = re.search(r"\b(detect|detection|inference|run|analy[sz]e)\b", normalized)
-    if "rarespot" in normalized and detection_word:
-        return True
-    if re.search(r"\bprairie\s+dogs?\b", normalized) and detection_word:
-        return True
-    if re.search(r"\bburrows?\b", normalized) and detection_word:
-        return True
-    return False
-
-
-def _rarespot_config_overrides_from_text(text: str) -> dict[str, Any]:
-    normalized = " ".join(str(text or "").lower().split())
-    confidence_threshold = _first_float_match(
-        normalized,
-        (
-            r"\b(?:confidence|conf)\s*(?:threshold)?\s*(?:=|:|of|to)?\s*(0?\.\d+|1(?:\.0+)?)\b",
-            r"\bthreshold\s*(?:=|:|of|to)?\s*(0?\.\d+|1(?:\.0+)?)\b",
-        ),
-    )
-    image_size = _first_int_match(
-        normalized,
-        (
-            r"\b(?:tile|image|imgsz|size)\D{0,12}([1-9]\d{2,3})\s*px\b",
-            r"\b([1-9]\d{2,3})\s*px\s*(?:tile|tiles|image|imgsz|size)\b",
-        ),
-    )
-    overlap_percent = _first_float_match(
-        normalized,
-        (
-            r"\b(\d+(?:\.\d+)?)\s*(?:%|percent)\s*overlap\b",
-            r"\boverlap\s*(?:=|:|of|to)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent)\b",
-        ),
-    )
-    tile_overlap = None
-    if overlap_percent is not None:
-        tile_overlap = overlap_percent / 100 if overlap_percent > 1 else overlap_percent
-    return compact_config_overrides(
-        confidence_threshold=confidence_threshold,
-        image_size=image_size,
-        tile_overlap=tile_overlap,
-    )
-
-
-def _first_float_match(text: str, patterns: tuple[str, ...]) -> float | None:
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        try:
-            return float(match.group(1))
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _first_int_match(text: str, patterns: tuple[str, ...]) -> int | None:
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        try:
-            return int(match.group(1))
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _append_preloaded_rarespot_messages(
-    messages: list[dict[str, Any]],
-    result: dict[str, Any],
-) -> list[dict[str, Any]]:
-    if _rarespot_result_failed(result):
-        raise ValueError("Failed RareSpot results cannot be appended as verified context.")
-    result_json = json.dumps(result, default=str, indent=2, sort_keys=True)
-    return [
-        *messages,
-        {
-            "role": "assistant",
-            "content": (
-                "RareSpot ecology inference has already completed through the production "
-                "RareSpot tool. Use the verified tool result below as the evidence base. "
-                "Do not rerun the same RareSpot configuration or search the sandbox "
-                "filesystem for outputs."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Synthesize the final user-facing answer from this verified RareSpot "
-                "result. Include quantitative counts, confidence summary, the 512 px "
-                "tile / 25% overlap configuration when present, and direct artifact "
-                "download links for overlay, CSV, and report. Use relative download_url "
-                "values exactly as provided; do not add or invent a host, scheme, or "
-                "placeholder domain. Keep the answer technical and concise.\n\n"
-                f"```json\n{result_json}\n```"
-            ),
-        },
-    ]
-
-
 def _message_text_fragments(content: Any) -> list[str]:
     if isinstance(content, str):
         return [content]
@@ -560,8 +294,19 @@ async def run_job(
     user_profile: dict[str, Any] | None = None,
     prior_usage: dict[str, Any] | None = None,
 ) -> str:
-    workspace_dir = Path(settings.workspace_root).expanduser() / job.run_id
+    workspace_root = Path(settings.workspace_root).expanduser()
+    workspace_dir = workspace_root / job.run_id
     artifact_dir = Path(settings.artifact_root).expanduser() / job.run_id
+    # Opportunistically reclaim expired scratch workspaces before creating this
+    # run's. Best-effort: never fail a run because retention GC could not run.
+    if settings.workspace_retention_seconds > 0:
+        try:
+            cleanup_expired_code_workspaces(
+                root_dir=workspace_root,
+                retention_seconds=settings.workspace_retention_seconds,
+            )
+        except Exception:
+            pass
     workspace_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     context = job.to_context(
@@ -619,17 +364,6 @@ async def run_job(
             upload_roots=settings.rarespot_upload_roots,
             cache_root=Path(settings.memory_root).expanduser() / "papers",
         )
-        preloaded_rarespot_result = await _preload_rarespot_for_context(
-            context,
-            settings=settings,
-            sequencer=sequencer,
-            publish_event=publish_event,
-        )
-        if preloaded_rarespot_result is not None:
-            messages = _append_preloaded_rarespot_messages(
-                messages,
-                preloaded_rarespot_result,
-            )
         agent = _build_agent_with_optional_checkpointer(
             agent_factory,
             settings,
@@ -832,6 +566,7 @@ async def run_job(
         messages=list(job.messages or [{"role": "user", "content": job.goal}]),
         response_text=response_text,
         artifact_events=artifact_events,
+        model_factory=title_model_factory or build_chat_model,
     )
     await publish_event(
         sequencer.stamp(
@@ -913,7 +648,10 @@ async def _stream_agent_attempt(
     }
     # Resuming a redelivered run: pass None so LangGraph continues from the last
     # checkpoint instead of appending the original messages again.
-    payload = None if resume_from_checkpoint else {"messages": messages}
+    if resume_from_checkpoint:
+        payload = None
+    else:
+        payload = {"messages": messages}
     stream = _start_agent_event_stream(
         agent,
         payload,
@@ -935,7 +673,14 @@ async def _stream_agent_attempt(
     stream_iter = stream.__aiter__()
     while True:
         try:
-            if model_stream_idle_timeout_seconds > 0 and not active_tool_calls:
+            # The idle watchdog must fire REGARDLESS of active_tool_calls. The previous
+            # `and not active_tool_calls` gate disarmed it during tool execution — the exact
+            # window in which a stalled vision call (an uncancellable to_thread blocked in
+            # httpx) wedged a worker for 1h43m. Wrapping every __anext__ in wait_for resets
+            # the deadline on each received event (heartbeat semantics), so slow-but-alive
+            # work — which keeps emitting subagent/reasoning/tool/usage events — never trips
+            # it; only a true dead-transport stall (zero events for the generous window) does.
+            if model_stream_idle_timeout_seconds > 0:
                 try:
                     event = await asyncio.wait_for(
                         stream_iter.__anext__(),
@@ -1191,6 +936,15 @@ _SKIP_OUTPUT_DIRS = {
     "frames",
     "animation_frames",
     "tmp_frames",
+    # RareSpot detector scratch — the CLI writes hundreds of intermediate crops/tiles under
+    # the run dir (e.g. 704 stability_tiles + 176 tiles); these must NOT be registered as
+    # durable Resources (they polluted the user's catalog). The deliverables — detections.csv,
+    # predictions.json, report.md, the survey map, and overlays/ — live at the run root.
+    "tiles",
+    "stability_tiles",
+    "stability_yolov5",
+    "prediction_xml",
+    "yolov5",
 }
 _SKIP_OUTPUT_FILES = {"lease.json", "run.lock", "matplotlibrc"}
 _CODE_SUFFIXES = {".py", ".ipynb", ".r", ".R", ".js", ".ts", ".tsx", ".jsx", ".jl", ".m", ".sh"}
@@ -1573,7 +1327,7 @@ _RIGOR_DISCRIMINATOR_RE = re.compile(
 )
 _RIGOR_LIMITATIONS_RE = re.compile(r"limitation", re.IGNORECASE)
 _DELEGATED_CLAIM_RE = re.compile(
-    r"\b(delegated|subagent|code-runner|data-analyst|task verification|task confirmed)\b",
+    r"\b(delegated|subagent|code-runner|task verification|task confirmed)\b",
     re.IGNORECASE,
 )
 _DELEGATION_FALLBACK_RE = re.compile(
@@ -2770,22 +2524,51 @@ def _deepagents_values_state(event: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _usage_from_stream_event(event: dict[str, Any]) -> dict[str, int] | None:
-    """Extract token usage from a model-call end event.
+def _v3_message_finish_data(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return ``(chunk, metadata)`` for a v3 deepagents ``message-finish`` event.
 
-    ``langchain-openai`` (with ``stream_usage=True``) reports the per-call token
-    totals on the ``on_chat_model_end`` event, where ``data.output`` is the fully
-    aggregated message carrying ``usage_metadata``. Returns ``None`` for every
-    other event so the caller can keep streaming normally.
+    The runner streams the compiled graph with ``version="v3"``, whose Pregel
+    "messages" protocol emits, once per model call, a chunk of the shape
+    ``{"event": "message-finish", "usage": {...}, "metadata": {...}}`` as
+    ``params.data[0]``; ``params.data[1]`` is the LangGraph metadata
+    (``ls_model_name``, ``langgraph_checkpoint_ns``, etc.). This is where
+    per-call token usage actually lives — the v3 protocol never emits the v2
+    ``on_chat_model_end`` event the older extractor keyed on. Returns ``None``
+    for any other event so the caller keeps streaming normally.
+    """
+    if event.get("method") != "messages":
+        return None
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return None
+    data = params.get("data")
+    if not isinstance(data, list | tuple) or not data:
+        return None
+    chunk = data[0]
+    if not isinstance(chunk, dict) or chunk.get("event") != "message-finish":
+        return None
+    metadata = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}
+    return chunk, metadata
+
+
+def _usage_from_stream_event(event: dict[str, Any]) -> dict[str, int] | None:
+    """Extract per-call token usage from a model-call completion event.
+
+    Handles the v3 Pregel ``message-finish`` event the runner actually streams,
+    and falls back to the v2 ``on_chat_model_end`` event (used by direct-model
+    streaming and the test harness). Returns ``None`` for every other event so
+    the caller can keep streaming normally.
     """
     if not isinstance(event, dict):
         return None
-    if str(event.get("event") or "").strip() != "on_chat_model_end":
-        return None
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return None
-    return _usage_metadata_from_output(data.get("output"))
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        return _normalize_usage_counts(finish[0].get("usage"))
+    if str(event.get("event") or "").strip() == "on_chat_model_end":
+        data = event.get("data")
+        if isinstance(data, dict):
+            return _usage_metadata_from_output(data.get("output"))
+    return None
 
 
 def _usage_metadata_from_output(output: Any) -> dict[str, int] | None:
@@ -2793,6 +2576,15 @@ def _usage_metadata_from_output(output: Any) -> dict[str, int] | None:
         meta = output.get("usage_metadata")
     else:
         meta = getattr(output, "usage_metadata", None)
+    return _normalize_usage_counts(meta)
+
+
+def _normalize_usage_counts(meta: Any) -> dict[str, int] | None:
+    """Coerce a ``{input,output,total}_tokens`` mapping to non-negative ints.
+
+    Shared by the v3 ``message-finish`` usage block and the v2
+    ``usage_metadata`` output, which carry the same three keys.
+    """
     if not isinstance(meta, dict):
         return None
     input_tokens = _coerce_int(meta.get("input_tokens"))
@@ -2815,6 +2607,19 @@ def _usage_event_id_from_stream_event(
     usage: dict[str, int],
     usage_index: int,
 ) -> str:
+    # v3 message-finish: the LangGraph checkpoint namespace is unique per model
+    # call within a run, so it is a stable dedup key across NATS redelivery and
+    # checkpoint resume (the control plane and UI both dedup on usage_event_id).
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        _, finish_metadata = finish
+        checkpoint_ns = _first_nonempty_string(
+            finish_metadata.get("langgraph_checkpoint_ns"),
+            finish_metadata.get("checkpoint_ns"),
+        )
+        if checkpoint_ns:
+            return f"{context.run_id}:model:{_stable_id_component(checkpoint_ns)}"
+
     data = event.get("data")
     metadata = event.get("metadata")
     output = data.get("output") if isinstance(data, dict) else None
@@ -2868,6 +2673,15 @@ def _stable_id_component(value: Any) -> str:
 
 
 def _model_name_from_event(event: dict[str, Any]) -> str:
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        _, finish_metadata = finish
+        name = _first_nonempty_string(
+            finish_metadata.get("ls_model_name"),
+            finish_metadata.get("model_name"),
+        )
+        if name:
+            return name
     metadata = event.get("metadata")
     if isinstance(metadata, dict):
         name = _first_nonempty_string(metadata.get("ls_model_name"), metadata.get("model_name"))

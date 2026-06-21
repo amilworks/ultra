@@ -23,8 +23,10 @@ previous run's graph state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import pickle
+import time
 from typing import Any, Protocol
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -45,6 +47,8 @@ class CheckpointStateStore(Protocol):
 
     async def save(self, thread_id: str, blob: bytes) -> None: ...
 
+    async def delete(self, thread_id: str) -> None: ...
+
     async def close(self) -> None: ...
 
 
@@ -54,12 +58,31 @@ class InMemoryCheckpointStateStore:
 
     def __init__(self) -> None:
         self._blobs: dict[str, bytes] = {}
+        self._saved_at: dict[str, float] = {}
 
     async def load(self, thread_id: str) -> bytes | None:
         return self._blobs.get(thread_id)
 
     async def save(self, thread_id: str, blob: bytes) -> None:
         self._blobs[thread_id] = blob
+        self._saved_at[thread_id] = time.monotonic()
+
+    async def delete(self, thread_id: str) -> None:
+        self._blobs.pop(thread_id, None)
+        self._saved_at.pop(thread_id, None)
+
+    async def delete_older_than(
+        self, retention_seconds: float, *, now_seconds: float | None = None
+    ) -> int:
+        if retention_seconds <= 0:
+            return 0
+        now = time.monotonic() if now_seconds is None else now_seconds
+        expires_before = now - retention_seconds
+        stale = [tid for tid, ts in self._saved_at.items() if ts < expires_before]
+        for tid in stale:
+            self._blobs.pop(tid, None)
+            self._saved_at.pop(tid, None)
+        return len(stale)
 
     async def close(self) -> None:
         return None
@@ -127,6 +150,31 @@ class PostgresCheckpointStateStore:
                 (thread_id, blob),
             )
 
+    async def delete(self, thread_id: str) -> None:
+        await self.ensure_schema()
+        async with self._lock:
+            conn = await self._connection()
+            await conn.execute(
+                f"DELETE FROM {_CHECKPOINT_TABLE} WHERE thread_id = %s",
+                (thread_id,),
+            )
+
+    async def delete_older_than(self, retention_seconds: float) -> int:
+        """Reap abandoned checkpoint rows (runs that crashed before terminal ack
+        and were never resumed). Completed runs delete their row on terminal ack,
+        so this only catches stragglers."""
+        if retention_seconds <= 0:
+            return 0
+        await self.ensure_schema()
+        async with self._lock:
+            conn = await self._connection()
+            cursor = await conn.execute(
+                f"DELETE FROM {_CHECKPOINT_TABLE} "
+                f"WHERE updated_at < now() - make_interval(secs => %s)",
+                (float(retention_seconds),),
+            )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
     async def close(self) -> None:
         async with self._lock:
             if self._conn is not None and not self._conn.closed:
@@ -141,9 +189,22 @@ class DurableCheckpointer(InMemorySaver):
     All checkpoint correctness (blob versioning, pending writes, channel
     reassembly) is inherited unchanged from LangGraph; this subclass only adds
     persist-after-write and hydrate-before-read.
+
+    Persistence is debounced per thread: a burst of writes within a super-step
+    (one ``aput`` plus several ``aput_writes`` for fan-out tasks) coalesces into a
+    single trailing slice upload instead of one full re-serialization per write,
+    and the graph no longer blocks on the durable write. The window is small
+    (sub-second) relative to LLM/tool super-steps, so a crash still resumes from
+    the last flushed super-step; LangGraph re-runs only the in-flight one.
     """
 
-    def __init__(self, store: CheckpointStateStore, *, serde: Any | None = None) -> None:
+    def __init__(
+        self,
+        store: CheckpointStateStore,
+        *,
+        serde: Any | None = None,
+        persist_debounce_seconds: float = 0.25,
+    ) -> None:
         super().__init__(serde=serde)
         # Guard against a future LangGraph layout change silently breaking
         # persistence: we depend on these in-memory attributes existing.
@@ -155,6 +216,9 @@ class DurableCheckpointer(InMemorySaver):
                 )
         self._store = store
         self._hydrated: set[str] = set()
+        self._persist_debounce_seconds = max(0.0, persist_debounce_seconds)
+        self._dirty: set[str] = set()
+        self._persist_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def hydrate(self, thread_id: str) -> bool:
         """Load a run's prior checkpoint slice into memory. Returns True when
@@ -198,16 +262,65 @@ class DurableCheckpointer(InMemorySaver):
                 exc_info=True,
             )
 
+    def _schedule_persist(self, thread_id: str) -> None:
+        """Mark the thread dirty and ensure exactly one trailing persist task is
+        in flight for it; a task already running will pick up the latest slice."""
+        if not thread_id:
+            return
+        self._dirty.add(thread_id)
+        existing = self._persist_tasks.get(thread_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._persist_tasks[thread_id] = asyncio.ensure_future(
+                self._debounced_persist(thread_id)
+            )
+        except RuntimeError:
+            # No running loop (shouldn't happen on the async write path); fall
+            # back to leaving the thread dirty so a later flush persists it.
+            self._dirty.add(thread_id)
+
+    async def _debounced_persist(self, thread_id: str) -> None:
+        try:
+            if self._persist_debounce_seconds > 0:
+                await asyncio.sleep(self._persist_debounce_seconds)
+            if thread_id in self._dirty:
+                self._dirty.discard(thread_id)
+                await self._persist(thread_id)
+        finally:
+            if self._persist_tasks.get(thread_id) is asyncio.current_task():
+                self._persist_tasks.pop(thread_id, None)
+        # A write that arrived during the persist re-dirties the thread; chain
+        # one more trailing persist so the very last super-step is never lost.
+        if thread_id in self._dirty:
+            self._schedule_persist(thread_id)
+
+    async def flush(self, thread_id: str | None = None) -> None:
+        """Force any pending debounced persist(s) to complete.
+
+        Awaited at graceful boundaries (and in tests) so the latest committed
+        super-step is durable before another process may hydrate it.
+        """
+        targets = [thread_id] if thread_id else list(self._persist_tasks.keys())
+        for tid in targets:
+            task = self._persist_tasks.get(tid)
+            if task is not None and not task.done():
+                with contextlib.suppress(Exception):
+                    await task
+            if tid and tid in self._dirty:
+                self._dirty.discard(tid)
+                await self._persist(tid)
+
     async def aput(self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
         result = await super().aput(config, checkpoint, metadata, new_versions)
-        await self._persist(_thread_id_from_config(config))
+        self._schedule_persist(_thread_id_from_config(config))
         return result
 
     async def aput_writes(
         self, config: Any, writes: Any, task_id: str, task_path: str = ""
     ) -> None:
         await super().aput_writes(config, writes, task_id, task_path)
-        await self._persist(_thread_id_from_config(config))
+        self._schedule_persist(_thread_id_from_config(config))
 
     def _collect_thread_slice(self, thread_id: str) -> dict[str, Any]:
         storage = {ns: dict(by_id) for ns, by_id in self.storage.get(thread_id, {}).items()}
@@ -219,7 +332,9 @@ class DurableCheckpointer(InMemorySaver):
         """Drop only this run's in-memory checkpoint slice.
 
         The durable state store is intentionally left untouched so a later
-        redelivery or inspection can hydrate the run again if needed.
+        redelivery or inspection can hydrate the run again if needed. To also
+        drop the durable row (a terminal run that will never resume), use
+        :meth:`delete_thread`.
         """
         thread_id = str(thread_id or "").strip()
         if not thread_id:
@@ -232,6 +347,45 @@ class DurableCheckpointer(InMemorySaver):
             if key and key[0] == thread_id:
                 self.writes.pop(key, None)
         self._hydrated.discard(thread_id)
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """Drop a terminal run's in-memory slice AND its durable row.
+
+        Called on terminal ack (succeeded/failed/canceled): the run will never be
+        redelivered or resumed, so leaving its (potentially large) row in the
+        shared Postgres only leaks disk. Cancels any pending debounced persist
+        first so a late trailing write cannot resurrect the row after deletion.
+        """
+        thread_id = str(thread_id or "").strip()
+        if not thread_id:
+            return
+        self._dirty.discard(thread_id)
+        task = self._persist_tasks.pop(thread_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self.clear_thread(thread_id)
+        try:
+            await self._store.delete(thread_id)
+        except Exception:
+            logger.warning(
+                "Durable checkpoint delete failed; row may linger until GC.",
+                extra={"thread_id": thread_id},
+                exc_info=True,
+            )
+
+    async def gc(self, retention_seconds: float) -> int:
+        """Reap durable rows for abandoned runs (crashed before terminal ack and
+        never resumed). No-op when the store has no time-based reaper."""
+        reaper = getattr(self._store, "delete_older_than", None)
+        if reaper is None or retention_seconds <= 0:
+            return 0
+        try:
+            return int(await reaper(retention_seconds))
+        except Exception:
+            logger.warning("Durable checkpoint GC failed.", exc_info=True)
+            return 0
 
     def _restore_thread_slice(self, thread_id: str, slice_: dict[str, Any]) -> None:
         for ns, by_id in slice_.get("storage", {}).items():

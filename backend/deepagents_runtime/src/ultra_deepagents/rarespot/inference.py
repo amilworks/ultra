@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ultra_deepagents.rarespot.artifacts import (
     artifact_record,
     render_overlay,
+    render_stability_overlay,
     slug_token,
     write_detections_csv,
     write_json,
@@ -17,6 +18,8 @@ from ultra_deepagents.rarespot.artifacts import (
     write_report,
 )
 from ultra_deepagents.rarespot.config import RareSpotConfig
+from ultra_deepagents.rarespot.geospatial import build_geospatial_summary
+from ultra_deepagents.rarespot.stability import run_detection_stability
 from ultra_deepagents.rarespot.tiling import (
     build_sliding_tiles,
     classwise_nms,
@@ -47,7 +50,6 @@ def run_rarespot_inference(
     output_dir.mkdir(parents=True, exist_ok=True)
     source_dir = output_dir / "tiles"
     source_dir.mkdir(parents=True, exist_ok=True)
-    labels_dir = output_dir / "yolov5" / "predict" / "labels"
     tile_manifest: dict[str, dict[str, Any]] = {}
     prepared_inputs = prepare_tiles(
         image_paths=image_paths,
@@ -56,7 +58,7 @@ def run_rarespot_inference(
         tile_manifest=tile_manifest,
     )
     emit(progress_callback, {"event": "inference_started", "image_count": len(prepared_inputs), "tile_count": len(tile_manifest)})
-    run_yolov5_detect(source_dir=source_dir, output_dir=output_dir, config=config)
+    labels_dir = run_yolov5_detect(source_dir=source_dir, output_dir=output_dir, config=config)
     predictions = parse_tile_predictions(
         prepared_inputs=prepared_inputs,
         tile_manifest=tile_manifest,
@@ -64,6 +66,20 @@ def run_rarespot_inference(
         output_dir=output_dir,
         config=config,
     )
+    stability_summary: dict[str, Any] | None = None
+    if config.stability:
+        emit(progress_callback, {"event": "stability_started"})
+        stability_summary = run_detection_stability(
+            predictions=predictions,
+            source_dir=source_dir,
+            output_dir=output_dir,
+            tile_manifest=tile_manifest,
+            detect_fn=lambda **kwargs: run_yolov5_detect(output_dir=output_dir, config=config, **kwargs),
+            match_iou=config.stability_match_iou,
+            iou_threshold=config.iou,
+        )
+        emit(progress_callback, {"event": "stability_completed", **((stability_summary or {}).get("label_counts") or {})})
+    geospatial_summary = build_geospatial_summary(predictions=predictions, output_dir=output_dir)
     counts_by_class: dict[str, int] = {}
     for prediction in predictions:
         for class_name, count in (prediction.get("class_counts") or {}).items():
@@ -71,10 +87,17 @@ def run_rarespot_inference(
     confidence_summary = summarize_detection_confidences(predictions)
 
     overlays: list[Path] = []
+    stability_overlays: list[Path] = []
     for index, prediction in enumerate(predictions):
         source = Path(str(prediction["input_path"]))
+        boxes = list(prediction.get("boxes") or [])
         overlay_path = output_dir / "overlays" / f"{index:04d}-{slug_token(source.stem)}.png"
-        overlays.append(render_overlay(source_path=source, boxes=list(prediction.get("boxes") or []), output_path=overlay_path))
+        overlays.append(render_overlay(source_path=source, boxes=boxes, output_path=overlay_path))
+        if stability_summary:
+            stability_overlay_path = output_dir / "overlays" / f"{index:04d}-{slug_token(source.stem)}-stability.png"
+            stability_overlays.append(
+                render_stability_overlay(source_path=source, boxes=boxes, output_path=stability_overlay_path)
+            )
 
     configuration = {
         "tile_size": config.tile_size,
@@ -105,6 +128,8 @@ def run_rarespot_inference(
         "counts_by_class": counts_by_class,
         "confidence_summary": confidence_summary,
         "configuration": configuration,
+        "stability": stability_summary or {},
+        "geospatial": geospatial_summary or {},
         "spectral": {},
     }
     artifacts = [
@@ -156,6 +181,19 @@ def run_rarespot_inference(
                 category="overlay",
             )
         )
+    for stability_overlay in stability_overlays:
+        artifacts.append(
+            artifact_record(
+                run_id=run_id,
+                thread_id=thread_id,
+                run_root=output_dir,
+                path=stability_overlay,
+                kind="image",
+                title=f"Stability overlay: {stability_overlay.name}",
+                mime_type="image/png",
+                category="overlay",
+            )
+        )
 
     spectral_payload: dict[str, Any] | None = None
     if config.spectral:
@@ -191,6 +229,22 @@ def run_rarespot_inference(
                     )
                 )
 
+    if geospatial_summary and geospatial_summary.get("map_path"):
+        map_path = Path(str(geospatial_summary["map_path"]))
+        if map_path.exists():
+            artifacts.append(
+                artifact_record(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    run_root=output_dir,
+                    path=map_path,
+                    kind="image",
+                    title="Survey detection map",
+                    mime_type="image/png",
+                    category="geospatial",
+                )
+            )
+
     report_md = write_report(output_dir / "report.md", report_payload)
     artifacts.append(
         artifact_record(
@@ -213,6 +267,8 @@ def run_rarespot_inference(
         "counts_by_class": counts_by_class,
         "confidence_summary": confidence_summary,
         "predictions": predictions,
+        "stability_summary": stability_summary,
+        "geospatial_summary": geospatial_summary,
         "top_spectral_review_candidates": top_candidates,
         "spectral": spectral_payload,
         "artifacts": artifacts,
@@ -254,9 +310,23 @@ def prepare_tiles(
     return prepared
 
 
-def run_yolov5_detect(*, source_dir: Path, output_dir: Path, config: RareSpotConfig) -> None:
+def run_yolov5_detect(
+    *,
+    source_dir: Path,
+    output_dir: Path,
+    config: RareSpotConfig,
+    project_subdir: str = "yolov5",
+    name: str = "predict",
+) -> Path:
+    """Run YOLOv5 detect.py over a tile directory; returns the labels output dir.
+    `project_subdir` lets the main and stability passes write to distinct trees."""
     env = os.environ.copy()
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    # YOLOv5's detect.py runs check_requirements() at startup, which pip-installs
+    # any missing requirement. That dies in the code sandbox (--network none), so
+    # disable it; the runtime deps (torch, torchvision, ...) are pre-baked into the
+    # sandbox image. Harmless in the legacy worker (its venv already has them).
+    env["YOLOv5_AUTOINSTALL"] = "false"
     env["YOLOV5_CONFIG_DIR"] = str((output_dir / ".yolov5-config").resolve())
     env["PYTHONPATH"] = f"{config.yolov5_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
     command = [
@@ -269,9 +339,9 @@ def run_yolov5_detect(*, source_dir: Path, output_dir: Path, config: RareSpotCon
         "--imgsz",
         str(config.tile_size),
         "--project",
-        str(output_dir / "yolov5"),
+        str(output_dir / project_subdir),
         "--name",
-        "predict",
+        name,
         "--exist-ok",
         "--save-txt",
         "--save-conf",
@@ -289,11 +359,12 @@ def run_yolov5_detect(*, source_dir: Path, output_dir: Path, config: RareSpotCon
         capture_output=True,
         check=False,
     )
-    (output_dir / "infer.stdout.log").write_text(result.stdout or "", encoding="utf-8")
-    (output_dir / "infer.stderr.log").write_text(result.stderr or "", encoding="utf-8")
+    (output_dir / f"{project_subdir}.stdout.log").write_text(result.stdout or "", encoding="utf-8")
+    (output_dir / f"{project_subdir}.stderr.log").write_text(result.stderr or "", encoding="utf-8")
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip()[-4000:]
         raise RuntimeError(f"YOLOv5 inference failed: {tail}")
+    return output_dir / project_subdir / name / "labels"
 
 
 def parse_tile_predictions(

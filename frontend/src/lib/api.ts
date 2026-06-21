@@ -136,6 +136,7 @@ import type {
   UploadSessionResponse,
 } from "../types";
 import type * as ViewerManifest from "./viewerManifest";
+import { reportClientError } from "./client-diagnostics";
 
 export type ApiClientOptions = {
   baseUrl: string;
@@ -1045,17 +1046,53 @@ export class ApiClient {
 
     const threadId = asTrimmedString(thread.thread_id);
     const messages: Array<Record<string, unknown>> = [];
+    let messagesFetchFailed = false;
+    let messagesFetchError: unknown = null;
     if (threadId) {
-      try {
-        const payload = await this.fetchJson<Record<string, unknown>>(
-          `/v2/threads/${encodeURIComponent(threadId)}/messages`,
-          { method: "GET" }
-        );
-        if (Array.isArray(payload.messages)) {
-          messages.push(...payload.messages.filter(isRecord));
+      // The durable user + assistant turns live in control_thread_messages and
+      // are read back here. When there is no client snapshot to fall back on,
+      // this fetch is the ONLY source of the user's message — a transient
+      // failure (swallowed before) would rebuild an assistant-only transcript
+      // and silently drop the user's turn. Retry briefly before giving up.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const payload = await this.fetchJson<Record<string, unknown>>(
+            `/v2/threads/${encodeURIComponent(threadId)}/messages`,
+            { method: "GET" }
+          );
+          messagesFetchFailed = false;
+          messagesFetchError = null;
+          if (Array.isArray(payload.messages)) {
+            messages.push(...payload.messages.filter(isRecord));
+          }
+          break;
+        } catch (error) {
+          messagesFetchFailed = true;
+          messagesFetchError = error;
+          if (attempt < 2) {
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, 200 * (attempt + 1));
+            });
+          }
         }
-      } catch {
-        // A V2 thread without message hydration should still open instead of spinning forever.
+      }
+    }
+
+    if (messagesFetchFailed) {
+      // With a snapshot we can still open from local state (recovered); without
+      // one, returning now would drop the user's message, so surface a
+      // recoverable error instead of overwriting local state with a lossy rebuild.
+      reportClientError(messagesFetchError, {
+        source: "hydration-messages-fetch",
+        recovered: hasExistingState,
+        extra: { conversationId: record.conversation_id, hasExistingState },
+      });
+      if (!hasExistingState) {
+        throw new ApiError(
+          "This conversation could not be fully loaded. Please try again.",
+          503,
+          null
+        );
       }
     }
 
@@ -1149,6 +1186,29 @@ export class ApiClient {
           };
         }
       }
+    }
+
+    // Instrumentation: a reconstructed transcript that has an assistant turn but
+    // no user turn is the exact "only the response is left" symptom. Capture it
+    // (handled, non-fatal) so the real-world trigger is visible in diagnostics.
+    const hasUserTurn = stateMessages.some((message) => stateMessageRole(message) === "user");
+    const hasAssistantTurn = stateMessages.some(
+      (message) => stateMessageRole(message) === "assistant"
+    );
+    if (!hasExistingState && hasAssistantTurn && !hasUserTurn) {
+      reportClientError(
+        new Error("Hydrated transcript has an assistant turn but no user message"),
+        {
+          source: "hydration-anomaly",
+          recovered: true,
+          extra: {
+            conversationId: record.conversation_id,
+            latestRunId: latestRunId ?? null,
+            messageCount: stateMessages.length,
+            threadMessageCount: messages.length,
+          },
+        }
+      );
     }
 
     const preview = record.preview || asOptionalString(

@@ -55,7 +55,6 @@ const emptyOverview: AdminOverviewResponse = {
     nats_configured: true,
     nats_stream: "ULTRA_RUNS",
     nats_jobs_subject: "ultra.runs.jobs",
-    nats_rarespot_jobs_subject: "ultra.runs.rarespot.jobs",
     nats_events_subject: "ultra.runs.events",
     nats_cancel_subject: "ultra.runs.cancel",
     nats_event_consumer: "ultra-control-event-ingest",

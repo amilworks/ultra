@@ -1,0 +1,21 @@
+{
+  "_note": "CPU-generated parity golden for the prairie-dog-detection Skill. Regenerate with: python -m tests.regen_rarespot_golden (inside the bisque-ultra-codeexec image).",
+  "counts_by_class": {
+    "burrow": 25,
+    "prairie_dog": 15
+  },
+  "fixture": "data/models/yolo/rarespot_parity_fixture.JPG (EnrNE_Day2_Run1__0241.JPG)",
+  "stability": {
+    "label_counts": {
+      "borderline": 3,
+      "trusted": 34,
+      "unstable": 3
+    }
+  },
+  "top_spectral_review_candidates": [
+    {
+      "file_name": "rarespot_parity_fixture.JPG"
+    }
+  ],
+  "total_detections": 40
+}

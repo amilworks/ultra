@@ -49,6 +49,7 @@ type MemoryStore struct {
 	dataAgentJobs          map[string]domain.DataAgentJobRecord
 	dataAgentEvents        map[string][]domain.DataAgentJobEventRecord
 	dataAgentLeases        map[string]domain.DataAgentJobLeaseRecord
+	dataAgentJobResources  map[string][]domain.LinkDataAgentJobResourceInput
 	uploadSessions         map[string]domain.UploadSessionRecord
 	uploadFiles            map[string]domain.UploadSessionFileRecord
 	uploadChunks           map[string]domain.UploadChunkRecord
@@ -88,6 +89,7 @@ func NewMemoryStore() *MemoryStore {
 		dataAgentJobs:          map[string]domain.DataAgentJobRecord{},
 		dataAgentEvents:        map[string][]domain.DataAgentJobEventRecord{},
 		dataAgentLeases:        map[string]domain.DataAgentJobLeaseRecord{},
+		dataAgentJobResources:  map[string][]domain.LinkDataAgentJobResourceInput{},
 		uploadSessions:         map[string]domain.UploadSessionRecord{},
 		uploadFiles:            map[string]domain.UploadSessionFileRecord{},
 		uploadChunks:           map[string]domain.UploadChunkRecord{},
@@ -1148,6 +1150,78 @@ func (s *MemoryStore) ListRunsForUser(ctx context.Context, userID string, thread
 	}
 	runs = runs[offset:]
 	return take(runs, limit), nil
+}
+
+// SearchRunHistoryForUser mirrors the Postgres episodic search for tests/dev:
+// the user's own succeeded runs matching an optional keyword, most recent first.
+func (s *MemoryStore) SearchRunHistoryForUser(ctx context.Context, userID string, opts domain.RunHistorySearchOptions) ([]domain.RunHistoryHit, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return []domain.RunHistoryHit{}, nil
+	}
+	terms := runHistorySearchTerms(opts.Query)
+	exclude := strings.TrimSpace(opts.ExcludeRunID)
+	limit := opts.Limit
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	hits := make([]domain.RunHistoryHit, 0)
+	for _, run := range s.runs {
+		if run.UserID != userID || string(run.Status) != string(domain.RunStatusSucceeded) {
+			continue
+		}
+		if exclude != "" && run.RunID == exclude {
+			continue
+		}
+		if opts.Since != nil && !opts.Since.IsZero() {
+			if run.CompletedAt == nil || run.CompletedAt.Before(*opts.Since) {
+				continue
+			}
+		}
+		title := ""
+		if thread, ok := s.threads[run.ThreadID]; ok {
+			title = thread.Title
+		}
+		if len(terms) > 0 {
+			haystack := strings.ToLower(run.Goal + "\n" + run.ResponseText + "\n" + title)
+			missing := false
+			for _, term := range terms {
+				if !strings.Contains(haystack, term) {
+					missing = true
+					break
+				}
+			}
+			if missing {
+				continue
+			}
+		}
+		snippet := run.ResponseText
+		if len(snippet) > runHistorySnippetChars {
+			snippet = snippet[:runHistorySnippetChars]
+		}
+		hits = append(hits, domain.RunHistoryHit{
+			RunID:           run.RunID,
+			ThreadID:        run.ThreadID,
+			Title:           title,
+			Goal:            run.Goal,
+			ResponseSnippet: snippet,
+			CompletedAt:     run.CompletedAt,
+		})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		ti, tj := hits[i].CompletedAt, hits[j].CompletedAt
+		if ti == nil {
+			return false
+		}
+		if tj == nil {
+			return true
+		}
+		return ti.After(*tj)
+	})
+	return take(hits, limit), nil
 }
 
 func (s *MemoryStore) GetRunLease(ctx context.Context, runID string) (domain.RunLeaseRecord, bool, error) {
@@ -3423,6 +3497,30 @@ func (s *MemoryStore) CreateDataAgentJob(ctx context.Context, input domain.Creat
 	return job, nil
 }
 
+func (s *MemoryStore) LinkDataAgentJobResource(ctx context.Context, input domain.LinkDataAgentJobResourceInput) error {
+	_ = ctx
+	jobID := strings.TrimSpace(input.JobID)
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if jobID == "" || resourceID == "" {
+		return ErrNotFound
+	}
+	if strings.TrimSpace(input.IORole) == "" {
+		input.IORole = "input"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	links := s.dataAgentJobResources[jobID]
+	for i, existing := range links {
+		if existing.ResourceID == resourceID {
+			links[i] = input
+			s.dataAgentJobResources[jobID] = links
+			return nil
+		}
+	}
+	s.dataAgentJobResources[jobID] = append(links, input)
+	return nil
+}
+
 func (s *MemoryStore) GetDataAgentJobForUser(ctx context.Context, jobID string, userID string, orgID string) (domain.DataAgentJobRecord, error) {
 	_ = ctx
 	s.mu.RLock()
@@ -3526,7 +3624,10 @@ func (s *MemoryStore) UpdateDataAgentJob(ctx context.Context, input domain.Updat
 	if input.OutputSummary != nil {
 		job.OutputSummary = cloneJSONMap(input.OutputSummary)
 	}
-	if input.Metadata != nil {
+	// Only replace metadata when the update actually carries some: status/progress
+	// updates send an empty map, and clobbering would drop create-time metadata such
+	// as results_collection_id that downstream registration relies on.
+	if len(input.Metadata) > 0 {
 		job.Metadata = cloneJSONMap(input.Metadata)
 	}
 	s.dataAgentJobs[job.JobID] = job

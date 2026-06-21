@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/hover-card";
 import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
 import { cn } from "@/lib/utils";
+import { reportClientError } from "@/lib/client-diagnostics";
 import { CodeBlock, CodeBlockCode } from "./code-block";
 
 export type MarkdownProps = {
@@ -22,8 +23,17 @@ export type MarkdownProps = {
 };
 
 function parseMarkdownIntoBlocks(markdown: string): string[] {
-  const tokens = marked.lexer(markdown);
-  return tokens.map((token) => token.raw);
+  try {
+    const tokens = marked.lexer(markdown);
+    return tokens.map((token) => token.raw);
+  } catch (error) {
+    // marked's lexer can throw on pathological model output (e.g. extreme
+    // nesting). This runs in a render-path useMemo, so an uncaught throw would
+    // crash the whole app via the top-level boundary. Fall back to rendering the
+    // text as a single block so the message still shows.
+    reportClientError(error, { source: "markdown-lexer" });
+    return [markdown];
+  }
 }
 
 const normalizeMathMarkdown = (source: string): string => {

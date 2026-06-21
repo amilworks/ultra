@@ -6,7 +6,6 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
-
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.runner import RunEventSequencer, _stream_agent_attempt
@@ -238,3 +237,51 @@ def test_stream_agent_attempt_publishes_reasoning_before_answer():
     assert published[1]["payload"]["text"] == "The answer is 42."
     # Sequences stay strictly increasing across both publish paths.
     assert [event["sequence"] for event in published] == [1, 2]
+
+
+def test_idle_watchdog_fires_during_an_active_tool_call():
+    """Regression for the 1h43m hang: a tool that STARTS but never finishes (the live
+    33-started/32-completed signature) must still trip the idle watchdog. The old
+    `and not active_tool_calls` gate disarmed the watchdog for exactly this case."""
+    import pytest
+    from ultra_deepagents.runner import AgentStreamIdleTimeoutError
+
+    published: list[dict[str, Any]] = []
+
+    async def publish_event(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    class _ToolThenHangAgent:
+        def astream_events(self, _payload: Any, *, config: Any = None, **_kwargs: Any) -> Any:
+            async def generate() -> Any:
+                # a tool call STARTS -> active_tool_calls becomes non-empty
+                yield {
+                    "event": "on_tool_start",
+                    "name": "read_file",
+                    "run_id": str(uuid4()),
+                    "data": {"input": {"path": "/workspace/x"}},
+                    "metadata": {},
+                }
+                # ...then the tool never returns: the stream goes permanently silent
+                # (an uncancellable to_thread blocked in httpx, exactly the live incident).
+                await asyncio.Event().wait()
+                yield {}  # unreachable
+
+            return generate()
+
+    async def scenario() -> None:
+        await _stream_agent_attempt(
+            _ToolThenHangAgent(),
+            messages=[{"role": "user", "content": "read it"}],
+            context=_context(),
+            sequencer=RunEventSequencer("run_hang_test"),
+            publish_event=publish_event,
+            model_stream_idle_timeout_seconds=0.5,  # short for the test; prod is 3600
+        )
+
+    with pytest.raises(AgentStreamIdleTimeoutError):
+        asyncio.run(scenario())
+
+    # The tool genuinely STARTED (active_tool_calls was populated), proving the watchdog
+    # fired DURING an active tool call — not merely on an already-empty stream.
+    assert any(e.get("event_kind") == "tool_call.started" for e in published)

@@ -121,17 +121,15 @@ func TestApplyStatementTimeout(t *testing.T) {
 func TestAppStartRecoversExpiredRunLeases(t *testing.T) {
 	t.Parallel()
 	application, err := New(config.Config{
-		AppVersion:                "test-version",
-		RunRecoveryEnabled:        true,
-		RunRecoveryInterval:       10 * time.Millisecond,
-		RunRecoveryBatchLimit:     10,
-		NATSJobsSubject:           "ultra.runs.jobs",
-		NATSRareSpotJobsSubject:   "ultra.runs.rarespot.jobs",
-		NATSEventsSubject:         "ultra.runs.events",
-		NATSCancelSubject:         "ultra.runs.cancel",
-		NATSEventConsumer:         "ultra-control-event-ingest",
-		NATSWorkerDurable:         "ultra-deepagents-worker",
-		NATSRareSpotWorkerDurable: "rarespot-ecology-worker",
+		AppVersion:            "test-version",
+		RunRecoveryEnabled:    true,
+		RunRecoveryInterval:   10 * time.Millisecond,
+		RunRecoveryBatchLimit: 10,
+		NATSJobsSubject:       "ultra.runs.jobs",
+		NATSEventsSubject:     "ultra.runs.events",
+		NATSCancelSubject:     "ultra.runs.cancel",
+		NATSEventConsumer:     "ultra-control-event-ingest",
+		NATSWorkerDurable:     "ultra-deepagents-worker",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -195,13 +193,11 @@ func TestAppStartRecoversExpiredDataAgentJobLeases(t *testing.T) {
 		RunRecoveryInterval:        10 * time.Millisecond,
 		RunRecoveryBatchLimit:      10,
 		NATSJobsSubject:            "ultra.runs.jobs",
-		NATSRareSpotJobsSubject:    "ultra.runs.rarespot.jobs",
 		NATSDataAgentJobsSubject:   "ultra.data_agent.jobs",
 		NATSEventsSubject:          "ultra.runs.events",
 		NATSCancelSubject:          "ultra.runs.cancel",
 		NATSEventConsumer:          "ultra-control-event-ingest",
 		NATSWorkerDurable:          "ultra-deepagents-worker",
-		NATSRareSpotWorkerDurable:  "rarespot-ecology-worker",
 		NATSDataAgentWorkerDurable: "ultra-data-agent-worker",
 	})
 	if err != nil {

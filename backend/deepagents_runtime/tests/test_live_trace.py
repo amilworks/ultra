@@ -2230,21 +2230,12 @@ def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
                                 "stage_uploaded_files_for_analysis",
                             ],
                         },
-                        {
-                            "name": "data-analyst",
-                            "description": "Inspects data.",
-                            "tool_names": [
-                                "artifact_manifest",
-                                "stage_artifact_for_analysis",
-                                "stage_uploaded_files_for_analysis",
-                            ],
-                        },
                     ],
                 }
             ],
             "delegation": {
                 "task_call_count": 1,
-                "subagent_names": ["code-runner", "data-analyst"],
+                "subagent_names": ["code-runner"],
                 "subagent_tool_names": ["stage_artifact_for_analysis"],
                 "subagent_message_delta_count": 2,
                 "scoped_tool_event_count": 1,
@@ -2259,7 +2250,6 @@ def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
     assert matrix["capabilities"]["delegation"]["used"] is True
     assert matrix["capabilities"]["delegation"]["available_subagents"] == [
         "code-runner",
-        "data-analyst",
     ]
     assert (
         matrix["capabilities"]["delegation"][
@@ -2273,23 +2263,12 @@ def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
             "stage_artifact_for_analysis",
             "stage_uploaded_files_for_analysis",
         ],
-        "data-analyst": [
-            "artifact_manifest",
-            "stage_artifact_for_analysis",
-            "stage_uploaded_files_for_analysis",
-        ],
     }
     assert matrix["turns"][0]["available_subagents"] == [
         "code-runner",
-        "data-analyst",
     ]
     assert matrix["turns"][0]["scoped_subagent_context_tools"] == {
         "code-runner": [
-            "artifact_manifest",
-            "stage_artifact_for_analysis",
-            "stage_uploaded_files_for_analysis",
-        ],
-        "data-analyst": [
             "artifact_manifest",
             "stage_artifact_for_analysis",
             "stage_uploaded_files_for_analysis",

@@ -1992,9 +1992,18 @@ export type Hdf5MaterialsDashboardResponse = {
 };
 
 export type UploadViewerInfo = {
-  kind?: "image" | "hdf5" | string;
+  kind?: "image" | "hdf5" | "unsupported" | string;
   file_id: string;
   original_name: string;
+  /**
+   * False when the image engine recognized the file but cannot decode it (e.g. a
+   * Leica .lif — registered but non-functional in this libbioimage build). The
+   * viewer renders a calm "preview unavailable, download instead" card rather than a
+   * broken 1×1 canvas stuck on "Loading…". Absent/true means a normal decodable image.
+   */
+  decodable?: boolean;
+  /** Human-readable explanation shown when `decodable` is false. */
+  message?: string;
   modality?: "microscopy" | "medical" | "geospatial" | "materials" | "image" | "unknown" | string;
   dims_order: string;
   backend_mode?: "direct" | "pyramid" | "atlas" | "scalar" | "hdf5" | string;

@@ -1,6 +1,18 @@
+"""Ultra run-scope + tenant-isolation wrapper around the deep agents async-subagent tools.
+
+EXPERIMENTAL / dormant. Async subagents federate to an EXTERNAL Agent Protocol /
+LangGraph deployment (``langgraph_sdk`` client). Ultra runs systemd + NATS + a Go
+control plane and does NOT host a LangGraph deployment, so this is off by default
+(``ULTRA_DEEPAGENTS_ENABLE_ASYNC_SUBAGENTS`` unset) and has never been validated
+against a live server. ASGI transport (``url=None``) is impossible without a
+co-deployed graph; the only viable config is HTTP to a remote deployment that does
+not currently exist. For in-Ultra background work, prefer the NATS run backbone
+(see ``rarespot/tools.py``). See ``planning/`` async-subagents review for the path
+to a NATS-native background-job tool trio.
+"""
+
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,9 +27,13 @@ from langgraph.types import Command
 from langgraph_sdk import get_client, get_sync_client
 from langgraph_sdk.client import LangGraphClient, SyncLangGraphClient
 
+from ultra_deepagents.config import allow_private_async_subagent_url, is_local_http_host
 from ultra_deepagents.context import AgentRunContext
 
 logger = logging.getLogger(__name__)
+
+# Shared with the context-URI guards so the server-URL check cannot drift.
+_is_local_http_host = is_local_http_host
 
 _ASYNC_TASK_TOOLS_WITH_REMOTE_RUNS = {"start_async_task", "update_async_task"}
 _ASYNC_TASK_TOOLS_REQUIRING_TRACKED_SUBAGENT = {
@@ -737,6 +753,12 @@ def _validate_async_subagent_url(value: Any, *, name: str) -> str:
         )
     if parsed.username or parsed.password:
         raise ValueError(f"Async subagent '{name}' url must not include credentials")
+    if is_local_http_host(parsed.hostname) and not allow_private_async_subagent_url():
+        raise ValueError(
+            f"Async subagent '{name}' url must not target a localhost/private/link-local "
+            "host (the run context + task egress to it); set "
+            "ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL=1 for local dev"
+        )
     return url
 
 
@@ -1207,15 +1229,6 @@ def _is_async_context_safe_remote_storage_uri(value: Any) -> bool:
     return True
 
 
-def _is_local_http_host(hostname: str | None) -> bool:
-    host = str(hostname or "").strip().lower().rstrip(".")
-    if not host or host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
 
 
 def async_subagent_run_metadata(

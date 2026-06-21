@@ -70,7 +70,9 @@ describe("sidebar settings menu", () => {
     expect(app).toMatch(/<span>Dark<\/span>[\s\S]*<span>Settings<\/span>/);
     expect(app).not.toMatch(/app-theme-menu-button/);
     expect(app).toMatch(/<span>New chat<\/span>/);
-    expect(app).toMatch(/isMobileConversationSearchActive \? "Search results" : "Recents"/);
+    // The mobile sidebar chat-search was removed by request; guard against reintroduction.
+    expect(app).not.toMatch(/Search chats/);
+    expect(app).not.toMatch(/mobileConversationQuery/);
     expect(app).toMatch(/<Settings data-icon="inline-start" aria-hidden="true" \/>/);
     expect(settingsDialog).toMatch(/GitBranch/);
     expect(settingsDialog).toMatch(

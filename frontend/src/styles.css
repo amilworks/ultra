@@ -2181,10 +2181,49 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.65rem;
 }
 
+.resource-browser-search-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  height: 2.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.95rem;
+  background: color-mix(in oklab, var(--bg-panel-strong) 82%, var(--bg-main) 18%);
+  padding-inline: 0.78rem 0.2rem;
+  box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+
+.resource-browser-search-field:focus-within {
+  border-color: color-mix(in oklab, var(--ring) 38%, var(--line) 62%);
+  background: var(--bg-panel-strong);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 12%, transparent);
+}
+
+.resource-browser-search-field svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  color: color-mix(in oklab, var(--text-muted) 78%, var(--text-main) 22%);
+}
+
 .resource-browser-search {
   width: 100%;
   min-width: 0;
-  height: 2.55rem;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  padding-left: 0;
+  box-shadow: none;
+}
+
+.resource-browser-search:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .resource-browser-result-summary {
@@ -3484,27 +3523,39 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     top: 0;
     z-index: 3;
     margin: 0 -1px;
-    padding: 1rem 1rem 0.8rem;
+    padding: 0.95rem 0.9rem 0.8rem;
     background: color-mix(in oklab, var(--bg-panel-strong) 96%, transparent);
     backdrop-filter: blur(16px) saturate(1.08);
   }
 
   .resource-browser-header-row {
-    flex-direction: column;
-    align-items: stretch;
+    align-items: center;
+    gap: 0.75rem;
   }
 
   .resource-browser-header-actions {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    width: 100%;
+    justify-content: flex-end;
+    width: auto;
   }
 
   .resource-browser-new-menu,
   .resource-browser-refresh,
   .resource-browser-filter-trigger {
+    width: 2.75rem;
+    min-width: 2.75rem;
     min-height: 2.75rem;
-    padding-inline: 0.8rem;
+    border-radius: 1rem;
+    padding-inline: 0;
+  }
+
+  .resource-browser-refresh {
+    border: 1px solid var(--line);
+    background: color-mix(in oklab, var(--bg-panel-strong) 84%, var(--bg-main) 16%);
+    box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
+  }
+
+  .resource-browser-new-menu svg[data-icon="inline-end"] {
+    display: none;
   }
 
   .resource-browser-upload-label {
@@ -3529,15 +3580,40 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 
   .resource-browser-toolbar {
-    align-items: stretch;
-    /* Mobile-card mode starts at 721px; give the search its own row from here
-       (not just <=640px) so it never gets squeezed beside the two buttons. */
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.55rem;
+    align-items: center;
+    grid-template-columns: minmax(0, 1fr) 2.75rem 2.75rem;
+    gap: 0.45rem;
   }
 
-  .resource-browser-toolbar .resource-browser-search {
-    grid-column: 1 / -1;
+  .resource-browser-search-field {
+    min-width: 0;
+    height: 2.75rem;
+    border-radius: 1rem;
+    background: color-mix(in oklab, var(--bg-main) 86%, #ffffff 14%);
+    padding-inline: 0.78rem 0.15rem;
+  }
+
+  .resource-browser-search {
+    font-size: 1rem;
+  }
+
+  .resource-browser-filter-trigger {
+    position: relative;
+  }
+
+  .resource-browser-filter-label {
+    display: none;
+  }
+
+  .resource-browser-filter-count {
+    position: absolute;
+    top: 0.28rem;
+    right: 0.28rem;
+    min-width: 0.92rem;
+    height: 0.92rem;
+    padding-inline: 0.15rem;
+    border: 1px solid var(--bg-panel-strong);
+    font-size: 0.6rem;
   }
 
   .resource-browser-active-collection {
@@ -6486,6 +6562,8 @@ details {
 }
 
 .viewer-direct-image-canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -7238,6 +7316,33 @@ details {
 .viewer-shell:-webkit-full-screen .viewer-canvas-shell-2d,
 .viewer-shell:-webkit-full-screen .viewer-canvas-shell-volume {
   height: min(86vh, calc(100vh - 132px));
+  min-height: 0;
+  max-height: none;
+}
+
+/* CSS pseudo-fullscreen for iPhone Safari, which has no element Fullscreen API.
+   Uses svh + safe-area so it fills the viewport under the notch/home indicator. */
+.viewer-shell-css-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100vw;
+  height: 100svh;
+  padding:
+    calc(12px + env(safe-area-inset-top, 0px))
+    max(12px, env(safe-area-inset-right, 0px))
+    calc(12px + env(safe-area-inset-bottom, 0px))
+    max(12px, env(safe-area-inset-left, 0px));
+  background: var(--viewer-bg, #06080d);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.viewer-shell-css-fullscreen .viewer-canvas-shell-2d,
+.viewer-shell-css-fullscreen .viewer-canvas-shell-volume {
+  height: min(86svh, calc(100svh - 132px));
   min-height: 0;
   max-height: none;
 }
@@ -8732,16 +8837,16 @@ details {
   }
 
   .resource-browser-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.55rem;
+    grid-template-columns: minmax(0, 1fr) 2.75rem 2.75rem;
+    gap: 0.45rem;
   }
 
-  .resource-browser-toolbar .resource-browser-search {
-    grid-column: 1 / -1;
+  .resource-browser-search-field {
+    min-width: 0;
   }
 
   .resource-browser-filter-trigger {
-    padding-inline: 0.75rem;
+    padding-inline: 0;
   }
 
   .resource-browser-filter-sheet {

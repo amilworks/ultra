@@ -68,6 +68,7 @@ import {
   Pencil,
   RefreshCw,
   RotateCcw,
+  Search,
   Share2,
   SlidersHorizontal,
   Table2,
@@ -1981,24 +1982,28 @@ export function ResourceBrowser({
           </div>
           <div className="resource-browser-controls">
             <div className="resource-browser-toolbar">
-              <Input
-                value={query}
-                onChange={(event) => {
-                  clearSelection();
-                  resetTableScroll();
-                  onQueryChange(event.target.value);
-                }}
-                placeholder="Search resources"
-                className="resource-browser-search"
-              />
+              <div className="resource-browser-search-field">
+                <Search data-icon="inline-start" aria-hidden="true" />
+                <Input
+                  value={query}
+                  onChange={(event) => {
+                    clearSelection();
+                    resetTableScroll();
+                    onQueryChange(event.target.value);
+                  }}
+                  placeholder="Search resources"
+                  className="resource-browser-search"
+                />
+              </div>
               <Button
                 type="button"
                 variant="outline"
                 className="resource-browser-filter-trigger"
+                aria-label="More filters"
                 onClick={() => setResourceFiltersOpen(true)}
               >
                 <SlidersHorizontal data-icon="inline-start" />
-                <span>More filters</span>
+                <span className="resource-browser-filter-label">More filters</span>
                 {visibleFilterCount > 0 ? (
                   <span className="resource-browser-filter-count">{visibleFilterCount}</span>
                 ) : null}

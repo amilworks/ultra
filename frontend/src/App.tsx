@@ -70,7 +70,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
-  SidebarInput,
   SidebarMenuAction,
   SidebarMenu,
   SidebarMenuButton,
@@ -7838,7 +7837,6 @@ export function App() {
   const resourceUploadInFlightRef = useRef(0);
   const pausedResourceUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const resourceListKeyRef = useRef("");
-  const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
   const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
@@ -13725,31 +13723,17 @@ export function App() {
     },
     [ensureConversationHydrated, rememberActiveConversationScrollPosition]
   );
-  const normalizedMobileConversationQuery = isPhoneView
-    ? mobileConversationQuery.trim().toLowerCase()
-    : "";
-  const filteredHistoryItems = useMemo(() => {
-    if (!normalizedMobileConversationQuery) {
-      return historyItems;
-    }
-    return historyItems.filter((item) => {
-      const haystack = `${item.title} ${item.preview}`.toLowerCase();
-      return haystack.includes(normalizedMobileConversationQuery);
-    });
-  }, [historyItems, normalizedMobileConversationQuery]);
-
   // Memoized so typing in the composer (which re-runs the App body) doesn't
-  // re-allocate/re-filter the grouped history, and so the sidebar history list
-  // keeps a stable reference and its memoized rows skip reconciliation.
+  // re-allocate/re-group the history, and so the sidebar history list keeps a
+  // stable reference and its memoized rows skip reconciliation.
   const historyGroups = useMemo(
     () =>
       HISTORY_PERIOD_ORDER.map((period) => ({
         period,
-        conversations: filteredHistoryItems.filter((item) => item.period === period),
+        conversations: historyItems.filter((item) => item.period === period),
       })).filter((group) => group.conversations.length > 0),
-    [filteredHistoryItems]
+    [historyItems]
   );
-  const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
   // Contextual title for the mobile top bar: the panel name, or the active
   // conversation's title once it has a real exchange (else the app name).
   const mobileShellTitle =
@@ -13962,14 +13946,6 @@ export function App() {
                 </span>
               </Button>
             </div>
-            <div className="app-sidebar-history-search md:hidden">
-              <SidebarInput
-                value={mobileConversationQuery}
-                onChange={(event) => setMobileConversationQuery(event.target.value)}
-                placeholder="Search chats"
-                aria-label="Search chats"
-              />
-            </div>
             <SidebarGroup className="app-bisque-group">
               <SidebarGroupLabel>BisQue</SidebarGroupLabel>
               <SidebarMenu>
@@ -14080,13 +14056,13 @@ export function App() {
             {historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
                 <SidebarGroupLabel>
-                  {isMobileConversationSearchActive ? "Search results" : "Recents"}
+                  {"Recents"}
                 </SidebarGroupLabel>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton className="app-history-button" disabled>
                       <span>
-                        {isMobileConversationSearchActive ? "No chats match" : "No history yet"}
+                        {"No history yet"}
                       </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

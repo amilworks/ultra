@@ -1,0 +1,19 @@
+# Build context = backend/controlplane (see Dockerfile). The image is a pure-Go
+# `go build ./cmd/ultra-control`; the Postgres schema is go:embed'd from
+# internal/store/schema.sql, so the binary needs Go sources + go.mod/go.sum only.
+# Test files, fixtures, docs, and the standalone migrations dir are not compiled in.
+
+.git
+.DS_Store
+*.log
+
+# Docs / dev tooling not needed to build the binary
+README.md
+Makefile
+
+# Go test files + fixtures are never compiled into `go build` output
+*_test.go
+**/testdata
+
+# Standalone SQL migrations are NOT embedded (schema.sql is); not a build input
+migrations

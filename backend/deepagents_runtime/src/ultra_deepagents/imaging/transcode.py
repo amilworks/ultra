@@ -77,12 +77,14 @@ class TranscodeResult:
     num_z: int
     dtype: str
     series_names: list[str]
+    num_t: int = 1
 
     @property
     def is_multichannel_or_volume(self) -> bool:
-        """Whether the derived pyramid must be OME-BigTIFF (to keep channels + z
-        planes) rather than plain BigTIFF (which would flatten them to one plane)."""
-        return self.num_c > 1 or self.num_z > 1
+        """Whether the derived pyramid must be OME-BigTIFF (to keep channels, z planes,
+        AND timepoints) rather than plain BigTIFF (which would flatten them to one plane).
+        Must include T: a time-lapse otherwise collapses to a single frame."""
+        return self.num_c > 1 or self.num_z > 1 or self.num_t > 1
 
 
 def _largest_scene_index(img: Any) -> int:
@@ -148,6 +150,7 @@ def transcode_to_ome_tiff(src: str, dst: str, *, prefer: str = "largest") -> Tra
         if data is None or getattr(data, "size", 0) == 0:
             raise TranscodeError(f"bioio returned an empty array for {src!r} series {index}")
 
+        num_t = int(data.shape[0])
         num_c = int(data.shape[1])
         num_z = int(data.shape[2])
 
@@ -185,6 +188,7 @@ def transcode_to_ome_tiff(src: str, dst: str, *, prefer: str = "largest") -> Tra
             series_name=name,
             num_c=num_c,
             num_z=num_z,
+            num_t=num_t,
             dtype=str(getattr(data, "dtype", "")),
             series_names=series_names,
         )

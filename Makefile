@@ -1,6 +1,7 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
+COMPOSE_ENV_FILE := $(if $(wildcard .env.docker),.env.docker,.env.docker.example)
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
 PYTHON_TYPECHECK_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_SCOPE := backend/deepagents_runtime/src
@@ -12,13 +13,39 @@ help: ## Show this help message
 	@echo 'Available targets:'
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
+# ─── Docker stack (canonical local "near-production" environment) ──────────────
+# `make up` builds (if needed) and runs the WHOLE stack in containers. Prefer this
+# over the native *-control-stack / dev-stack targets, which run Go/Python/Vite on
+# the host. Uses .env.docker if present, else .env.docker.example.
+
+up: ## Start the full stack in Docker, building if needed (canonical local stack)
+	docker compose --env-file $(COMPOSE_ENV_FILE) up --build
+
+up-detached: ## Start the full Docker stack in the background
+	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d
+
+down: ## Stop the Docker stack (keeps data volumes: Postgres, uploads, JetStream)
+	docker compose down
+
+down-clean: ## Stop the Docker stack AND delete its data volumes
+	docker compose down -v
+
+logs: ## Tail logs from the Docker stack (CTRL-C to stop tailing)
+	docker compose logs -f
+
+ps: ## Show status of the Docker stack
+	docker compose ps
+
+scale-workers: ## Run N agent workers as a NATS queue group, e.g. make scale-workers N=3
+	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d --scale worker=$(or $(N),2)
+
 install: ## Install production dependencies
 	uv sync
 
 dev: ## Install all dependencies including dev tools
 	uv sync --all-extras
 
-dev-stack: ## Start production-like Go control stack plus workers and frontend
+dev-stack: ## (native/no-Docker) Start the host Go stack + workers + frontend — prefer 'make up'
 	./scripts/restart_control_stack.sh restart
 
 run: ## Run the Go control plane API
@@ -39,7 +66,7 @@ stop-dev: ## Stop production-like Go control stack
 status-dev: ## Inspect production-like Go control stack
 	./scripts/restart_control_stack.sh status
 
-restart-control-stack: ## Restart production-like Go + NATS + Postgres + worker + frontend stack
+restart-control-stack: ## (native/no-Docker) Restart the host Go+NATS+PG+worker+frontend stack — prefer 'make up'
 	./scripts/restart_control_stack.sh restart
 
 stop-control-stack: ## Stop production-like Go control stack

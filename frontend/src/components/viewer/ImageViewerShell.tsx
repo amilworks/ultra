@@ -703,9 +703,23 @@ export function ImageViewerShell({
   const viewerHoveredRef = useRef(false);
   const fullscreenTriggerRef = useRef<HTMLElement | null>(null);
   const isFullscreenRef = useRef(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const cssFullscreenRef = useRef(false);
+  // Native Fullscreen API state (desktop / iPad / Android).
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  // CSS pseudo-fullscreen state — used on iPhone Safari, which exposes no element
+  // Fullscreen API at all (requestFullscreen/webkitRequestFullscreen are absent).
+  const [cssFullscreen, setCssFullscreen] = useState(false);
+  const isFullscreen = nativeFullscreen || cssFullscreen;
+  useEffect(() => {
+    isFullscreenRef.current = isFullscreen;
+    cssFullscreenRef.current = cssFullscreen;
+  }, [isFullscreen, cssFullscreen]);
 
   const exitShellFullscreen = useCallback(() => {
+    if (cssFullscreenRef.current) {
+      setCssFullscreen(false);
+      return;
+    }
     const exit =
       document.exitFullscreen ??
       (document as unknown as { webkitExitFullscreen?: () => void }).webkitExitFullscreen;
@@ -721,20 +735,26 @@ export function ImageViewerShell({
     if (!shell) {
       return;
     }
-    if (currentFullscreenElement()) {
+    if (cssFullscreenRef.current || currentFullscreenElement()) {
       exitShellFullscreen();
       return;
     }
     // Remember where focus was so we can restore it on exit (no focus trap).
     fullscreenTriggerRef.current = (document.activeElement as HTMLElement | null) ?? null;
     const request = shell.requestFullscreen ?? shell.webkitRequestFullscreen;
+    if (typeof request !== "function") {
+      // iPhone Safari: no element Fullscreen API → CSS pseudo-fullscreen.
+      setCssFullscreen(true);
+      return;
+    }
     try {
-      const result = request?.call(shell) as Promise<void> | undefined;
+      const result = request.call(shell) as Promise<void> | undefined;
       if (result && typeof result.catch === "function") {
-        result.catch(() => {});
+        result.catch(() => setCssFullscreen(true));
       }
     } catch {
-      /* fullscreen denied (e.g. without a user gesture) — leave docked */
+      // Fullscreen denied — fall back to CSS pseudo-fullscreen rather than staying docked.
+      setCssFullscreen(true);
     }
   }, [exitShellFullscreen]);
 
@@ -742,8 +762,7 @@ export function ImageViewerShell({
   useEffect(() => {
     const onChange = () => {
       const active = currentFullscreenElement() === shellRef.current;
-      isFullscreenRef.current = active;
-      setIsFullscreen(active);
+      setNativeFullscreen(active);
       if (active) {
         const focusTarget =
           shellRef.current?.querySelector<HTMLElement>('[role="group"]') ?? shellRef.current;
@@ -785,6 +804,45 @@ export function ImageViewerShell({
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [toggleFullscreen, exitShellFullscreen]);
+
+  // iPhone Safari ignores touch-action for its proprietary pinch gesture, which
+  // would zoom the whole page and hijack the viewer's own pinch/pan. Suppress the
+  // gesture events on the viewer surface only, so page accessibility zoom stays
+  // intact everywhere else.
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) {
+      return;
+    }
+    const prevent = (event: Event) => event.preventDefault();
+    shell.addEventListener("gesturestart", prevent, { passive: false });
+    shell.addEventListener("gesturechange", prevent, { passive: false });
+    shell.addEventListener("gestureend", prevent, { passive: false });
+    return () => {
+      shell.removeEventListener("gesturestart", prevent);
+      shell.removeEventListener("gesturechange", prevent);
+      shell.removeEventListener("gestureend", prevent);
+    };
+  }, []);
+
+  // CSS pseudo-fullscreen (iPhone): lock page scroll behind the overlay and move
+  // focus into the viewer, restoring it on exit — mirroring the native path.
+  useEffect(() => {
+    if (!cssFullscreen) {
+      return;
+    }
+    const root = document.documentElement;
+    const previousOverflow = root.style.overflow;
+    root.style.overflow = "hidden";
+    const focusTarget =
+      shellRef.current?.querySelector<HTMLElement>('[role="group"]') ?? shellRef.current;
+    focusTarget?.focus?.();
+    return () => {
+      root.style.overflow = previousOverflow;
+      fullscreenTriggerRef.current?.focus?.();
+      fullscreenTriggerRef.current = null;
+    };
+  }, [cssFullscreen]);
 
   // Arrow-key scrubbing on the 2D surface: Up/Down step Z, Left/Right step T (and
   // fall back to Z when there is no time axis). Scoped to when the viewer is hovered
@@ -957,6 +1015,16 @@ export function ImageViewerShell({
     }
     if (axisSizes.T > 1) {
       dimensionDetails.push({ label: "Timepoints (T)", value: formatNumber(axisSizes.T) });
+    }
+    // Time-lapse cadence (e.g. OME-Zarr "1 hour" every frame over "60 hours"). Backend
+    // formats the value + unit; shown next to the timepoint count.
+    const timeInterval = md.microscopy?.timelapse_interval;
+    if (axisSizes.T > 1 && timeInterval != null && String(timeInterval).trim()) {
+      dimensionDetails.push({ label: "Time interval", value: String(timeInterval) });
+    }
+    const timeDuration = md.microscopy?.total_time_duration;
+    if (axisSizes.T > 1 && timeDuration != null && String(timeDuration).trim()) {
+      dimensionDetails.push({ label: "Duration", value: String(timeDuration) });
     }
     if (md.scene || md.scene_count > 1) {
       dimensionDetails.push({
@@ -1574,7 +1642,14 @@ export function ImageViewerShell({
           cacheKey: previewCacheKey,
         })
       : null;
-  const direct2dImageUrl = direct2dDisplayUrl ?? direct2dSliceUrl;
+  // OME-Zarr (ngff) renders the 2D plane natively via the t/z-aware /slice — its /display is
+  // the same omero-aware render but t-agnostic, so a time-lapse/z-stack would freeze on one
+  // frame. Driving the slice URL makes the main plane track the time/z scrubber. libbioimage
+  // keeps its optimized /display.
+  const direct2dImageUrl =
+    viewerInfo.metadata.reader === "ngff"
+      ? direct2dSliceUrl
+      : (direct2dDisplayUrl ?? direct2dSliceUrl);
   const direct2dPreviewUrl = apiClient.uploadPreviewUrl(viewerInfo.file_id);
   const canUseDeepZoom2D =
     !viewerInfo.is_volume &&
@@ -1911,7 +1986,7 @@ export function ImageViewerShell({
   return (
     <div
       ref={shellRef}
-      className="viewer-shell"
+      className={cssFullscreen ? "viewer-shell viewer-shell-css-fullscreen" : "viewer-shell"}
       tabIndex={-1}
       onPointerEnter={() => {
         viewerHoveredRef.current = true;

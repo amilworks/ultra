@@ -120,6 +120,25 @@ def test_docker_sandbox_command_enforces_isolation_and_limits(tmp_path: Path):
     assert command[-3:] == ["bash", "-lc", "python analysis.py"]
 
 
+def test_docker_sandbox_can_disable_no_new_privileges_for_snap_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_NO_NEW_PRIVILEGES", "false")
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+
+    command = backend.build_docker_command("python analysis.py")
+
+    assert "--security-opt" not in command
+    assert "--cap-drop" in command
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert "--read-only" in command
+    assert "--network" in command
+    assert command[command.index("--network") + 1] == "none"
+
+
 def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",
@@ -203,6 +222,60 @@ def test_docker_sandbox_admin_timeout_overrides_tool_timeout(
 
     assert captured["timeout"] == 1800
     assert result.exit_code == 0
+
+
+def test_sandbox_concurrency_cap_returns_busy_when_saturated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY", "1")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_QUEUE_TIMEOUT_SECONDS", "0.05")
+    docker._reset_sandbox_semaphore_for_tests()
+    semaphore = docker._get_sandbox_semaphore()
+    assert semaphore is not None
+    assert semaphore.acquire(timeout=1)  # occupy the only slot
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("subprocess.run must not be called when the sandbox is saturated")
+
+    monkeypatch.setattr(docker.subprocess, "run", _must_not_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+    try:
+        result = backend.execute("python train.py")
+    finally:
+        semaphore.release()
+        docker._reset_sandbox_semaphore_for_tests()
+
+    assert result.exit_code == docker._SANDBOX_BUSY_EXIT_CODE
+    assert "capacity" in result.output.lower()
+
+
+def test_sandbox_concurrency_cap_releases_slot_between_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY", "1")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_QUEUE_TIMEOUT_SECONDS", "1")
+    docker._reset_sandbox_semaphore_for_tests()
+
+    def fake_run(command, *, capture_output, text, timeout, check):
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+    try:
+        # A cap of 1 must still allow back-to-back runs: the slot is released after each.
+        first = backend.execute("python a.py")
+        second = backend.execute("python b.py")
+    finally:
+        docker._reset_sandbox_semaphore_for_tests()
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
 
 
 def test_unlimited_output_limit_does_not_truncate():

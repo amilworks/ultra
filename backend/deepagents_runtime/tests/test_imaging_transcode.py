@@ -34,6 +34,9 @@ def test_transcode_result_multichannel_or_volume_flag():
     flat = TranscodeResult("p", 1, 0, "s", num_c=1, num_z=1, dtype="uint8", series_names=["s"])
     multichannel = TranscodeResult("p", 1, 0, "s", num_c=2, num_z=1, dtype="uint8", series_names=["s"])
     volume = TranscodeResult("p", 1, 0, "s", num_c=1, num_z=40, dtype="uint8", series_names=["s"])
+    timelapse = TranscodeResult("p", 1, 0, "s", num_c=1, num_z=1, dtype="uint8", series_names=["s"], num_t=61)
     assert flat.is_multichannel_or_volume is False
     assert multichannel.is_multichannel_or_volume is True
     assert volume.is_multichannel_or_volume is True
+    # A time-lapse (t>1) must also stay OME-BigTIFF or its frames collapse to one plane.
+    assert timelapse.is_multichannel_or_volume is True

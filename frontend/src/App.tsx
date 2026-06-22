@@ -19,6 +19,7 @@ import {
   ChatContainerScrollAnchor,
   FileUpload,
   FileUploadTrigger,
+  FileUploadFolderTrigger,
   Loader,
   MarkdownResponseStream,
   Message,
@@ -69,7 +70,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
-  SidebarInput,
   SidebarMenuAction,
   SidebarMenu,
   SidebarMenuButton,
@@ -84,6 +84,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
+import { groupPendingUploads } from "./lib/pendingBundles";
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
@@ -245,6 +246,7 @@ import {
   Copy,
   Database,
   FolderOpen,
+  FolderUp,
   ImageIcon,
   Images,
   Laptop,
@@ -7835,7 +7837,6 @@ export function App() {
   const resourceUploadInFlightRef = useRef(0);
   const pausedResourceUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const resourceListKeyRef = useRef("");
-  const [mobileConversationQuery, setMobileConversationQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
   const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
@@ -10341,21 +10342,27 @@ export function App() {
   const viewerBisqueLinksByFileId =
     resourceViewerContext?.bisqueLinksByFileId ?? activeBisqueLinksByFileId;
 
-  const pendingPreviewFiles = useMemo(
-    () =>
-      activePendingFiles.map((file, index) => {
-        const canPreviewInBrowser = supportsBrowserPreview(file.name, file.type);
-        return {
-          key: `${file.name}-${file.size}-${file.lastModified}-${index}`,
-          name: file.name,
-          sizeLabel: formatBytes(file.size),
-          canPreviewInBrowser,
-          isScientific: isScientificUpload(file.name),
-          objectUrl: canPreviewInBrowser ? URL.createObjectURL(file) : null,
-        };
-      }),
-    [activePendingFiles]
-  );
+  const pendingPreviewFiles = useMemo(() => {
+    // Collapse a folder-picked directory format (OME-Zarr: many member files sharing a
+    // `*.zarr` top segment) into ONE chip — the backend commits them as one bundle resource.
+    return groupPendingUploads(activePendingFiles).map((group) => {
+      const firstFile = activePendingFiles[group.indices[0]];
+      const canPreviewInBrowser =
+        !group.isBundle && firstFile ? supportsBrowserPreview(firstFile.name, firstFile.type) : false;
+      return {
+        key: group.isBundle ? `bundle:${group.name}` : `${group.name}-${group.totalBytes}-${group.indices[0]}`,
+        name: group.name,
+        sizeLabel: group.isBundle
+          ? `${group.indices.length} files · ${formatBytes(group.totalBytes)}`
+          : formatBytes(group.totalBytes),
+        canPreviewInBrowser,
+        isScientific: group.isBundle || (firstFile ? isScientificUpload(firstFile.name) : false),
+        isBundle: group.isBundle,
+        objectUrl: canPreviewInBrowser && firstFile ? URL.createObjectURL(firstFile) : null,
+        indices: group.indices,
+      };
+    });
+  }, [activePendingFiles]);
 
   useEffect(() => {
     return () => {
@@ -13716,31 +13723,17 @@ export function App() {
     },
     [ensureConversationHydrated, rememberActiveConversationScrollPosition]
   );
-  const normalizedMobileConversationQuery = isPhoneView
-    ? mobileConversationQuery.trim().toLowerCase()
-    : "";
-  const filteredHistoryItems = useMemo(() => {
-    if (!normalizedMobileConversationQuery) {
-      return historyItems;
-    }
-    return historyItems.filter((item) => {
-      const haystack = `${item.title} ${item.preview}`.toLowerCase();
-      return haystack.includes(normalizedMobileConversationQuery);
-    });
-  }, [historyItems, normalizedMobileConversationQuery]);
-
   // Memoized so typing in the composer (which re-runs the App body) doesn't
-  // re-allocate/re-filter the grouped history, and so the sidebar history list
-  // keeps a stable reference and its memoized rows skip reconciliation.
+  // re-allocate/re-group the history, and so the sidebar history list keeps a
+  // stable reference and its memoized rows skip reconciliation.
   const historyGroups = useMemo(
     () =>
       HISTORY_PERIOD_ORDER.map((period) => ({
         period,
-        conversations: filteredHistoryItems.filter((item) => item.period === period),
+        conversations: historyItems.filter((item) => item.period === period),
       })).filter((group) => group.conversations.length > 0),
-    [filteredHistoryItems]
+    [historyItems]
   );
-  const isMobileConversationSearchActive = normalizedMobileConversationQuery.length > 0;
   // Contextual title for the mobile top bar: the panel name, or the active
   // conversation's title once it has a real exchange (else the app name).
   const mobileShellTitle =
@@ -13953,14 +13946,6 @@ export function App() {
                 </span>
               </Button>
             </div>
-            <div className="app-sidebar-history-search md:hidden">
-              <SidebarInput
-                value={mobileConversationQuery}
-                onChange={(event) => setMobileConversationQuery(event.target.value)}
-                placeholder="Search chats"
-                aria-label="Search chats"
-              />
-            </div>
             <SidebarGroup className="app-bisque-group">
               <SidebarGroupLabel>BisQue</SidebarGroupLabel>
               <SidebarMenu>
@@ -14071,13 +14056,13 @@ export function App() {
             {historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
                 <SidebarGroupLabel>
-                  {isMobileConversationSearchActive ? "Search results" : "Recents"}
+                  {"Recents"}
                 </SidebarGroupLabel>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton className="app-history-button" disabled>
                       <span>
-                        {isMobileConversationSearchActive ? "No chats match" : "No history yet"}
+                        {"No history yet"}
                       </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -14464,6 +14449,7 @@ export function App() {
                   }))
                 }
                 multiple
+                allowDirectories
               >
                 <PromptInput
                   isLoading={activeSending || !activeConversationHydrated}
@@ -14605,7 +14591,7 @@ export function App() {
                           </Button>
                         </div>
                         <div className="composer-preview-row">
-                          {pendingPreviewFiles.map((file, index) => (
+                          {pendingPreviewFiles.map((file) => (
                             <article key={file.key} className="composer-preview-card">
                               {file.objectUrl ? (
                                 <img
@@ -14615,7 +14601,7 @@ export function App() {
                                 />
                               ) : (
                                 <div className="composer-preview-fallback">
-                                  {file.isScientific ? "BIO" : "FILE"}
+                                  {file.isBundle ? "ZARR" : file.isScientific ? "BIO" : "FILE"}
                                 </div>
                               )}
                               <div className="composer-preview-meta">
@@ -14628,14 +14614,15 @@ export function App() {
                                 size="icon-xs"
                                 className="composer-preview-remove"
                                 aria-label={`Remove ${file.name}`}
-                                onClick={() =>
+                                onClick={() => {
+                                  const removeIndices = new Set(file.indices);
                                   updateActiveConversation((conversation) => ({
                                     ...conversation,
                                     pendingFiles: conversation.pendingFiles.filter(
-                                      (_, itemIndex) => itemIndex !== index
+                                      (_, itemIndex) => !removeIndices.has(itemIndex)
                                     ),
-                                  }))
-                                }
+                                  }));
+                                }}
                               >
                                 <X className="size-3.5" />
                               </Button>
@@ -14795,6 +14782,20 @@ export function App() {
                               <Plus size={18} />
                             </Button>
                           </FileUploadTrigger>
+                        </PromptInputAction>
+                        <PromptInputAction tooltip="Attach folder (OME-Zarr)">
+                          <FileUploadFolderTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label="Attach folder"
+                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
+                              disabled={!activeConversationHydrated}
+                            >
+                              <FolderUp size={18} />
+                            </Button>
+                          </FileUploadFolderTrigger>
                         </PromptInputAction>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>

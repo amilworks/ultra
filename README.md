@@ -36,7 +36,7 @@ ollama pull gpt-oss:20b   # the stack's default model (any OpenAI-compatible mod
 **2. Build and launch the whole stack:**
 
 ```bash
-docker compose up --build
+docker compose up --build      # or: make up   (same thing; auto-loads .env.docker if present)
 ```
 
 This builds and starts seven services — Postgres, NATS (JetStream), the libbioimage **image service** + its convert worker, the Go **control plane**, the Deep Agents **worker**, and the **frontend**. The first build compiles the native imaging engine (libbioimage/`imgcnv`) from source: budget **~10–30 minutes** the first time (fast on native amd64 Linux; emulated on Apple Silicon). Later runs start in seconds.
@@ -61,7 +61,9 @@ cp .env.docker.example .env.docker     # then edit it
 docker compose --env-file .env.docker up --build
 ```
 
-Stop with `docker compose down` (add `-v` to also wipe the database and uploaded files). The defaults reach a host model at `http://host.docker.internal:11434/v1` (`host-gateway` is wired for Linux). BisQue import features are off unless you set `ULTRA_BISQUE_ROOT_URL`.
+Stop with `make down` (or `docker compose down`); durable state — Postgres, uploaded files, and NATS JetStream — persists across restarts. Use `make down-clean` (`docker compose down -v`) to also wipe it. The defaults reach a host model at `http://host.docker.internal:11434/v1` (`host-gateway` is wired for Linux). BisQue import features are off unless you set `ULTRA_BISQUE_ROOT_URL`.
+
+**Scale the agent worker tier.** The worker is a NATS JetStream queue-group consumer, so you can run several against one stack: `make scale-workers N=3`. Before doing so, set an aggregate sandbox cap in `.env.docker` (`ULTRA_SANDBOX_MAX_CONCURRENCY`, e.g. `8`, plus a `ULTRA_SANDBOX_MEMORY=8g` per-container cap) so the replicas can't oversubscribe the single host's Docker daemon.
 
 > Prefer to run the services directly from source (with hot reload, no Docker for the app code)? See [Run from source](#run-from-source-advanced) below.
 

@@ -49,6 +49,7 @@ type ServerDeps struct {
 	ArtifactRoot      string
 	UploadRoot        string
 	ImageServiceURL   string
+	NgffServiceURL    string
 	DevAdminEnabled   bool
 	Runtime           RuntimeSummary
 	QueueDiagnostics  eventbus.QueueDiagnosticsProvider
@@ -538,6 +539,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/upload-sessions/{session_id}", deps.handleGetUploadSession)
 			r.Put("/upload-sessions/{session_id}/files/{file_token}/chunks/{chunk_index}", deps.handleUploadSessionChunk)
 			r.Post("/upload-sessions/{session_id}/files/{file_token}/complete", deps.handleCompleteUploadSessionFile)
+			r.Post("/upload-sessions/{session_id}/finalize-bundle", deps.handleFinalizeUploadBundle)
 			r.Post("/upload-sessions/{session_id}/pause", deps.handlePauseUploadSession)
 			r.Post("/upload-sessions/{session_id}/resume", deps.handleResumeUploadSession)
 			r.Post("/upload-sessions/{session_id}/cancel", deps.handleCancelUploadSession)
@@ -3349,6 +3351,17 @@ func (deps ServerDeps) handleCreateUploadSession(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusBadRequest, errors.New("total_bytes cannot be smaller than declared file sizes"))
 		return
 	}
+	// Detect directory-format bundles (OME-Zarr) from the file relative paths: a group of
+	// files sharing a special-format top segment (scan.ome.zarr/...) is committed as ONE
+	// resource by finalize-bundle, not one per member file.
+	sessionMetadata := domain.JSONMap{
+		"source":     "resumable_upload_v2",
+		"file_count": len(fileInputs),
+	}
+	bundles := detectSessionBundles(fileInputs, func() string { return domain.NewID("file") })
+	if len(bundles) > 0 {
+		sessionMetadata["bundles"] = bundleMetadataValue(bundles)
+	}
 	idempotencyKey := idempotencyKeyFromRequest(r, req.IdempotencyKey)
 	if idempotencyKey != "" {
 		existing, err := sessions.GetUploadSessionByIdempotencyKeyForUser(r.Context(), idempotencyKey, principal.UserID, principal.OrgID)
@@ -3399,10 +3412,7 @@ func (deps ServerDeps) handleCreateUploadSession(w http.ResponseWriter, r *http.
 		BrowserFingerprint: strings.TrimSpace(req.BrowserFingerprint),
 		CreatedAt:          now,
 		UpdatedAt:          now,
-		Metadata: domain.JSONMap{
-			"source":     "resumable_upload_v2",
-			"file_count": len(fileInputs),
-		},
+		Metadata:           sessionMetadata,
 	})
 	if err != nil {
 		// Collision-tolerant: a concurrent create with the same idempotency key (two
@@ -3779,6 +3789,42 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 		writeError(w, http.StatusBadRequest, errors.New("completed file size mismatch"))
 		return
 	}
+	// Bundle member (a file inside an OME-Zarr folder upload): move it into the bundle tree
+	// at {root}/bundles/{bundleID}/{relative_path} and DO NOT catalog/dedup it — the whole
+	// bundle is committed as one resource by finalize-bundle. The session file is marked
+	// completed against the shared bundle id so finalize knows its members are in.
+	if dest, bundle, isBundle := bundleMemberTarget(root, session, file); isBundle {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			_ = os.Remove(tmp)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if err := os.Rename(tmp, dest); err != nil {
+			_ = os.Remove(tmp)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		session, completedFile, err := completeUploadSessionStoreState(r.Context(), sessions, session, file, bundle.ID, computedSHA)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		deps.recordUploadSessionFileCompleted(r.Context(), session, completedFile, principal)
+		writeJSON(w, http.StatusOK, uploadSessionFileCompleteResponse{
+			Session: session,
+			File:    completedFile,
+			Resource: uploadedFileRecord{
+				FileID:       bundle.ID,
+				OriginalName: bundle.Name,
+				ContentType:  "application/octet-stream",
+				SizeBytes:    file.SizeBytes,
+				SHA256:       computedSHA,
+				ProjectID:    session.ProjectID,
+				Principal:    principal.record(),
+			},
+		})
+		return
+	}
 	// Serialize the dedup-check-then-commit for identical content across DIFFERENT
 	// sessions. The per-(session,file) lock above does not cover this: two re-uploads of
 	// the same bytes use different session IDs, so without a content lock both could miss
@@ -3854,6 +3900,69 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 	}
 	deps.recordUploadSessionFileCompleted(r.Context(), session, completedFile, principal)
 	writeJSON(w, http.StatusOK, uploadSessionFileCompleteResponse{Session: session, File: completedFile, Resource: record})
+}
+
+// handleFinalizeUploadBundle commits the directory-format bundle(s) of an upload session
+// (OME-Zarr folder uploads) as catalog resources — ONE resource per bundle, pointing at its
+// reconstructed tree under {root}/bundles/{id}/{name}. Members were already written there by
+// the per-file complete handler. Idempotent (UpsertResource on a stable bundle id).
+func (deps ServerDeps) handleFinalizeUploadBundle(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sessions, ok := deps.uploadSessionStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, errors.New("upload sessions are not configured"))
+		return
+	}
+	session, err := deps.uploadSessionForRequest(r, sessions)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	bundles := sessionBundles(session)
+	if len(bundles) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("upload session has no directory-format bundles"))
+		return
+	}
+	now := domain.Now().Format(time.RFC3339Nano)
+	results := make([]uploadedFileRecord, 0, len(bundles))
+	for _, b := range bundles {
+		dir := bundleDirPath(root, b)
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			continue // no members landed for this bundle (nothing uploaded) — skip
+		}
+		record := uploadedFileRecord{
+			FileID:       b.ID,
+			OriginalName: b.Name,
+			ContentType:  "application/octet-stream",
+			SizeBytes:    dirSizeBytes(dir),
+			CreatedAt:    now,
+			SourceURI:    uploadSessionSourceURI(session.SessionID, b.ID),
+			ProjectID:    session.ProjectID,
+			PreviewURL:   "/v2/uploads/" + url.PathEscape(b.ID) + "/preview",
+			Principal:    principal.record(),
+		}
+		if err := deps.catalogUploadedFileAtPath(r.Context(), root, dir, record, "resource.uploaded"); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		results = append(results, record)
+	}
+	if len(results) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("no bundle contents found to finalize"))
+		return
+	}
+	deps.recordUploadSessionEvent(r.Context(), session, principal, "upload_session.bundle_finalized", domain.JSONMap{
+		"bundle_count": len(results),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"bundles": results})
 }
 
 // keyedMutex is a set of mutexes addressed by string key, used to serialize work on
@@ -6974,6 +7083,19 @@ func (deps ServerDeps) handleServeUpload(w http.ResponseWriter, r *http.Request)
 	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	// OME-Zarr is a directory, not a file — http.ServeFile below would fail on it. Render a
+	// display/preview PNG natively via the ngff-service (its /slice is the omero-aware plane
+	// render). Covers both /display and /preview, which share this handler.
+	if deps.servesViaNgff(record, path) {
+		q := url.Values{"path": {path}}
+		for _, key := range []string{"t", "z", "channels"} {
+			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+				q.Set(key, v)
+			}
+		}
+		deps.ngffDeps().proxyImageServiceCached(w, r, "/slice", q)
 		return
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
@@ -11021,6 +11143,23 @@ func removeUploadedFile(root string, fileID string) error {
 	if err := os.Remove(uploadMetadataPath(root, fileID)); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 		firstErr = err
 	}
+	// Directory-format bundle (OME-Zarr): the whole bundles/{fileID} tree.
+	if bundleDir := filepath.Join(root, bundlesDirName, fileID); pathIsUnderRoot(root, bundleDir) {
+		if err := os.RemoveAll(bundleDir); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	// Derived pyramid + its permanent-failure marker (for transcoded/derived formats).
+	for _, p := range []string{
+		filepath.Join(root, "derived", derivedPyramidName(fileID)),
+		filepath.Join(root, "derived", derivedPyramidFailedName(fileID)),
+	} {
+		if pathIsUnderRoot(root, p) {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
 	return firstErr
 }
 
@@ -13880,6 +14019,12 @@ func contentTypeForUpload(originalName string, hint string) string {
 
 func resourceKindForContent(originalName string, contentType string) string {
 	switch {
+	case detectSpecialFormatByName(originalName) != nil:
+		// OME-Zarr (and other registry special formats) render as images.
+		if sf := detectSpecialFormatByName(originalName); sf.ResourceKind != "" {
+			return sf.ResourceKind
+		}
+		return "image"
 	case isTIFFUpload(originalName, contentType):
 		return "image"
 	case strings.HasPrefix(contentType, "image/"):

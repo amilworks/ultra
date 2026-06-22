@@ -1,0 +1,17 @@
+# ngff-service: native OME-Zarr (NGFF) serving microservice.
+# Deliberately light — no libbioimage, no Java, no bioio. Just zarr + numpy + Pillow +
+# FastAPI. Stateless; scale by running N replicas behind the control-plane proxy.
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+# Build context is backend/deepagents_runtime (same as Dockerfile.imaging).
+COPY . /app/deepagents_runtime
+RUN pip install --no-cache-dir "/app/deepagents_runtime[ngff]"
+
+# Local chunk cache (NFS chunk reads -> local disk LRU). Mount a volume here in prod.
+ENV ULTRA_NGFF_CHUNK_CACHE_DIR=/var/cache/ultra-ngff
+RUN mkdir -p /var/cache/ultra-ngff
+
+EXPOSE 8091
+# Single worker by default; prod sets ULTRA_NGFF_WORKERS or runs N replicas behind an LB.
+CMD ["python", "-m", "ultra_deepagents.ngff_service", "--host", "0.0.0.0", "--port", "8091"]

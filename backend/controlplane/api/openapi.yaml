@@ -382,6 +382,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2UploadSessionFileCompleteResponse"
+  /v2/upload-sessions/{session_id}/finalize-bundle:
+    post:
+      operationId: finalizeV2UploadBundle
+      parameters:
+        - $ref: "#/components/parameters/UploadSessionID"
+      responses:
+        "200":
+          description: Finalized directory-format upload bundles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2UploadBundleFinalizeResponse"
   /v2/upload-sessions/{session_id}/cancel:
     post:
       operationId: cancelV2UploadSession
@@ -3688,6 +3700,14 @@ components:
       properties:
         file_count: { type: integer }
         uploaded:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2UploadBundleFinalizeResponse:
+      type: object
+      required: [bundles]
+      properties:
+        bundles:
           type: array
           items:
             $ref: "#/components/schemas/V2UploadedFileRecord"

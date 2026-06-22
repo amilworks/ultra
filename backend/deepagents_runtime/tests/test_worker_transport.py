@@ -4251,6 +4251,9 @@ def test_worker_fetches_new_jobs_while_previous_job_is_still_running(monkeypatch
             async def _ensure_stream(self, _js):
                 pass
 
+            async def _reap_sandbox_containers_once(self):
+                pass
+
             async def _subscribe(self, _js):
                 return self.connection.subscription
 
@@ -4286,6 +4289,41 @@ def test_worker_fetches_new_jobs_while_previous_job_is_still_running(monkeypatch
                 await worker_task
 
     asyncio.run(scenario())
+
+
+def test_worker_reconnects_after_recoverable_nats_error(monkeypatch):
+    async def scenario():
+        sleeps: list[float] = []
+
+        class ReconnectingWorker(NATSDeepAgentsWorker):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.serve_calls = 0
+
+            async def _serve_one_connection(self):
+                self.serve_calls += 1
+                if self.serve_calls == 1:
+                    raise nats.errors.ConnectionClosedError()
+
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+        )
+        worker = ReconnectingWorker(settings)
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr(nats_worker_module.asyncio, "sleep", fake_sleep)
+
+        await asyncio.wait_for(worker.run_forever(), timeout=1.0)
+
+        return worker.serve_calls, sleeps
+
+    serve_calls, sleeps = asyncio.run(scenario())
+
+    assert serve_calls == 2
+    assert sleeps == [1.0]
 
 
 def test_worker_shutdown_naks_active_job_without_marking_user_canceled(monkeypatch):
@@ -4330,6 +4368,9 @@ def test_worker_shutdown_naks_active_job_without_marking_user_canceled(monkeypat
                 self.connection = FakeConnection()
 
             async def _ensure_stream(self, _js):
+                pass
+
+            async def _reap_sandbox_containers_once(self):
                 pass
 
             async def _subscribe(self, _js):
@@ -4385,6 +4426,9 @@ def test_worker_registers_async_cancel_subscription_callback(monkeypatch):
 
         class SubscribeWorker(NATSDeepAgentsWorker):
             async def _ensure_stream(self, _js):
+                pass
+
+            async def _reap_sandbox_containers_once(self):
                 pass
 
             async def _subscribe(self, _js):

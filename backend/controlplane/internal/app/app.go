@@ -251,6 +251,7 @@ func New(cfg config.Config) (*App, error) {
 		ArtifactRoot:      cfg.ArtifactRoot,
 		UploadRoot:        cfg.UploadRoot,
 		ImageServiceURL:   cfg.ImageServiceURL,
+		NgffServiceURL:    cfg.NgffServiceURL,
 		DevAdminEnabled:   cfg.DevAdminEnabled,
 		Runtime:           runtime,
 		QueueDiagnostics:  natsBus,

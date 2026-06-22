@@ -1,0 +1,15 @@
+{
+  "_comment": "Canonical registry of SPECIAL image formats — directory/archive shaped, or needing a non-default serving backend. Mirrored by Go (backend/controlplane/internal/httpapi/special_formats.go) and Python (backend/deepagents_runtime/src/ultra_deepagents/imaging/special_formats.py); a parity test in each language asserts its registry matches this file. TEMPLATE — to add a format: append one entry here, mirror it in both registries, and add the reader/serve hook.",
+  "formats": [
+    {
+      "id": "ome-zarr",
+      "extensions": [".ome.zarr", ".zarr"],
+      "shape": "directory",
+      "dir_markers": [".zattrs", ".zgroup"],
+      "serve": "ngff",
+      "reader": "ngff",
+      "resource_kind": "image",
+      "description": "OME-NGFF (OME-Zarr) multiscale store. A directory; already a chunked multiscale pyramid. Served natively by the ngff-service (no transcode, no pyramid derivation)."
+    }
+  ]
+}

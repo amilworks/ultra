@@ -56,6 +56,17 @@ imaging = [
     "aicspylibczi>=3.3.1",   # czi native reader — pin to a cp312-wheel release (no compiler)
     "pylibczirw>=6.0.1",     # czi native reader — pin to a cp312-wheel release (no compiler)
 ]
+# ngff-service: native OME-Zarr (NGFF) serving. Deliberately SEPARATE from [imaging] —
+# no libbioimage, no bioio, no Java — a light, conflict-free image. zarr>=2.18 picks
+# zarr 3.x which reads both Zarr v2 and v3 stores; numcodecs brings blosc/zstd codecs.
+ngff = [
+    "numpy>=1.26.0,<3",
+    "zarr>=2.18,<4",
+    "numcodecs>=0.12.0",
+    "Pillow>=10.0.0",
+    "fastapi>=0.110.0,<1",
+    "uvicorn>=0.29.0,<1",
+]
 rarespot = [
     "matplotlib>=3.8.0,<4",
     "ipython>=8.0.0,<10",
@@ -79,6 +90,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ultra_deepagents"]
+
+# Ship the agent skills (SKILL.md protocols) INSIDE the wheel so a pip-installed
+# worker (the containerized deployment) finds them next to the package — otherwise
+# resolve_skills_root falls back to a source-tree path that does not exist in
+# site-packages and the agent silently runs with no skills.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "ultra_deepagents/skills"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 from ultra_deepagents.builder import (
+    BUILDER_SYSTEM_PROMPT,
+    GOAL_LOOP_INJECTIONS_KEY,
     GOAL_LOOP_SOURCE,
     GoalLoopMiddleware,
     build_builder_subagent,
@@ -70,6 +72,65 @@ def test_goal_loop_budget_exhausted_finishes_even_if_unmet():
     # 2 prior nudges already injected -> at the cap -> finish regardless of unmet verdict
     state = _state(*_nudge(2), AIMessage(content='GOAL_OUTCOME: {"met": false, "metric": 0.6}'))
     assert gl.after_agent(state, None) is None  # pathology cap fires, never a depth cap
+
+
+def test_goal_loop_cap_holds_when_summarization_prunes_nudges():
+    """Regression for the #1 prod-enable blocker: SummarizationMiddleware rewrites `messages`
+    with RemoveMessage(REMOVE_ALL_MESSAGES), pruning the goal_loop nudge tags. A message-derived
+    budget would reset to 0 and loop forever; the DURABLE STATE counter must still fire the cap."""
+    gl = GoalLoopMiddleware(max_iterations=6)
+    # Post-compaction: a fresh summary message + an unmet verdict; ZERO goal_loop nudges survive.
+    state = {
+        "messages": [
+            HumanMessage(content="<summary of prior work>", additional_kwargs={"lc_source": "summarization"}),
+            AIMessage(content='GOAL_OUTCOME: {"met": false, "metric": 0.6, "target": "> 0.65"}'),
+        ],
+        GOAL_LOOP_INJECTIONS_KEY: 6,  # the count the summarizer cannot touch
+    }
+    assert gl.after_agent(state, None) is None  # cap fires from state, not from messages
+
+
+def test_goal_loop_persists_incremented_count_in_state():
+    """Each injected nudge bumps the durable counter so the cap survives history compaction."""
+    gl = GoalLoopMiddleware(max_iterations=6)
+    state = {
+        "messages": [AIMessage(content='GOAL_OUTCOME: {"met": false, "metric": 0.6}')],
+        GOAL_LOOP_INJECTIONS_KEY: 3,
+    }
+    out = gl.after_agent(state, None)
+    assert out is not None and out["jump_to"] == "model"
+    assert out[GOAL_LOOP_INJECTIONS_KEY] == 4  # bumped + persisted to durable state
+
+
+def test_goal_loop_cap_enforced_in_compiled_graph_via_durable_state():
+    """End-to-end: the durable counter registers as a graph channel and enforces the cap
+    through a REAL compiled deep-agent graph WITHOUT the message-scan fallback -- the exact
+    path that holds after SummarizationMiddleware prunes the nudges from history."""
+    from deepagents import create_deep_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    class _FakeBind(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):  # the deep-agent stack binds tools
+            return self
+
+    class _StateOnly(GoalLoopMiddleware):
+        @staticmethod
+        def _message_injections(messages):  # disable the lower-bound fallback -> state only
+            return 0
+
+    agent = create_deep_agent(
+        model=_FakeBind(messages=(f"working {i}" for i in range(2000))),
+        tools=[],
+        system_prompt=BUILDER_SYSTEM_PROMPT,
+        middleware=[_StateOnly(max_iterations=3)],
+    ).with_config({"recursion_limit": 60})
+    assert GOAL_LOOP_INJECTIONS_KEY in (getattr(agent, "channels", {}) or {})  # channel registered
+    result = agent.invoke({"messages": [("user", "GOAL: X. DONE-WHEN: metric>0.9.")]})
+    nudges = sum(
+        1 for m in result["messages"]
+        if (getattr(m, "additional_kwargs", {}) or {}).get("lc_source") == GOAL_LOOP_SOURCE
+    )
+    assert nudges == 3  # capped purely by the durable state counter, no message fallback
 
 
 def test_goal_loop_malformed_verdict_treated_as_missing():

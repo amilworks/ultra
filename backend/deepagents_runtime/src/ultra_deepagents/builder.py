@@ -26,11 +26,17 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Annotated, Any
 
 from deepagents import CompiledSubAgent, create_deep_agent
-from langchain.agents.middleware.types import AgentMiddleware, AgentState, hook_config
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    PrivateStateAttr,
+    hook_config,
+)
 from langchain_core.messages import AIMessage, HumanMessage
+from typing_extensions import NotRequired
 
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.model import build_builder_model
@@ -38,7 +44,20 @@ from ultra_deepagents.model import build_builder_model
 logger = logging.getLogger(__name__)
 
 GOAL_LOOP_SOURCE = "goal_loop"
+# The injection count lives in this DURABLE STATE field, never derived from message history.
+# The deep-agent stack includes SummarizationMiddleware, which on context overflow rewrites
+# `messages` with RemoveMessage(REMOVE_ALL_MESSAGES) + a fresh summary — pruning the goal_loop
+# nudge tags and silently resetting any history-derived count to ~0. Since the Builder exists
+# FOR long, context-accumulating runs, that compaction is the COMMON path, so a message-derived
+# pathology cap would not hold. A state field is untouched by the messages rewrite.
+GOAL_LOOP_INJECTIONS_KEY = "goal_loop_injections"
 _GOAL_OUTCOME_RE = re.compile(r"GOAL_OUTCOME:\s*(\{.*\})", re.DOTALL)
+
+
+class GoalLoopState(AgentState[Any]):
+    """Builder agent state extended with the durable GoalLoop injection counter."""
+
+    goal_loop_injections: NotRequired[Annotated[int, PrivateStateAttr]]
 
 BUILDER_NAME = "builder"
 BUILDER_DESCRIPTION = (
@@ -106,13 +125,40 @@ class GoalLoopMiddleware(AgentMiddleware):
     remains, it injects the gap and jumps back to the model. ``max_iterations`` is a
     PATHOLOGY cap (catches a never-converging loop), never a depth/quality cap - a build
     making real progress toward the goal is never throttled by it.
+
+    The budget is counted in DURABLE STATE (``goal_loop_injections``), NOT by scanning the
+    message history: SummarizationMiddleware (in the deep-agent stack) compacts ``messages``
+    on overflow and would prune the nudge tags, silently resetting a history-derived count
+    and defeating the cap on exactly the long runs the Builder is built for. The message scan
+    is kept only as a never-undercount lower bound.
     """
+
+    state_schema = GoalLoopState  # type: ignore[assignment]
 
     def __init__(self, *, max_iterations: int = 6) -> None:
         super().__init__()
         if not isinstance(max_iterations, int) or max_iterations < 1:
             raise ValueError("max_iterations must be a positive int")
         self.max_iterations = max_iterations
+
+    @staticmethod
+    def _state_injections(state: Any) -> int:  # noqa: ANN401
+        raw = (
+            state.get(GOAL_LOOP_INJECTIONS_KEY, 0)
+            if isinstance(state, dict)
+            else getattr(state, GOAL_LOOP_INJECTIONS_KEY, 0)
+        )
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _message_injections(messages: Any) -> int:  # noqa: ANN401
+        return sum(
+            1 for m in messages
+            if (getattr(m, "additional_kwargs", {}) or {}).get("lc_source") == GOAL_LOOP_SOURCE
+        )
 
     @staticmethod
     def _message_text(content: Any) -> str:
@@ -147,12 +193,10 @@ class GoalLoopMiddleware(AgentMiddleware):
         messages = (
             state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
         )
-        # iteration budget = how many goal-loop nudges we have already injected
-        injections = sum(
-            1
-            for m in messages
-            if (getattr(m, "additional_kwargs", {}) or {}).get("lc_source") == GOAL_LOOP_SOURCE
-        )
+        # iteration budget = how many goal-loop nudges we have already injected. Read from
+        # DURABLE STATE (survives the SummarizationMiddleware messages-rewrite); the message
+        # scan is a never-undercount lower bound for the pre-summarization path.
+        injections = max(self._state_injections(state), self._message_injections(messages))
         last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
         outcome = self._parse_outcome(getattr(last_ai, "content", "") if last_ai else "")
 
@@ -191,6 +235,9 @@ class GoalLoopMiddleware(AgentMiddleware):
                 )
             ],
             "jump_to": "model",
+            # Persist the bumped count in durable state so the cap holds even after a
+            # SummarizationMiddleware compaction prunes the nudge tags from `messages`.
+            GOAL_LOOP_INJECTIONS_KEY: injections + 1,
         }
 
 

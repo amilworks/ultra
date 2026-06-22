@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 
 from ultra_deepagents.config import RuntimeSettings
+
+logger = logging.getLogger(__name__)
 
 
 class UltraChatOpenAI(ChatOpenAI):
@@ -123,6 +126,16 @@ def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
     (reasoning-delta lift + per-run token accounting) as the other model builders.
     """
     if not settings.builder_base_url or not settings.builder_model:
+        # A partially-configured endpoint (exactly one of base_url/model set) is almost
+        # certainly an operator mistake; fall back, but say so loudly rather than silently
+        # running the Builder on the coordinator model.
+        if settings.builder_base_url or settings.builder_model:
+            logger.warning(
+                "Builder model partially configured (base_url=%r, model=%r): BOTH are required "
+                "to use a separate endpoint; falling back to the coordinator model.",
+                settings.builder_base_url,
+                settings.builder_model,
+            )
         return build_chat_model(settings)
     timeout = settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
     model = UltraChatOpenAI(

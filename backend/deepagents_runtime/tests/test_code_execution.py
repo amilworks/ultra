@@ -1,3 +1,4 @@
+import base64
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -321,6 +322,53 @@ def test_docker_sandbox_allows_workspace_scoped_recursive_searches():
         docker.validate_sandbox_command(
             "python3 -c \"import glob; glob.glob('/workspace/**/*.csv', recursive=True)\""
         )
+        is None
+    )
+
+
+def _encoded_glob_command(path: str, pattern: str) -> str:
+    """Mirror the deepagents ls/glob backend tool, which base64-encodes its path and
+    pattern into the generated python so the literals never appear in the command."""
+    enc_path = base64.b64encode(path.encode()).decode()
+    enc_pattern = base64.b64encode(pattern.encode()).decode()
+    return (
+        'python3 -c "'
+        "import glob, os, base64; "
+        f"path = base64.b64decode('{enc_path}').decode('utf-8'); "
+        f"pattern = base64.b64decode('{enc_pattern}').decode('utf-8'); "
+        "os.chdir(path); "
+        'print(sorted(glob.glob(pattern, recursive=True)))"'
+    )
+
+
+def test_docker_sandbox_rejects_base64_encoded_root_globs_before_launch(tmp_path: Path):
+    """The two prod hangs were `glob('**/*', path='/')` issued by the deepagents tool,
+    which base64-encodes its args — so the literal `/**` regex never saw it. The guard
+    must decode the literals and reject the root-anchored recursive walk before launch."""
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+
+    for path, pattern in (("/", "**/*"), ("/", "**/detections.csv"), ("/opt", "**/*.pt")):
+        unsafe = _encoded_glob_command(path, pattern)
+        violation = docker.validate_sandbox_command(unsafe)
+        result = backend.execute(unsafe)
+        assert violation is not None, (path, pattern)
+        assert result.exit_code == 126
+        assert "Recursive searches must stay under /workspace" in result.output
+
+    # A root-anchored recursive pattern in a single literal ("/**/*") is caught too.
+    rooted = _encoded_glob_command("/workspace", "/**/*.csv")
+    assert docker.validate_sandbox_command(rooted) is not None
+
+
+def test_docker_sandbox_allows_base64_encoded_workspace_globs():
+    # The same tool scoped to the run's own mounts must still pass unblocked.
+    assert docker.validate_sandbox_command(_encoded_glob_command("/workspace", "**/*.csv")) is None
+    assert docker.validate_sandbox_command(_encoded_glob_command("/outputs", "**/*.png")) is None
+    assert (
+        docker.validate_sandbox_command(_encoded_glob_command("/workspace/run", "**/*.json"))
         is None
     )
 

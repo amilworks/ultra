@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import subprocess
@@ -376,10 +378,64 @@ def _uses_shell_timeout_wrapper(command: str) -> bool:
     return bool(re.search(r"(?:^|(?:&&|\|\||;|\|)\s*)g?timeout\b", command))
 
 
+# Recursive filesystem searches are only ever legitimate under the run's own mounts.
+# A recursive walk anchored anywhere else (above all, "/") stat-walks the entire 9GB+
+# sandbox image (torch + site-packages = hundreds of thousands of files), pegging a core
+# and ballooning memory for tens of minutes — the exact failure that hung two prod runs.
+_ALLOWED_SEARCH_ROOTS = ("/workspace", "/outputs")
+
+
+def _decode_base64_string_literals(command: str) -> list[str]:
+    """Decode base64 string literals embedded in a sandbox command.
+
+    The deepagents ls/glob/grep backend tools base64-encode their path and pattern
+    arguments into the python they generate (so an arbitrary path can never break the
+    shell quoting). That same encoding hides "/" and "**/*" from the literal root-search
+    regexes below — so a `glob('**/*', path='/')` sails straight past the guard and
+    scans the whole image. Decode the literals here so the guard can see through it.
+    Best-effort: anything that is not valid base64 / utf-8 is skipped.
+    """
+    decoded: list[str] = []
+    for match in re.finditer(r"b64decode\(\s*['\"]([A-Za-z0-9+/=\s]+)['\"]", command):
+        token = "".join(match.group(1).split())
+        if not token:
+            continue
+        try:
+            decoded.append(base64.b64decode(token, validate=True).decode("utf-8"))
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            continue
+    return decoded
+
+
+def _path_is_within_allowed_roots(path: str) -> bool:
+    normalized = "/" + path.strip().strip("/")
+    if normalized == "/":
+        return False
+    return any(
+        normalized == root or normalized.startswith(root + "/")
+        for root in _ALLOWED_SEARCH_ROOTS
+    )
+
+
 def _searches_root_with_python_glob(command: str) -> bool:
     if "glob" not in command and "rglob" not in command:
         return False
-    return bool(re.search(r"['\"]/\*\*", command))
+    # Literal form: glob.glob('/**...') / rglob anchored at the filesystem root.
+    if re.search(r"['\"]/\*\*", command):
+        return True
+    # Base64-obfuscated form (the deepagents ls/glob tools encode path + pattern).
+    if "recursive=True" not in command and "rglob" not in command:
+        return False
+    decoded = _decode_base64_string_literals(command)
+    # (a) a decoded pattern that is itself a root-anchored recursive glob ("/**...").
+    if any(value.startswith("/**") for value in decoded):
+        return True
+    # (b) a recursive "**" pattern combined with a decoded chdir base that escapes the
+    #     allowed roots (the deepagents tool always encodes the absolute search base).
+    if not any("**" in value for value in decoded):
+        return False
+    bases = [v for v in decoded if v.startswith("/") and "**" not in v]
+    return any(not _path_is_within_allowed_roots(base) for base in bases)
 
 
 def _root_search_message() -> str:

@@ -150,3 +150,38 @@ def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
     if settings.builder_max_input_tokens > 0:
         model.profile = {"max_input_tokens": settings.builder_max_input_tokens}
     return model
+
+
+def build_builder_worker_model(settings: RuntimeSettings) -> ChatOpenAI:
+    """The Builder's SUB-WORKER model — the executor it delegates focused sub-runs to.
+
+    Enables a model split: the LEAD loop (plan/decide/verify) runs ``build_builder_model`` and
+    its sub-workers run a SECOND endpoint (e.g. lead=deepseek/H200, workers=Qwen/tesla, so heavy
+    execution offloads onto the other GPU). When the worker block is unset the worker model IS
+    the lead model, so the default is today's single-model behavior and NO second endpoint is
+    contacted. Returns an ``UltraChatOpenAI`` INSTANCE (not a model string) so the reasoning-delta
+    lift + ``stream_usage`` token accounting + ``.profile`` window are preserved on the worker.
+    """
+    if not settings.builder_worker_base_url or not settings.builder_worker_model:
+        # Partial config (exactly one of base_url/model) is almost certainly an operator mistake.
+        if settings.builder_worker_base_url or settings.builder_worker_model:
+            logger.warning(
+                "Builder WORKER model partially configured (base_url=%r, model=%r): BOTH are "
+                "required to use a separate worker endpoint; falling back to the Builder lead model.",
+                settings.builder_worker_base_url,
+                settings.builder_worker_model,
+            )
+        return build_builder_model(settings)
+    timeout = settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
+    model = UltraChatOpenAI(
+        model=settings.builder_worker_model,
+        base_url=settings.builder_worker_base_url,
+        api_key=settings.builder_worker_api_key,
+        timeout=timeout,
+        stream_chunk_timeout=timeout,
+        max_retries=settings.max_retries,
+        stream_usage=True,
+    )
+    if settings.builder_worker_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.builder_worker_max_input_tokens}
+    return model

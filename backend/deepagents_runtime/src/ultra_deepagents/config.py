@@ -91,6 +91,15 @@ class RuntimeSettings:
     builder_multimodal: bool = False  # builder model can SEE (self-check its own rendered figures)
     builder_goal_max_iterations: int = 6  # GoalLoop pathology cap (never a depth cap)
     builder_recursion_limit: int = 400
+    # Optional SECOND endpoint for the Builder's sub-workers: the LEAD loop (plan/decide/verify)
+    # runs build_builder_model; the executors it delegates focused sub-runs to via its own task
+    # tool run this worker model (e.g. lead=deepseek/H200, workers=Qwen/tesla — heavy execution
+    # offloads onto the other GPU). UNSET => workers run the SAME model as the lead (no second
+    # endpoint contacted), so the default is today's single-model behavior.
+    builder_worker_base_url: str = ""
+    builder_worker_model: str = ""
+    builder_worker_api_key: str = field(default="EMPTY", repr=False)
+    builder_worker_max_input_tokens: int = 0
     title_generation_enabled: bool = False
     title_generation_timeout_seconds: float = 8.0
     # Sidebar titles need ~12 tokens; on hybrid-reasoning models the thinking
@@ -272,6 +281,16 @@ class RuntimeSettings:
             ),
             builder_recursion_limit=max(
                 10, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_RECURSION_LIMIT", "400"))
+            ),
+            builder_worker_base_url=os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_BASE_URL", ""),
+            builder_worker_model=os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_MODEL", ""),
+            builder_worker_api_key=_resolve_secret(
+                "ULTRA_DEEPAGENTS_BUILDER_WORKER_API_KEY",
+                "ULTRA_DEEPAGENTS_BUILDER_WORKER_API_KEY_FILE",
+                default="EMPTY",
+            ),
+            builder_worker_max_input_tokens=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_MAX_INPUT_TOKENS", "0"))
             ),
             title_generation_enabled=_env_bool(
                 "ULTRA_DEEPAGENTS_TITLE_GENERATION_ENABLED",

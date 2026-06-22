@@ -175,6 +175,7 @@ def test_builder_registered_when_enabled(monkeypatch):
 
     monkeypatch.setattr("ultra_deepagents.builder.create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr("ultra_deepagents.builder.build_builder_model", lambda s: "builder-model")
+    monkeypatch.setattr("ultra_deepagents.builder.build_builder_worker_model", lambda s: "worker-model")
     sub = build_builder_subagent(
         _settings(
             builder_enabled=True,
@@ -189,11 +190,20 @@ def test_builder_registered_when_enabled(monkeypatch):
         "build-until-goal" in sub["description"].lower()
         or "owns the whole loop" in sub["description"].lower()
     )
-    # the GoalLoop middleware is attached with the configured cap
+    # the GoalLoop middleware is attached to the LEAD with the configured cap
     mw = captured["middleware"][0]
     assert isinstance(mw, GoalLoopMiddleware) and mw.max_iterations == 4
     assert captured["model"] == "builder-model"
     assert bound == {"recursion_limit": 123}
+    # the Builder gets an explicit "general-purpose" sub-worker on the WORKER model so the lead can
+    # delegate focused sub-runs to a (possibly different) executor endpoint.
+    worker = captured["subagents"][0]
+    assert worker["name"] == "general-purpose"  # replaces the globally-disabled auto-added worker
+    assert worker["model"] == "worker-model"
+    assert "permissions" not in worker  # inherits the Builder's /skills + /policies denies
+    # the worker carries image-stripping (text-only by construction) but NOT the GoalLoop (lead-only)
+    assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
+    assert not any(isinstance(m, GoalLoopMiddleware) for m in worker["middleware"])
 
 
 def test_strip_image_content_drops_images_keeps_text():
@@ -256,13 +266,19 @@ def test_builder_multimodal_adds_vision_tools(monkeypatch):
         lambda **kw: captured.update(kw) or FakeRunnable(),
     )
     monkeypatch.setattr("ultra_deepagents.builder.build_builder_model", lambda s: "m")
+    monkeypatch.setattr("ultra_deepagents.builder.build_builder_worker_model", lambda s: "w")
     build_builder_subagent(
         _settings(builder_enabled=True, builder_multimodal=True),
         tools=["execute"],
         backend=object(),
         vision_tools=["inspect_images"],
     )
-    assert "inspect_images" in captured["tools"]  # self-check capability wired in
+    assert "inspect_images" in captured["tools"]  # lead self-check capability wired in
+    # the worker is TEXT-ONLY by construction even when the LEAD is multimodal: it must NOT get the
+    # vision tools (only the base tools), so a stray image can never 400 the Qwen worker.
+    worker = captured["subagents"][0]
+    assert "inspect_images" not in worker["tools"]
+    assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
 
 
 def test_builder_delegation_guidance_in_prompt_only_when_enabled():
@@ -284,3 +300,48 @@ def test_build_builder_model_falls_back_to_coordinator_when_unconfigured():
     # no builder_base_url/model -> uses the coordinator's model (single-model deployments still work)
     m = build_builder_model(_settings())
     assert m.model_name == "deepseek_v4"
+
+
+def test_build_builder_worker_model_falls_back_to_lead_when_unconfigured():
+    from ultra_deepagents.model import build_builder_worker_model
+
+    # no worker block + no builder block -> worker == lead == coordinator model (single-model default)
+    assert build_builder_worker_model(_settings()).model_name == "deepseek_v4"
+    # worker unset but the lead points at its own endpoint -> worker inherits the LEAD endpoint
+    m = build_builder_worker_model(
+        _settings(builder_base_url="http://tesla:8000/v1", builder_model="Qwen3.6-27B")
+    )
+    assert m.model_name == "Qwen3.6-27B"
+
+
+def test_build_builder_worker_model_uses_worker_endpoint_when_set():
+    from ultra_deepagents.model import UltraChatOpenAI, build_builder_worker_model
+
+    m = build_builder_worker_model(
+        _settings(
+            builder_base_url="http://h200:9393/v1",
+            builder_model="deepseek_v4",
+            builder_worker_base_url="http://tesla:8000/v1",
+            builder_worker_model="Qwen3.6-27B",
+            builder_worker_max_input_tokens=262144,
+        )
+    )
+    # must be an UltraChatOpenAI INSTANCE (not a 'provider:model' string routed through
+    # init_chat_model, which would silently lose the reasoning-delta lift + stream_usage + profile)
+    assert isinstance(m, UltraChatOpenAI)
+    assert m.model_name == "Qwen3.6-27B"  # the WORKER model, not the deepseek lead
+    assert m.profile == {"max_input_tokens": 262144}
+
+
+def test_build_builder_worker_model_partial_config_falls_back_to_lead():
+    from ultra_deepagents.model import build_builder_worker_model
+
+    # only base_url set (no model) -> operator mistake -> fall back to the lead model, do not crash
+    m = build_builder_worker_model(
+        _settings(
+            builder_base_url="http://h200:9393/v1",
+            builder_model="deepseek_v4",
+            builder_worker_base_url="http://tesla:8000/v1",
+        )
+    )
+    assert m.model_name == "deepseek_v4"  # fell back to the lead (deepseek), not a broken worker

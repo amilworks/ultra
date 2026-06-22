@@ -39,7 +39,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from typing_extensions import NotRequired
 
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.model import build_builder_model
+from ultra_deepagents.model import build_builder_model, build_builder_worker_model
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +100,13 @@ How to work:
    evaluation, a benchmark, a passing test). If the DONE-WHEN is not directly measurable, define the
    closest measurable proxy and say so.
 2. Plan with write_todos. Establish the BASELINE first (measure the current state you must beat).
-3. Implement and RUN in the sandbox. Inspect outputs, fix errors, iterate. For long or repetitive
-   sub-runs (a training trial, a sweep point), delegate to your general-purpose worker via the task tool
-   so your own context stays clean - collect only the metric back.
+3. Implement and RUN in the sandbox. Inspect outputs, fix errors, iterate. DELEGATE heavy, self-contained,
+   or repeatable sub-units to your general-purpose worker via the task tool: each INDEPENDENT sweep point,
+   per-trial training run, per-image / per-replicate batch item, or discrete "implement X, run it, report the
+   number" unit should go to the worker (it runs on a separate executor, so the work runs off your critical
+   path and your own context stays clean). Give the worker a precise, self-contained instruction and collect
+   ONLY the metric/result back. Keep planning, deciding, and VERIFYING on yourself. Do NOT delegate a single
+   sequential dependent chain where step B needs step A's result — that only adds round-trips; run those yourself.
 4. VERIFY against the measurable check every time you think you are close. Never claim success from a
    single run or an unverified number. Read the metric from STDOUT or a results file (CSV/JSON) - a
    NUMBER, not a picture.
@@ -118,6 +122,25 @@ machine-readable verdict:
 GOAL_OUTCOME: {"met": true|false, "summary": "...", "metric": <value-or-string>, "baseline": <value-or-string>, "target": "...", "what_changed": "...", "artifacts": ["/outputs/..."], "evidence": "the command/eval you ran and its result", "limitations": "..."}
 Set "met": true ONLY when your measurable check confirms the goal; otherwise "met": false and keep
 working if you have budget. Do not fabricate the verdict - it must reflect an executed verification.
+"""
+
+# The Builder's sub-worker (the executor the lead delegates focused sub-runs to via its own task
+# tool). It can run a DIFFERENT model than the lead (build_builder_worker_model) so heavy execution
+# offloads onto a second endpoint. It is a PURE EXECUTOR: no GoalLoop, no GOAL_OUTCOME contract.
+BUILDER_WORKER_DESCRIPTION = (
+    "A focused executor for ONE self-contained sub-run delegated by the Builder. Hand it a single "
+    "independent unit of work — a sweep point, a per-trial training run, a per-image/per-replicate "
+    "batch item, or a discrete 'implement X, run it, report the number' unit — and it runs the work "
+    "in the sandbox and returns ONLY the requested metric/result. Not for planning or final "
+    "verification; the Builder owns those."
+)
+BUILDER_WORKER_SYSTEM_PROMPT = """You are the Builder's executor worker. You are given ONE self-contained sub-task.
+
+Implement it if needed, RUN it in the sandbox, and return ONLY the requested result — the metric, the number, the
+artifact path, or a short factual summary — read from STDOUT or a results file (a NUMBER, not a picture). Be fast and
+focused: do exactly the delegated unit, confirm it ran without a traceback, and report the result concisely. Do NOT
+plan the larger goal, do NOT emit a GOAL_OUTCOME verdict (that is the Builder lead's job), and do NOT open image files
+— you are text-only; rely entirely on numeric/textual outputs.
 """
 
 
@@ -308,12 +331,30 @@ def build_builder_subagent(
     if not builder_is_multimodal:
         # The fallback/coordinator model is text-only: guarantee no image block ever reaches it.
         middleware.append(StripImagesForTextModelMiddleware())
+    # The Builder's sub-worker spec. An EXPLICIT "general-purpose" subagent REPLACES the
+    # (globally-disabled) auto-added worker so one actually exists for the lead to delegate to, and
+    # lets it run a DIFFERENT model than the lead: the lead reasons on build_builder_model while the
+    # worker executes on build_builder_worker_model (which falls back to the lead model when no
+    # worker endpoint is configured, so the default is unchanged single-model behavior). The worker
+    # is a TEXT-ONLY executor by construction — base tools only (vision_tools stay on the lead;
+    # execute/read/write come free via FilesystemMiddleware), always image-stripping, and it carries
+    # NEITHER the GoalLoop (that bounds the lead only) NOR a permissions key (so it inherits the
+    # Builder's /skills + /policies denies rather than replacing them).
+    worker_spec = {
+        "name": "general-purpose",
+        "description": BUILDER_WORKER_DESCRIPTION,
+        "system_prompt": BUILDER_WORKER_SYSTEM_PROMPT,
+        "model": build_builder_worker_model(settings),
+        "tools": list(tools),
+        "middleware": [StripImagesForTextModelMiddleware()],
+    }
     inner = create_deep_agent(
         model=build_builder_model(settings),
         tools=builder_tools,
         system_prompt=BUILDER_SYSTEM_PROMPT,
         backend=backend,
         middleware=middleware,
+        subagents=[worker_spec],
     ).with_config({"recursion_limit": settings.builder_recursion_limit})
     return CompiledSubAgent(
         name=BUILDER_NAME,

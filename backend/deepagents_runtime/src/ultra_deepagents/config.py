@@ -80,6 +80,17 @@ class RuntimeSettings:
     # Max images per single VLM prompt — MUST match the served vLLM's
     # --limit-mm-per-prompt image count (4); exceeding it is a hard 400 from the server.
     qwen_vlm_max_images_per_call: int = 4
+    # The Builder: a model-agnostic autonomous-coding sub-coordinator the coordinator
+    # delegates a GOAL to. Points at ANY OpenAI-compatible endpoint (swap models freely).
+    # Off by default; when base_url/model are unset it falls back to the coordinator's model.
+    builder_enabled: bool = False
+    builder_base_url: str = ""
+    builder_model: str = ""
+    builder_api_key: str = field(default="EMPTY", repr=False)
+    builder_max_input_tokens: int = 0
+    builder_multimodal: bool = False  # builder model can SEE (self-check its own rendered figures)
+    builder_goal_max_iterations: int = 6  # GoalLoop pathology cap (never a depth cap)
+    builder_recursion_limit: int = 400
     title_generation_enabled: bool = False
     title_generation_timeout_seconds: float = 8.0
     # Sidebar titles need ~12 tokens; on hybrid-reasoning models the thinking
@@ -243,6 +254,24 @@ class RuntimeSettings:
             ),
             qwen_vlm_max_images_per_call=max(
                 1, int(os.getenv("QWEN_VLM_MAX_IMAGES_PER_CALL", "4"))
+            ),
+            builder_enabled=_env_bool("ULTRA_DEEPAGENTS_BUILDER_ENABLED", False),
+            builder_base_url=os.getenv("ULTRA_DEEPAGENTS_BUILDER_BASE_URL", ""),
+            builder_model=os.getenv("ULTRA_DEEPAGENTS_BUILDER_MODEL", ""),
+            builder_api_key=_resolve_secret(
+                "ULTRA_DEEPAGENTS_BUILDER_API_KEY",
+                "ULTRA_DEEPAGENTS_BUILDER_API_KEY_FILE",
+                default="EMPTY",
+            ),
+            builder_max_input_tokens=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_MAX_INPUT_TOKENS", "0"))
+            ),
+            builder_multimodal=_env_bool("ULTRA_DEEPAGENTS_BUILDER_MULTIMODAL", False),
+            builder_goal_max_iterations=max(
+                1, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_GOAL_MAX_ITERATIONS", "6"))
+            ),
+            builder_recursion_limit=max(
+                10, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_RECURSION_LIMIT", "400"))
             ),
             title_generation_enabled=_env_bool(
                 "ULTRA_DEEPAGENTS_TITLE_GENERATION_ENABLED",

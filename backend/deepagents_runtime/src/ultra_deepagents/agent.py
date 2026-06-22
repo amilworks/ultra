@@ -24,6 +24,7 @@ from langchain_core.tools import BaseTool
 
 from ultra_deepagents.async_delegation import UltraAsyncSubagentContextMiddleware
 from ultra_deepagents.bisque.tools import build_bisque_tools
+from ultra_deepagents.builder import BUILDER_DELEGATION_GUIDANCE, build_builder_subagent
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
@@ -956,6 +957,12 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     # so generic text runs do not pay for delegation guidance to an absent subagent.
     if context is not None and _should_register_vision_subagent(context, settings):
         sections.append(VISION_DELEGATION_GUIDANCE)
+    # Advertise the Builder's delegation discipline only when it is enabled (and thus
+    # registered): hand heavy/iterative coding to the Builder EARLY with the goal + data
+    # paths instead of over-prepping in the coordinator's own context (a live trace showed
+    # the coordinator re-running a pipeline + ballooning to 527K tokens before delegating).
+    if settings.builder_enabled:
+        sections.append(BUILDER_DELEGATION_GUIDANCE)
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -1408,6 +1415,17 @@ def build_research_agent(
         skills_sources=skills_sources,
         vision_tools=vision_tools,
     )
+    # The Builder: a model-agnostic autonomous-coding sub-coordinator (a full deep agent
+    # with its own loop + workers) the coordinator delegates a verify-driven GOAL to. It
+    # inherits the coordinator's coding tools + filesystem backend. Off unless configured.
+    builder_subagent = build_builder_subagent(
+        settings,
+        tools=resolved_tools,
+        backend=resolved_backend,
+        vision_tools=vision_tools,
+    )
+    if builder_subagent is not None:
+        subagents = [*subagents, builder_subagent]
     async_subagents = build_async_subagents(settings, context=context)
     if async_subagents:
         middleware.append(UltraAsyncSubagentContextMiddleware(async_subagents))

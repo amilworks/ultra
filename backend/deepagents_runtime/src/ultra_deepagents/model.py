@@ -111,3 +111,29 @@ def build_vision_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
     if settings.qwen_vlm_max_input_tokens > 0:
         model.profile = {"max_input_tokens": settings.qwen_vlm_max_input_tokens}
     return model
+
+
+def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
+    """The Builder sub-coordinator's loop model - MODEL-AGNOSTIC by design.
+
+    Points at whatever OpenAI-compatible endpoint ``builder_base_url``/``builder_model``
+    name (swap Qwen, deepseek, or any other without touching the system). When those are
+    unset, the Builder falls back to the coordinator's own ``build_chat_model`` so the
+    system still runs with a single model configured. Same UltraChatOpenAI transport
+    (reasoning-delta lift + per-run token accounting) as the other model builders.
+    """
+    if not settings.builder_base_url or not settings.builder_model:
+        return build_chat_model(settings)
+    timeout = settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
+    model = UltraChatOpenAI(
+        model=settings.builder_model,
+        base_url=settings.builder_base_url,
+        api_key=settings.builder_api_key,
+        timeout=timeout,
+        stream_chunk_timeout=timeout,
+        max_retries=settings.max_retries,
+        stream_usage=True,
+    )
+    if settings.builder_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.builder_max_input_tokens}
+    return model

@@ -43,11 +43,11 @@ def test_control_stack_launcher_keeps_background_services_alive_after_exit():
     assert "nohup" in text
 
 
-def test_control_stack_launcher_does_not_reintroduce_model_idle_cap():
+def test_control_stack_launcher_uses_long_model_idle_watchdog():
     script = ROOT / "scripts" / "restart_control_stack.sh"
     text = script.read_text(encoding="utf-8")
 
-    assert "ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:-0" in text
+    assert "ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:-3600" in text
     assert "ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:-240" not in text
 
 

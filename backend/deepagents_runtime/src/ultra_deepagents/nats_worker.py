@@ -613,6 +613,14 @@ async def fetch_job_messages(
         return []
 
 
+# Connection-level NATS failures (dropped/drained link, no servers, stale connection)
+# that must reconnect the worker's message pump rather than crash the process and orphan
+# the in-flight run. nats.errors.Error is the base of all of them (DrainTimeoutError,
+# ConnectionClosedError, ...); the normal idle-fetch TimeoutError is already swallowed in
+# fetch_job_messages, so it never reaches the supervisor.
+_RECOVERABLE_NATS_ERRORS = (nats.errors.Error, OSError)
+
+
 class NATSDeepAgentsWorker:
     def __init__(
         self,
@@ -655,6 +663,28 @@ class NATSDeepAgentsWorker:
         self._sandbox_reaper_lock = asyncio.Lock()
 
     async def run_forever(self) -> None:
+        """Supervise the NATS message pump: serve one connection until a recoverable
+        connection-level failure (dropped/drained link, common when heavy load starves
+        the event loop and NATS heartbeats are missed), then reconnect with backoff
+        instead of crashing the process — a crash orphans the in-flight run. A clean
+        shutdown returns; non-NATS errors still propagate."""
+        backoff = 1.0
+        while True:
+            try:
+                await self._serve_one_connection()
+                return
+            except _RECOVERABLE_NATS_ERRORS as exc:
+                logger.warning(
+                    "NATS connection lost (%s); reconnecting in %.1fs",
+                    type(exc).__name__,
+                    backoff,
+                    exc_info=exc,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+
+    async def _serve_one_connection(self) -> None:
+        self._shutting_down = False
         nc = await nats.connect(self.settings.nats_url)
         js = nc.jetstream()
         cancel_subscription = None
@@ -718,7 +748,8 @@ class NATSDeepAgentsWorker:
             if cancel_subscription is not None:
                 with contextlib.suppress(Exception):
                     await cancel_subscription.unsubscribe()
-            await nc.drain()
+            with contextlib.suppress(Exception):
+                await nc.drain()
 
     async def _sandbox_reaper_loop(self) -> None:
         """Periodically reap orphaned/leftover sandbox containers until cancelled."""

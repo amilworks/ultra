@@ -120,6 +120,25 @@ def test_docker_sandbox_command_enforces_isolation_and_limits(tmp_path: Path):
     assert command[-3:] == ["bash", "-lc", "python analysis.py"]
 
 
+def test_docker_sandbox_can_disable_no_new_privileges_for_snap_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_NO_NEW_PRIVILEGES", "false")
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+
+    command = backend.build_docker_command("python analysis.py")
+
+    assert "--security-opt" not in command
+    assert "--cap-drop" in command
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert "--read-only" in command
+    assert "--network" in command
+    assert command[command.index("--network") + 1] == "none"
+
+
 def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",

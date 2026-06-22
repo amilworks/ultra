@@ -180,8 +180,6 @@ class DockerSandboxBackend(BaseSandbox):
             self.config.network,
             "--cap-drop",
             "ALL",
-            "--security-opt",
-            "no-new-privileges",
             "--read-only",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=512m",
@@ -203,6 +201,11 @@ class DockerSandboxBackend(BaseSandbox):
             "--env",
             "TMPDIR=/workspace/.tmp",
         ]
+        # no-new-privileges blocks setuid escalation, but snap-packaged docker (e.g. stitch)
+        # denies exec under it ("operation not permitted"). Allow a per-node opt-out via env
+        # while keeping --cap-drop ALL / --network none / --read-only / tmpfs intact.
+        if os.getenv("ULTRA_DEEPAGENTS_SANDBOX_NO_NEW_PRIVILEGES", "true").strip().lower() not in ("0", "false", "no"):
+            docker_command.extend(["--security-opt", "no-new-privileges"])
         if self.outputs_dir is not None:
             docker_command.extend(
                 [

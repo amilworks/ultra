@@ -21,6 +21,12 @@ describe("resource browser responsive layout", () => {
     );
   });
 
+  it("keeps the mobile resources toolbar in one calm search row", () => {
+    expect(stylesSource).toMatch(
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*2\.75rem\s*2\.75rem;[\s\S]*\.resource-browser-search-field\s*\{[^}]*min-width:\s*0;[\s\S]*\.resource-browser-filter-label\s*\{[^}]*display:\s*none;/s
+    );
+  });
+
   it("prioritizes filenames in the dense resource table for constrained panes", () => {
     expect(stylesSource).toMatch(
       /@media \(max-width:\s*960px\)\s*\{[\s\S]*\.resource-browser-table\s*\{[^}]*min-width:\s*0;[\s\S]*\.resource-browser-table th:nth-child\(2\),[\s\S]*\.resource-browser-table td:nth-child\(2\),[\s\S]*\.resource-browser-table th:nth-child\(3\),[\s\S]*\.resource-browser-table td:nth-child\(3\),[\s\S]*\.resource-browser-table th:nth-child\(4\),[\s\S]*\.resource-browser-table td:nth-child\(4\),[\s\S]*\.resource-browser-table th:nth-child\(5\),[\s\S]*\.resource-browser-table td:nth-child\(5\),[\s\S]*\.resource-browser-table th:nth-child\(6\),[\s\S]*\.resource-browser-table td:nth-child\(6\)\s*\{[^}]*display:\s*none;/s

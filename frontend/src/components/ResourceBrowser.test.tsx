@@ -405,8 +405,13 @@ describe("ResourceBrowser", () => {
     expect(screen.queryByLabelText("Upload resource folder")).not.toBeInTheDocument();
     expect(screen.getByTestId("resource-upload-files-input")).toHaveAttribute("hidden");
     expect(screen.getByTestId("resource-upload-folder-input")).toHaveAttribute("hidden");
-    expect(screen.getByPlaceholderText("Search resources")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "More filters" })).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Search resources").closest(".resource-browser-search-field")
+    ).not.toBeNull();
+    expect(screen.getByRole("button", { name: "More filters" })).toHaveAttribute(
+      "aria-label",
+      "More filters"
+    );
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "New" }), {
       button: 0,

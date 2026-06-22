@@ -7,12 +7,14 @@ fallback.
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ultra_deepagents.builder import (
     BUILDER_SYSTEM_PROMPT,
     GOAL_LOOP_INJECTIONS_KEY,
     GOAL_LOOP_SOURCE,
     GoalLoopMiddleware,
+    StripImagesForTextModelMiddleware,
+    _strip_image_content,
     build_builder_subagent,
 )
 from ultra_deepagents.config import RuntimeSettings
@@ -192,6 +194,54 @@ def test_builder_registered_when_enabled(monkeypatch):
     assert isinstance(mw, GoalLoopMiddleware) and mw.max_iterations == 4
     assert captured["model"] == "builder-model"
     assert bound == {"recursion_limit": 123}
+
+
+def test_strip_image_content_drops_images_keeps_text():
+    """A text-only Builder model 400s on any image block; the guard must drop them (leaving a
+    breadcrumb) while leaving plain-text messages untouched. Regression: the Builder read its
+    own rendered .png via read_file and hard-failed with 'not a multimodal model'."""
+    msgs = [
+        HumanMessage(content="plain text stays"),
+        ToolMessage(
+            content=[
+                {"type": "text", "text": "fit_log.csv contents"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+            tool_call_id="t1",
+        ),
+    ]
+    out = _strip_image_content(msgs)
+    assert out[0].content == "plain text stays"  # untouched
+    blocks = out[1].content
+    assert all("image_url" not in b and "image" not in str(b.get("type", "")) for b in blocks)
+    assert any(b.get("text", "").startswith("[image omitted") for b in blocks)
+    assert any(b.get("text") == "fit_log.csv contents" for b in blocks)  # text block preserved
+
+
+def test_builder_attaches_image_strip_when_text_only(monkeypatch):
+    captured = {}
+
+    class FakeRunnable:
+        def with_config(self, config):
+            return self
+
+    monkeypatch.setattr(
+        "ultra_deepagents.builder.create_deep_agent",
+        lambda **kw: captured.update(kw) or FakeRunnable(),
+    )
+    monkeypatch.setattr("ultra_deepagents.builder.build_builder_model", lambda s: "m")
+    # text-only (default multimodal=False) -> strip guard attached
+    build_builder_subagent(_settings(builder_enabled=True), tools=["execute"], backend=object())
+    assert any(isinstance(mw, StripImagesForTextModelMiddleware) for mw in captured["middleware"])
+    # multimodal builder (can SEE) -> no strip guard
+    captured.clear()
+    build_builder_subagent(
+        _settings(builder_enabled=True, builder_multimodal=True),
+        tools=["execute"],
+        backend=object(),
+        vision_tools=["inspect_images"],
+    )
+    assert not any(isinstance(mw, StripImagesForTextModelMiddleware) for mw in captured["middleware"])
 
 
 def test_builder_multimodal_adds_vision_tools(monkeypatch):

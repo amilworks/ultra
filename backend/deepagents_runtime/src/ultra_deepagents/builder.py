@@ -104,10 +104,14 @@ How to work:
    sub-runs (a training trial, a sweep point), delegate to your general-purpose worker via the task tool
    so your own context stays clean - collect only the metric back.
 4. VERIFY against the measurable check every time you think you are close. Never claim success from a
-   single run or an unverified number.
-5. If you can SEE images (inspect_images is available), look at your own rendered figures / training
-   curves / sample outputs to catch defects that pass every assertion (inverted colormap, an off-by-one
-   axis, a loss that is technically decreasing but diverging).
+   single run or an unverified number. Read the metric from STDOUT or a results file (CSV/JSON) - a
+   NUMBER, not a picture.
+5. Your model is TEXT-ONLY unless `inspect_images` is in your tool list. Do NOT open image files
+   (.png/.jpg/.svg) with read_file - a text-only model cannot view them and it will hard-fail the run;
+   they are output artifacts for the user, not inputs for you. ONLY if you actually have `inspect_images`
+   may you visually self-check your own rendered figures / training curves to catch defects that pass
+   every assertion (inverted colormap, an off-by-one axis, a loss that is technically decreasing but
+   diverging). Otherwise rely entirely on the numeric outputs.
 
 END-OF-TURN CONTRACT (required): when you stop, the LAST line of your message MUST be exactly one
 machine-readable verdict:
@@ -241,6 +245,44 @@ class GoalLoopMiddleware(AgentMiddleware):
         }
 
 
+def _is_image_block(block: Any) -> bool:  # noqa: ANN401
+    if not isinstance(block, dict):
+        return False
+    if "image_url" in block:
+        return True
+    return "image" in str(block.get("type", "")).lower()
+
+
+def _strip_image_content(messages: list[Any]) -> list[Any]:
+    """Drop image content blocks from messages, leaving a text breadcrumb. A text-only model
+    hard-400s on ANY image block (e.g. a stray read_file('*.png')); this makes that impossible
+    without mutating stored state — only what is sent to the model."""
+    cleaned: list[Any] = []
+    for m in messages:
+        content = getattr(m, "content", None)
+        if isinstance(content, list) and any(_is_image_block(b) for b in content):
+            kept = [b for b in content if not _is_image_block(b)]
+            kept.append({"type": "text", "text": "[image omitted: the Builder model is text-only]"})
+            cleaned.append(m.model_copy(update={"content": kept}) if hasattr(m, "model_copy") else m)
+        else:
+            cleaned.append(m)
+    return cleaned
+
+
+class StripImagesForTextModelMiddleware(AgentMiddleware):
+    """Defense-in-depth for a TEXT-ONLY Builder model: strip image content blocks from the
+    OUTGOING model request so a stray image in history (a read_file on a .png it rendered) can
+    never hard-fail the run with a provider 'not a multimodal model' 400. Attached only when
+    the Builder has no inspect_images. The prompt already steers away from reading images; this
+    makes it deterministic rather than a matter of the model obeying."""
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:  # noqa: ANN401
+        return handler(request.override(messages=_strip_image_content(request.messages)))
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:  # noqa: ANN401
+        return await handler(request.override(messages=_strip_image_content(request.messages)))
+
+
 def build_builder_subagent(
     settings: RuntimeSettings,
     *,
@@ -258,15 +300,20 @@ def build_builder_subagent(
     """
     if not settings.builder_enabled:
         return None
+    builder_is_multimodal = bool(settings.builder_multimodal and vision_tools)
     builder_tools = list(tools)
-    if settings.builder_multimodal and vision_tools:
+    if builder_is_multimodal:
         builder_tools = [*builder_tools, *vision_tools]
+    middleware: list[Any] = [GoalLoopMiddleware(max_iterations=settings.builder_goal_max_iterations)]
+    if not builder_is_multimodal:
+        # The fallback/coordinator model is text-only: guarantee no image block ever reaches it.
+        middleware.append(StripImagesForTextModelMiddleware())
     inner = create_deep_agent(
         model=build_builder_model(settings),
         tools=builder_tools,
         system_prompt=BUILDER_SYSTEM_PROMPT,
         backend=backend,
-        middleware=[GoalLoopMiddleware(max_iterations=settings.builder_goal_max_iterations)],
+        middleware=middleware,
     ).with_config({"recursion_limit": settings.builder_recursion_limit})
     return CompiledSubAgent(
         name=BUILDER_NAME,

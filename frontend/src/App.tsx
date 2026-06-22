@@ -2365,6 +2365,7 @@ function ChatAutoScroll({
   scrollMemoryRef,
   scrollElementRef,
   scrollWriteBlockRef,
+  onScrolledAwayChange,
 }: {
   conversationId: string | null;
   conversationHydrated: boolean;
@@ -2372,11 +2373,25 @@ function ChatAutoScroll({
   scrollMemoryRef: MutableRefObject<Record<string, ConversationScrollMemory>>;
   scrollElementRef: MutableRefObject<HTMLElement | null>;
   scrollWriteBlockRef: MutableRefObject<string | null>;
+  // Lifts a "scrolled away from the bottom" signal (with hysteresis) so the
+  // composer can collapse while the user reads back through a long answer.
+  onScrolledAwayChange?: (away: boolean) => void;
 }) {
   const { scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
   const restoredConversationIdRef = useRef<string | null>(null);
   const liveConversationIdRef = useRef<string | null>(conversationId);
   const previousScrollRequestKeyRef = useRef(scrollRequestKey);
+  const scrolledAwayRef = useRef(false);
+  const setScrolledAway = useCallback(
+    (away: boolean) => {
+      if (scrolledAwayRef.current === away) {
+        return;
+      }
+      scrolledAwayRef.current = away;
+      onScrolledAwayChange?.(away);
+    },
+    [onScrolledAwayChange]
+  );
 
   const rememberScrollPosition = useCallback(
     (targetConversationId: string | null) => {
@@ -2464,7 +2479,16 @@ function ChatAutoScroll({
     if (!scrollElement) {
       return;
     }
+    // A fresh conversation starts at the bottom, so the composer is expanded.
+    setScrolledAway(false);
     const handleScroll = () => {
+      // Hysteresis so a tiny scroll doesn't flicker the composer: collapse once
+      // ~160px from the bottom, expand again only within ~48px of it.
+      const distanceFromBottom =
+        scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
+      setScrolledAway(
+        scrolledAwayRef.current ? distanceFromBottom > 48 : distanceFromBottom > 160
+      );
       if (
         liveConversationIdRef.current !== conversationId ||
         scrollWriteBlockRef.current === conversationId
@@ -2477,7 +2501,14 @@ function ChatAutoScroll({
     return () => {
       scrollElement.removeEventListener("scroll", handleScroll);
     };
-  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef, scrollWriteBlockRef]);
+  }, [
+    conversationHydrated,
+    conversationId,
+    rememberScrollPosition,
+    scrollRef,
+    scrollWriteBlockRef,
+    setScrolledAway,
+  ]);
 
   useEffect(() => {
     if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
@@ -7763,6 +7794,9 @@ export function App() {
     failed: false,
   });
   const isPhoneView = useBreakpoint(641);
+  // Phone-only: when the user scrolls up to read a long answer, collapse the
+  // composer to reclaim reading space (expands on focus / at-bottom / sending).
+  const [composerScrolledAway, setComposerScrolledAway] = useState(false);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
   const [conversationListOffset, setConversationListOffset] = useState(0);
@@ -14405,6 +14439,7 @@ export function App() {
                   scrollMemoryRef={conversationScrollMemoryRef}
                   scrollElementRef={activeChatScrollElementRef}
                   scrollWriteBlockRef={conversationScrollWriteBlockRef}
+                  onScrolledAwayChange={setComposerScrolledAway}
                 />
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
@@ -14434,7 +14469,12 @@ export function App() {
               </ChatContainerRoot>
             </div>
 
-          <div className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
+          <div
+            className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
+            data-composer-compact={
+              isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
+            }
+          >
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
                 <SystemMessage variant="error" fill className="mb-3">

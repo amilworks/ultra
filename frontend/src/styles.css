@@ -1875,6 +1875,42 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
 
+/* Phone-only: collapse the composer to a slim line while the user reads back
+   through a long answer (data-composer-compact set when scrolled away). It
+   re-expands instantly on focus (keyboard up) via :focus-within, and when
+   scrolled back to the bottom or a run starts (attribute cleared in JS). */
+@media (max-width: 640px) {
+  .app-composer-shell .app-composer-textarea {
+    transition: min-height 220ms ease, padding 220ms ease;
+  }
+  .app-composer-shell .app-composer-actions {
+    max-height: 5rem;
+    overflow: hidden;
+    transition: max-height 220ms ease, opacity 160ms ease, padding 220ms ease,
+      margin-top 220ms ease;
+  }
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
+    min-height: 2.55rem;
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+  }
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-actions {
+    max-height: 0;
+    margin-top: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+@media (max-width: 640px) and (prefers-reduced-motion: reduce) {
+  .app-composer-shell .app-composer-textarea,
+  .app-composer-shell .app-composer-actions {
+    transition: none;
+  }
+}
+
 .app-history-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent);
   color: var(--text-main);
@@ -3523,9 +3559,22 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     top: 0;
     z-index: 3;
     margin: 0 -1px;
-    padding: 0.95rem 0.9rem 0.8rem;
+    /* Tighter than the desktop header: the leaked 1.25rem gap + tall padding
+       wasted ~40px before the list. */
+    gap: 0.55rem;
+    padding: 0.65rem 0.9rem 0.55rem;
     background: color-mix(in oklab, var(--bg-panel-strong) 96%, transparent);
     backdrop-filter: blur(16px) saturate(1.08);
+  }
+
+  /* The contextual mobile nav bar already shows "Resources", so the in-panel
+     title is redundant; let the count be the slim header label. */
+  .resource-browser-title {
+    display: none;
+  }
+
+  .resource-browser-result-summary {
+    font-size: 0.8rem;
   }
 
   .resource-browser-header-row {

@@ -889,6 +889,21 @@ def test_text_only_system_prompt_guides_inline_plot_captions_and_updates():
     assert "do not call read_file on image" in prompt.lower()
 
 
+def test_system_prompt_includes_substantial_prose_writing_guidance():
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+
+    prompt = build_system_prompt(settings)
+
+    assert "## Writing" in prompt
+    assert "For substantial prose, match the genre, audience, purpose" in prompt
+    assert "Put truth before polish" in prompt
+    assert "Never invent facts, citations, figures, quotations, or results" in prompt
+    assert "Plainness is the default" in prompt
+
+
 def test_system_prompt_discourages_analysis_wall_clock_timeout_wrappers():
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",

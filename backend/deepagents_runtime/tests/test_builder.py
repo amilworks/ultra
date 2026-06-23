@@ -142,6 +142,20 @@ def test_goal_loop_malformed_verdict_treated_as_missing():
     assert out is not None and out["jump_to"] == "model"  # can't parse -> keep going
 
 
+def test_goal_loop_parses_real_verdict_after_echoed_template():
+    """Regression: the prompt shows the literal GOAL_OUTCOME template, so the model sometimes
+    echoes it earlier then emits the REAL verdict last. A greedy first-tag match would span both
+    and capture invalid JSON -> a met goal looks unmet -> one wasted iteration. Anchor on the LAST tag."""
+    gl = GoalLoopMiddleware(max_iterations=6)
+    content = (
+        'I will finish by emitting GOAL_OUTCOME: {"met": ...} as instructed.\n'
+        'Here is some prose between the template and the real verdict.\n'
+        'GOAL_OUTCOME: {"met": true, "metric": 0.97, "target": "> 0.9"}'
+    )
+    state = _state(AIMessage(content=content))
+    assert gl.after_agent(state, None) is None  # parses the LAST verdict -> met -> finish (no extra loop)
+
+
 def test_goal_loop_handles_list_content_blocks():
     """Regression: via the worker's streaming path AIMessage.content is a LIST of blocks, not a
     str; a naive regex raised 'expected string ... got list' and failed the live run."""
@@ -184,6 +198,7 @@ def test_builder_registered_when_enabled(monkeypatch):
         ),
         tools=["execute"],
         backend=object(),
+        permissions=["DENY-/policies"],
     )
     assert sub is not None and sub["name"] == "builder"
     assert (
@@ -195,12 +210,17 @@ def test_builder_registered_when_enabled(monkeypatch):
     assert isinstance(mw, GoalLoopMiddleware) and mw.max_iterations == 4
     assert captured["model"] == "builder-model"
     assert bound == {"recursion_limit": 123}
+    # SECURITY: the caller's filesystem denies are passed to the inner Builder's create_deep_agent
+    # (a pre-compiled CompiledSubAgent does NOT inherit the parent's permissions, so this is the
+    # only thing stopping the Builder + worker from writing /policies, /skills, /memories).
+    assert captured["permissions"] == ["DENY-/policies"]
     # the Builder gets an explicit "general-purpose" sub-worker on the WORKER model so the lead can
     # delegate focused sub-runs to a (possibly different) executor endpoint.
     worker = captured["subagents"][0]
     assert worker["name"] == "general-purpose"  # replaces the globally-disabled auto-added worker
     assert worker["model"] == "worker-model"
-    assert "permissions" not in worker  # inherits the Builder's /skills + /policies denies
+    # worker omits its own permissions key, so it INHERITS the lead's denies (which now exist)
+    assert "permissions" not in worker
     # the worker carries image-stripping (text-only by construction) but NOT the GoalLoop (lead-only)
     assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
     assert not any(isinstance(m, GoalLoopMiddleware) for m in worker["middleware"])
@@ -292,6 +312,16 @@ def test_builder_delegation_guidance_in_prompt_only_when_enabled():
     assert BUILDER_DELEGATION_GUIDANCE in on
     assert "DELEGATE IT TO THE BUILDER EARLY" in on
     assert BUILDER_DELEGATION_GUIDANCE not in off
+
+
+def test_builder_prompt_steers_parallel_fanout():
+    """Concurrent fan-out is a prompt-steering feature: the async path already runs same-turn task()
+    calls concurrently, so the Builder must be told to emit K independent sub-units as K calls in ONE
+    turn (with distinct output paths). Without this the lead serializes and the speedup is lost."""
+    p = BUILDER_SYSTEM_PROMPT
+    assert "FAN OUT IN PARALLEL" in p
+    assert "SINGLE turn" in p and "CONCURRENTLY" in p
+    assert "DISTINCT output path" in p  # output-collision guard for concurrent workers
 
 
 def test_build_builder_model_falls_back_to_coordinator_when_unconfigured():

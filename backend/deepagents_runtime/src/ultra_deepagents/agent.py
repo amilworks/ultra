@@ -150,6 +150,24 @@ confirm which sandbox, filesystem, prior-artifact, paper, or domain tools are
 available before choosing a workflow.
 """
 
+WRITING_GUIDANCE = """
+## Writing
+
+For substantial prose, match the genre, audience, purpose, and requested voice. Write with precision, coherence, and economy.
+
+- Put truth before polish. Never invent facts, citations, figures, quotations, or results, or strengthen claims beyond the evidence. Distinguish evidence, inference, and speculation; flag missing specifics rather than guessing.
+- Before drafting, identify the controlling question, exact claim, and what the piece must establish. In contested matters, locate the disagreement—fact, definition, cause, value, scope, or procedure—and keep subordinate questions tied to it.
+- Give each unit one purpose. Usually move from familiar context to new or consequential information. Develop ideas through mechanism, evidence, scope, or limitation rather than restatement.
+- Make sentences easy to parse. Keep subjects near verbs and modifiers beside what they modify; usually place the main clause before long qualifications. Use punctuation and parallel structure to reveal logical grouping. Split when the subject, viewpoint, or proposition changes materially; do not append loose afterthoughts after a natural close.
+- Choose words for exact meaning, not display. Prefer one precise term to near-synonym piles or generic intensifiers. Express principal actions as verbs. Use abstraction, nominalization, or passive voice when they improve accuracy or cohesion, not when they conceal action or agency. Cut redundancy without making prose telegraphic.
+- Match syntax to evidential strength: state firm conclusions directly and subordinate genuine conditions or caveats. Place emphasis near the end when natural. Vary sentence length, cadence, and structure without creating a mechanical pattern.
+- In arguments, make non-obvious warrants explicit. Use sufficient support, but omit weak or redundant reasons that dilute the case; disclose material limitations or contrary evidence.
+- In technical exposition, introduce terms and notation before use, keep notation consistent, identify definitions, assumptions, conjectures, bounds, and results, and give a brief roadmap before a multi-step argument or proof.
+- When editing, preserve the author’s voice, meaning, and evidentiary limits. Revise structure before flow, flow before syntax, and syntax before diction.
+
+Plainness is the default. Keep technique invisible; use ornament only when it serves the genre and argument, and discuss the craft only when asked.
+"""
+
 PLOT_WORKFLOW_GUIDANCE = """
 For code, simulation, model-training, or algorithm-demonstration prompts that ask for plots,
 run the code and create inspectable artifacts. In the final answer, mention each plot near
@@ -929,6 +947,7 @@ def _should_register_async_delegation_subagents(context: AgentRunContext | None)
 def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | None = None) -> str:
     sections = [
         SYSTEM_PROMPT.strip(),
+        WRITING_GUIDANCE.strip(),
         PLOT_WORKFLOW_GUIDANCE.strip(),
         SANDBOX_RUNTIME_GUIDANCE.strip(),
         build_sandbox_resources_guidance(settings),
@@ -1423,6 +1442,10 @@ def build_research_agent(
         tools=resolved_tools,
         backend=resolved_backend,
         vision_tools=vision_tools,
+        # The Builder is a pre-compiled CompiledSubAgent, so deepagents does NOT inherit the
+        # coordinator's permissions onto it — pass the same memory denies explicitly so the
+        # Builder lead + its worker cannot write /policies, /skills, /memories.
+        permissions=resolve_memory_permissions(settings),
     )
     if builder_subagent is not None:
         subagents = [*subagents, builder_subagent]

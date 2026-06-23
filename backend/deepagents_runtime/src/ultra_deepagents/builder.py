@@ -107,6 +107,13 @@ How to work:
    path and your own context stays clean). Give the worker a precise, self-contained instruction and collect
    ONLY the metric/result back. Keep planning, deciding, and VERIFYING on yourself. Do NOT delegate a single
    sequential dependent chain where step B needs step A's result — that only adds round-trips; run those yourself.
+   FAN OUT IN PARALLEL: when you have K INDEPENDENT sub-units (e.g. 4 hyperparameter settings, 5 seeds, 8 images),
+   emit all K task() calls in a SINGLE turn (one message with multiple tool calls) so they run CONCURRENTLY on
+   separate workers — do NOT call task, wait for the result, then call the next; that serializes and throws away
+   the speedup. Give every fanned-out sub-unit a DISTINCT output path (e.g. /outputs/trial_<i>/...) so the
+   concurrent workers never overwrite each other, then collect all K results once they return. Keep each fan-out
+   batch modest (a handful at a time) since the workers share one endpoint; do a few batches rather than one huge
+   burst. Only the independent units fan out — anything that depends on a prior result stays sequential.
 4. VERIFY against the measurable check every time you think you are close. Never claim success from a
    single run or an unverified number. Read the metric from STDOUT or a results file (CSV/JSON) - a
    NUMBER, not a picture.
@@ -206,7 +213,15 @@ class GoalLoopMiddleware(AgentMiddleware):
 
     @classmethod
     def _parse_outcome(cls, content: Any) -> dict[str, Any] | None:
-        m = _GOAL_OUTCOME_RE.search(cls._message_text(content))
+        text = cls._message_text(content)
+        # Anchor on the LAST verdict tag: the prompt shows the model the literal GOAL_OUTCOME
+        # template, so it sometimes echoes it earlier and emits the REAL verdict last. The greedy
+        # `\{.*\}` would otherwise span from the first tag to the final brace and capture invalid
+        # JSON (the prose between the two tags), making a genuinely-met goal look like no-verdict.
+        idx = text.rfind("GOAL_OUTCOME:")
+        if idx == -1:
+            return None
+        m = _GOAL_OUTCOME_RE.search(text, idx)
         if not m:
             return None
         try:
@@ -312,6 +327,7 @@ def build_builder_subagent(
     tools: list[Any],
     backend: Any,
     vision_tools: list[Any] | None = None,
+    permissions: list[Any] | None = None,
 ) -> CompiledSubAgent | None:
     """Build the Builder as a CompiledSubAgent (a full deep agent with its own loop).
 
@@ -320,6 +336,14 @@ def build_builder_subagent(
     filesystem backend, gets ``inspect_images`` when configured multimodal (visual
     self-check), and runs the ``GoalLoopMiddleware`` termination loop. Returns ``None`` when
     the Builder is disabled.
+
+    SECURITY: ``permissions`` MUST be the coordinator's resolved filesystem denies
+    (``resolve_memory_permissions``). Because the Builder is handed to the parent as a
+    pre-compiled ``CompiledSubAgent`` (a ``runnable``), deepagents does NOT inherit the
+    parent's permissions onto it — so without this the inner Builder + its worker would run
+    with FilesystemMiddleware's allow-by-default and could write ``/policies``, ``/skills``,
+    ``/memories``. We pass it explicitly so the lead (and the worker, which omits its own
+    ``permissions`` key and therefore inherits the lead's) carry the denies.
     """
     if not settings.builder_enabled:
         return None
@@ -355,6 +379,7 @@ def build_builder_subagent(
         backend=backend,
         middleware=middleware,
         subagents=[worker_spec],
+        permissions=permissions,
     ).with_config({"recursion_limit": settings.builder_recursion_limit})
     return CompiledSubAgent(
         name=BUILDER_NAME,

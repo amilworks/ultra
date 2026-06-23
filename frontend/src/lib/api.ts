@@ -77,6 +77,8 @@ import type {
   ResourceMetadataFilter,
   ResourceRecord,
   ResourceResponse,
+  ResourceTextHead,
+  ResourceCsvRows,
   ResourceComputationLookupRequest,
   ResourceComputationLookupResponse,
   ResourceShareGrantCreateRequest,
@@ -4568,6 +4570,93 @@ export class ApiClient {
   resourceDownloadUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
     return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`);
+  }
+
+  // resourceRawUrl is the "open raw" link: the download endpoint asked to serve
+  // inline (text-like types only — the server refuses inline for active content).
+  resourceRawUrl(fileId: string): string {
+    const safeFileId = encodeURIComponent(fileId);
+    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`, { disposition: "inline" });
+  }
+
+  // resourceTextHead fetches a bounded, UTF-8-safe window of a text/data resource
+  // plus metadata (total size, truncation, encoding, line estimate). O(window).
+  async resourceTextHead(
+    fileId: string,
+    options: { maxBytes?: number; offset?: number } = {}
+  ): Promise<ResourceTextHead> {
+    const params: Record<string, string> = {};
+    if (typeof options.maxBytes === "number") {
+      params.max_bytes = String(Math.max(1, Math.floor(options.maxBytes)));
+    }
+    if (typeof options.offset === "number" && options.offset > 0) {
+      params.offset = String(Math.floor(options.offset));
+    }
+    return this.fetchJson<ResourceTextHead>(
+      `/v2/resources/${encodeURIComponent(fileId)}/text-head`,
+      {},
+      params
+    );
+  }
+
+  // resourceCsvRows fetches one quote-aware page of CSV/TSV rows using byte-offset
+  // (cursor) pagination. offset 0 also returns the header as columns. O(page_size).
+  async resourceCsvRows(
+    fileId: string,
+    options: { offsetBytes?: number; limit?: number; delimiter?: string } = {}
+  ): Promise<ResourceCsvRows> {
+    const params: Record<string, string> = {};
+    if (typeof options.offsetBytes === "number" && options.offsetBytes > 0) {
+      params.offset_bytes = String(Math.floor(options.offsetBytes));
+    }
+    if (typeof options.limit === "number") {
+      params.limit = String(Math.max(1, Math.floor(options.limit)));
+    }
+    if (options.delimiter) {
+      params.delimiter = options.delimiter;
+    }
+    return this.fetchJson<ResourceCsvRows>(
+      `/v2/resources/${encodeURIComponent(fileId)}/csv/rows`,
+      {},
+      params
+    );
+  }
+
+  // fetchResourceRangeBytes reads a bounded byte window of a resource via an HTTP
+  // Range request against /download (ServeContent supports 206). Used for gzip
+  // (.gz) heads that the server does not transcode — the caller decompresses.
+  async fetchResourceRangeBytes(
+    fileId: string,
+    options: { offset?: number; maxBytes?: number } = {}
+  ): Promise<{ bytes: Uint8Array; totalBytes: number | null; truncated: boolean }> {
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const maxBytes = Math.max(1, Math.floor(options.maxBytes ?? 1 << 20));
+    const end = offset + maxBytes - 1;
+    const response = await fetch(this.resourceDownloadUrl(fileId), {
+      method: "GET",
+      headers: this.headers({ Range: `bytes=${offset}-${end}` }),
+      credentials: "include",
+    });
+    if (!response.ok && response.status !== 206) {
+      return parseError(response);
+    }
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    let totalBytes: number | null = null;
+    let truncated = false;
+    const contentRange = response.headers.get("Content-Range");
+    if (contentRange) {
+      const match = /\/(\d+)\s*$/.exec(contentRange);
+      if (match) {
+        totalBytes = Number(match[1]);
+      }
+      truncated = totalBytes !== null && offset + buffer.byteLength < totalBytes;
+    } else {
+      const length = response.headers.get("Content-Length");
+      if (length) {
+        totalBytes = Number(length);
+      }
+    }
+    return { bytes: buffer, totalBytes, truncated };
   }
 
   uploadPreviewUrl(fileId: string): string {

@@ -11,6 +11,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { classifyTextResource } from "@/lib/textFormat";
 import type { ApiClient } from "../lib/api";
 import type { Hdf5DatasetSummary, UploadViewerInfo, UploadedFileRecord } from "../types";
 
@@ -30,6 +31,12 @@ const LazyImageViewerShell = lazy(() =>
 const LazyHdf5ViewerShell = lazy(() =>
   import("./viewer/hdf5/Hdf5Overview").then((module) => ({
     default: module.Hdf5ViewerShell,
+  }))
+);
+
+const LazyTextResourceViewer = lazy(() =>
+  import("./viewer/TextResourceViewer").then((module) => ({
+    default: module.TextResourceViewer,
   }))
 );
 
@@ -378,6 +385,10 @@ export function UploadViewerWorkspace({
     : null;
   const selectedFileIsPdf = isPdfUpload(selectedFile);
   const selectedFileIsVideo = isVideoUpload(selectedFile);
+  // Text/data files (CSV/JSON/YAML/XML/Markdown/text) route to the dedicated text
+  // viewer and must short-circuit the image-engine probe, exactly like PDF/video.
+  const selectedTextKind = selectedFileIsPdf || selectedFileIsVideo ? null : classifyTextResource(selectedFile);
+  const selectedFileIsText = selectedTextKind !== null;
   const selectedViewerInfo = selectedFileId ? viewerInfoById[selectedFileId] ?? null : null;
   const selectedViewerError = selectedFileId ? viewerErrorById[selectedFileId] ?? null : null;
 
@@ -387,6 +398,7 @@ export function UploadViewerWorkspace({
       !selectedFileId ||
       selectedFileIsPdf ||
       selectedFileIsVideo ||
+      selectedFileIsText ||
       selectedViewerInfo ||
       selectedViewerError ||
       loadingFileIdRef.current === selectedFileId
@@ -468,7 +480,7 @@ export function UploadViewerWorkspace({
       }
       setLoadingFileId((current) => (current === activeFileId ? null : current));
     };
-  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedFileIsVideo, selectedViewerError, selectedViewerInfo]);
+  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedFileIsVideo, selectedFileIsText, selectedViewerError, selectedViewerInfo]);
 
   const selectedIndices = selectedFileId ? viewerIndicesById[selectedFileId] ?? null : null;
 
@@ -562,7 +574,7 @@ export function UploadViewerWorkspace({
       className={cn(
         "viewer-workspace",
         !showFileStrip && "viewer-workspace-single-file",
-        (selectedFileIsPdf || selectedFileIsVideo) && "viewer-workspace-document",
+        (selectedFileIsPdf || selectedFileIsVideo || selectedFileIsText) && "viewer-workspace-document",
         selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
         className
       )}
@@ -600,6 +612,16 @@ export function UploadViewerWorkspace({
             <PdfViewerPanel file={selectedFile} apiClient={apiClient} />
           ) : selectedFileIsVideo && selectedFile ? (
             <VideoViewerPanel file={selectedFile} apiClient={apiClient} />
+          ) : selectedFileIsText && selectedTextKind && selectedFile ? (
+            <Suspense fallback={<ViewerPanelFallback />}>
+              {/* key by file id so switching files fully remounts (resets view/state). */}
+              <LazyTextResourceViewer
+                key={selectedFile.file_id}
+                file={selectedFile}
+                kind={selectedTextKind}
+                apiClient={apiClient}
+              />
+            </Suspense>
           ) : selectedViewerInfo?.decodable === false ? (
             <UnsupportedFormatPanel info={selectedViewerInfo} apiClient={apiClient} />
           ) : showBisqueFrame ? (

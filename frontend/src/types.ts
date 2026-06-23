@@ -913,7 +913,7 @@ export type ResourceRecord = {
   created_at: string;
   status?: string | null;
   source_type: "upload" | "bisque_import" | string;
-  resource_kind: "image" | "video" | "table" | "file" | string;
+  resource_kind: "image" | "video" | "table" | "document" | "file" | string;
   source_uri?: string | null;
   project_id?: string | null;
   client_view_url?: string | null;
@@ -931,6 +931,39 @@ export type ResourceRecord = {
   tags?: string[];
   metadata?: Record<string, unknown> | null;
   share_summary?: ResourceShareSummary | null;
+};
+
+export type ResourceTextFormat = "csv" | "json" | "yaml" | "xml" | "markdown" | "text";
+
+export type ResourceTextHead = {
+  file_id: string;
+  original_name: string;
+  content_type: string;
+  format: ResourceTextFormat | string;
+  total_size_bytes: number;
+  offset: number;
+  returned_bytes: number;
+  next_offset: number;
+  truncated: boolean;
+  encoding: string;
+  eol: "lf" | "crlf" | "none" | string;
+  line_count: number;
+  approx_total_lines: number;
+  text: string;
+};
+
+export type ResourceCsvRows = {
+  file_id: string;
+  original_name: string;
+  delimiter: string;
+  columns?: string[] | null;
+  rows: string[][];
+  offset_bytes: number;
+  next_offset_bytes: number;
+  returned_rows: number;
+  has_more: boolean;
+  approx_total_rows: number;
+  total_size_bytes: number;
 };
 
 export type ResourceShareSummary = {
@@ -1124,7 +1157,7 @@ export type DatasetSnapshotResourceRecord = {
   size_bytes: number;
   sha256?: string | null;
   source_type: "upload" | "bisque_import" | string;
-  resource_kind: "image" | "video" | "table" | "file" | string;
+  resource_kind: "image" | "video" | "table" | "document" | "file" | string;
   storage_uri?: string | null;
   source_uri?: string | null;
   project_id?: string | null;

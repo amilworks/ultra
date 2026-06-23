@@ -14389,6 +14389,9 @@ export function App() {
                 downloadUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceDownloadUrl(resource.file_id)
                 }
+                quickPeekFetch={(fileId: string, maxBytes: number) =>
+                  apiClient.resourceTextHead(fileId, { maxBytes })
+                }
                 onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
                 onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
               />

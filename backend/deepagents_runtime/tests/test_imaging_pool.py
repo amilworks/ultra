@@ -46,6 +46,10 @@ def test_image_pool_reclaims_hung_worker_on_timeout():
         try:
             with pytest.raises((asyncio.TimeoutError, TimeoutError)):
                 await pool.call("tile", "x.tif", level=0, col=0, row=0, tile_size=6000)
+            # The 0.2s timeout above is intentionally tiny to force the hung op
+            # path. Do not require a freshly spawned worker process to cold-start
+            # and serve the health probe inside that same artificial budget.
+            pool.call_timeout = 5.0
             assert await pool.call("formats")  # pool recovered, still serving
         finally:
             pool.shutdown()

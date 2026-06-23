@@ -48,6 +48,9 @@ import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
 import { VideoThumbnail } from "./viewer/VideoThumbnail";
 import { ZScrubThumbnail } from "./viewer/ZScrubThumbnail";
+import { ResourceQuickPeek } from "./ResourceQuickPeek";
+import { ResourceThumbnailPreview } from "./ResourceThumbnailPreview";
+import { classifyTextResource } from "@/lib/textFormat";
 import { resourceDisplayName } from "@/features/resources/presentation";
 import {
   ArrowLeft,
@@ -56,6 +59,7 @@ import {
   Download,
   Eye,
   File,
+  FileText,
   Folder,
   FolderMinus,
   Film,
@@ -81,6 +85,7 @@ import type {
   ResourceCollectionRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
+  ResourceTextHead,
 } from "../types";
 
 export type ResourceKindFilter = "all" | "image" | "video" | "table" | "file";
@@ -197,6 +202,7 @@ type ResourceBrowserProps = {
   onClearActiveCollection?: () => void;
   thumbnailUrlFor: (resource: ResourceRecord) => string;
   downloadUrlFor?: (resource: ResourceRecord) => string;
+  quickPeekFetch?: (fileId: string, maxBytes: number) => Promise<ResourceTextHead>;
   onPushResourceToBisque?: (resource: ResourceRecord) => Promise<void> | void;
   onPushCollectionToBisque?: (collection: ResourceCollectionRecord) => Promise<void> | void;
   zScrubThumbnail?: {
@@ -564,6 +570,8 @@ const iconForKind = (kind: string) => {
       return Film;
     case "table":
       return Table2;
+    case "document":
+      return FileText;
     default:
       return File;
   }
@@ -641,6 +649,7 @@ export function ResourceBrowser({
   thumbnailUrlFor,
   zScrubThumbnail,
   downloadUrlFor,
+  quickPeekFetch,
   onPushResourceToBisque,
   onPushCollectionToBisque,
 }: ResourceBrowserProps) {
@@ -2713,6 +2722,13 @@ export function ResourceBrowser({
                     const KindIcon = iconForKind(resource.resource_kind);
                     const displayName = resourceDisplayName(resource);
                     const thumbnailReady = shouldRequestThumbnail(resource, failedThumbnailIds);
+                    // Text/data resources get a content-preview thumbnail (filling the
+                    // full preview area like image cards) instead of a tiny icon chip.
+                    const textPreviewKind =
+                      quickPeekFetch && !thumbnailReady && !isVideoResource(resource)
+                        ? classifyTextResource(resource)
+                        : null;
+                    const hasPreviewSurface = thumbnailReady || textPreviewKind !== null;
                     const isDeleting = Boolean(deletingFileIds[resource.file_id]);
                     const isDeleted = isDeletedResource(resource);
                     const isRestoring = Boolean(restoringFileIds[resource.file_id]);
@@ -2732,7 +2748,7 @@ export function ResourceBrowser({
                         <ContextMenuTrigger asChild>
                           <article
                             className="resource-browser-card group/resource"
-                            data-preview={thumbnailReady ? "true" : "false"}
+                            data-preview={hasPreviewSurface ? "true" : "false"}
                             data-selected={isSelected ? "true" : undefined}
                             draggable={
                               !isDeleted &&
@@ -2754,6 +2770,11 @@ export function ResourceBrowser({
                             }
                           >
                         <div className="resource-browser-preview">
+                          {quickPeekFetch ? (
+                            <div className="resource-quick-peek-slot">
+                              <ResourceQuickPeek resource={resource} fetchHead={quickPeekFetch} />
+                            </div>
+                          ) : null}
                           {selectionEnabled ? (
                             <Checkbox
                               aria-label={`Select ${displayName}`}
@@ -2808,6 +2829,14 @@ export function ResourceBrowser({
                                 }
                               />
                             )
+                          ) : textPreviewKind && quickPeekFetch ? (
+                            <ResourceThumbnailPreview
+                              resource={resource}
+                              kind={textPreviewKind}
+                              fetchHead={quickPeekFetch}
+                              fallbackIcon={KindIcon}
+                              fallbackLabel={resourceKindLabel(resource.resource_kind)}
+                            />
                           ) : (
                             <div className="resource-browser-preview-fallback">
                               <KindIcon className="size-6" aria-hidden="true" />

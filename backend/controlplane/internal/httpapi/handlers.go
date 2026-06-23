@@ -568,6 +568,8 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/resources/tags/bulk", deps.handleBulkTagResources)
 			r.Post("/resources/shares/bulk", deps.handleCreateResourceShareGrants)
 			r.Get("/resources/{file_id}/download", deps.handleDownloadResource)
+			r.Get("/resources/{file_id}/text-head", deps.handleResourceTextHead)
+			r.Get("/resources/{file_id}/csv/rows", deps.handleResourceCsvRows)
 			r.Get("/resources/{file_id}", deps.handleGetResource)
 			r.Patch("/resources/{file_id}", deps.handlePatchResource)
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
@@ -6458,16 +6460,49 @@ func (deps ServerDeps) handleDownloadResource(w http.ResponseWriter, r *http.Req
 		filename = "resource"
 	}
 	contentType := strings.TrimSpace(resource.ContentType)
-	if contentType == "" {
-		contentType = mime.TypeByExtension(filepath.Ext(filename))
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = contentTypeForUpload(filename, contentType)
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	// Defense-in-depth: never let the browser sniff a declared text type up into
+	// active content (HTML/SVG), which matters most on the inline path below.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Default to attachment (the Download button). The text/data viewer reads bytes
+	// via fetch()+Range, so disposition is irrelevant to it; ?disposition=inline is
+	// an opt-in for an "open raw" affordance, restricted to safe text-like types so
+	// it can never coax the browser into rendering active content inline.
+	disposition := "attachment"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("disposition")), "inline") && isInlineSafeContentType(contentType) {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": filename}))
+	// Let http.ServeContent own Content-Length: it rewrites it to the partial length
+	// on a 206 Range response, so pre-setting the full size here would be wrong for
+	// the bounded head-fetch the viewer relies on.
 	http.ServeContent(w, r, filename, info.ModTime(), file)
+}
+
+// isInlineSafeContentType reports whether a content type is safe to serve with an
+// inline Content-Disposition (plain text / data formats the browser will not treat
+// as active content). HTML/SVG are deliberately excluded.
+func isInlineSafeContentType(contentType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(contentType))
+	if idx := strings.IndexByte(normalized, ';'); idx >= 0 {
+		normalized = strings.TrimSpace(normalized[:idx])
+	}
+	switch normalized {
+	case "text/plain", "text/csv", "text/tab-separated-values", "text/markdown",
+		"text/yaml", "application/json", "application/xml", "text/xml",
+		"application/x-yaml", "application/yaml", "application/x-ndjson":
+		return true
+	}
+	if strings.HasSuffix(normalized, "+json") || strings.HasSuffix(normalized, "+xml") {
+		return true
+	}
+	return false
 }
 
 func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Request) {
@@ -11343,12 +11378,17 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		}
 	}
 	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
-	contentType := resource.ContentType
-	if contentType == "" {
-		contentType = contentTypeForUpload(resource.OriginalName, "")
+	// Read-time classification repair: chunked/bundle uploads persist an
+	// "application/octet-stream" content type (handlers.go:3819,3944), so a large
+	// CSV/JSON lands with a useless type and a "file" kind. Re-derive both from the
+	// filename extension here (no storage mutation) so the catalog shows correct
+	// icons and the viewer routes the file to the text/data viewer.
+	contentType := strings.TrimSpace(resource.ContentType)
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = contentTypeForUpload(resource.OriginalName, contentType)
 	}
 	resourceKind := strings.TrimSpace(resource.ResourceKind)
-	if resourceKind == "" {
+	if resourceKind == "" || resourceKind == "file" {
 		resourceKind = resourceKindForContent(resource.OriginalName, contentType)
 	}
 	sourceType := strings.TrimSpace(resource.SourceType)
@@ -14031,11 +14071,54 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "image"
 	case strings.HasPrefix(contentType, "video/"):
 		return "video"
-	case strings.Contains(contentType, "csv") || strings.EqualFold(filepath.Ext(originalName), ".csv"):
+	case isTabularUpload(originalName, contentType):
 		return "table"
+	case isTextDocumentUpload(originalName, contentType):
+		return "document"
 	default:
 		return "file"
 	}
+}
+
+// isTabularUpload reports whether the file is a delimited table (CSV/TSV) that
+// the text/data viewer should open as a table.
+func isTabularUpload(originalName string, contentType string) bool {
+	if strings.Contains(strings.ToLower(contentType), "csv") || strings.Contains(strings.ToLower(contentType), "tab-separated") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(originalName)) {
+	case ".csv", ".tsv":
+		return true
+	}
+	return false
+}
+
+// isTextDocumentUpload reports whether the file is a human-readable text/data
+// document (JSON/YAML/XML/Markdown/plain text/logs) that the text viewer renders.
+// Detection leans on the extension first because chunked uploads frequently
+// persist "application/octet-stream" as the content type.
+func isTextDocumentUpload(originalName string, contentType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case strings.HasPrefix(normalizedType, "text/"):
+		return true
+	case normalizedType == "application/json" || strings.HasSuffix(normalizedType, "+json"):
+		return true
+	case normalizedType == "application/xml" || strings.HasSuffix(normalizedType, "+xml"):
+		return true
+	case normalizedType == "application/x-yaml" || normalizedType == "application/yaml":
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(originalName)) {
+	case ".json", ".jsonl", ".ndjson", ".geojson",
+		".yaml", ".yml",
+		".xml", ".xsd", ".xslt",
+		".md", ".markdown", ".mdx",
+		".txt", ".text", ".log",
+		".ini", ".toml", ".cfg", ".conf", ".properties", ".env":
+		return true
+	}
+	return false
 }
 
 func isOmeTIFFName(originalName string) bool {

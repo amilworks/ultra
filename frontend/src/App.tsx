@@ -11676,7 +11676,7 @@ export function App() {
   };
 
   const handleSelectComposerWorkflow = (workflow: ComposerWorkflowDefinition): void => {
-    if (!activeConversation) {
+    if (!activeConversation || workflow.comingSoon) {
       return;
     }
     const preset = toComposerWorkflowPresetState(workflow);
@@ -11685,7 +11685,13 @@ export function App() {
       updatedAt: Date.now(),
       composerWorkflowPreset: preset,
     }));
-    setActivePromptValue(workflow.prompt);
+    // Combine the curated workflow scaffold with whatever the user already typed —
+    // the scaffolds end ready for the user's specifics — so picking a workflow keeps
+    // their text instead of overwriting it.
+    const existingDraft = activePrompt.trim();
+    setActivePromptValue(
+      existingDraft ? `${workflow.prompt}${existingDraft}` : workflow.prompt
+    );
     setActivePanel("chat");
     setResourceViewerContext(null);
     setDismissedSlashPrompt(null);

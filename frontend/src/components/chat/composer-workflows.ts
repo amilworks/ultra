@@ -7,12 +7,14 @@ import {
   Cpu,
   Download,
   FileSearch,
+  FlaskConical,
   FolderPlus,
   FolderUp,
   Radar,
   ScanSearch,
   Scissors,
   Search,
+  Target,
   Tags,
   Trash2,
   Upload,
@@ -36,9 +38,11 @@ export type ComposerWorkflowPresetState = {
 
 export type ComposerWorkflowDefinition = ComposerWorkflowPresetState & {
   description: string;
-  category: "Resources" | "Vision" | "More tools";
+  category: "Workflows" | "Resources" | "Vision" | "More tools";
   icon: LucideIcon;
   keywords: string[];
+  /** Shown greyed-out and non-selectable with a "Soon" badge (e.g. unreleased pipelines). */
+  comingSoon?: boolean;
 };
 
 const makeWorkflowHint = (
@@ -49,6 +53,75 @@ const makeWorkflowHint = (
 });
 
 export const COMPOSER_WORKFLOWS: ComposerWorkflowDefinition[] = [
+  {
+    id: "goal_driven_build",
+    label: "Goal-driven build",
+    description: "Scoped iterate-until-verified loop with a clear done-when and a tight budget.",
+    category: "Workflows",
+    icon: Target,
+    prompt:
+      "Treat my request as a goal-driven build. First restate it as ONE measurable success criterion (a DONE-WHEN) plus a baseline. Then iterate efficiently — implement, run, measure, adjust — using the SMALLEST experiment that answers it; do NOT launch an exhaustive multi-seed or multi-duration sweep unless I explicitly ask. Stop as soon as the criterion is met (or you can make a clear call) and report concisely: the result, how you verified it, and one caveat. Render math as LaTeX (inline \\( \\); display equations on their own line with $$ … $$, never inside a > quote) and write absolute value as \\lvert x \\rvert so Markdown tables don't break.\n\nGoal: ",
+    selectedToolNames: [],
+    workflowHint: null,
+    requiresAttachedFiles: false,
+    opensResourcePickerOnSelect: false,
+    clearsAfterResourcePick: false,
+    keywords: ["goal", "build", "iterate", "until", "objective", "optimize", "loop"],
+  },
+  {
+    id: "quantitative_analysis",
+    label: "Quantitative analysis",
+    description:
+      "Stats + plots with a results contract (uncertainty, decision rule) and clean formatting.",
+    category: "Workflows",
+    icon: FlaskConical,
+    prompt:
+      "Run a focused quantitative analysis of my request. State the question, the method, and a clear decision rule up front; report estimates WITH uncertainty (a CI or ±1σ) and the resulting decision; keep the experiment proportionate to the question. Present results in clean Markdown tables, and render every formula as LaTeX — inline with \\( \\) and display equations on their own line with $$ … $$ (never inside a > quote). Inside table cells write absolute value as \\lvert x \\rvert (never bare |…|) so the table renders.\n\nAnalysis request: ",
+    selectedToolNames: [],
+    workflowHint: null,
+    requiresAttachedFiles: false,
+    opensResourcePickerOnSelect: false,
+    clearsAfterResourcePick: false,
+    keywords: [
+      "quantitative",
+      "analysis",
+      "statistics",
+      "stats",
+      "uncertainty",
+      "plot",
+      "regression",
+    ],
+  },
+  {
+    id: "image_analysis",
+    label: "Image analysis",
+    description: "Describe, measure, and flag anomalies in the attached scientific image(s).",
+    category: "Workflows",
+    icon: ScanSearch,
+    prompt:
+      "Analyze the attached/selected scientific image(s) for my request: describe what's visible, measure or quantify what's relevant, and flag anything notable or anomalous — grounded in the pixels, and say so when uncertain. Keep any math in LaTeX (inline \\( \\); display $$ on its own line).\n\nRequest: ",
+    selectedToolNames: [],
+    workflowHint: null,
+    requiresAttachedFiles: true,
+    opensResourcePickerOnSelect: false,
+    clearsAfterResourcePick: false,
+    keywords: ["image", "analysis", "measure", "describe", "microscopy", "inspect", "vision"],
+  },
+  {
+    id: "megaseg",
+    label: "MegaSeg segmentation",
+    description: "Coming soon — instance / semantic segmentation for microscopy.",
+    category: "Vision",
+    icon: Scissors,
+    comingSoon: true,
+    prompt: "",
+    selectedToolNames: [],
+    workflowHint: null,
+    requiresAttachedFiles: false,
+    opensResourcePickerOnSelect: false,
+    clearsAfterResourcePick: false,
+    keywords: ["megaseg", "segmentation", "microscopy", "mask", "instance", "semantic"],
+  },
   {
     id: "find_resource",
     label: "Find resource",
@@ -357,6 +430,7 @@ export const COMPOSER_WORKFLOWS: ComposerWorkflowDefinition[] = [
 ];
 
 export const COMPOSER_WORKFLOW_GROUP_ORDER: Array<ComposerWorkflowDefinition["category"]> = [
+  "Workflows",
   "Resources",
   "Vision",
   "More tools",

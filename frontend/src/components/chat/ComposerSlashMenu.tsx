@@ -180,19 +180,26 @@ export function ComposerSlashMenu({
                 <CommandGroup key={group.category} heading={group.category}>
                   {group.items.map((workflow) => {
                     const Icon = workflow.icon;
-                    const active = workflow.id === activeWorkflowId;
+                    const comingSoon = workflow.comingSoon === true;
+                    const active = !comingSoon && workflow.id === activeWorkflowId;
                     return (
                       <CommandItem
                         key={workflow.id}
                         value={workflow.id}
+                        disabled={comingSoon}
                         data-testid={`composer-workflow-${workflow.id}`}
                         data-composer-active={active ? "true" : undefined}
                         className={cn(
                           "items-center gap-3 rounded-xl px-3 py-3",
-                          active && "bg-accent text-accent-foreground"
+                          active && "bg-accent text-accent-foreground",
+                          comingSoon && "cursor-not-allowed opacity-55"
                         )}
                         onMouseDown={(event) => event.preventDefault()}
-                        onSelect={() => onSelectWorkflow?.(workflow)}
+                        onSelect={() => {
+                          if (!comingSoon) {
+                            onSelectWorkflow?.(workflow);
+                          }
+                        }}
                       >
                         <div
                           className={cn(
@@ -210,7 +217,16 @@ export function ComposerSlashMenu({
                             {workflow.description}
                           </p>
                         </div>
-                        {active ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                        {comingSoon ? (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide"
+                          >
+                            Soon
+                          </Badge>
+                        ) : active ? (
+                          <Check className="size-4 shrink-0 text-primary" />
+                        ) : null}
                       </CommandItem>
                     );
                   })}

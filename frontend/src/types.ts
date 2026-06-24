@@ -65,7 +65,11 @@ export type ChatWorkflowHintId =
   | "pro_mode"
   | "scientific_calculator"
   | "chemistry_workbench"
-  | "run_bisque_module";
+  | "run_bisque_module"
+  | "goal_driven_build"
+  | "quantitative_analysis"
+  | "image_analysis"
+  | "megaseg";
 
 export type ChatWorkflowHint = {
   id: ChatWorkflowHintId;

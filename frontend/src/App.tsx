@@ -92,7 +92,7 @@ import {
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { formatBytes, formatTokens } from "./lib/format";
-import { thumbnailScrubAxis } from "./lib/viewerManifest";
+import { thumbnailScrubAxis } from "./lib/thumbnailScrubAxis";
 import {
   buildBisqueNavLinks,
   inferBisqueRootFromUrl,

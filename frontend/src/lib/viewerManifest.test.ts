@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeUploadViewerInfo, thumbnailScrubAxis } from "./viewerManifest";
+import { thumbnailScrubAxis } from "./thumbnailScrubAxis";
+import { normalizeUploadViewerInfo } from "./viewerManifest";
 
 describe("thumbnailScrubAxis", () => {
   it("scrubs Z for a focal/depth stack", () => {

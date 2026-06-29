@@ -27,6 +27,7 @@ import contextlib
 import logging
 import pickle
 import time
+import zlib
 from typing import Any, Protocol
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -34,8 +35,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 logger = logging.getLogger(__name__)
 
 # Bumped if the persisted slice layout changes so stale blobs are ignored
-# instead of mis-deserialized.
-_STATE_BLOB_VERSION = 1
+# instead of mis-deserialized. Version 1 was a raw pickle payload; version 2 is
+# a magic-prefixed compressed envelope whose inner payload remains the v1 slice.
+_STATE_BLOB_VERSION = 2
+_LEGACY_STATE_BLOB_VERSION = 1
+_STATE_BLOB_MAGIC = b"ULTRA_DEEPAGENTS_CKPT\x00"
+_COMPRESSION_ZSTD = "zstd"
+_COMPRESSION_ZLIB = "zlib"
 
 _CHECKPOINT_TABLE = "deepagents_checkpoint_threads"
 
@@ -120,6 +126,12 @@ class PostgresCheckpointStateStore:
                 )
                 """
             )
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {_CHECKPOINT_TABLE}_updated_at_idx
+                ON {_CHECKPOINT_TABLE} (updated_at)
+                """
+            )
             self._ready = True
 
     async def load(self, thread_id: str) -> bytes | None:
@@ -145,7 +157,13 @@ class PostgresCheckpointStateStore:
                 INSERT INTO {_CHECKPOINT_TABLE} (thread_id, state, updated_at)
                 VALUES (%s, %s, now())
                 ON CONFLICT (thread_id)
-                DO UPDATE SET state = EXCLUDED.state, updated_at = now()
+                DO UPDATE SET
+                  state = CASE
+                    WHEN {_CHECKPOINT_TABLE}.state IS DISTINCT FROM EXCLUDED.state
+                    THEN EXCLUDED.state
+                    ELSE {_CHECKPOINT_TABLE}.state
+                  END,
+                  updated_at = now()
                 """,
                 (thread_id, blob),
             )
@@ -404,17 +422,63 @@ def _thread_id_from_config(config: Any) -> str:
 
 
 def _encode_thread_slice(slice_: dict[str, Any]) -> bytes:
-    return pickle.dumps({"version": _STATE_BLOB_VERSION, "slice": slice_})
+    raw = pickle.dumps(
+        {"version": _LEGACY_STATE_BLOB_VERSION, "slice": slice_},
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+    algorithm, compressed = _compress_checkpoint_payload(raw)
+    envelope = {
+        "version": _STATE_BLOB_VERSION,
+        "compression": algorithm,
+        "raw_size": len(raw),
+        "payload": compressed,
+    }
+    return _STATE_BLOB_MAGIC + pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _decode_thread_slice(blob: bytes) -> dict[str, Any]:
+    if blob.startswith(_STATE_BLOB_MAGIC):
+        envelope = pickle.loads(blob[len(_STATE_BLOB_MAGIC) :])
+        if not isinstance(envelope, dict) or envelope.get("version") != _STATE_BLOB_VERSION:
+            raise ValueError("unsupported checkpoint envelope version")
+        payload = envelope.get("payload")
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise ValueError("malformed checkpoint envelope payload")
+        raw = _decompress_checkpoint_payload(
+            str(envelope.get("compression") or ""),
+            bytes(payload),
+        )
+        return _decode_legacy_thread_slice(raw)
+    return _decode_legacy_thread_slice(blob)
+
+
+def _decode_legacy_thread_slice(blob: bytes) -> dict[str, Any]:
     payload = pickle.loads(blob)
-    if not isinstance(payload, dict) or payload.get("version") != _STATE_BLOB_VERSION:
+    if not isinstance(payload, dict) or payload.get("version") != _LEGACY_STATE_BLOB_VERSION:
         raise ValueError("unsupported checkpoint slice version")
     slice_ = payload.get("slice")
     if not isinstance(slice_, dict):
         raise ValueError("malformed checkpoint slice")
     return slice_
+
+
+def _compress_checkpoint_payload(raw: bytes) -> tuple[str, bytes]:
+    try:
+        import zstandard as zstd
+
+        return _COMPRESSION_ZSTD, zstd.ZstdCompressor(level=3).compress(raw)
+    except Exception:
+        return _COMPRESSION_ZLIB, zlib.compress(raw, level=6)
+
+
+def _decompress_checkpoint_payload(algorithm: str, payload: bytes) -> bytes:
+    if algorithm == _COMPRESSION_ZSTD:
+        import zstandard as zstd
+
+        return zstd.ZstdDecompressor().decompress(payload)
+    if algorithm == _COMPRESSION_ZLIB:
+        return zlib.decompress(payload)
+    raise ValueError("unsupported checkpoint compression")
 
 
 def run_graph_config(run_id: str, *, recursion_limit: int) -> dict[str, Any]:

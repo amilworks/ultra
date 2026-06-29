@@ -254,6 +254,7 @@ WITH visible_resources AS (
       OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
       OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
     )
+    AND ($15::bool = false OR r.resource_id = ANY($16::text[]))
     AND (
       cardinality($8::text[]) = 0
       OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
@@ -411,6 +412,8 @@ type CountResourcesForUserParams struct {
 	Column12    string             `json:"column_12"`
 	Column13    string             `json:"column_13"`
 	Column14    []string           `json:"column_14"`
+	Column15    bool               `json:"column_15"`
+	Column16    []string           `json:"column_16"`
 }
 
 func (q *Queries) CountResourcesForUser(ctx context.Context, arg CountResourcesForUserParams) (int64, error) {
@@ -429,6 +432,8 @@ func (q *Queries) CountResourcesForUser(ctx context.Context, arg CountResourcesF
 		arg.Column12,
 		arg.Column13,
 		arg.Column14,
+		arg.Column15,
+		arg.Column16,
 	)
 	var column_1 int64
 	err := row.Scan(&column_1)
@@ -1605,6 +1610,7 @@ WITH visible_resources AS (
       OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
       OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
     )
+    AND ($15::bool = false OR r.resource_id = ANY($16::text[]))
     AND (
       cardinality($8::text[]) = 0
       OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
@@ -1758,7 +1764,7 @@ WHERE (
     OR ($13::text = 'shared' AND share_status IN ('shared_by_me', 'shared_with_me', 'public'))
   )
 ORDER BY created_at DESC, resource_id ASC
-LIMIT $15 OFFSET $16
+LIMIT $17 OFFSET $18
 `
 
 type ListResourcesForUserParams struct {
@@ -1776,6 +1782,8 @@ type ListResourcesForUserParams struct {
 	Column12    string             `json:"column_12"`
 	Column13    string             `json:"column_13"`
 	Column14    []string           `json:"column_14"`
+	Column15    bool               `json:"column_15"`
+	Column16    []string           `json:"column_16"`
 	Limit       int32              `json:"limit"`
 	Offset      int32              `json:"offset"`
 }
@@ -1823,6 +1831,8 @@ func (q *Queries) ListResourcesForUser(ctx context.Context, arg ListResourcesFor
 		arg.Column12,
 		arg.Column13,
 		arg.Column14,
+		arg.Column15,
+		arg.Column16,
 		arg.Limit,
 		arg.Offset,
 	)

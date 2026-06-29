@@ -216,3 +216,97 @@ func BenchmarkPostgresListThreadMessages(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkPostgresListResourcesTypedSearch(b *testing.B) {
+	s := benchPostgresStore(b)
+	ctx := context.Background()
+	userID := benchID("resource-search-user")
+	orgID := benchID("resource-search-org")
+	now := time.Date(2026, 6, 27, 9, 0, 0, 0, time.UTC)
+	const seedCount = 5000
+	for i := 0; i < seedCount; i++ {
+		age := 30 + (i % 70)
+		label := "control"
+		if i%4 == 0 {
+			label = "NPH"
+		}
+		originalName := fmt.Sprintf("Norm_old_%06d_%dyo.nii.gz", i, age)
+		contentType := "application/x-nifti"
+		resourceKind := "file"
+		metadata := domain.JSONMap{
+			"label": label,
+			"image_header": domain.JSONMap{
+				"reader":      "nifti-1",
+				"array_dtype": "uint16",
+				"width":       float64(256 + i%512),
+				"height":      float64(256),
+				"depth":       float64(64),
+			},
+		}
+		if i%10 == 0 {
+			originalName = fmt.Sprintf("camera_%06d.jpg", i)
+			contentType = "image/jpeg"
+			resourceKind = "image"
+			metadata = domain.JSONMap{
+				"label": label,
+				"image_header": domain.JSONMap{
+					"reader":      "go-image",
+					"array_dtype": "uint8",
+					"width":       float64(1800 + i%400),
+					"height":      float64(1200),
+				},
+				"exif": domain.JSONMap{
+					"camera_model":    "UltraCam",
+					"focal_length_mm": float64(35 + (i/10)%10),
+					"iso":             float64(800),
+				},
+			}
+		}
+		if _, err := s.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID:   fmt.Sprintf("%s-%06d", userID, i),
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: originalName,
+			ContentType:  contentType,
+			SizeBytes:    int64(4096 + i),
+			SourceType:   "upload",
+			ResourceKind: resourceKind,
+			Status:       "active",
+			CreatedAt:    now.Add(time.Duration(i) * time.Millisecond),
+			UpdatedAt:    now.Add(time.Duration(i) * time.Millisecond),
+			Metadata:     metadata,
+		}); err != nil {
+			b.Fatalf("UpsertResource(%d): %v", i, err)
+		}
+	}
+	queries := []struct {
+		name  string
+		query string
+	}{
+		{name: "age_gt_60", query: "age > 60"},
+		{name: "nph_age_gt_60", query: "NPH age > 60"},
+		{name: "nifti_glob", query: "*.nii.gz"},
+		{name: "header_width", query: "width > 1000"},
+		{name: "exif_focal_length", query: "focal_length > 38"},
+	}
+	for _, bench := range queries {
+		b.Run(bench.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				page, err := s.ListResourcesForUser(ctx, domain.ResourceListInput{
+					UserID: userID,
+					OrgID:  orgID,
+					Query:  bench.query,
+					Limit:  50,
+				})
+				if err != nil {
+					b.Fatalf("ListResourcesForUser(%q): %v", bench.query, err)
+				}
+				if page.TotalCount == 0 || len(page.Resources) == 0 {
+					b.Fatalf("ListResourcesForUser(%q) returned no resources", bench.query)
+				}
+			}
+		})
+	}
+}

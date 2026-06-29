@@ -61,13 +61,26 @@ type ServerDeps struct {
 	// run-status, run-events, run-lease, and worker-heartbeat endpoints. Empty
 	// disables worker-token auth.
 	WorkerToken string
+	// ModelPrices maps a (normalized) model id to its per-million-token price so
+	// the admin metrics cost panel can turn the token ledger into currency. Set
+	// by NewRouter from ULTRA_CONTROL_MODEL_PRICES; empty reports tokens only.
+	ModelPrices map[string]ModelPrice
+	// DatabaseDiagnostics reports read-only Postgres pool and pg_stat_statements
+	// health for the admin overview. Nil is expected for the in-memory store.
+	DatabaseDiagnostics DatabaseDiagnosticsProvider
 	// adminSnapshots collapses concurrent admin snapshot computations into
 	// one; set by NewRouter.
 	adminSnapshots *singleflight.Group
-	// imageCache serves repeatable image reads (tile/atlas/thumbnail/slice) from a
-	// bounded LRU so pan/zoom + 3D re-loads skip the engine. Set by NewRouter from
+	// imageCache serves repeatable image reads (tile/atlas/thumbnail) from a bounded
+	// LRU so pan/zoom + 3D re-loads skip the engine. Set by NewRouter from
 	// ULTRA_CONTROL_IMAGE_CACHE_BYTES; nil disables (plain streaming proxy).
 	imageCache *imageResponseCache
+	// sliceCache is a separate, smaller LRU for /slice responses so a z-scrub burst
+	// of one-shot slices can't evict the viewer's tile/atlas working set.
+	sliceCache *imageResponseCache
+	// captioner lazily generates + disk-caches academic-style captions for run-output
+	// figures via a grounded VLM. nil/disabled = a graceful no-op (no captions).
+	captioner *imageCaptioner
 }
 
 type workerAuthState int
@@ -497,6 +510,15 @@ func NewRouter(deps ServerDeps) http.Handler {
 	if deps.imageCache == nil {
 		deps.imageCache = newImageResponseCacheFromEnv()
 	}
+	if deps.ModelPrices == nil {
+		deps.ModelPrices = loadModelPricesFromEnv()
+	}
+	if deps.sliceCache == nil {
+		deps.sliceCache = newSliceResponseCacheFromEnv()
+	}
+	if deps.captioner == nil {
+		deps.captioner = newImageCaptionerFromEnv(deps.ArtifactRoot)
+	}
 	if !deps.WorkOS.Enabled() {
 		_ = deps.ensureLocalBootstrapAccounts(context.Background())
 	}
@@ -568,6 +590,8 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/resources/tags/bulk", deps.handleBulkTagResources)
 			r.Post("/resources/shares/bulk", deps.handleCreateResourceShareGrants)
 			r.Get("/resources/{file_id}/download", deps.handleDownloadResource)
+			r.Get("/resources/{file_id}/text-head", deps.handleResourceTextHead)
+			r.Get("/resources/{file_id}/csv/rows", deps.handleResourceCsvRows)
 			r.Get("/resources/{file_id}", deps.handleGetResource)
 			r.Patch("/resources/{file_id}", deps.handlePatchResource)
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
@@ -621,6 +645,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/runs/{run_id}/events", deps.handleListRunEvents)
 			r.Get("/runs/{run_id}/artifacts", deps.handleListRunArtifacts)
 			r.Get("/runs/{run_id}/artifacts/download", deps.handleDownloadRunArtifactByPath)
+			r.Get("/runs/{run_id}/artifacts/caption", deps.handleRunArtifactCaption)
 			r.Get("/artifacts/{artifact_id}", deps.handleGetArtifact)
 			r.Get("/artifacts/{artifact_id}/download", deps.handleDownloadArtifact)
 			r.Post("/artifacts/{artifact_id}/promote-resource", deps.handlePromoteArtifactResource)
@@ -630,6 +655,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 					r.Use(deps.requireWorkOSAdmin)
 				}
 				r.Get("/admin/overview", deps.handleAdminOverview)
+				r.Get("/admin/metrics", deps.handleAdminMetrics)
 				r.Post("/admin/resources/reconcile", deps.handleAdminReconcileResources)
 				r.Get("/admin/orgs", deps.handleAdminOrganizations)
 				r.Post("/admin/orgs", deps.handleAdminCreateOrganization)
@@ -1355,14 +1381,26 @@ func (deps ServerDeps) resolveWorkOSAccount(ctx context.Context, snapshot workOS
 					account, found, err = accounts.GetUserByEmail(ctx, snapshot.Email)
 				}
 				if err == nil && found {
-					return applyUltraAccountToWorkOSSnapshot(snapshot, account), account, isActiveAccount(account), nil
+					return deps.applyAdminEmailOverride(applyUltraAccountToWorkOSSnapshot(snapshot, account)), account, isActiveAccount(account), nil
 				}
 			}
 			return snapshot, domain.UserAccount{}, false, err
 		}
 	}
-	resolved := applyUltraAccountToWorkOSSnapshot(snapshot, account)
+	resolved := deps.applyAdminEmailOverride(applyUltraAccountToWorkOSSnapshot(snapshot, account))
 	return resolved, account, isActiveAccount(account), nil
+}
+
+// applyAdminEmailOverride makes the ULTRA_CONTROL_ADMIN_EMAILS allowlist the
+// final authority on the admin role, winning over the stored account role. This
+// is the bootstrap path: a fresh WorkOS account is created with role
+// "researcher" and there is no in-app role editor, so without this an operator
+// could never get the first admin into the console.
+func (deps ServerDeps) applyAdminEmailOverride(snapshot workOSSessionSnapshot) workOSSessionSnapshot {
+	if deps.WorkOS.isAdminEmail(snapshot.Email) {
+		snapshot.Principal.Role = "admin"
+	}
+	return snapshot
 }
 
 func applyUltraAccountToWorkOSSnapshot(snapshot workOSSessionSnapshot, account domain.UserAccount) workOSSessionSnapshot {
@@ -2455,6 +2493,7 @@ type adminOverviewResponse struct {
 	GeneratedAt      string                                 `json:"generated_at"`
 	Runtime          RuntimeSummary                         `json:"runtime"`
 	Queue            adminQueueDiagnostics                  `json:"queue"`
+	Database         adminDatabaseDiagnostics               `json:"database"`
 	ImageCache       adminImageCacheStats                   `json:"image_cache"`
 	RetentionBacklog adminRetentionBacklog                  `json:"retention_backlog"`
 	KPIs             adminPlatformKPIs                      `json:"kpis"`
@@ -6458,16 +6497,49 @@ func (deps ServerDeps) handleDownloadResource(w http.ResponseWriter, r *http.Req
 		filename = "resource"
 	}
 	contentType := strings.TrimSpace(resource.ContentType)
-	if contentType == "" {
-		contentType = mime.TypeByExtension(filepath.Ext(filename))
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = contentTypeForUpload(filename, contentType)
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	// Defense-in-depth: never let the browser sniff a declared text type up into
+	// active content (HTML/SVG), which matters most on the inline path below.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Default to attachment (the Download button). The text/data viewer reads bytes
+	// via fetch()+Range, so disposition is irrelevant to it; ?disposition=inline is
+	// an opt-in for an "open raw" affordance, restricted to safe text-like types so
+	// it can never coax the browser into rendering active content inline.
+	disposition := "attachment"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("disposition")), "inline") && isInlineSafeContentType(contentType) {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": filename}))
+	// Let http.ServeContent own Content-Length: it rewrites it to the partial length
+	// on a 206 Range response, so pre-setting the full size here would be wrong for
+	// the bounded head-fetch the viewer relies on.
 	http.ServeContent(w, r, filename, info.ModTime(), file)
+}
+
+// isInlineSafeContentType reports whether a content type is safe to serve with an
+// inline Content-Disposition (plain text / data formats the browser will not treat
+// as active content). HTML/SVG are deliberately excluded.
+func isInlineSafeContentType(contentType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(contentType))
+	if idx := strings.IndexByte(normalized, ';'); idx >= 0 {
+		normalized = strings.TrimSpace(normalized[:idx])
+	}
+	switch normalized {
+	case "text/plain", "text/csv", "text/tab-separated-values", "text/markdown",
+		"text/yaml", "application/json", "application/xml", "text/xml",
+		"application/x-yaml", "application/yaml", "application/x-ndjson":
+		return true
+	}
+	if strings.HasSuffix(normalized, "+json") || strings.HasSuffix(normalized, "+xml") {
+		return true
+	}
+	return false
 }
 
 func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Request) {
@@ -7660,6 +7732,7 @@ func (deps ServerDeps) handleAdminOverview(w http.ResponseWriter, r *http.Reques
 		GeneratedAt:      data.GeneratedAt,
 		Runtime:          deps.adminRuntimeSummary(),
 		Queue:            deps.adminQueueDiagnostics(r.Context()),
+		Database:         deps.adminDatabaseDiagnostics(r.Context()),
 		ImageCache:       deps.adminImageCacheStats(),
 		RetentionBacklog: deps.adminRetentionBacklog(r.Context()),
 		KPIs:             data.KPIs,
@@ -7861,10 +7934,28 @@ func (deps ServerDeps) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Requ
 // so an operator can see whether the viewer's hot path is being served from memory
 // (hits) or hammering the decode engine (misses), and how full the cache is.
 func (deps ServerDeps) adminImageCacheStats() adminImageCacheStats {
-	if deps.imageCache == nil {
+	// Combine the main (tile/atlas/thumbnail) cache and the dedicated /slice cache so
+	// the operator sees total image-cache effectiveness across both partitions.
+	caches := []*imageResponseCache{deps.imageCache, deps.sliceCache}
+	var hits, misses uint64
+	var entries int
+	var bytes, maxBytes int64
+	enabled := false
+	for _, c := range caches {
+		if c == nil {
+			continue
+		}
+		enabled = true
+		h, m, e, b := c.stats()
+		hits += h
+		misses += m
+		entries += e
+		bytes += b
+		maxBytes += c.maxBytes
+	}
+	if !enabled {
 		return adminImageCacheStats{Enabled: false}
 	}
-	hits, misses, entries, bytes := deps.imageCache.stats()
 	rate := 0.0
 	if total := hits + misses; total > 0 {
 		rate = float64(hits) / float64(total)
@@ -7876,7 +7967,7 @@ func (deps ServerDeps) adminImageCacheStats() adminImageCacheStats {
 		HitRate:  rate,
 		Entries:  entries,
 		Bytes:    bytes,
-		MaxBytes: deps.imageCache.maxBytes,
+		MaxBytes: maxBytes,
 	}
 }
 
@@ -10850,9 +10941,7 @@ func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.
 		CreatedAt:    createdAt,
 		UpdatedAt:    domain.Now(),
 		Tags:         record.Tags,
-		Metadata: domain.JSONMap{
-			"source": "upload_store",
-		},
+		Metadata:     uploadCatalogMetadataForPath(path, record),
 	}
 	resource, err := catalog.UpsertResource(ctx, input)
 	if err != nil {
@@ -10867,6 +10956,95 @@ func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.
 	// Viewer can serve bounded tiles for large images (best-effort).
 	deps.maybeEnqueuePyramidDerivation(ctx, root, record, path, eventType)
 	return nil
+}
+
+func uploadCatalogMetadataForPath(path string, record resourceRecord) domain.JSONMap {
+	metadata := domain.JSONMap{
+		"source": "upload_store",
+	}
+	if header := uploadImageHeaderMetadataForPath(path, record); len(header) > 0 {
+		metadata["image_header"] = header
+	}
+	if exif := uploadEXIFMetadataForPath(path, record.ContentType); len(exif) > 0 {
+		metadata["exif"] = exif
+	}
+	return metadata
+}
+
+func uploadImageHeaderMetadataForPath(path string, record resourceRecord) domain.JSONMap {
+	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		geom, err := readNiftiHeaderGeometry(path)
+		if err != nil {
+			return nil
+		}
+		dimsOrder := niftiGeometryDimsOrder(geom)
+		return domain.JSONMap{
+			"reader":                 "nifti-1",
+			"width":                  float64(geom.width),
+			"height":                 float64(geom.height),
+			"depth":                  float64(geom.depth),
+			"time_count":             float64(geom.timeCount),
+			"channel_count":          float64(geom.channelCount),
+			"dims_order":             dimsOrder,
+			"array_shape":            niftiGeometryArrayShape(geom, dimsOrder),
+			"array_dtype":            geom.dtype,
+			"bytes_per_voxel":        float64(geom.bytesPerVoxel),
+			"physical_spacing":       domain.JSONMap{"x": geom.spacingX, "y": geom.spacingY, "z": geom.spacingZ},
+			"physical_spacing_unit":  geom.spaceUnit,
+			"voxel_offset":           float64(geom.voxOffset),
+			"rescale_slope":          geom.sclSlope,
+			"rescale_intercept":      geom.sclInter,
+			"affine_method":          niftiAffineMethodName(geom.affineCode),
+			"content_type":           record.ContentType,
+			"size_bytes":             float64(record.SizeBytes),
+			"sha256":                 record.SHA256,
+			"source_metadata_reader": "catalog_header",
+		}
+	}
+	if record.ResourceKind != "image" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(record.ContentType)), "image/") {
+		return nil
+	}
+	descriptor := uploadImageDescriptorForPath(path, record.ContentType)
+	reader := "go-image"
+	if descriptor.OME != nil {
+		reader = "ome-tiff+xml+go-image"
+	}
+	header := domain.JSONMap{
+		"reader":                 reader,
+		"width":                  float64(descriptor.Width),
+		"height":                 float64(descriptor.Height),
+		"depth":                  float64(descriptor.Depth),
+		"time_count":             float64(descriptor.TimeCount),
+		"channel_count":          float64(descriptor.ChannelCount),
+		"dims_order":             descriptor.DimsOrder,
+		"array_shape":            intsAsJSONNumbers(descriptor.ArrayShape),
+		"array_dtype":            descriptor.ArrayDType,
+		"warnings":               append([]string(nil), descriptor.Warnings...),
+		"content_type":           record.ContentType,
+		"size_bytes":             float64(record.SizeBytes),
+		"sha256":                 record.SHA256,
+		"source_metadata_reader": "catalog_header",
+	}
+	if descriptor.OME != nil {
+		header["physical_spacing"] = omePhysicalSpacing(descriptor.OME)
+		header["scene"] = descriptor.OME.SceneName
+		header["scene_count"] = float64(positiveIntOr(descriptor.OME.SceneCount, 1))
+		header["microscopy"] = domain.JSONMap{
+			"channel_names":      append([]string(nil), descriptor.OME.ChannelNames...),
+			"dimensions_present": descriptor.DimsOrder,
+			"current_scene":      descriptor.OME.SceneName,
+			"scene_names":        []string{descriptor.OME.SceneName},
+		}
+	}
+	return header
+}
+
+func intsAsJSONNumbers(values []int) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, float64(value))
+	}
+	return out
 }
 
 func catalogResourceEventMetadata(record resourceRecord, extra domain.JSONMap) domain.JSONMap {
@@ -11343,12 +11521,17 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		}
 	}
 	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
-	contentType := resource.ContentType
-	if contentType == "" {
-		contentType = contentTypeForUpload(resource.OriginalName, "")
+	// Read-time classification repair: chunked/bundle uploads persist an
+	// "application/octet-stream" content type (handlers.go:3819,3944), so a large
+	// CSV/JSON lands with a useless type and a "file" kind. Re-derive both from the
+	// filename extension here (no storage mutation) so the catalog shows correct
+	// icons and the viewer routes the file to the text/data viewer.
+	contentType := strings.TrimSpace(resource.ContentType)
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = contentTypeForUpload(resource.OriginalName, contentType)
 	}
 	resourceKind := strings.TrimSpace(resource.ResourceKind)
-	if resourceKind == "" {
+	if resourceKind == "" || resourceKind == "file" {
 		resourceKind = resourceKindForContent(resource.OriginalName, contentType)
 	}
 	sourceType := strings.TrimSpace(resource.SourceType)
@@ -11982,6 +12165,260 @@ func tiffImageDescription(path string) (string, error) {
 		return strings.TrimRight(string(raw), "\x00"), nil
 	}
 	return "", errors.New("TIFF ImageDescription is not present")
+}
+
+func uploadEXIFMetadataForPath(path string, contentType string) domain.JSONMap {
+	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
+	lowerPath := strings.ToLower(strings.TrimSpace(path))
+	if normalizedType != "image/jpeg" && normalizedType != "image/jpg" && !strings.HasSuffix(lowerPath, ".jpg") && !strings.HasSuffix(lowerPath, ".jpeg") {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	data, err := io.ReadAll(io.LimitReader(file, 2<<20))
+	if err != nil {
+		return nil
+	}
+	return parseJPEGEXIFMetadata(data)
+}
+
+func parseJPEGEXIFMetadata(data []byte) domain.JSONMap {
+	tiffData, ok := jpegEXIFTIFFPayload(data)
+	if !ok {
+		return nil
+	}
+	metadata := parseEXIFTIFFMetadata(tiffData)
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func jpegEXIFTIFFPayload(data []byte) ([]byte, bool) {
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return nil, false
+	}
+	offset := 2
+	for offset+4 <= len(data) {
+		for offset < len(data) && data[offset] == 0xff {
+			offset++
+		}
+		if offset >= len(data) {
+			return nil, false
+		}
+		marker := data[offset]
+		offset++
+		if marker == 0xd9 || marker == 0xda {
+			return nil, false
+		}
+		if offset+2 > len(data) {
+			return nil, false
+		}
+		segmentLength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		if segmentLength < 2 || offset+segmentLength > len(data) {
+			return nil, false
+		}
+		payload := data[offset+2 : offset+segmentLength]
+		if marker == 0xe1 && len(payload) > 6 && string(payload[:6]) == "Exif\x00\x00" {
+			return payload[6:], true
+		}
+		offset += segmentLength
+	}
+	return nil, false
+}
+
+func parseEXIFTIFFMetadata(data []byte) domain.JSONMap {
+	if len(data) < 8 {
+		return nil
+	}
+	var order binary.ByteOrder
+	switch string(data[:2]) {
+	case "II":
+		order = binary.LittleEndian
+	case "MM":
+		order = binary.BigEndian
+	default:
+		return nil
+	}
+	if order.Uint16(data[2:4]) != 42 {
+		return nil
+	}
+	ifd0Offset := int(order.Uint32(data[4:8]))
+	entries, ok := readEXIFIFDEntries(data, order, ifd0Offset)
+	if !ok {
+		return nil
+	}
+	metadata := domain.JSONMap{}
+	var exifOffset int
+	for _, entry := range entries {
+		switch entry.Tag {
+		case 0x010f:
+			if value, ok := exifASCIIValue(data, order, entry); ok {
+				metadata["camera_make"] = value
+			}
+		case 0x0110:
+			if value, ok := exifASCIIValue(data, order, entry); ok {
+				metadata["camera_model"] = value
+			}
+		case 0x0112:
+			if value, ok := exifUnsignedValue(data, order, entry); ok {
+				metadata["orientation"] = float64(value)
+			}
+		case 0x0132:
+			if value, ok := exifASCIIValue(data, order, entry); ok {
+				metadata["datetime"] = value
+			}
+		case 0x8769:
+			if value, ok := exifUnsignedValue(data, order, entry); ok {
+				exifOffset = int(value)
+			}
+		}
+	}
+	if exifOffset > 0 {
+		if exifEntries, ok := readEXIFIFDEntries(data, order, exifOffset); ok {
+			for _, entry := range exifEntries {
+				switch entry.Tag {
+				case 0x829a:
+					if value, ok := exifRationalValue(data, order, entry); ok {
+						metadata["exposure_time_seconds"] = value
+					}
+				case 0x829d:
+					if value, ok := exifRationalValue(data, order, entry); ok {
+						metadata["f_number"] = value
+					}
+				case 0x8827:
+					if value, ok := exifUnsignedValue(data, order, entry); ok {
+						metadata["iso"] = float64(value)
+					}
+				case 0x9003:
+					if value, ok := exifASCIIValue(data, order, entry); ok {
+						metadata["datetime_original"] = value
+					}
+				case 0x920a:
+					if value, ok := exifRationalValue(data, order, entry); ok {
+						metadata["focal_length_mm"] = value
+					}
+				case 0xa434:
+					if value, ok := exifASCIIValue(data, order, entry); ok {
+						metadata["lens_model"] = value
+					}
+				}
+			}
+		}
+	}
+	return metadata
+}
+
+func readEXIFIFDEntries(data []byte, order binary.ByteOrder, offset int) ([]tiffIFDEntry, bool) {
+	if offset < 0 || offset+2 > len(data) {
+		return nil, false
+	}
+	count := int(order.Uint16(data[offset : offset+2]))
+	entriesOffset := offset + 2
+	if count < 0 || entriesOffset+count*12 > len(data) {
+		return nil, false
+	}
+	entries := make([]tiffIFDEntry, 0, count)
+	for index := 0; index < count; index++ {
+		entryOffset := entriesOffset + index*12
+		entry := tiffIFDEntry{
+			Tag:      order.Uint16(data[entryOffset : entryOffset+2]),
+			DataType: order.Uint16(data[entryOffset+2 : entryOffset+4]),
+			Count:    order.Uint32(data[entryOffset+4 : entryOffset+8]),
+		}
+		copy(entry.ValueBytes[:], data[entryOffset+8:entryOffset+12])
+		entries = append(entries, entry)
+	}
+	return entries, true
+}
+
+func exifEntryBytes(data []byte, order binary.ByteOrder, entry tiffIFDEntry) ([]byte, bool) {
+	typeSize := exifTypeSize(entry.DataType)
+	if typeSize <= 0 {
+		return nil, false
+	}
+	total := int(entry.Count) * typeSize
+	if total < 0 {
+		return nil, false
+	}
+	if total <= 4 {
+		return entry.ValueBytes[:total], true
+	}
+	offset := int(order.Uint32(entry.ValueBytes[:]))
+	if offset < 0 || offset+total > len(data) {
+		return nil, false
+	}
+	return data[offset : offset+total], true
+}
+
+func exifTypeSize(dataType uint16) int {
+	switch dataType {
+	case 1, 2, 7:
+		return 1
+	case 3:
+		return 2
+	case 4, 9:
+		return 4
+	case 5, 10:
+		return 8
+	default:
+		return 0
+	}
+}
+
+func exifASCIIValue(data []byte, order binary.ByteOrder, entry tiffIFDEntry) (string, bool) {
+	if entry.DataType != 2 {
+		return "", false
+	}
+	raw, ok := exifEntryBytes(data, order, entry)
+	if !ok {
+		return "", false
+	}
+	value := strings.TrimRight(string(raw), "\x00")
+	value = strings.TrimSpace(value)
+	return value, value != ""
+}
+
+func exifUnsignedValue(data []byte, order binary.ByteOrder, entry tiffIFDEntry) (uint32, bool) {
+	raw, ok := exifEntryBytes(data, order, entry)
+	if !ok || len(raw) == 0 {
+		return 0, false
+	}
+	switch entry.DataType {
+	case 1, 7:
+		return uint32(raw[0]), true
+	case 3:
+		if len(raw) < 2 {
+			return 0, false
+		}
+		return uint32(order.Uint16(raw[:2])), true
+	case 4:
+		if len(raw) < 4 {
+			return 0, false
+		}
+		return order.Uint32(raw[:4]), true
+	default:
+		return 0, false
+	}
+}
+
+func exifRationalValue(data []byte, order binary.ByteOrder, entry tiffIFDEntry) (float64, bool) {
+	raw, ok := exifEntryBytes(data, order, entry)
+	if !ok || len(raw) < 8 {
+		return 0, false
+	}
+	numerator := float64(order.Uint32(raw[:4]))
+	denominator := float64(order.Uint32(raw[4:8]))
+	if denominator == 0 {
+		return 0, false
+	}
+	value := numerator / denominator
+	return value, numberIsFinite(value)
 }
 
 func readClassicTIFFHeader(file *os.File) (binary.ByteOrder, uint32, error) {
@@ -12632,6 +13069,66 @@ func parseNiftiGeometry(header []byte) (niftiGeometry, error) {
 		sclInter:      sclInter,
 		spaceUnit:     niftiSpaceUnitFromHeader(header),
 	}, nil
+}
+
+func readNiftiHeaderGeometry(path string) (niftiGeometry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return niftiGeometry{}, err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	var reader io.Reader = file
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(path)), ".gz") {
+		gzipReader, err := gzip.NewReader(file)
+		if err != nil {
+			return niftiGeometry{}, err
+		}
+		defer func() {
+			_ = gzipReader.Close()
+		}()
+		reader = gzipReader
+	}
+	header := make([]byte, niftiHeaderReadSize)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return niftiGeometry{}, err
+	}
+	return parseNiftiGeometry(header)
+}
+
+func niftiGeometryDimsOrder(geom niftiGeometry) string {
+	axes := make([]string, 0, 5)
+	if geom.timeCount > 1 {
+		axes = append(axes, "T")
+	}
+	if geom.channelCount > 1 {
+		axes = append(axes, "C")
+	}
+	if geom.depth > 1 {
+		axes = append(axes, "Z")
+	}
+	axes = append(axes, "Y", "X")
+	return strings.Join(axes, "")
+}
+
+func niftiGeometryArrayShape(geom niftiGeometry, dimsOrder string) []any {
+	shape := make([]any, 0, len(dimsOrder))
+	for _, axis := range strings.ToUpper(dimsOrder) {
+		switch axis {
+		case 'T':
+			shape = append(shape, float64(geom.timeCount))
+		case 'C':
+			shape = append(shape, float64(geom.channelCount))
+		case 'Z':
+			shape = append(shape, float64(geom.depth))
+		case 'Y':
+			shape = append(shape, float64(geom.height))
+		case 'X':
+			shape = append(shape, float64(geom.width))
+		}
+	}
+	return shape
 }
 
 // niftiRescaleFromHeader reads scl_slope/scl_inter (header[112:120]). Per the
@@ -14031,11 +14528,54 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "image"
 	case strings.HasPrefix(contentType, "video/"):
 		return "video"
-	case strings.Contains(contentType, "csv") || strings.EqualFold(filepath.Ext(originalName), ".csv"):
+	case isTabularUpload(originalName, contentType):
 		return "table"
+	case isTextDocumentUpload(originalName, contentType):
+		return "document"
 	default:
 		return "file"
 	}
+}
+
+// isTabularUpload reports whether the file is a delimited table (CSV/TSV) that
+// the text/data viewer should open as a table.
+func isTabularUpload(originalName string, contentType string) bool {
+	if strings.Contains(strings.ToLower(contentType), "csv") || strings.Contains(strings.ToLower(contentType), "tab-separated") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(originalName)) {
+	case ".csv", ".tsv":
+		return true
+	}
+	return false
+}
+
+// isTextDocumentUpload reports whether the file is a human-readable text/data
+// document (JSON/YAML/XML/Markdown/plain text/logs) that the text viewer renders.
+// Detection leans on the extension first because chunked uploads frequently
+// persist "application/octet-stream" as the content type.
+func isTextDocumentUpload(originalName string, contentType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case strings.HasPrefix(normalizedType, "text/"):
+		return true
+	case normalizedType == "application/json" || strings.HasSuffix(normalizedType, "+json"):
+		return true
+	case normalizedType == "application/xml" || strings.HasSuffix(normalizedType, "+xml"):
+		return true
+	case normalizedType == "application/x-yaml" || normalizedType == "application/yaml":
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(originalName)) {
+	case ".json", ".jsonl", ".ndjson", ".geojson",
+		".yaml", ".yml",
+		".xml", ".xsd", ".xslt",
+		".md", ".markdown", ".mdx",
+		".txt", ".text", ".log",
+		".ini", ".toml", ".cfg", ".conf", ".properties", ".env":
+		return true
+	}
+	return false
 }
 
 func isOmeTIFFName(originalName string) bool {

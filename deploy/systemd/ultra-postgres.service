@@ -17,6 +17,14 @@ ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-postgres \
   -v ${ULTRA_PG_DATA_DIR:-/srv/ultra-local/postgres-control}:/var/lib/postgresql \
   --shm-size=${ULTRA_PG_SHM_SIZE:-256m} \
   postgres:18-alpine \
+  -c shared_preload_libraries=pg_stat_statements \
+  -c pg_stat_statements.max=${ULTRA_PG_STAT_STATEMENTS_MAX:-10000} \
+  -c pg_stat_statements.track=${ULTRA_PG_STAT_STATEMENTS_TRACK:-all} \
+  -c track_io_timing=on \
+  -c track_wal_io_timing=on \
+  -c log_temp_files=${ULTRA_PG_LOG_TEMP_FILES:-65536} \
+  -c wal_compression=${ULTRA_PG_WAL_COMPRESSION:-lz4} \
+  -c default_toast_compression=${ULTRA_PG_DEFAULT_TOAST_COMPRESSION:-lz4} \
   -c shared_buffers=${ULTRA_PG_SHARED_BUFFERS:-4GB} \
   -c effective_cache_size=${ULTRA_PG_EFFECTIVE_CACHE_SIZE:-24GB} \
   -c work_mem=${ULTRA_PG_WORK_MEM:-64MB} \

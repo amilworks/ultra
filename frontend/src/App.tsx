@@ -84,6 +84,13 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
+import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
+import { FigureCaption } from "./components/chat/FigureCaption";
+import {
+  openFigureLightbox,
+  registerLightboxOpenInLens,
+  type LightboxFigure,
+} from "./lib/figureLightbox";
 import { groupPendingUploads } from "./lib/pendingBundles";
 import {
   DEFAULT_API_BASE_URL,
@@ -92,6 +99,7 @@ import {
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { formatBytes, formatTokens } from "./lib/format";
+import { thumbnailScrubAxis } from "./lib/thumbnailScrubAxis";
 import {
   buildBisqueNavLinks,
   inferBisqueRootFromUrl,
@@ -101,6 +109,7 @@ import {
   createAdminOrganization,
   createAdminUser,
   deleteAdminUser,
+  loadAdminMetrics,
   loadAdminOrganizations,
   loadAdminIssues,
   loadAdminOverview,
@@ -117,8 +126,11 @@ import {
   buildScientificResultGroups,
 } from "./features/chat/scientific-results";
 import {
+  classifyRunDocumentKind,
+  isHydratableRunArtifactDocument,
   isHydratableRunArtifactVisual,
   rewriteArtifactMarkdownImageUrls,
+  type RunDocumentKind,
   shouldHydrateRunArtifacts,
 } from "./features/chat/run-artifact-hydration";
 import {
@@ -130,6 +142,7 @@ import {
 import { extractRunTokenUsage } from "./features/chat/token-usage";
 import {
   findReusableBlankDraftConversation,
+  shouldExposeConversationInUrl,
   shouldShowConversationInHistory,
   shouldPersistConversationSnapshot,
 } from "./features/chat/conversation-draft";
@@ -180,6 +193,7 @@ import type {
   AdminCreateUserRequest,
   AdminIssueRecord,
   AdminOrganization,
+  AdminMetricsResponse,
   AdminOverviewResponse,
   AdminRunRecord,
   AdminUserStatus,
@@ -204,11 +218,17 @@ import type {
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
+import {
+  composeComposerWorkflowPromptForModel,
+  slashWorkflowSearchQuery,
+  visiblePromptAfterComposerWorkflowSelection,
+} from "./components/chat/composer-workflow-prompt";
 import type {
   ComposerWorkflowDefinition,
   ComposerWorkflowId,
   ComposerWorkflowPresetState,
 } from "./components/chat/composer-workflows";
+import type { ComposerWorkflowGroup } from "./components/chat/ComposerSlashMenu";
 import type {
   MegasegFileInsight,
   PrairieImageAnalysis,
@@ -295,6 +315,11 @@ type BisqueResourceCountsState = {
 
 const MISSING_REQUESTED_CONVERSATION_MESSAGE =
   "Requested chat was not found. Opened the latest available conversation instead.";
+
+// Per-file scrub axis for gallery thumbnails. loadZCount (async, on first hover)
+// resolves the axis from viewerinfo and records it here so the synchronous slice-URL
+// builder can request the same axis — Z for a focal stack, T for a Z-less time-series.
+const THUMBNAIL_SCRUB_AXIS = new Map<string, "z" | "t">();
 
 export const shouldShowAppShellBanner = (
   activePanel: ActivePanel,
@@ -476,6 +501,27 @@ type RunImageArtifact = {
   resultGroupId?: string | null;
 };
 
+// A non-visual durable run output (markdown report, supporting code, data table)
+// surfaced in the chat for inline reading and download. Images use RunImageArtifact.
+type RunDocumentArtifact = {
+  path: string;
+  title: string;
+  downloadUrl: string;
+  kind: RunDocumentKind;
+  mimeType?: string;
+  sizeBytes?: number;
+};
+
+// Fetch a durable artifact's text for inline rendering. The download URL is
+// absolute and same-origin-authenticated, so credentials must ride along.
+const fetchRunDocumentText = async (downloadUrl: string): Promise<string> => {
+  const response = await fetch(downloadUrl, { method: "GET", credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`Unable to load document (${response.status})`);
+  }
+  return response.text();
+};
+
 const formatBisqueShortcutLabel = (
   count: number | null | undefined,
   singular: string,
@@ -508,6 +554,7 @@ const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
 const loadProModeDevTraceModule = () => import("./components/chat/ProModeDevTrace");
 const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
+const loadChatRunDocumentsModule = () => import("./components/chat/ChatRunDocuments");
 const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
 
 type ComposerWorkflowsModule = Awaited<
@@ -631,6 +678,7 @@ const LazyResearchDigestCard = lazyNamed(
   loadToolResultCardsModule,
   "ResearchDigestCard"
 );
+const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
 
 let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
 let adminPanelPreloadPromise: Promise<unknown> | null = null;
@@ -688,6 +736,7 @@ type UiMessage = {
   uploadedFileNames?: string[];
   liveStream?: AsyncIterable<string>;
   runArtifacts?: RunImageArtifact[];
+  runDocuments?: RunDocumentArtifact[];
   quickPreviewFileIds?: string[];
   resolvedBisqueResources?: ToolResourceRow[];
 };
@@ -844,6 +893,7 @@ const EMPTY_UI_MESSAGES: UiMessage[] = [];
 const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
 const EMPTY_RUN_EVENTS: RunEvent[] = [];
 const EMPTY_RUN_IMAGE_ARTIFACTS: RunImageArtifact[] = [];
+const EMPTY_RUN_DOCUMENTS: RunDocumentArtifact[] = [];
 const EMPTY_FILES: File[] = [];
 const EMPTY_UPLOADED_FILES: UploadedFileRecord[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -874,6 +924,17 @@ const mergeRunImageArtifacts = (
   });
   return Array.from(merged.values());
 };
+
+// Map run-output image artifacts to the figure-lightbox shape (previewable only).
+const runArtifactsToFigures = (artifacts: RunImageArtifact[]): LightboxFigure[] =>
+  artifacts
+    .filter((artifact) => artifact.previewable)
+    .map((artifact) => ({
+      url: artifact.url,
+      downloadUrl: artifact.downloadUrl,
+      title: artifact.title,
+      fileId: artifact.linkedFileId ?? undefined,
+    }));
 
 const collectConversationRunArtifacts = (messages: UiMessage[]): RunImageArtifact[] => {
   const artifacts: RunImageArtifact[] = [];
@@ -1515,40 +1576,15 @@ const coerceComposerWorkflowPresetState = (
   };
 };
 
-const inferReuseToolNames = (promptText: string): string[] => {
-  const intent = inferPromptWorkflowIntent(promptText);
-  const selected: string[] = [];
-  if (intent.asksForDetection) {
-    selected.push("yolo_detect");
-  }
-  if (intent.asksForDepth) {
-    selected.push("estimate_depth_pro");
-  }
-  return selected;
+const inferReuseToolNames = (): string[] => {
+  // No reuse-loadable tools remain: the detection/depth tools this surfaced
+  // (yolo_detect / estimate_depth_pro) were removed from the product.
+  return [];
 };
 
-const normalizeSlashWorkflowQuery = (value: string): string => {
-  const prompt = String(value || "");
-  if (!prompt.startsWith("/")) {
-    return "";
-  }
-  return prompt.slice(1).trim();
-};
+const reuseToolLabel = (toolName: string): string => toolName;
 
-const reuseToolLabel = (toolName: string): string => {
-  if (toolName === "yolo_detect") {
-    return "YOLO detection";
-  }
-  if (toolName === "estimate_depth_pro") {
-    return "Depth estimation";
-  }
-  return toolName;
-};
-
-const autoLoadReuseToolNames = new Set<string>([
-  "yolo_detect",
-  "estimate_depth_pro",
-]);
+const autoLoadReuseToolNames = new Set<string>();
 
 const promptExplicitlyRequestsReuseLoad = (promptText: string): boolean => {
   const lowered = String(promptText || "").trim().toLowerCase();
@@ -2365,6 +2401,7 @@ function ChatAutoScroll({
   scrollMemoryRef,
   scrollElementRef,
   scrollWriteBlockRef,
+  onScrolledAwayChange,
 }: {
   conversationId: string | null;
   conversationHydrated: boolean;
@@ -2372,11 +2409,25 @@ function ChatAutoScroll({
   scrollMemoryRef: MutableRefObject<Record<string, ConversationScrollMemory>>;
   scrollElementRef: MutableRefObject<HTMLElement | null>;
   scrollWriteBlockRef: MutableRefObject<string | null>;
+  // Lifts a "scrolled away from the bottom" signal (with hysteresis) so the
+  // composer can collapse while the user reads back through a long answer.
+  onScrolledAwayChange?: (away: boolean) => void;
 }) {
   const { scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
   const restoredConversationIdRef = useRef<string | null>(null);
   const liveConversationIdRef = useRef<string | null>(conversationId);
   const previousScrollRequestKeyRef = useRef(scrollRequestKey);
+  const scrolledAwayRef = useRef(false);
+  const setScrolledAway = useCallback(
+    (away: boolean) => {
+      if (scrolledAwayRef.current === away) {
+        return;
+      }
+      scrolledAwayRef.current = away;
+      onScrolledAwayChange?.(away);
+    },
+    [onScrolledAwayChange]
+  );
 
   const rememberScrollPosition = useCallback(
     (targetConversationId: string | null) => {
@@ -2464,7 +2515,16 @@ function ChatAutoScroll({
     if (!scrollElement) {
       return;
     }
+    // A fresh conversation starts at the bottom, so the composer is expanded.
+    setScrolledAway(false);
     const handleScroll = () => {
+      // Hysteresis so a tiny scroll doesn't flicker the composer: collapse once
+      // ~160px from the bottom, expand again only within ~48px of it.
+      const distanceFromBottom =
+        scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
+      setScrolledAway(
+        scrolledAwayRef.current ? distanceFromBottom > 48 : distanceFromBottom > 160
+      );
       if (
         liveConversationIdRef.current !== conversationId ||
         scrollWriteBlockRef.current === conversationId
@@ -2477,7 +2537,14 @@ function ChatAutoScroll({
     return () => {
       scrollElement.removeEventListener("scroll", handleScroll);
     };
-  }, [conversationHydrated, conversationId, rememberScrollPosition, scrollRef, scrollWriteBlockRef]);
+  }, [
+    conversationHydrated,
+    conversationId,
+    rememberScrollPosition,
+    scrollRef,
+    scrollWriteBlockRef,
+    setScrolledAway,
+  ]);
 
   useEffect(() => {
     if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
@@ -2605,6 +2672,7 @@ const ConversationMessageRow = memo(
     const progressEvents = message.progressEvents ?? EMPTY_PROGRESS_EVENTS;
     const runEvents = message.runEvents ?? EMPTY_RUN_EVENTS;
     const runArtifacts = message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS;
+    const runDocuments = message.runDocuments ?? EMPTY_RUN_DOCUMENTS;
     const artifactReferences = useMemo(
       () => mergeRunImageArtifacts(runArtifacts, conversationRunArtifacts),
       [conversationRunArtifacts, runArtifacts]
@@ -2954,30 +3022,49 @@ const ConversationMessageRow = memo(
           {runArtifacts.length > 0 && toolResultCards.length === 0 ? (
             <div className="chat-artifact-grid">
               {runArtifacts.map((artifact) => (
-                <a
-                  key={artifact.path}
-                  href={artifact.downloadUrl ?? artifact.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="chat-artifact-card"
-                >
-                  {artifact.previewable ? (
-                    <img
-                      src={artifact.url}
-                      alt={artifact.title}
-                      loading="lazy"
-                      className="chat-artifact-image"
-                    />
-                  ) : (
-                    <div className="chat-artifact-image chat-tool-image-placeholder">
-                      <ImageIcon className="size-5" />
-                      <span>Preview unavailable</span>
-                    </div>
-                  )}
-                  <span className="chat-artifact-title">{artifact.title}</span>
-                </a>
+                <div key={artifact.path} className="chat-artifact-cell">
+                  <button
+                    type="button"
+                    className="chat-artifact-card"
+                    onClick={() => {
+                      const figures = runArtifactsToFigures(runArtifacts);
+                      openFigureLightbox(
+                        figures,
+                        figures.findIndex((figure) => figure.url === artifact.url)
+                      );
+                    }}
+                    disabled={!artifact.previewable}
+                  >
+                    {artifact.previewable ? (
+                      <img
+                        src={artifact.url}
+                        alt={artifact.title}
+                        loading="lazy"
+                        className="chat-artifact-image"
+                      />
+                    ) : (
+                      <div className="chat-artifact-image chat-tool-image-placeholder">
+                        <ImageIcon className="size-5" />
+                        <span>Preview unavailable</span>
+                      </div>
+                    )}
+                    <span className="chat-artifact-title">{artifact.title}</span>
+                  </button>
+                  {artifact.previewable && message.runId ? (
+                    <FigureCaption runId={message.runId} path={artifact.path} apiClient={apiClient} />
+                  ) : null}
+                </div>
               ))}
             </div>
+          ) : null}
+          {runDocuments.length > 0 ? (
+            <Suspense fallback={null}>
+              <LazyChatRunDocuments
+                documents={runDocuments}
+                imageArtifacts={runArtifacts}
+                loadDocumentText={fetchRunDocumentText}
+              />
+            </Suspense>
           ) : null}
           {message.status === "stopped" || message.status === "failed" ? (
             <AssistantTurnRecovery
@@ -3798,11 +3885,22 @@ const resolveUploadedArtifactPreview = (
   return null;
 };
 
+// The agent emits the REAL backend tool name (e.g. bisque_search_resources); a few
+// result-card branches below were written against the slash-menu name instead. Map
+// real → card name so those results render. (bisque_download_resource and
+// bisque_create_dataset already match by their real names, so they're not aliased.)
+const TOOL_NAME_CARD_ALIASES: Record<string, string> = {
+  bisque_search_resources: "search_bisque_resources",
+  bisque_upload_files: "upload_to_bisque",
+  bisque_upload_workspace_files: "upload_to_bisque",
+};
+
 const normalizeToolName = (value: unknown): string => {
   if (typeof value !== "string") {
     return "";
   }
-  return value.trim();
+  const trimmed = value.trim();
+  return TOOL_NAME_CARD_ALIASES[trimmed] ?? trimmed;
 };
 
 const toNumber = (value: unknown): number | null => {
@@ -4297,17 +4395,12 @@ const buildToolResultCards = (
 
   const cards: ToolResultCard[] = [];
   const bisqueSearchByType = new Map<string, BisqueSearchCandidate>();
-  const bisqueMetadataByResource = new Map<
-    string,
-    { index: number; infoScore: number; card: ToolResultCard }
-  >();
   const bisqueDownloadRows: ToolDownloadRow[] = [];
   let latestBisqueDownloadIndex = -1;
   let latestBisqueUploadCard: ToolResultCard | null = null;
   let bestBisqueFindAssetsCard: ToolResultCard | null = null;
   let bestBisqueFindAssetsScore = Number.NEGATIVE_INFINITY;
   let bestBisqueFindAssetsIndex = -1;
-  let hasSuccessfulBisqueModule = false;
   const scientificResultGroups = buildScientificResultGroups({
     progressEvents,
     toolInvocations: scientificToolInvocations,
@@ -4443,20 +4536,11 @@ const buildToolResultCards = (
     if (
       toolName !== "segment_image_megaseg" &&
       toolName !== "yolo_detect" &&
-      toolName !== "estimate_depth_pro" &&
       toolName !== "quantify_segmentation_masks" &&
       toolName !== "plot_quantified_detections" &&
       toolName !== "upload_to_bisque" &&
-      toolName !== "load_bisque_resource" &&
       toolName !== "bisque_download_resource" &&
-      toolName !== "bisque_download_dataset" &&
       toolName !== "bisque_create_dataset" &&
-      toolName !== "bisque_add_to_dataset" &&
-      toolName !== "bisque_add_gobjects" &&
-      toolName !== "add_tags_to_resource" &&
-      toolName !== "bisque_fetch_xml" &&
-      toolName !== "delete_bisque_resource" &&
-      toolName !== "run_bisque_module" &&
       toolName !== "search_bisque_resources" &&
       toolName !== "bisque_advanced_search" &&
       toolName !== "bisque_find_assets"
@@ -4509,129 +4593,12 @@ const buildToolResultCards = (
       });
     });
 
-    if (toolName === "run_bisque_module") {
-      if (summary?.success === false) {
-        return;
-      }
-      hasSuccessfulBisqueModule = true;
-      bisqueSearchByType.clear();
-      bestBisqueFindAssetsCard = null;
-      bestBisqueFindAssetsScore = Number.NEGATIVE_INFINITY;
-      bestBisqueFindAssetsIndex = -1;
-
-      if (matchedImages.length === 0) {
-        runArtifacts
-          .filter((artifact) =>
-            /(edge|canny|module|module_output|preview|output)/i.test(
-              artifact.sourceName
-            )
-          )
-          .slice(0, 6)
-          .forEach((artifact) => addMatchedImage(artifact));
-      }
-
-      const moduleName =
-        typeof summary?.module_name === "string" && summary.module_name.trim()
-          ? summary.module_name.trim()
-          : "Module";
-      const status =
-        typeof summary?.status === "string" && summary.status.trim()
-          ? summary.status.trim()
-          : "completed";
-      const outputPath =
-        typeof summary?.output_path === "string" && summary.output_path.trim()
-          ? summary.output_path.trim()
-          : "";
-      const outputResourceUri =
-        typeof summary?.output_resource_uri === "string" &&
-        summary.output_resource_uri.trim()
-          ? summary.output_resource_uri.trim()
-          : "";
-      const outputClientViewUrl =
-        typeof summary?.output_client_view_url === "string" &&
-        summary.output_client_view_url.trim()
-          ? summary.output_client_view_url.trim()
-          : "";
-      const outputImageServiceUrl =
-        typeof summary?.output_image_service_url === "string" &&
-        summary.output_image_service_url.trim()
-          ? summary.output_image_service_url.trim()
-          : "";
-      const downloadedOutput = Boolean(summary?.downloaded_output) || Boolean(outputPath);
-
-      const hasInlinePreview = matchedImages.some((image) => image.previewable);
-      if (outputImageServiceUrl && !hasInlinePreview) {
-        if (!matchedImages.some((image) => image.url === outputImageServiceUrl)) {
-          matchedImages.push({
-            path: outputImageServiceUrl,
-            url: outputImageServiceUrl,
-            title: `${moduleName} output`,
-            sourceName: extractFilename(outputImageServiceUrl),
-            previewable: true,
-          });
-        }
-      }
-
-      const resourceRows: ToolResourceRow[] = [];
-      if (outputClientViewUrl || outputResourceUri) {
-        resourceRows.push({
-          name: `${moduleName} output`,
-          resourceType: "image",
-          uri: outputClientViewUrl || outputResourceUri,
-          resourceUri: outputResourceUri || undefined,
-          clientViewUrl: outputClientViewUrl || undefined,
-          imageServiceUrl: outputImageServiceUrl || undefined,
-        });
-      }
-      if (outputImageServiceUrl && outputImageServiceUrl !== outputClientViewUrl) {
-        resourceRows.push({
-          name: "Image service URL",
-          resourceType: "image_service",
-          uri: outputImageServiceUrl,
-          resourceUri: outputResourceUri || undefined,
-          clientViewUrl: outputClientViewUrl || undefined,
-          imageServiceUrl: outputImageServiceUrl,
-        });
-      }
-
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "run_bisque_module",
-        title: "BisQue module",
-        subtitle: moduleName,
-        metrics: [
-          {
-            label: "Status",
-            value: status,
-          },
-          {
-            label: "Output",
-            value: downloadedOutput ? "downloaded" : "resource link",
-          },
-          {
-            label: "Images",
-            value: `${matchedImages.length}`,
-          },
-        ],
-        classes: [],
-        images: [...matchedImages]
-          .sort((left, right) => Number(right.previewable) - Number(left.previewable))
-          .slice(0, 6),
-        resourceRows,
-        downloadRows: [],
-      });
-      return;
-    }
-
     if (
       toolName === "search_bisque_resources" ||
       toolName === "bisque_advanced_search" ||
       toolName === "bisque_find_assets"
     ) {
       if (summary?.success === false) {
-        return;
-      }
-      if (hasSuccessfulBisqueModule) {
         return;
       }
       const summaryRows = Array.isArray(summary?.rows) ? summary.rows : [];
@@ -4781,86 +4748,6 @@ const buildToolResultCards = (
       return;
     }
 
-    if (toolName === "load_bisque_resource") {
-      if (summary?.success === false) {
-        return;
-      }
-      const summaryRows = Array.isArray(summary?.rows) ? summary.rows : [];
-      const resourceRows = summaryRows
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          name: String(row.name ?? "").trim() || "resource",
-          owner: String(row.owner ?? "").trim() || undefined,
-          created: String(row.created ?? "").trim() || undefined,
-          resourceType: String(row.resource_type ?? "").trim() || undefined,
-          uri: String(row.uri ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-        }))
-        .slice(0, 1);
-      const dimensions = toRecord(summary?.dimensions);
-      const dimensionLabel = dimensions
-        ? ([
-            ["w", toNumber(dimensions.width)],
-            ["h", toNumber(dimensions.height)],
-            ["z", toNumber(dimensions.depth)],
-            ["c", toNumber(dimensions.channels)],
-            ["t", toNumber(dimensions.timepoints)],
-          ] as Array<[string, number | null]>)
-            .filter(([, value]) => value !== null)
-            .map(([label, value]) => `${label}=${Math.round(value ?? 0)}`)
-            .join(", ")
-        : "";
-      const tagCount = Math.round(toNumber(summary?.tag_count) ?? 0);
-
-      const metadataCard: ToolResultCard = {
-        id: `${toolName}-${index}`,
-        tool: "load_bisque_resource",
-        title: "BisQue metadata",
-        subtitle: resourceRows[0]?.name,
-        metrics: [
-          {
-            label: "Tags",
-            value: `${tagCount}`,
-          },
-          {
-            label: "Dimensions",
-            value: dimensionLabel || "n/a",
-          },
-        ],
-        classes: [],
-        images: toolCardImagesFromBisqueResourceRows(resourceRows, 1),
-        resourceRows,
-        downloadRows: [],
-      };
-      const metadataKey =
-        resourceRows[0]?.resourceUri?.toLowerCase() ||
-        resourceRows[0]?.clientViewUrl?.toLowerCase() ||
-        resourceRows[0]?.uri?.toLowerCase() ||
-        resourceRows[0]?.name?.toLowerCase() ||
-        `${toolName}-${index}`;
-      const infoScore =
-        tagCount * 10 +
-        Number(Boolean(dimensionLabel)) * 5 +
-        Number(resourceRows.length > 0) * 2 +
-        Number(metadataCard.images.length > 0);
-      const existingMetadata = bisqueMetadataByResource.get(metadataKey);
-      if (
-        !existingMetadata ||
-        infoScore > existingMetadata.infoScore ||
-        (infoScore === existingMetadata.infoScore && index > existingMetadata.index)
-      ) {
-        bisqueMetadataByResource.set(metadataKey, {
-          index,
-          infoScore,
-          card: metadataCard,
-        });
-      }
-      return;
-    }
-
     if (toolName === "upload_to_bisque") {
       const summaryRows = Array.isArray(summary?.rows) ? summary.rows : [];
       const resourceRows = summaryRows
@@ -4922,7 +4809,7 @@ const buildToolResultCards = (
       return;
     }
 
-    if (toolName === "bisque_create_dataset" || toolName === "bisque_add_to_dataset") {
+    if (toolName === "bisque_create_dataset") {
       if (summary?.success === false) {
         return;
       }
@@ -4943,9 +4830,7 @@ const buildToolResultCards = (
       const action =
         typeof summary?.action === "string" && summary.action.trim()
           ? summary.action.trim()
-          : toolName === "bisque_create_dataset"
-            ? "created"
-            : "updated";
+          : "created";
       const members = toNumber(summary?.members);
       const added = toNumber(summary?.added);
       const totalResources = toNumber(summary?.total_resources);
@@ -4981,186 +4866,6 @@ const buildToolResultCards = (
       return;
     }
 
-    if (toolName === "bisque_add_gobjects") {
-      if (summary?.success === false) {
-        return;
-      }
-      const resourceRows = (Array.isArray(summary?.rows) ? summary.rows : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          name: String(row.name ?? "").trim() || "annotated resource",
-          owner: String(row.owner ?? "").trim() || undefined,
-          created: String(row.created ?? "").trim() || undefined,
-          resourceType: String(row.resource_type ?? "").trim() || undefined,
-          uri: String(row.uri ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-        }))
-        .slice(0, 4);
-      const countsByType = toRecord(summary?.counts_by_type);
-      const classRows = countsByType
-        ? Object.entries(countsByType)
-            .map(([name, value]) => ({
-              name,
-              count: Math.max(0, Math.round(toNumber(value) ?? 0)),
-            }))
-            .filter((row) => row.count > 0)
-            .slice(0, 8)
-        : [];
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "bisque_add_gobjects",
-        title: "BisQue annotations",
-        metrics: [
-          {
-            label: "Added",
-            value: `${Math.max(0, Math.round(toNumber(summary?.added_total) ?? 0))}`,
-          },
-          {
-            label: "Types",
-            value: `${classRows.length}`,
-          },
-        ],
-        classes: classRows,
-        images: toolCardImagesFromBisqueResourceRows(resourceRows, 1),
-        resourceRows,
-        downloadRows: [],
-      });
-      return;
-    }
-
-    if (toolName === "add_tags_to_resource") {
-      if (summary?.success === false) {
-        return;
-      }
-      const resourceRows = (Array.isArray(summary?.rows) ? summary.rows : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          name: String(row.name ?? "").trim() || "tagged resource",
-          owner: String(row.owner ?? "").trim() || undefined,
-          created: String(row.created ?? "").trim() || undefined,
-          resourceType: String(row.resource_type ?? "").trim() || undefined,
-          uri: String(row.uri ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-        }))
-        .slice(0, 4);
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "add_tags_to_resource",
-        title: "BisQue tags",
-        metrics: [
-          {
-            label: "Tags added",
-            value: `${Math.max(0, Math.round(toNumber(summary?.tag_count) ?? 0))}`,
-          },
-        ],
-        classes: [],
-        images: toolCardImagesFromBisqueResourceRows(resourceRows, 1),
-        resourceRows,
-        downloadRows: [],
-      });
-      return;
-    }
-
-    if (toolName === "bisque_fetch_xml") {
-      if (summary?.success === false) {
-        return;
-      }
-      const resourceRows = (Array.isArray(summary?.rows) ? summary.rows : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          name: String(row.name ?? "").trim() || "xml source",
-          owner: String(row.owner ?? "").trim() || undefined,
-          created: String(row.created ?? "").trim() || undefined,
-          resourceType: String(row.resource_type ?? "").trim() || undefined,
-          uri: String(row.uri ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-        }))
-        .slice(0, 4);
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "bisque_fetch_xml",
-        title: "BisQue XML",
-        metrics: [
-          {
-            label: "Truncated",
-            value: summary?.truncated ? "yes" : "no",
-          },
-          {
-            label: "Saved",
-            value:
-              typeof summary?.saved_path === "string" && summary.saved_path.trim()
-                ? "yes"
-                : "no",
-          },
-        ],
-        classes: [],
-        images: toolCardImagesFromBisqueResourceRows(resourceRows, 1),
-        resourceRows,
-        downloadRows: [],
-      });
-      return;
-    }
-
-    if (toolName === "delete_bisque_resource") {
-      const resourceRows = (Array.isArray(summary?.rows) ? summary.rows : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          name: String(row.name ?? "").trim() || "deleted resource",
-          owner: String(row.owner ?? "").trim() || undefined,
-          created: String(row.created ?? "").trim() || undefined,
-          resourceType: String(row.resource_type ?? "").trim() || undefined,
-          uri: String(row.uri ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-        }))
-        .slice(0, 1);
-      const datasetCleanup = toRecord(summary?.dataset_cleanup);
-      const cleanupFound =
-        datasetCleanup && typeof datasetCleanup.found === "number" ? datasetCleanup.found : undefined;
-      const cleanupRemoved =
-        datasetCleanup && typeof datasetCleanup.removed === "number" ? datasetCleanup.removed : undefined;
-      const deletionVerified =
-        typeof summary?.deletion_verified === "boolean" ? summary.deletion_verified : undefined;
-      const deletionError =
-        typeof summary?.error === "string" && summary.error.trim() ? summary.error.trim() : undefined;
-      const deleteSucceeded = summary?.success !== false;
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "delete_bisque_resource",
-        title: deleteSucceeded ? "BisQue deletion" : "BisQue deletion failed",
-        subtitle:
-          typeof summary?.resource_name === "string" && summary.resource_name.trim()
-            ? summary.resource_name.trim()
-            : undefined,
-        metrics: [
-          { label: "Status", value: deleteSucceeded ? "deleted" : "failed" },
-          ...(typeof deletionVerified === "boolean"
-            ? [{ label: "Verified", value: deletionVerified ? "yes" : "no" }]
-            : []),
-          ...(typeof cleanupFound === "number" && typeof cleanupRemoved === "number"
-            ? [{ label: "Dataset cleanup", value: `${cleanupRemoved}/${cleanupFound}` }]
-            : []),
-          ...(deletionError ? [{ label: "Error", value: deletionError }] : []),
-        ],
-        classes: [],
-        images: [],
-        resourceRows,
-        downloadRows: [],
-      });
-      return;
-    }
-
     if (toolName === "bisque_download_resource") {
       if (summary?.success === false) {
         return;
@@ -5181,43 +4886,6 @@ const buildToolResultCards = (
       }
       latestBisqueDownloadIndex = Math.max(latestBisqueDownloadIndex, index);
       rows.forEach((row) => bisqueDownloadRows.push(row));
-      return;
-    }
-
-    if (toolName === "bisque_download_dataset") {
-      if (summary?.success === false) {
-        return;
-      }
-      const rows = (Array.isArray(summary?.download_rows) ? summary.download_rows : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          status: String(row.status ?? "unknown").trim() || "unknown",
-          outputPath: String(row.output_path ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-          error: String(row.error ?? "").trim() || undefined,
-        }));
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "bisque_download_dataset",
-        title: "BisQue dataset download",
-        metrics: [
-          {
-            label: "Downloaded",
-            value: `${Math.max(0, Math.round(toNumber(summary?.downloaded) ?? 0))}/${Math.max(0, Math.round(toNumber(summary?.total_members) ?? rows.length))}`,
-          },
-          {
-            label: "Files",
-            value: `${rows.length}`,
-          },
-        ],
-        classes: [],
-        images: [],
-        resourceRows: [],
-        downloadRows: rows.slice(0, 12),
-      });
       return;
     }
 
@@ -5619,93 +5287,6 @@ const buildToolResultCards = (
           structureChannel: toNumber(megasegSummary.structure_channel),
           nucleusChannel: toNumber(megasegSummary.nucleus_channel),
         },
-      });
-      return;
-    }
-
-    if (toolName === "estimate_depth_pro") {
-      const summaryFiles = Array.isArray(summary?.files) ? summary.files : [];
-      const processed = toNumber(summary?.processed);
-      const totalFiles = toNumber(summary?.total_files);
-      const meanDepth = toNumber(summary?.depth_mean_average);
-      const depthRows = summaryFiles
-        .slice(0, 8)
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          rawFile: String(row.file ?? "file"),
-          file: toDisplayFileLabel(String(row.file ?? "file")),
-          depthMean: toNumber(row.depth_mean),
-          depthMin: toNumber(row.depth_min),
-          depthMax: toNumber(row.depth_max),
-        }));
-
-      const hoverDetailsByLookupKey = new Map<string, ToolImageHoverDetails>();
-      depthRows.forEach((row) => {
-        const details: ToolImageHoverDetails = {
-          fileLabel:
-            row.depthMean !== null && row.depthMin !== null && row.depthMax !== null
-              ? `${row.file} • mean ${row.depthMean.toFixed(3)} • ${row.depthMin.toFixed(
-                  3
-                )}–${row.depthMax.toFixed(3)}`
-              : row.file,
-        };
-        artifactLookupKeys(row.rawFile).forEach((key) => {
-          if (!hoverDetailsByLookupKey.has(key)) {
-            hoverDetailsByLookupKey.set(key, details);
-          }
-        });
-      });
-
-      if (matchedImages.length === 0) {
-        runArtifacts
-          .filter((artifact) =>
-            /(depth|depth_map|overlay|side_by_side)/i.test(artifact.sourceName)
-          )
-          .slice(0, 6)
-          .forEach((artifact) => addMatchedImage(artifact));
-      }
-
-      const matchedDepthImages: ToolCardImage[] = [...matchedImages]
-        .sort((left, right) => Number(right.previewable) - Number(left.previewable))
-        .slice(0, 6)
-        .map((artifact) => {
-          const details =
-            artifactLookupKeys(artifact.sourceName)
-              .map((key) => hoverDetailsByLookupKey.get(key))
-              .find((value): value is ToolImageHoverDetails => value !== undefined) ??
-            undefined;
-          return {
-            ...artifact,
-            hoverDetails: details,
-          };
-        });
-
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "estimate_depth_pro",
-        title: "DepthPro estimation",
-        subtitle:
-          typeof summary?.model === "string" && summary.model.length > 0
-            ? summary.model
-            : undefined,
-        metrics: [
-          {
-            label: "Processed",
-            value:
-              processed !== null && totalFiles !== null
-                ? `${processed}/${totalFiles}`
-                : "n/a",
-          },
-          {
-            label: "Mean depth",
-            value: meanDepth !== null ? meanDepth.toFixed(4) : "n/a",
-          },
-        ],
-        classes: [],
-        images: matchedDepthImages,
-        resourceRows: [],
-        downloadRows: [],
       });
       return;
     }
@@ -6276,7 +5857,7 @@ const buildToolResultCards = (
   let mergedBisqueSearchCard: ToolResultCard | null = null;
   let mergedBisqueSearchMatchCount = 0;
 
-  if (bisqueSearchByType.size > 0 && !hasSuccessfulBisqueModule) {
+  if (bisqueSearchByType.size > 0) {
     const selectedBisqueSearches = Array.from(bisqueSearchByType.values()).sort(
       (left, right) => left.index - right.index
     );
@@ -6353,7 +5934,7 @@ const buildToolResultCards = (
     primaryBisqueCard = latestBisqueUploadCard;
   }
 
-  if (!primaryBisqueCard && bestBisqueFindAssetsCard && !hasSuccessfulBisqueModule) {
+  if (!primaryBisqueCard && bestBisqueFindAssetsCard) {
     const findAssetsCard = bestBisqueFindAssetsCard as ToolResultCard;
     if (mergedBisqueSearchCard) {
       const mergedRows = mergeBisqueResourceRows(
@@ -6392,16 +5973,6 @@ const buildToolResultCards = (
     }
   } else if (mergedBisqueSearchCard && !primaryBisqueCard) {
     primaryBisqueCard = mergedBisqueSearchCard;
-  }
-
-  if (!primaryBisqueCard && bisqueMetadataByResource.size > 0) {
-    primaryBisqueCard = Array.from(bisqueMetadataByResource.values())
-      .sort((left, right) => {
-        if (left.infoScore !== right.infoScore) {
-          return right.infoScore - left.infoScore;
-        }
-        return right.index - left.index;
-      })[0]?.card ?? null;
   }
 
   if (primaryBisqueCard) {
@@ -6533,10 +6104,8 @@ const deriveBisqueSelectionContextFromResponseMetadata = ({
   const toolInvocations = Array.isArray(metadata?.tool_invocations)
     ? metadata.tool_invocations
     : [];
-  const clearsSelection = toolInvocations.some((entry) => {
-    const record = toRecord(entry);
-    return String(record?.tool ?? "").trim() === "delete_bisque_resource";
-  });
+  // No BisQue deletion tool exists, so a turn can never clear the selection.
+  const clearsSelection = false;
   const resolvedRows = mergeBisqueResourceRows(
     toolInvocations.flatMap((entry) => {
       const record = toRecord(entry);
@@ -6810,28 +6379,6 @@ const inferBisqueSelectionToolNames = (
 ): string[] => {
   const lowered = String(promptText || "").trim().toLowerCase();
   const selected = new Set<string>();
-  if (/\bxml\b/.test(lowered)) {
-    selected.add("bisque_fetch_xml");
-  }
-  if (/\b(?:metadata\s+)?tags?\b/.test(lowered)) {
-    selected.add("add_tags_to_resource");
-  }
-  if (
-    /\b(?:roi|gobject|annotation|annotations|rectangle|polygon|bounding box|bbox)\b/.test(
-      lowered
-    )
-  ) {
-    selected.add("bisque_add_gobjects");
-  }
-  if (/\bdelete|trash|remove\b/.test(lowered)) {
-    selected.add("delete_bisque_resource");
-  }
-  if (
-    /\bdataset\b/.test(lowered) &&
-    /\b(download|export|save)\b/.test(lowered)
-  ) {
-    selected.add("bisque_download_dataset");
-  }
   if (
     /\bdataset\b/.test(lowered) &&
     /\b(create|make|build|assemble|call(?:ed)?|named?)\b/.test(lowered)
@@ -6840,13 +6387,10 @@ const inferBisqueSelectionToolNames = (
   }
   if (
     /\bdataset\b/.test(lowered) &&
-    /\b(add|append|put|organize|move|save)\b/.test(lowered)
+    /\b(add|append|put|organize|move|save)\b/.test(lowered) &&
+    (options?.hasStagedUploads || isBisqueUploadActionPrompt(promptText, options))
   ) {
-    if (options?.hasStagedUploads || isBisqueUploadActionPrompt(promptText, options)) {
-      selected.add("upload_to_bisque");
-    } else {
-      selected.add("bisque_add_to_dataset");
-    }
+    selected.add("upload_to_bisque");
   }
   if (isBisqueUploadActionPrompt(promptText, options)) {
     selected.add("upload_to_bisque");
@@ -6863,15 +6407,6 @@ const inferBisqueSelectionToolNames = (
     );
   if (wantsCatalogSearch) {
     selected.add("search_bisque_resources");
-  }
-  if (
-    selected.size === 0 &&
-    options?.hasSelectionContext &&
-    /\b(show|see|view|preview|open|inspect|metadata|details?|keys?|groups?|datasets?|columns?|headers?|variables?|fields?|schema|structure|layout)\b/.test(
-      lowered
-    )
-  ) {
-    selected.add("load_bisque_resource");
   }
   return Array.from(selected);
 };
@@ -6945,10 +6480,10 @@ const deriveBisqueSelectionContextFromToolCards = ({
   resolvedRows: ToolResourceRow[];
   clearsSelection: boolean;
 } => {
-  const clearsSelection = toolResultCards.some((card) => card.tool === "delete_bisque_resource");
+  // No BisQue deletion tool exists, so a turn can never clear the selection.
+  const clearsSelection = false;
   const resolvedRows = mergeBisqueResourceRows(
     toolResultCards
-      .filter((card) => card.tool !== "delete_bisque_resource")
       .flatMap((card) => card.resourceRows)
       .filter((row) => Boolean(row.resourceUri))
   );
@@ -7763,6 +7298,9 @@ export function App() {
     failed: false,
   });
   const isPhoneView = useBreakpoint(641);
+  // Phone-only: when the user scrolls up to read a long answer, collapse the
+  // composer to reclaim reading space (expands on focus / at-bottom / sending).
+  const [composerScrolledAway, setComposerScrolledAway] = useState(false);
 
   const [conversations, setConversations] = useState<ConversationState[]>([]);
   const [conversationListOffset, setConversationListOffset] = useState(0);
@@ -7866,6 +7404,9 @@ export function App() {
   const [pendingResourceDelete, setPendingResourceDelete] = useState<ResourceRecord | null>(null);
   const [pendingBulkResourceDelete, setPendingBulkResourceDelete] = useState<ResourceRecord[]>([]);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
+  const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null);
+  const [adminLoadingMetrics, setAdminLoadingMetrics] = useState(false);
+  const [adminMetricsRangeDays, setAdminMetricsRangeDays] = useState(90);
   const [adminOrganizations, setAdminOrganizations] = useState<AdminOrganization[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [adminRuns, setAdminRuns] = useState<AdminRunRecord[]>([]);
@@ -8431,7 +7972,12 @@ export function App() {
       activeConversationId && conversations.some((conversation) => conversation.id === activeConversationId)
         ? activeConversationId
         : conversations[0]?.id ?? null;
-    replaceConversationIdInLocation(resolvedConversationId);
+    const urlConversation = resolvedConversationId
+      ? conversations.find((conversation) => conversation.id === resolvedConversationId) ?? null
+      : null;
+    replaceConversationIdInLocation(
+      shouldExposeConversationInUrl(urlConversation) ? resolvedConversationId : null
+    );
   }, [activeConversationId, authStatus, conversations, conversationsHydrated]);
 
   const flushConversationSnapshots = useCallback(() => {
@@ -8795,6 +8341,45 @@ export function App() {
       cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
+      return queueEffectUpdate(() => {
+        setAdminMetrics(null);
+        setAdminLoadingMetrics(false);
+      });
+    }
+    let cancelled = false;
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingMetrics(true);
+    });
+    void loadAdminMetrics(apiClient, adminMetricsRangeDays)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminMetrics(payload);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminError(normalizeApiError(error));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setAdminLoadingMetrics(false);
+      });
+    return () => {
+      cancelled = true;
+      cancelQueuedReset();
+    };
+  }, [activePanel, adminMetricsRangeDays, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
@@ -9653,6 +9238,7 @@ export function App() {
     setConversationDeletingById({});
     setResourceDeletingById({});
     setAdminOverview(null);
+    setAdminMetrics(null);
     setAdminOrganizations([]);
     setAdminUsers([]);
     setAdminRuns([]);
@@ -10400,11 +9986,29 @@ export function App() {
     () => new Set(Object.keys(composerResourcePickerSelection)),
     [composerResourcePickerSelection]
   );
-  const slashWorkflowQuery = normalizeSlashWorkflowQuery(activePrompt);
+  const slashWorkflowQuery = slashWorkflowSearchQuery(activePrompt);
   const filteredSlashWorkflows = useMemo(
     () => composerWorkflows?.filterComposerWorkflows(slashWorkflowQuery) ?? [],
     [composerWorkflows, slashWorkflowQuery]
   );
+  const slashWorkflowGroups = useMemo<ComposerWorkflowGroup[]>(() => {
+    if (!composerWorkflows) {
+      return [];
+    }
+    const grouped = new Map<
+      ComposerWorkflowDefinition["category"],
+      ComposerWorkflowDefinition[]
+    >();
+    filteredSlashWorkflows.forEach((workflow) => {
+      const existing = grouped.get(workflow.category) ?? [];
+      existing.push(workflow);
+      grouped.set(workflow.category, existing);
+    });
+    return composerWorkflows.COMPOSER_WORKFLOW_GROUP_ORDER.map((category) => ({
+      category,
+      items: grouped.get(category) ?? [],
+    })).filter((group) => group.items.length > 0);
+  }, [composerWorkflows, filteredSlashWorkflows]);
   const slashMenuOpen =
     !composerResourcePickerOpen &&
     // Allow slash selection even when a persistent workflow such as Pro Mode
@@ -11359,6 +10963,20 @@ export function App() {
     openUploadedFilesInViewer([uploaded], bisqueLink ? { [uploaded.file_id]: bisqueLink } : {});
   };
 
+  // The figure lightbox's "Open in Lens" escape hatch: resolve the resource by id
+  // and hand it to the full scientific viewer.
+  useEffect(() => {
+    registerLightboxOpenInLens((fileId) => {
+      void apiClient
+        .getResource(fileId)
+        .then((resource) => openResourceInViewer(resource))
+        .catch(() => undefined);
+    });
+    return () => registerLightboxOpenInLens(null);
+    // openResourceInViewer is stable for this purpose; apiClient is the only dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClient]);
+
   // --- URL-as-navigation-state -------------------------------------------------------
   // The app has no router; navigation is React state. Reflect the active panel + open
   // Lens resource in the URL so the browser Back/Forward buttons work, a refresh
@@ -11636,7 +11254,7 @@ export function App() {
   };
 
   const handleSelectComposerWorkflow = (workflow: ComposerWorkflowDefinition): void => {
-    if (!activeConversation) {
+    if (!activeConversation || workflow.comingSoon) {
       return;
     }
     const preset = toComposerWorkflowPresetState(workflow);
@@ -11645,7 +11263,9 @@ export function App() {
       updatedAt: Date.now(),
       composerWorkflowPreset: preset,
     }));
-    setActivePromptValue(workflow.prompt);
+    setActivePromptValue(
+      visiblePromptAfterComposerWorkflowSelection(workflow, activePrompt)
+    );
     setActivePanel("chat");
     setResourceViewerContext(null);
     setDismissedSlashPrompt(null);
@@ -12301,7 +11921,26 @@ export function App() {
             mime_type: artifact.mime_type,
           })
       );
-      if (durableArtifacts.length === 0) {
+      // Non-visual durable outputs (markdown report, supporting code, data tables)
+      // become readable/downloadable documents in the chat instead of being dropped.
+      const documentArtifacts: RunDocumentArtifact[] = artifactResponse.artifacts
+        .filter(
+          (artifact) =>
+            Math.max(0, Number(artifact.size_bytes) || 0) > 0 &&
+            isHydratableRunArtifactDocument({
+              path: artifact.path,
+              mime_type: artifact.mime_type,
+            })
+        )
+        .map((artifact) => ({
+          path: artifact.path,
+          title: artifactDisplayName(artifact),
+          downloadUrl: apiClient.artifactDownloadUrl(runId, artifact.path),
+          kind: classifyRunDocumentKind(artifact.path, artifact.mime_type) ?? "document",
+          mimeType: String(artifact.mime_type || "").trim() || undefined,
+          sizeBytes: Math.max(0, Number(artifact.size_bytes) || 0) || undefined,
+        }));
+      if (durableArtifacts.length === 0 && documentArtifacts.length === 0) {
         return;
       }
 
@@ -12353,6 +11992,7 @@ export function App() {
                         null,
                     } satisfies RunImageArtifact;
                   }),
+                  runDocuments: documentArtifacts,
                 }
               : item
           ),
@@ -13225,7 +12865,7 @@ export function App() {
         .filter((file): file is UploadedFileRecord => Boolean(file));
 
       const imageUploadsForReuse = currentUploads.filter((file) => isImageLikeUploadedFile(file));
-      const requestedReuseTools = inferReuseToolNames(promptForModel);
+      const requestedReuseTools = inferReuseToolNames();
       const hasFreshImageUploadsForTurn = uploadResult.newlyUploadedFiles.some((file) =>
         isImageLikeUploadedFile(file)
       );
@@ -13296,11 +12936,15 @@ export function App() {
         return;
       }
 
+      const modelPromptForTurn = composeComposerWorkflowPromptForModel(
+        composerWorkflowPreset,
+        promptForModel
+      );
       const chatMessages = toChatWire(nextMessages);
-      if (promptForModel !== text) {
+      if (modelPromptForTurn !== text) {
         for (let idx = chatMessages.length - 1; idx >= 0; idx -= 1) {
           if (chatMessages[idx].role === "user") {
-            chatMessages[idx] = { ...chatMessages[idx], content: promptForModel };
+            chatMessages[idx] = { ...chatMessages[idx], content: modelPromptForTurn };
             break;
           }
         }
@@ -13338,7 +12982,7 @@ export function App() {
         uploaded_files: [],
         file_ids: currentUploads.map((file) => file.file_id),
         conversation_id: conversationId,
-        goal: promptForModel,
+        goal: modelPromptForTurn,
         selected_tool_names: effectiveSelectedToolNamesForTurn,
         selection_context: selectionContextForTurn,
         workflow_hint: composerWorkflowPreset?.workflowHint ?? null,
@@ -14209,6 +13853,10 @@ export function App() {
             >
               <LazyAdminConsole
                 overview={adminOverview}
+                metrics={adminMetrics}
+                loadingMetrics={adminLoadingMetrics}
+                metricsRangeDays={adminMetricsRangeDays}
+                onMetricsRangeDaysChange={setAdminMetricsRangeDays}
                 organizations={adminOrganizations}
                 users={adminUsers}
                 runs={adminRuns}
@@ -14344,16 +13992,34 @@ export function App() {
                   apiClient.resourceThumbnailUrl(resource.file_id)
                 }
                 zScrubThumbnail={{
-                  // Gallery z-scrub is a transient thumbnail (never measured), so
-                  // request bounded-resolution frames: the backend serves a small
-                  // pyramid level for large planes, keeping rapid scrub snappy.
-                  sliceUrlFor: (fileId: string, z: number) =>
-                    apiClient.uploadSliceUrl(fileId, { axis: "z", z, fullResolution: false }),
+                  // Gallery scrub is a transient thumbnail (never measured), so request
+                  // bounded-resolution frames: the backend serves a small pyramid level
+                  // for large planes, keeping rapid scrub snappy. The scrub axis is Z for
+                  // a focal stack, else T for a Z-less time-series (e.g. a 61-frame movie)
+                  // — loadZCount records it per file so this builder requests the same one.
+                  sliceUrlFor: (fileId: string, index: number) => {
+                    const scrubAxis = THUMBNAIL_SCRUB_AXIS.get(fileId) ?? "z";
+                    return apiClient.uploadSliceUrl(fileId, {
+                      // axis is the SLICE ORIENTATION (xy-plane); the scrub varies the
+                      // depth (z) or time (t) index into that plane.
+                      axis: "z",
+                      z: scrubAxis === "z" ? index : undefined,
+                      t: scrubAxis === "t" ? index : undefined,
+                      fullResolution: false,
+                    });
+                  },
                   loadZCount: (fileId: string) =>
-                    apiClient.getUploadViewer(fileId).then((info) => info.axis_sizes.Z),
+                    apiClient.getUploadViewer(fileId).then((info) => {
+                      const { axis, count } = thumbnailScrubAxis(info.axis_sizes);
+                      THUMBNAIL_SCRUB_AXIS.set(fileId, axis);
+                      return count;
+                    }),
                 }}
                 downloadUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceDownloadUrl(resource.file_id)
+                }
+                quickPeekFetch={(fileId: string, maxBytes: number) =>
+                  apiClient.resourceTextHead(fileId, { maxBytes })
                 }
                 onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
                 onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
@@ -14405,6 +14071,7 @@ export function App() {
                   scrollMemoryRef={conversationScrollMemoryRef}
                   scrollElementRef={activeChatScrollElementRef}
                   scrollWriteBlockRef={conversationScrollWriteBlockRef}
+                  onScrolledAwayChange={setComposerScrolledAway}
                 />
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
@@ -14434,7 +14101,15 @@ export function App() {
               </ChatContainerRoot>
             </div>
 
-          <div className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5">
+          <div
+            className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
+            data-composer-compact={
+              isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
+            }
+            data-composer-menu-open={
+              slashMenuOpen || composerResourcePickerOpen ? "true" : undefined
+            }
+          >
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
                 <SystemMessage variant="error" fill className="mb-3">
@@ -14464,7 +14139,7 @@ export function App() {
                     <Suspense fallback={null}>
                       <LazyComposerSlashMenu
                         mode="workflow"
-                        workflowQuery={slashWorkflowQuery}
+                        workflowGroups={slashWorkflowGroups}
                         activeWorkflowId={resolvedActiveSlashWorkflowId}
                         onSelectWorkflow={handleSelectComposerWorkflow}
                       />
@@ -15111,6 +14786,7 @@ export function App() {
       {activePanel !== "resources" ? (
         <UploadFlightChip inFlightCount={inFlightUploadCount} onOpen={openResourcesPanel} />
       ) : null}
+      <FigureLightboxRoot />
     </SidebarProvider>
   );
 }

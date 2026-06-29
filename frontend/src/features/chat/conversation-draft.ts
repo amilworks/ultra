@@ -46,6 +46,10 @@ export const shouldShowConversationInHistory = (
   conversation: DraftConversationLike | null | undefined
 ): boolean => Boolean(conversation && !isBlankDraftConversation(conversation));
 
+export const shouldExposeConversationInUrl = (
+  conversation: DraftConversationLike | null | undefined
+): boolean => shouldShowConversationInHistory(conversation);
+
 export const findReusableBlankDraftConversation = <
   Conversation extends DraftConversationLike,
 >(

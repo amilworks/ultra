@@ -47,7 +47,16 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
             "reasoning_mode": "deep",
             "budgets": {"max_runtime_seconds": 0},
             "benchmark": {"suite": "autonomy"},
-            "metadata": {"principal": {"org_id": "allen", "role": "researcher"}},
+            "metadata": {
+                "principal": {"org_id": "allen", "role": "researcher"},
+                "runtime_facts": {
+                    "current_datetime_utc": "2026-06-25T00:42:05Z",
+                    "current_date_utc": "Thursday, June 25, 2026",
+                    "user_timezone": "America/Los_Angeles",
+                    "product_name": "Ultra",
+                    "public_url": "https://ultra.ece.ucsb.edu",
+                },
+            },
         }
     )
 
@@ -68,6 +77,13 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
     assert context.reasoning_mode == "deep"
     assert context.budget == {"max_runtime_seconds": 0}
     assert context.benchmark == {"suite": "autonomy"}
+    assert context.runtime_facts == {
+        "current_datetime_utc": "2026-06-25T00:42:05Z",
+        "current_date_utc": "Thursday, June 25, 2026",
+        "user_timezone": "America/Los_Angeles",
+        "product_name": "Ultra",
+        "public_url": "https://ultra.ece.ucsb.edu",
+    }
     assert context.auth_claims["role"] == "researcher"
 
 

@@ -58,6 +58,16 @@ class RuntimeSettings:
     # that let a stalled vision call wedge a worker for 1h43m).
     model_stream_idle_timeout_seconds: float = 3600.0
     model_stream_idle_max_recoveries: int = 2
+    # Per-delegated-task (task tool) HARD wall-clock budget for BOUNDED subagents only
+    # (vision-reasoner, literature-reviewer — see DEADLINE_BOUNDED_SUBAGENTS). Distinct from the
+    # idle watchdog above (which resets on every event and is run-level at 3600s): a bounded
+    # subagent that goes silent for many minutes is HUNG, not progressing. On expiry it returns a
+    # degraded ToolMessage (the subagent is isolated; siblings in a parallel fan-out are unaffected;
+    # the coordinator continues with partial results). Default 1800s (30m): well above bounded
+    # subagents' measured legit work (vision p90 ~22m) yet far below the 60m idle watchdog that
+    # let a hung vision-reasoner stall a run. Computational delegates (code-runner etc.) are
+    # EXCLUDED — they legitimately run 30-67m. 0 disables.
+    subagent_task_timeout_seconds: float = 1800.0
     max_retries: int = 1
     # Qwen3.6-27B vision-language model (the "vision-reasoner" subagent's own model,
     # distinct from the text coordinator above). On-prem vLLM, OpenAI-compatible.
@@ -80,6 +90,26 @@ class RuntimeSettings:
     # Max images per single VLM prompt — MUST match the served vLLM's
     # --limit-mm-per-prompt image count (4); exceeding it is a hard 400 from the server.
     qwen_vlm_max_images_per_call: int = 4
+    # The Builder: a model-agnostic autonomous-coding sub-coordinator the coordinator
+    # delegates a GOAL to. Points at ANY OpenAI-compatible endpoint (swap models freely).
+    # Off by default; when base_url/model are unset it falls back to the coordinator's model.
+    builder_enabled: bool = False
+    builder_base_url: str = ""
+    builder_model: str = ""
+    builder_api_key: str = field(default="EMPTY", repr=False)
+    builder_max_input_tokens: int = 0
+    builder_multimodal: bool = False  # builder model can SEE (self-check its own rendered figures)
+    builder_goal_max_iterations: int = 6  # GoalLoop pathology cap (never a depth cap)
+    builder_recursion_limit: int = 400
+    # Optional SECOND endpoint for the Builder's sub-workers: the LEAD loop (plan/decide/verify)
+    # runs build_builder_model; the executors it delegates focused sub-runs to via its own task
+    # tool run this worker model (e.g. lead=deepseek/H200, workers=Qwen/tesla — heavy execution
+    # offloads onto the other GPU). UNSET => workers run the SAME model as the lead (no second
+    # endpoint contacted), so the default is today's single-model behavior.
+    builder_worker_base_url: str = ""
+    builder_worker_model: str = ""
+    builder_worker_api_key: str = field(default="EMPTY", repr=False)
+    builder_worker_max_input_tokens: int = 0
     title_generation_enabled: bool = False
     title_generation_timeout_seconds: float = 8.0
     # Sidebar titles need ~12 tokens; on hybrid-reasoning models the thinking
@@ -215,6 +245,9 @@ class RuntimeSettings:
                 # Default armed (3600 = the field default); only an explicit env 0 disables it.
                 float(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "3600")),
             ),
+            subagent_task_timeout_seconds=max(
+                0.0, float(os.getenv("ULTRA_DEEPAGENTS_SUBAGENT_TASK_TIMEOUT_SECONDS", "1800"))
+            ),
             model_stream_idle_max_recoveries=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", "2")),
@@ -243,6 +276,34 @@ class RuntimeSettings:
             ),
             qwen_vlm_max_images_per_call=max(
                 1, int(os.getenv("QWEN_VLM_MAX_IMAGES_PER_CALL", "4"))
+            ),
+            builder_enabled=_env_bool("ULTRA_DEEPAGENTS_BUILDER_ENABLED", False),
+            builder_base_url=os.getenv("ULTRA_DEEPAGENTS_BUILDER_BASE_URL", ""),
+            builder_model=os.getenv("ULTRA_DEEPAGENTS_BUILDER_MODEL", ""),
+            builder_api_key=_resolve_secret(
+                "ULTRA_DEEPAGENTS_BUILDER_API_KEY",
+                "ULTRA_DEEPAGENTS_BUILDER_API_KEY_FILE",
+                default="EMPTY",
+            ),
+            builder_max_input_tokens=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_MAX_INPUT_TOKENS", "0"))
+            ),
+            builder_multimodal=_env_bool("ULTRA_DEEPAGENTS_BUILDER_MULTIMODAL", False),
+            builder_goal_max_iterations=max(
+                1, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_GOAL_MAX_ITERATIONS", "6"))
+            ),
+            builder_recursion_limit=max(
+                10, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_RECURSION_LIMIT", "400"))
+            ),
+            builder_worker_base_url=os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_BASE_URL", ""),
+            builder_worker_model=os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_MODEL", ""),
+            builder_worker_api_key=_resolve_secret(
+                "ULTRA_DEEPAGENTS_BUILDER_WORKER_API_KEY",
+                "ULTRA_DEEPAGENTS_BUILDER_WORKER_API_KEY_FILE",
+                default="EMPTY",
+            ),
+            builder_worker_max_input_tokens=max(
+                0, int(os.getenv("ULTRA_DEEPAGENTS_BUILDER_WORKER_MAX_INPUT_TOKENS", "0"))
             ),
             title_generation_enabled=_env_bool(
                 "ULTRA_DEEPAGENTS_TITLE_GENERATION_ENABLED",

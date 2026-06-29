@@ -44,6 +44,8 @@ export const sliceCacheSize = (): number => bitmapCache.size;
 export const clearSliceCache = (): void => {
   bitmapCache.clear();
   inflight.clear();
+  pendingPrefetch = [];
+  activePrefetch = 0;
 };
 
 /**
@@ -122,18 +124,53 @@ export const loadSliceBitmap = (url: string, onProgress?: SliceLoadProgress): Pr
   return request;
 };
 
+// Concurrency cap for prefetch warm-ups. A z-scrub asks to prefetch a neighborhood
+// on every step; without a cap a fast drag fires dozens of decode requests at once
+// and floods the (small, libbioimage-serialized) image-service decode pool, which
+// then starves the interactive viewer. The display request itself (the <img> the
+// user is looking at) is separate and unthrottled here — only the speculative
+// warm-ups are bounded.
+const PREFETCH_CONCURRENCY = 3;
+let pendingPrefetch: string[] = [];
+let activePrefetch = 0;
+
+const pumpPrefetch = (): void => {
+  while (activePrefetch < PREFETCH_CONCURRENCY && pendingPrefetch.length > 0) {
+    const url = pendingPrefetch.shift() as string;
+    if (!url || bitmapCache.has(url) || inflight.has(url)) {
+      continue;
+    }
+    activePrefetch += 1;
+    void loadSliceBitmap(url)
+      .catch(() => {})
+      .finally(() => {
+        activePrefetch = Math.max(0, activePrefetch - 1);
+        pumpPrefetch();
+      });
+  }
+};
+
 /**
- * Warm the cache for slices the user is likely to reach next. Already-cached or
- * in-flight URLs are skipped, and failures are swallowed (a prefetch that loses a
- * race with navigation must never surface an error).
+ * Warm the cache for slices the user is likely to reach next. Latest-position-wins:
+ * each call REPLACES the pending (not-yet-started) prefetch set, so when a scrub
+ * moves on, warm-ups for planes the user already passed are dropped instead of
+ * piling onto the decode pool. At most {@link PREFETCH_CONCURRENCY} run at once.
+ * Already-cached or in-flight URLs are skipped; failures are swallowed.
  */
 export const prefetchSliceBitmaps = (urls: Iterable<string>): void => {
+  pendingPrefetch = [];
   for (const url of urls) {
     if (!url || bitmapCache.has(url) || inflight.has(url)) {
       continue;
     }
-    void loadSliceBitmap(url).catch(() => {});
+    pendingPrefetch.push(url);
   }
+  pumpPrefetch();
+};
+
+/** Drop queued (not-yet-started) prefetches — e.g. when the scrub ends. */
+export const cancelPendingSlicePrefetches = (): void => {
+  pendingPrefetch = [];
 };
 
 export type ScalarSliceSource = {

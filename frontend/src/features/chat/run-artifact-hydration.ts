@@ -308,3 +308,119 @@ export const shouldHydrateRunArtifacts = (
 
   return Array.from(candidateUrls).some(looksLikeLocalFilesystemPath);
 };
+
+// Non-visual durable run outputs the chat surfaces as readable/downloadable
+// documents. Images keep flowing through the figure strip; this covers the
+// markdown report, supporting code, and data tables a run produces.
+export type RunDocumentKind = "report" | "code" | "data" | "document";
+
+const REPORT_DOCUMENT_EXTENSIONS = [".md", ".markdown", ".mdx"];
+const CODE_DOCUMENT_EXTENSIONS = [
+  ".py",
+  ".ipynb",
+  ".r",
+  ".jl",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".sh",
+  ".bash",
+  ".c",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".java",
+  ".go",
+  ".rs",
+  ".m",
+  ".sql",
+];
+const DATA_DOCUMENT_EXTENSIONS = [
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
+  ".ndjson",
+  ".geojson",
+  ".yaml",
+  ".yml",
+  ".xml",
+  ".parquet",
+  ".feather",
+  ".npy",
+  ".npz",
+  ".h5",
+  ".hdf5",
+  ".nc",
+];
+const PLAIN_DOCUMENT_EXTENSIONS = [".txt", ".text", ".log", ".tex", ".bib", ".rst", ".pdf"];
+
+const pathHasExtension = (path: string, extensions: string[]): boolean => {
+  const lower = String(path || "").trim().toLowerCase();
+  return extensions.some((extension) => lower.endsWith(extension));
+};
+
+// Only intentional, agent-produced OUTPUTS are surfaced — never the user's own
+// uploads, staged inputs, or intermediate tile artifacts. The outputs collector
+// registers produced files under `outputs/`.
+const isRunOutputArtifactPath = (path: string): boolean => {
+  const normalized = String(path || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  if (!normalized) {
+    return false;
+  }
+  return normalized.startsWith("outputs/") || normalized.includes("/outputs/");
+};
+
+export const classifyRunDocumentKind = (
+  path: string,
+  mimeType?: string | null
+): RunDocumentKind | null => {
+  const mime = String(mimeType ?? "").trim().toLowerCase();
+  if (pathHasExtension(path, REPORT_DOCUMENT_EXTENSIONS) || mime === "text/markdown") {
+    return "report";
+  }
+  if (pathHasExtension(path, CODE_DOCUMENT_EXTENSIONS) || mime.startsWith("text/x-")) {
+    return "code";
+  }
+  if (
+    pathHasExtension(path, DATA_DOCUMENT_EXTENSIONS) ||
+    mime === "application/json" ||
+    mime.endsWith("+json") ||
+    mime === "text/csv" ||
+    mime === "application/x-yaml" ||
+    mime === "application/yaml" ||
+    mime === "application/xml" ||
+    mime.endsWith("+xml")
+  ) {
+    return "data";
+  }
+  if (pathHasExtension(path, PLAIN_DOCUMENT_EXTENSIONS) || mime.startsWith("text/")) {
+    return "document";
+  }
+  return null;
+};
+
+export const isReportRunDocument = (path: string, mimeType?: string | null): boolean =>
+  classifyRunDocumentKind(path, mimeType) === "report";
+
+// A durable run artifact the chat should surface as a downloadable document or
+// readable report: an intentional output, NOT a visual (images take the figure
+// strip), with a recognized document/code/data type.
+export const isHydratableRunArtifactDocument = (
+  artifact: HydrationArtifactRecord
+): boolean => {
+  if (isHydratableRunArtifactVisual(artifact)) {
+    return false;
+  }
+  const path = String(artifact?.path ?? "").trim();
+  if (!path || !isRunOutputArtifactPath(path)) {
+    return false;
+  }
+  const mimeType = String(artifact?.mime_type ?? artifact?.mimeType ?? "");
+  return classifyRunDocumentKind(path, mimeType) !== null;
+};

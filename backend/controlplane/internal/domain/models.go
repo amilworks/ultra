@@ -945,6 +945,101 @@ type UploadSessionOperationalMetrics struct {
 	BytesCommitted int64 `json:"bytes_committed"`
 }
 
+// AdminMetricsParams configures the value-proving ("platform value") metric
+// computation. Time boundaries are computed by the handler so the store stays
+// deterministic and testable.
+type AdminMetricsParams struct {
+	Now                  time.Time
+	RangeStart           time.Time
+	CohortMaxPeriods     int
+	ActivationWindowDays int
+	PowerUserWindowDays  int
+	PowerUserThreshold   int
+	CostSince            time.Time
+}
+
+// AdminWeekPoint is one weekly value in a trend series. WeekStart is the
+// ISO-week Monday (UTC) the value is bucketed under.
+type AdminWeekPoint struct {
+	WeekStart time.Time
+	Value     int
+}
+
+// AdminNorthStar is the headline value metric: weekly active researchers who
+// complete at least one useful run (a succeeded run that produced an output).
+type AdminNorthStar struct {
+	Weekly []AdminWeekPoint
+}
+
+// AdminRetentionCohort is one signup-week cohort. Retained[p] is the count of
+// distinct cohort members active during the p-th week after signup, so
+// Retained[0] is week-zero activity. Size is the cohort's signup count.
+type AdminRetentionCohort struct {
+	CohortStart time.Time
+	Size        int
+	Retained    []int
+}
+
+// AdminPowerUserBucket is one bar of the L28 power-user curve.
+type AdminPowerUserBucket struct {
+	DaysActive int
+	Users      int
+}
+
+// AdminPowerUserCurve is the histogram of distinct active days per user over a
+// trailing window — the "smile" that reveals a near-daily core.
+type AdminPowerUserCurve struct {
+	WindowDays         int
+	PowerUserThreshold int
+	Buckets            []AdminPowerUserBucket
+}
+
+// AdminFunnelStage is one step of the new-user activation funnel.
+type AdminFunnelStage struct {
+	Stage string
+	Users int
+}
+
+// AdminModelTokens is per-model token consumption over the metrics range.
+type AdminModelTokens struct {
+	Model        string
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+	Runs         int
+}
+
+// AdminDayModelTokens is per-day, per-model token consumption used to build the
+// daily cost/usage trend (priced in the handler from the configured price map).
+type AdminDayModelTokens struct {
+	Day          time.Time
+	Model        string
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+}
+
+// AdminMetrics is the raw value-proving metric set computed in the store. Cost
+// in currency is layered on in the handler from the configured model price map;
+// the store only reports token volumes and run counts.
+type AdminMetrics struct {
+	RangeDays            int
+	NorthStar            AdminNorthStar
+	WAU                  int
+	MAU                  int
+	NewUsers             int
+	ActivationActivated  int
+	ActivationCohort     int
+	ActivationWindowDays int
+	RetentionCohorts     []AdminRetentionCohort
+	PowerUserCurve       AdminPowerUserCurve
+	Funnel               []AdminFunnelStage
+	UsefulRuns           int
+	TotalRuns            int
+	TokensByModel        []AdminModelTokens
+	TokensDaily          []AdminDayModelTokens
+}
+
 func (metrics *UploadSessionOperationalMetrics) AddSession(session UploadSessionRecord) {
 	metrics.Total++
 	switch strings.ToLower(strings.TrimSpace(session.Status)) {

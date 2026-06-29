@@ -1490,6 +1490,290 @@ func TestPostgresStoreResourceCatalogFiltersScientificMetadata(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreResourceSearchParsesScientificPredicatesAndFilePatterns(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-search-" + suffix
+	orgID := "org-search-" + suffix
+	now := time.Date(2026, 6, 27, 9, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_old_64_" + suffix,
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: "Norm_old_004_64yo.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now,
+			Metadata: domain.JSONMap{
+				"label": "NPH",
+				"image_header": domain.JSONMap{
+					"reader":      "nifti-1",
+					"array_dtype": "float32",
+					"width":       float64(256),
+				},
+			},
+		},
+		{
+			ResourceID:   "file_old_81_" + suffix,
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: "Norm_old_001_81yo.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(time.Second),
+			Metadata: domain.JSONMap{
+				"label": "control",
+				"image_header": domain.JSONMap{
+					"reader":      "nifti-1",
+					"array_dtype": "uint16",
+					"width":       float64(512),
+				},
+			},
+		},
+		{
+			ResourceID:   "file_young_40_" + suffix,
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: "Norm_young_005_40yo.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(2 * time.Second),
+			Metadata:     domain.JSONMap{"label": "NPH"},
+		},
+		{
+			ResourceID:   "file_old_plain_72_" + suffix,
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: "Norm_old_008_72.nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    now.Add(-time.Second),
+			Metadata:     domain.JSONMap{"label": "NPH"},
+		},
+		{
+			ResourceID:   "file_photo_" + suffix,
+			OwnerUserID:  userID,
+			OwnerOrgID:   orgID,
+			OriginalName: "prairie-camera.jpg",
+			ContentType:  "image/jpeg",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "image",
+			Status:       "active",
+			CreatedAt:    now.Add(3 * time.Second),
+			Metadata: domain.JSONMap{
+				"exif": domain.JSONMap{
+					"camera_model":    "Sony A1",
+					"focal_length_mm": float64(35),
+					"iso":             float64(800),
+				},
+				"image_header": domain.JSONMap{
+					"format": "jpeg",
+					"width":  float64(2048),
+					"height": float64(1024),
+				},
+			},
+		},
+	} {
+		if _, err := store.UpsertResource(ctx, resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	ageMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "age > 60",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser age query: %v", err)
+	}
+	if got := resourceIDs(ageMatches.Resources); !reflect.DeepEqual(got, []string{"file_old_81_" + suffix, "file_old_64_" + suffix, "file_old_plain_72_" + suffix}) {
+		t.Fatalf("age query resources = %v, want filename-derived old subjects", got)
+	}
+
+	combined, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "NPH age > 60",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser combined query: %v", err)
+	}
+	if got := resourceIDs(combined.Resources); !reflect.DeepEqual(got, []string{"file_old_64_" + suffix, "file_old_plain_72_" + suffix}) {
+		t.Fatalf("combined query resources = %v, want only NPH subject over 60", got)
+	}
+
+	nifti, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "*.nii.gz",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser glob query: %v", err)
+	}
+	if got := resourceIDs(nifti.Resources); !reflect.DeepEqual(got, []string{"file_young_40_" + suffix, "file_old_81_" + suffix, "file_old_64_" + suffix, "file_old_plain_72_" + suffix}) {
+		t.Fatalf("glob query resources = %v, want NIfTI gz resources", got)
+	}
+
+	niftiFamily, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "*.nii",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser NIfTI-family glob query: %v", err)
+	}
+	if got := resourceIDs(niftiFamily.Resources); !reflect.DeepEqual(got, []string{"file_young_40_" + suffix, "file_old_81_" + suffix, "file_old_64_" + suffix, "file_old_plain_72_" + suffix}) {
+		t.Fatalf("*.nii query resources = %v, want all NIfTI resources including .nii.gz", got)
+	}
+
+	headerMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "width > 1000",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser header query: %v", err)
+	}
+	if got := resourceIDs(headerMatches.Resources); !reflect.DeepEqual(got, []string{"file_photo_" + suffix}) {
+		t.Fatalf("header query resources = %v, want image header width match", got)
+	}
+
+	exifMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "focal_length > 30",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser exif query: %v", err)
+	}
+	if got := resourceIDs(exifMatches.Resources); !reflect.DeepEqual(got, []string{"file_photo_" + suffix}) {
+		t.Fatalf("EXIF query resources = %v, want focal-length match", got)
+	}
+}
+
+func TestPostgresStoreBackfillsResourceSearchFactsForExistingResources(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-search-backfill-" + suffix
+	orgID := "org-search-backfill-" + suffix
+	now := time.Date(2026, 6, 27, 11, 0, 0, 0, time.UTC)
+	for _, resource := range []struct {
+		id       string
+		name     string
+		metadata string
+		created  time.Time
+	}{
+		{
+			id:       "legacy_old_72_" + suffix,
+			name:     "NPH_shunt_013_72yo.nii.gz",
+			metadata: `{"label":"NPH"}`,
+			created:  now,
+		},
+		{
+			id:       "legacy_old_40_" + suffix,
+			name:     "Norm_young_005_40yo.nii.gz",
+			metadata: `{"label":"control"}`,
+			created:  now.Add(time.Second),
+		},
+	} {
+		_, err := pool.Exec(ctx, `
+INSERT INTO control_resources (
+  resource_id, owner_user_id, owner_org_id, original_name, content_type, size_bytes, source_type,
+  resource_kind, status, created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, $4, 'application/gzip', 128, 'upload', 'file', 'active', $5, $5, $6::jsonb)`,
+			resource.id,
+			userID,
+			orgID,
+			resource.name,
+			resource.created,
+			resource.metadata,
+		)
+		if err != nil {
+			t.Fatalf("insert legacy resource %s: %v", resource.id, err)
+		}
+	}
+
+	if err := BackfillPostgresResourceSearchIndexes(ctx, pool); err != nil {
+		t.Fatalf("BackfillPostgresResourceSearchIndexes: %v", err)
+	}
+
+	ageMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "age > 60",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser age query: %v", err)
+	}
+	if got := resourceIDs(ageMatches.Resources); !reflect.DeepEqual(got, []string{"legacy_old_72_" + suffix}) {
+		t.Fatalf("backfilled age query resources = %v, want legacy old subject", got)
+	}
+
+	niftiMatches, err := store.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "*.nii",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser NIfTI query: %v", err)
+	}
+	if got := resourceIDs(niftiMatches.Resources); !reflect.DeepEqual(got, []string{"legacy_old_40_" + suffix, "legacy_old_72_" + suffix}) {
+		t.Fatalf("backfilled *.nii query resources = %v, want all legacy NIfTI resources", got)
+	}
+}
+
 func TestPostgresStoreResourceCollectionBulkMembership(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {

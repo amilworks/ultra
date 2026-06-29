@@ -14,8 +14,63 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 )
+
+func TestMigratePostgresBackfillsResourceSearchFacts(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is required")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+
+	suffix := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")) + "_" + time.Now().UTC().Format("20060102150405")
+	userID := "app-migrate-search-" + suffix
+	orgID := "org-app-migrate-search-" + suffix
+	resourceID := "legacy-migrate-old-" + suffix
+	createdAt := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+INSERT INTO control_resources (
+  resource_id, owner_user_id, owner_org_id, original_name, content_type, size_bytes, source_type,
+  resource_kind, status, created_at, updated_at, metadata
+)
+VALUES ($1, $2, $3, 'NPH_shunt_016_79yo.nii.gz', 'application/gzip', 128, 'upload', 'file', 'active', $4, $4, '{"label":"NPH"}'::jsonb)`,
+		resourceID,
+		userID,
+		orgID,
+		createdAt,
+	); err != nil {
+		t.Fatalf("insert legacy resource: %v", err)
+	}
+
+	if err := MigratePostgres(ctx, config.Config{DatabaseURL: databaseURL}); err != nil {
+		t.Fatalf("MigratePostgres: %v", err)
+	}
+
+	pgStore := store.NewPostgresStore(pool)
+	page, err := pgStore.ListResourcesForUser(ctx, domain.ResourceListInput{
+		UserID: userID,
+		OrgID:  orgID,
+		Query:  "NPH age > 60",
+		Limit:  20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser: %v", err)
+	}
+	if len(page.Resources) != 1 || page.Resources[0].ResourceID != resourceID {
+		t.Fatalf("resources = %+v, want migrated legacy resource", page.Resources)
+	}
+}
 
 func TestAppPostgresAndNATSFlowPersistsWorkerEventsAcrossRestart(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL"))

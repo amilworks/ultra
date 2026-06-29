@@ -93,6 +93,51 @@ const datasetSnapshotEventFixture = {
 };
 const resourceFixtures = [
   {
+    file_id: "file_csv_demo",
+    original_name: "survey_2026.csv",
+    content_type: "text/csv",
+    size_bytes: 2_410_000_000,
+    sha256: "sha-csv-demo",
+    source_type: "upload",
+    resource_kind: "table",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["survey"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  },
+  {
+    file_id: "file_json_demo",
+    original_name: "agent_config.json",
+    content_type: "application/json",
+    size_bytes: 3200,
+    sha256: "sha-json-demo",
+    source_type: "upload",
+    resource_kind: "document",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["config"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  },
+  {
+    file_id: "file_md_demo",
+    original_name: "README.md",
+    content_type: "text/markdown",
+    size_bytes: 6800,
+    sha256: "sha-md-demo",
+    source_type: "upload",
+    resource_kind: "document",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["docs"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  },
+  {
     file_id: "file_query_dataset_b",
     original_name: "subject-b-nph-under70.nii.gz",
     content_type: "application/gzip",
@@ -615,8 +660,144 @@ const metadataScalarValues = (value) => {
   return [];
 };
 
+const normalizeSearchField = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const flattenMetadataNumbers = (value, prefix = "") => {
+  if (value == null) {
+    return [];
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return [[prefix, value]];
+  }
+  if (typeof value === "string") {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) && value.trim() !== "" ? [[prefix, numberValue]] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => flattenMetadataNumbers(item, `${prefix}.${index}`));
+  }
+  if (typeof value === "object") {
+    return Object.entries(value).flatMap(([key, child]) =>
+      flattenMetadataNumbers(child, prefix ? `${prefix}.${key}` : key)
+    );
+  }
+  return [];
+};
+
+const filenameAge = (resource) => {
+  const name = String(resource.original_name || "");
+  const match = name.match(/(?:^|[_\-\s])(\d{1,3})\s*(?:yo|yrs?|years?)(?=$|[_\-\s.])/i);
+  if (!match) {
+    return null;
+  }
+  const age = Number(match[1]);
+  return Number.isFinite(age) ? age : null;
+};
+
+const numericFactsForResource = (resource) => {
+  const facts = new Map();
+  const addFact = (key, value) => {
+    const normalized = normalizeSearchField(key);
+    const numberValue = Number(value);
+    if (!normalized || !Number.isFinite(numberValue)) {
+      return;
+    }
+    if (!facts.has(normalized)) {
+      facts.set(normalized, []);
+    }
+    facts.get(normalized).push(numberValue);
+  };
+  flattenMetadataNumbers(resource.metadata || {}).forEach(([path, value]) => {
+    addFact(path, value);
+    const segments = String(path || "").split(".").filter(Boolean);
+    if (segments.length > 0) {
+      addFact(segments[segments.length - 1], value);
+    }
+  });
+  const age = filenameAge(resource);
+  if (age != null) {
+    addFact("age", age);
+    addFact("subject_age", age);
+  }
+  if (facts.has("subject_age") && !facts.has("age")) {
+    facts.set("age", [...facts.get("subject_age")]);
+  }
+  if (facts.has("focal_length_mm") && !facts.has("focal_length")) {
+    facts.set("focal_length", [...facts.get("focal_length_mm")]);
+  }
+  return facts;
+};
+
+const compareNumber = (actual, operator, expected) => {
+  if (operator === "<") return actual < expected;
+  if (operator === "<=") return actual <= expected;
+  if (operator === ">") return actual > expected;
+  if (operator === ">=") return actual >= expected;
+  if (operator === "=" || operator === "==") return actual === expected;
+  return false;
+};
+
+const parseResourceSearchQuery = (rawQuery) => {
+  let residual = String(rawQuery || "").trim();
+  const numericPredicates = [];
+  residual = residual.replace(
+    /\b([a-zA-Z][\w.-]*)\s*(<=|>=|==|=|<|>)\s*(-?\d+(?:\.\d+)?)\b/g,
+    (_match, field, operator, value) => {
+      numericPredicates.push({
+        field: normalizeSearchField(field),
+        operator,
+        value: Number(value),
+      });
+      return " ";
+    }
+  );
+  const filePatterns = [];
+  residual = residual.replace(/(^|\s)(\*\.?[^\s,]+)(?=$|\s|,)/g, (match, prefix, pattern) => {
+    filePatterns.push(String(pattern || "").toLowerCase());
+    return prefix || " ";
+  });
+  return {
+    numericPredicates,
+    filePatterns,
+    residual: residual.replace(/\s+/g, " ").trim(),
+  };
+};
+
+const resourceMatchesNumericPredicates = (resource, predicates) => {
+  if (predicates.length === 0) {
+    return true;
+  }
+  const facts = numericFactsForResource(resource);
+  return predicates.every((predicate) => {
+    const values = facts.get(predicate.field) || [];
+    return values.some((value) => compareNumber(value, predicate.operator, predicate.value));
+  });
+};
+
+const resourceMatchesFilePatterns = (resource, patterns) => {
+  if (patterns.length === 0) {
+    return true;
+  }
+  const filename = String(resource.original_name || "").toLowerCase();
+  return patterns.every((pattern) => {
+    if (pattern.startsWith("*.")) {
+      const extension = pattern.slice(2);
+      return filename.endsWith(`.${extension}`) || filename.includes(`.${extension}.`);
+    }
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`).test(filename);
+  });
+};
+
 const resourceMatchesQuery = (resource, queryInput = {}) => {
-  const query = String(queryInput.q || queryInput.query || "").trim().toLowerCase();
+  const rawQuery = String(queryInput.q || queryInput.query || "").trim();
+  const parsedQuery = parseResourceSearchQuery(rawQuery);
+  const query = parsedQuery.residual.toLowerCase();
   const kind = String(queryInput.kind || "").trim();
   const source = String(queryInput.source || "").trim();
   const projectId = String(queryInput.project_id || queryInput.projectId || "").trim();
@@ -624,6 +805,12 @@ const resourceMatchesQuery = (resource, queryInput = {}) => {
   const tags = Array.isArray(queryInput.tags)
     ? queryInput.tags.map((tag) => String(tag).trim()).filter(Boolean)
     : [];
+  if (!resourceMatchesNumericPredicates(resource, parsedQuery.numericPredicates)) {
+    return false;
+  }
+  if (!resourceMatchesFilePatterns(resource, parsedQuery.filePatterns)) {
+    return false;
+  }
   if (query) {
     const searchable = [
       resource.file_id,
@@ -1411,6 +1598,76 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  const textHeadMatch = url.pathname.match(/^\/v2\/resources\/([^/]+)\/text-head$/);
+  if (request.method === "GET" && textHeadMatch) {
+    const resourceId = decodeURIComponent(textHeadMatch[1] || "").trim();
+    const jsonText =
+      '{\n  "model": "deepseek_v4",\n  "max_input_tokens": 786432,\n  "enable_thinking": true,\n' +
+      '  "subagents": ["code-runner", "vision-reasoner"],\n  "sandbox": {\n    "memory_gb": 64,\n    "gpus": 1,\n    "network": "none"\n  }\n}\n';
+    const mdText =
+      "# Prairie-dog survey pipeline\n\nBatch detection over aerial transects using `MegaSeg` (GPU) and\n`RareSpot` (CPU), aggregated to the Resources catalog.\n\n## Inputs\n\n- GeoTIFF transects, 1–3 GB each\n- A `survey_2026.csv` manifest of sites\n\n## Run\n\nOpen the file in Lens, or hand it to the data agent for full-file analytics.\n";
+    const csvText =
+      "site_id,species,lat,lon,count,observed_at,confidence,notes\n" +
+      "A-014,C. ludovicianus,41.1402,-104.8203,34,2026-05-12,0.97,burrow cluster A\n" +
+      "B-002,C. gunnisoni,38.8339,-104.8214,52,2026-05-13,0.99,dense aggregation\n" +
+      "C-101,C. leucurus,40.0150,-105.2705,21,2026-05-15,0.95,near road\n" +
+      "D-077,C. ludovicianus,41.5868,-109.2029,88,2026-05-18,0.98,largest colony\n";
+    const text = resourceId === "file_md_demo" ? mdText : resourceId === "file_csv_demo" ? csvText : jsonText;
+    const format = resourceId === "file_md_demo" ? "markdown" : resourceId === "file_csv_demo" ? "csv" : "json";
+    sendJson(response, 200, {
+      file_id: resourceId,
+      original_name: resourceId === "file_md_demo" ? "README.md" : "agent_config.json",
+      content_type: resourceId === "file_md_demo" ? "text/markdown" : "application/json",
+      format,
+      total_size_bytes: text.length,
+      offset: 0,
+      returned_bytes: text.length,
+      next_offset: text.length,
+      truncated: false,
+      encoding: "utf-8",
+      eol: "lf",
+      line_count: text.split("\n").length,
+      approx_total_lines: text.split("\n").length,
+      text,
+    });
+    return;
+  }
+
+  const csvRowsMatch = url.pathname.match(/^\/v2\/resources\/([^/]+)\/csv\/rows$/);
+  if (request.method === "GET" && csvRowsMatch) {
+    const resourceId = decodeURIComponent(csvRowsMatch[1] || "").trim();
+    const offsetBytes = Number(url.searchParams.get("offset_bytes") || "0");
+    const columns = ["site_id", "species", "lat", "lon", "count", "observed_at", "confidence", "notes"];
+    const species = ["C. ludovicianus", "C. gunnisoni", "C. leucurus"];
+    const rows = Array.from({ length: 200 }, (_, i) => {
+      const n = offsetBytes / 64 + i;
+      return [
+        `A-${String((n % 900) + 14).padStart(3, "0")}`,
+        species[Math.floor(n) % species.length],
+        (41.14 + (n % 13) * 0.001).toFixed(4),
+        (-104.82 - (n % 17) * 0.001).toFixed(4),
+        String(((Math.floor(n) * 7) % 90) + 3),
+        "2026-05-12",
+        (0.6 + ((Math.floor(n) * 3) % 40) / 100).toFixed(2),
+        "burrow cluster",
+      ];
+    });
+    sendJson(response, 200, {
+      file_id: resourceId,
+      original_name: "survey_2026.csv",
+      delimiter: ",",
+      columns: offsetBytes === 0 ? columns : undefined,
+      rows,
+      offset_bytes: offsetBytes,
+      next_offset_bytes: offsetBytes + 200 * 64,
+      returned_rows: rows.length,
+      has_more: offsetBytes < 64 * 2000,
+      approx_total_rows: 2_400_000,
+      total_size_bytes: 2_410_000_000,
+    });
+    return;
+  }
+
   const resourceDownloadMatch = url.pathname.match(/^\/v2\/resources\/([^/]+)\/download$/);
   if (request.method === "GET" && resourceDownloadMatch) {
     const resourceId = decodeURIComponent(resourceDownloadMatch[1] || "").trim();
@@ -1452,6 +1709,10 @@ const server = http.createServer(async (request, response) => {
     const resource = allResources().find((fixture) => fixture.file_id === resourceId);
     if (!resource) {
       sendJson(response, 404, { error: "not found" });
+      return;
+    }
+    if (request.method === "GET") {
+      sendJson(response, 200, { resource: resourceWithLifecycle(resource) });
       return;
     }
     if (request.method === "PATCH") {

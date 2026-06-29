@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 
 from ultra_deepagents.config import RuntimeSettings
+
+logger = logging.getLogger(__name__)
 
 
 class UltraChatOpenAI(ChatOpenAI):
@@ -110,4 +113,75 @@ def build_vision_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
     )
     if settings.qwen_vlm_max_input_tokens > 0:
         model.profile = {"max_input_tokens": settings.qwen_vlm_max_input_tokens}
+    return model
+
+
+def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
+    """The Builder sub-coordinator's loop model - MODEL-AGNOSTIC by design.
+
+    Points at whatever OpenAI-compatible endpoint ``builder_base_url``/``builder_model``
+    name (swap Qwen, deepseek, or any other without touching the system). When those are
+    unset, the Builder falls back to the coordinator's own ``build_chat_model`` so the
+    system still runs with a single model configured. Same UltraChatOpenAI transport
+    (reasoning-delta lift + per-run token accounting) as the other model builders.
+    """
+    if not settings.builder_base_url or not settings.builder_model:
+        # A partially-configured endpoint (exactly one of base_url/model set) is almost
+        # certainly an operator mistake; fall back, but say so loudly rather than silently
+        # running the Builder on the coordinator model.
+        if settings.builder_base_url or settings.builder_model:
+            logger.warning(
+                "Builder model partially configured (base_url=%r, model=%r): BOTH are required "
+                "to use a separate endpoint; falling back to the coordinator model.",
+                settings.builder_base_url,
+                settings.builder_model,
+            )
+        return build_chat_model(settings)
+    timeout = settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
+    model = UltraChatOpenAI(
+        model=settings.builder_model,
+        base_url=settings.builder_base_url,
+        api_key=settings.builder_api_key,
+        timeout=timeout,
+        stream_chunk_timeout=timeout,
+        max_retries=settings.max_retries,
+        stream_usage=True,
+    )
+    if settings.builder_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.builder_max_input_tokens}
+    return model
+
+
+def build_builder_worker_model(settings: RuntimeSettings) -> ChatOpenAI:
+    """The Builder's SUB-WORKER model — the executor it delegates focused sub-runs to.
+
+    Enables a model split: the LEAD loop (plan/decide/verify) runs ``build_builder_model`` and
+    its sub-workers run a SECOND endpoint (e.g. lead=deepseek/H200, workers=Qwen/tesla, so heavy
+    execution offloads onto the other GPU). When the worker block is unset the worker model IS
+    the lead model, so the default is today's single-model behavior and NO second endpoint is
+    contacted. Returns an ``UltraChatOpenAI`` INSTANCE (not a model string) so the reasoning-delta
+    lift + ``stream_usage`` token accounting + ``.profile`` window are preserved on the worker.
+    """
+    if not settings.builder_worker_base_url or not settings.builder_worker_model:
+        # Partial config (exactly one of base_url/model) is almost certainly an operator mistake.
+        if settings.builder_worker_base_url or settings.builder_worker_model:
+            logger.warning(
+                "Builder WORKER model partially configured (base_url=%r, model=%r): BOTH are "
+                "required to use a separate worker endpoint; falling back to the Builder lead model.",
+                settings.builder_worker_base_url,
+                settings.builder_worker_model,
+            )
+        return build_builder_model(settings)
+    timeout = settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
+    model = UltraChatOpenAI(
+        model=settings.builder_worker_model,
+        base_url=settings.builder_worker_base_url,
+        api_key=settings.builder_worker_api_key,
+        timeout=timeout,
+        stream_chunk_timeout=timeout,
+        max_retries=settings.max_retries,
+        stream_usage=True,
+    )
+    if settings.builder_worker_max_input_tokens > 0:
+        model.profile = {"max_input_tokens": settings.builder_worker_max_input_tokens}
     return model

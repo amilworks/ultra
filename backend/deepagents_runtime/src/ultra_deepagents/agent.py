@@ -34,11 +34,12 @@ from ultra_deepagents.context_tools import (
     build_tool_capability_manifest_tool,
 )
 from ultra_deepagents.episodic.tools import build_episodic_tools
-from ultra_deepagents.model import build_chat_model
+from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
+from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
 from ultra_deepagents.vision import build_vision_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
@@ -147,6 +148,24 @@ run the requested analysis (plot, inference, feature extraction, model training)
 For other complex autonomous work, call tool_capability_manifest when you need to
 confirm which sandbox, filesystem, prior-artifact, paper, or domain tools are
 available before choosing a workflow.
+"""
+
+WRITING_GUIDANCE = """
+## Writing
+
+For substantial prose, match the genre, audience, purpose, and requested voice. Write with precision, coherence, and economy.
+
+- Put truth before polish. Never invent facts, citations, figures, quotations, or results, or strengthen claims beyond the evidence. Distinguish evidence, inference, and speculation; flag missing specifics rather than guessing. When you compute or estimate a quantity the source did not supply — a confidence interval, an r², a percentage, an effect size, a p-value — label it explicitly as derived and name the formula or assumption behind it; never present a derived or assumed value as a reported result.
+- Before drafting, identify the controlling question, exact claim, and what the piece must establish. In contested matters, locate the disagreement—fact, definition, cause, value, scope, or procedure—and keep subordinate questions tied to it.
+- Give each unit one purpose. Usually move from familiar context to new or consequential information. Develop ideas through mechanism, evidence, scope, or limitation rather than restatement.
+- Make sentences easy to parse. Keep subjects near verbs and modifiers beside what they modify; usually place the main clause before long qualifications. Use punctuation and parallel structure to reveal logical grouping. Split when the subject, viewpoint, or proposition changes materially; do not append loose afterthoughts after a natural close.
+- Choose words for exact meaning, not display. Prefer one precise term to near-synonym piles or generic intensifiers. Express principal actions as verbs. Use abstraction, nominalization, or passive voice when they improve accuracy or cohesion, not when they conceal action or agency. Cut redundancy without making prose telegraphic.
+- Match syntax to evidential strength: state firm conclusions directly and subordinate genuine conditions or caveats. Place emphasis near the end when natural. Vary sentence length, cadence, and structure without creating a mechanical pattern.
+- In arguments, make non-obvious warrants explicit. Use sufficient support, but omit weak or redundant reasons that dilute the case; disclose material limitations or contrary evidence.
+- In technical exposition, introduce terms and notation before use, keep notation consistent, identify definitions, assumptions, conjectures, bounds, and results, and give a brief roadmap before a multi-step argument or proof.
+- When editing, preserve the author’s voice, meaning, and evidentiary limits. Revise structure before flow, flow before syntax, and syntax before diction.
+
+Plainness is the default. Keep technique invisible; use ornament only when it serves the genre and argument, and discuss the craft only when asked.
 """
 
 PLOT_WORKFLOW_GUIDANCE = """
@@ -445,7 +464,9 @@ SCOPED_DELEGATION_CONTEXT_TOOLS = {
 # Subagents that do computational work and benefit from the rigor/reporting
 # skills. literature-reviewer is page-grounded paper review and is excluded so it
 # does not re-pay the SkillsMiddleware overhead for skills it would never activate.
-_SKILL_BEARING_SUBAGENTS = {"code-runner"}
+QWEN_CODE_RUNNER_NAME = "qwen-code-runner"
+
+_SKILL_BEARING_SUBAGENTS = {"code-runner", QWEN_CODE_RUNNER_NAME}
 
 # A single, unambiguous computational delegate. (A separate data-analyst was
 # dropped: it had a tool set identical to code-runner — deepagents injects
@@ -487,6 +508,38 @@ SCOPED_DELEGATION_SUBAGENTS = [
         ),
     },
 ]
+
+
+QWEN_CODE_RUNNER = {
+    "name": QWEN_CODE_RUNNER_NAME,
+    "description": (
+        "Qwen3.6-powered multimodal coding agent for focused sandbox execution, "
+        "debugging, plotting, artifact inspection, and image-aware code checks. Use it "
+        "when code work benefits from reading visual artifacts, screenshots, generated "
+        "plots, figures, or image-like data, or when an independent second coding pass "
+        "should run on the Qwen endpoint."
+    ),
+    "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
+    "system_prompt": (
+        "You are Ultra's Qwen multimodal code-runner. Use built-in filesystem and "
+        "sandbox execution tools for focused coding, debugging, plotting, simulation, "
+        "model-training, reproducibility, or artifact-inspection subtasks. You run on "
+        "the Qwen3.6 multimodal endpoint, so you may inspect visual artifacts when the "
+        "subtask genuinely depends on plots, screenshots, figures, or images; still "
+        "prefer numeric/textual verification for measurable claims and do not turn a "
+        "visual check into an open-ended diagnosis. Use the provided context tools to "
+        "stage selected uploads and prior artifacts before code reads them; avoid "
+        "guessing paths. Keep intermediate files under /workspace and durable outputs "
+        "under /outputs when available. Preserve the user's requested compute scope: "
+        "do not add longer durations, finer step sizes, more seeds, or broader "
+        "convergence sweeps unless the subtask explicitly asks for them or a short "
+        "smoke check reveals material uncertainty. Return a concise final report with "
+        "commands/scripts run, key numerical results, visual/artifact findings, "
+        "generated artifact paths, failures, and confidence. Do not perform broad "
+        "literature review, BisQue account operations, RareSpot inference, or "
+        "user-facing final synthesis; the coordinator reconciles your result."
+    ),
+}
 
 
 # The "second pair of eyes": a vision-language reasoner the text coordinator
@@ -602,6 +655,16 @@ quantitative question (an index, ratio, count, or slope with a known reference r
 COMPUTE in the sandbox; the vision pass corroborates the number, it does not produce it.
 """.strip()
 
+QWEN_CODE_DELEGATION_GUIDANCE = """
+Two coding delegates may be available: `code-runner` and `qwen-code-runner`. Use
+`code-runner` for the advanced reasoning coding pass: implementation, debugging,
+numerical experiments, reproducibility checks, and text/numeric artifact inspection. Use
+`qwen-code-runner` when the same code work benefits from a multimodal second pass over
+plots, screenshots, figures, or image-like outputs, or when an independent coding check
+should run on the Qwen endpoint. For independent subtasks, you may fan out to both and
+reconcile their findings yourself; keep each delegation focused and bounded.
+""".strip()
+
 
 def _should_register_vision_subagent(
     context: AgentRunContext | None, settings: RuntimeSettings
@@ -630,6 +693,22 @@ def _should_register_vision_subagent(
     return any(token in goal for token in _VISION_GOAL_TOKENS)
 
 
+def _should_register_qwen_code_runner(
+    context: AgentRunContext | None, settings: RuntimeSettings
+) -> bool:
+    if not _should_register_scoped_delegation_subagents(context):
+        return False
+    if not settings.qwen_vlm_enabled:
+        return False
+    if not settings.qwen_vlm_api_key or settings.qwen_vlm_api_key == "EMPTY":
+        logging.getLogger(__name__).warning(
+            "qwen_vlm_enabled but no API key resolved (set QWEN_VLM_API_KEY or "
+            "QWEN_VLM_API_KEY_FILE); qwen-code-runner will NOT be registered."
+        )
+        return False
+    return True
+
+
 _ULTRA_HARNESS_PROFILE_REGISTERED = False
 
 
@@ -655,6 +734,7 @@ def build_subagents(
     text_only_model: bool = True,
     skills_sources: Sequence[str] | None = None,
     vision_tools: Sequence[BaseTool | Any] | None = None,
+    qwen_coding_model: BaseChatModel | Any | None = None,
 ) -> list[dict[str, Any]]:
     subagents: list[dict[str, Any]] = []
 
@@ -685,6 +765,12 @@ def build_subagents(
             if subagent["name"] in _SKILL_BEARING_SUBAGENTS:
                 subagent["tools"] = delegation_context_tools
             subagents.append(subagent)
+        if qwen_coding_model is not None:
+            qwen = dict(QWEN_CODE_RUNNER)
+            qwen["response_format"] = deepcopy(qwen["response_format"])
+            qwen["model"] = qwen_coding_model
+            qwen["tools"] = delegation_context_tools
+            subagents.append(qwen)
 
     for subagent in subagents:
         # Only the computational subagents benefit from the rigor/reporting
@@ -693,7 +779,7 @@ def build_subagents(
         # activating them. Subagents share the parent backend's /skills/ route.
         if skills_sources and subagent["name"] in _SKILL_BEARING_SUBAGENTS:
             subagent["skills"] = list(skills_sources)
-        if text_only_model:
+        if text_only_model and subagent["name"] != QWEN_CODE_RUNNER_NAME:
             subagent["middleware"] = [TextOnlyMultimodalMiddleware()]
     return subagents
 
@@ -928,6 +1014,7 @@ def _should_register_async_delegation_subagents(context: AgentRunContext | None)
 def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | None = None) -> str:
     sections = [
         SYSTEM_PROMPT.strip(),
+        WRITING_GUIDANCE.strip(),
         PLOT_WORKFLOW_GUIDANCE.strip(),
         SANDBOX_RUNTIME_GUIDANCE.strip(),
         build_sandbox_resources_guidance(settings),
@@ -956,6 +1043,8 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     # so generic text runs do not pay for delegation guidance to an absent subagent.
     if context is not None and _should_register_vision_subagent(context, settings):
         sections.append(VISION_DELEGATION_GUIDANCE)
+    if context is not None and _should_register_qwen_code_runner(context, settings):
+        sections.append(QWEN_CODE_DELEGATION_GUIDANCE)
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -971,6 +1060,28 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     ]
     if context.goal.strip():
         lines.append(f"- goal: {context.goal.strip()}")
+    if context.runtime_facts:
+        lines.append("Runtime facts:")
+        for key in (
+            "current_datetime_utc",
+            "current_date_utc",
+            "user_timezone",
+            "local_datetime",
+            "run_started_at",
+            "product_name",
+            "app_name",
+            "app_version",
+            "deployment_environment",
+            "public_url",
+        ):
+            value = str(context.runtime_facts.get(key) or "").strip()
+            if value:
+                lines.append(f"- {key}: {value}")
+        lines.append(
+            "- Use these runtime facts for today, tomorrow, yesterday, current time, "
+            "timezone, product/deployment identity, and public URL. Do not infer "
+            "current dates from model knowledge."
+        )
     if context.selected_file_ids:
         file_ids = ", ".join(context.selected_file_ids)
         lines.append(f"- selected uploaded file ids: {file_ids} | use stage_uploaded_files_for_analysis")
@@ -1364,6 +1475,14 @@ def build_research_agent(
         resolved_backend = StateBackend()
 
     middleware: list[Any] = []
+    # OUTERMOST tool-call wrapper: contain a failing/slow `task` subagent to a degraded
+    # ToolMessage so one bad subagent in a parallel fan-out cannot cancel its siblings and abort
+    # the whole run (langgraph's gather has no return_exceptions; the default handler re-raises).
+    middleware.append(
+        SubagentFailureIsolationMiddleware(
+            timeout_seconds=settings.subagent_task_timeout_seconds
+        )
+    )
     middleware.append(build_runtime_prompt_middleware(settings))
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
@@ -1400,6 +1519,11 @@ def build_research_agent(
         if _should_register_vision_subagent(context, settings)
         else []
     )
+    qwen_coding_model = (
+        build_vision_chat_model(settings)
+        if _should_register_qwen_code_runner(context, settings)
+        else None
+    )
     subagents = build_subagents(
         paper_tools,
         context=context,
@@ -1407,7 +1531,10 @@ def build_research_agent(
         text_only_model=not settings.model_supports_multimodal,
         skills_sources=skills_sources,
         vision_tools=vision_tools,
+        qwen_coding_model=qwen_coding_model,
     )
+    # Builder remains in the codebase for later development, but is intentionally not
+    # registered in the coordinator while we evaluate the simpler multi-agent coding path.
     async_subagents = build_async_subagents(settings, context=context)
     if async_subagents:
         middleware.append(UltraAsyncSubagentContextMiddleware(async_subagents))

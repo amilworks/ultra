@@ -1867,6 +1867,50 @@ paths:
               schema:
                 type: string
                 format: binary
+  /v2/resources/{file_id}/text-head:
+    get:
+      operationId: getResourceTextHead
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: max_bytes
+          in: query
+          description: Maximum UTF-8-safe byte window to return. The server caps this to a bounded preview size.
+          schema: { type: integer, format: int64, minimum: 1, maximum: 4194304, default: 1048576 }
+        - name: offset
+          in: query
+          description: Byte offset for continuation reads.
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Bounded text or structured-data preview window
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceTextHeadResponse"
+  /v2/resources/{file_id}/csv/rows:
+    get:
+      operationId: getResourceCsvRows
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: offset_bytes
+          in: query
+          description: Byte-offset cursor returned by the previous page.
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          description: Maximum number of parsed rows to return.
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 200 }
+        - name: delimiter
+          in: query
+          description: Optional delimiter override. Use auto, comma, tab, semicolon, pipe, space, or a single delimiter character.
+          schema: { type: string, default: auto }
+      responses:
+        "200":
+          description: Quote-aware CSV or TSV row page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ResourceCsvRowsResponse"
   /v2/resources/{file_id}/restore:
     post:
       operationId: restoreResource
@@ -2168,6 +2212,31 @@ paths:
           description: Missing or unsafe artifact path
         "404":
           description: Artifact path not found
+  /v2/runs/{run_id}/artifacts/caption:
+    get:
+      operationId: getRunArtifactCaption
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: Run-relative artifact path to caption.
+      responses:
+        "200":
+          description: Lazily generated run artifact caption
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [caption, enabled]
+                properties:
+                  caption: { type: string }
+                  enabled: { type: boolean }
+        "400":
+          description: Missing artifact path
+        "404":
+          description: Artifact path not found for run
   /v2/artifacts/{artifact_id}:
     get:
       operationId: getArtifact
@@ -2257,6 +2326,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2AdminOverviewResponse"
+  /v2/admin/metrics:
+    get:
+      operationId: getV2AdminMetrics
+      parameters:
+        - name: range_days
+          in: query
+          schema: { type: integer, minimum: 14, maximum: 365, default: 90 }
+      responses:
+        "200":
+          description: Admin platform value metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
   /v2/admin/resources/reconcile:
     post:
       operationId: reconcileV2AdminResources
@@ -4089,6 +4172,74 @@ components:
           type: object
           minProperties: 1
           additionalProperties: true
+    V2ResourceTextHeadResponse:
+      type: object
+      required:
+        - file_id
+        - original_name
+        - content_type
+        - format
+        - total_size_bytes
+        - offset
+        - returned_bytes
+        - next_offset
+        - truncated
+        - encoding
+        - eol
+        - line_count
+        - approx_total_lines
+        - text
+      properties:
+        file_id: { type: string }
+        original_name: { type: string }
+        content_type: { type: string }
+        format:
+          type: string
+          enum: [csv, json, yaml, xml, markdown, text]
+        total_size_bytes: { type: integer, format: int64 }
+        offset: { type: integer, format: int64 }
+        returned_bytes: { type: integer, format: int64 }
+        next_offset: { type: integer, format: int64 }
+        truncated: { type: boolean }
+        encoding: { type: string }
+        eol:
+          type: string
+          enum: [lf, crlf, none]
+        line_count: { type: integer }
+        approx_total_lines: { type: integer, format: int64 }
+        text: { type: string }
+    V2ResourceCsvRowsResponse:
+      type: object
+      required:
+        - file_id
+        - original_name
+        - delimiter
+        - rows
+        - offset_bytes
+        - next_offset_bytes
+        - returned_rows
+        - has_more
+        - approx_total_rows
+        - total_size_bytes
+      properties:
+        file_id: { type: string }
+        original_name: { type: string }
+        delimiter: { type: string }
+        columns:
+          type: array
+          nullable: true
+          items: { type: string }
+        rows:
+          type: array
+          items:
+            type: array
+            items: { type: string }
+        offset_bytes: { type: integer, format: int64 }
+        next_offset_bytes: { type: integer, format: int64 }
+        returned_rows: { type: integer }
+        has_more: { type: boolean }
+        approx_total_rows: { type: integer, format: int64 }
+        total_size_bytes: { type: integer, format: int64 }
     V2ResourceEventRecord:
       type: object
       required: [event_id, resource_id, event_type, ts, metadata]

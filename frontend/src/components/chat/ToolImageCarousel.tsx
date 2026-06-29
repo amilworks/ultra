@@ -17,6 +17,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
+import { openFigureLightbox } from "@/lib/figureLightbox";
 
 type PrairieImageAnalysis = {
   prairieDogCount?: number | null;
@@ -196,10 +197,32 @@ export function ToolImageCarousel({
         src={activeImage.url}
         alt={activeImage.title}
         loading="lazy"
+        role="button"
+        tabIndex={0}
+        title="View full size"
         className={cn(
-          "chat-tool-carousel-image",
+          "chat-tool-carousel-image chat-tool-carousel-image--zoomable",
           hasDetectionData && "chat-tool-carousel-image--detection"
         )}
+        onClick={() =>
+          openFigureLightbox(
+            images
+              .filter((image) => image.previewable !== false)
+              .map((image) => ({ url: image.url, downloadUrl: image.downloadUrl, title: image.title })),
+            boundedIndex
+          )
+        }
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openFigureLightbox(
+              images
+                .filter((image) => image.previewable !== false)
+                .map((image) => ({ url: image.url, downloadUrl: image.downloadUrl, title: image.title })),
+              boundedIndex
+            );
+          }
+        }}
         onLoad={(event) => {
           const target = event.currentTarget;
           const width = target.naturalWidth;

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,7 @@ func New(cfg config.Config) (*App, error) {
 	var controlStore runcontrol.Store
 	var closeFns []func()
 	storeBackend := "memory"
+	var databaseDiagnostics httpapi.DatabaseDiagnosticsProvider
 	if cfg.DatabaseURL != "" {
 		poolConfig, err := postgresPoolConfig(cfg)
 		if err != nil {
@@ -70,6 +72,7 @@ func New(cfg config.Config) (*App, error) {
 		}
 		closeFns = append(closeFns, pool.Close)
 		controlStore = store.NewPostgresStore(pool)
+		databaseDiagnostics = httpapi.NewPostgresDatabaseDiagnostics(pool)
 		storeBackend = "postgres"
 	} else {
 		controlStore = store.NewMemoryStore()
@@ -143,7 +146,16 @@ func New(cfg config.Config) (*App, error) {
 		dataAgentJobs = memBus
 	}
 
-	runService := runcontrol.NewService(controlStore, bus)
+	runService := runcontrol.NewServiceWithOptions(controlStore, bus, runcontrol.ServiceOptions{
+		RuntimeFacts: runcontrol.RuntimeFactsConfig{
+			ProductName:         "Ultra",
+			AppName:             cfg.AppName,
+			AppVersion:          cfg.AppVersion,
+			Environment:         cfg.Environment,
+			PublicURL:           configuredPublicURL(cfg),
+			DefaultUserTimezone: cfg.DefaultUserTimezone,
+		},
+	})
 	var stubWorker *worker.StubWorker
 	if jobSource != nil {
 		stubWorker = worker.NewStubWorker(controlStore, bus)
@@ -223,6 +235,7 @@ func New(cfg config.Config) (*App, error) {
 			CookiePassword:       cfg.WorkOSCookiePassword,
 			CookieSecure:         cfg.WorkOSCookieSecure,
 			BaseURL:              cfg.WorkOSBaseURL,
+			AdminEmails:          cfg.WorkOSAdminEmails,
 		})
 		if err != nil {
 			for _, closeFn := range closeFns {
@@ -244,22 +257,23 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	handler := httpapi.NewRouter(httpapi.ServerDeps{
-		Version:           cfg.AppVersion,
-		Runs:              runService,
-		Store:             controlStore,
-		Bus:               runEvents,
-		ArtifactRoot:      cfg.ArtifactRoot,
-		UploadRoot:        cfg.UploadRoot,
-		ImageServiceURL:   cfg.ImageServiceURL,
-		NgffServiceURL:    cfg.NgffServiceURL,
-		DevAdminEnabled:   cfg.DevAdminEnabled,
-		Runtime:           runtime,
-		QueueDiagnostics:  natsBus,
-		DataAgentJobs:     dataAgentJobs,
-		Bisque:            bisqueService,
-		BisqueCredentials: bisqueCredentialStore,
-		WorkOS:            workOSAuth,
-		WorkerToken:       cfg.WorkerToken,
+		Version:             cfg.AppVersion,
+		Runs:                runService,
+		Store:               controlStore,
+		Bus:                 runEvents,
+		ArtifactRoot:        cfg.ArtifactRoot,
+		UploadRoot:          cfg.UploadRoot,
+		ImageServiceURL:     cfg.ImageServiceURL,
+		NgffServiceURL:      cfg.NgffServiceURL,
+		DevAdminEnabled:     cfg.DevAdminEnabled,
+		Runtime:             runtime,
+		QueueDiagnostics:    natsBus,
+		DataAgentJobs:       dataAgentJobs,
+		Bisque:              bisqueService,
+		BisqueCredentials:   bisqueCredentialStore,
+		WorkOS:              workOSAuth,
+		WorkerToken:         cfg.WorkerToken,
+		DatabaseDiagnostics: databaseDiagnostics,
 	})
 	return &App{
 		Handler:            handler,
@@ -432,6 +446,17 @@ func cloneAppJSONMap(value domain.JSONMap) domain.JSONMap {
 	return out
 }
 
+func configuredPublicURL(cfg config.Config) string {
+	if publicURL := strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/"); publicURL != "" {
+		return publicURL
+	}
+	parsed, err := url.Parse(strings.TrimSpace(cfg.WorkOSPostLoginRedirectURI))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
 func pingPostgres(ctx context.Context, pool *pgxpool.Pool) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -492,6 +517,9 @@ func MigratePostgres(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		return err
+	}
+	if err := store.BackfillPostgresResourceSearchIndexes(ctx, pool); err != nil {
 		return err
 	}
 	return store.VerifyPostgresSchema(ctx, pool)

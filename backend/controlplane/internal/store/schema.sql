@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
 CREATE TABLE IF NOT EXISTS control_threads (
   thread_id text PRIMARY KEY,
   user_id text NOT NULL,
@@ -223,6 +225,33 @@ CREATE TABLE IF NOT EXISTS control_resource_search_documents (
   search_vector tsvector NOT NULL DEFAULT ''::tsvector,
   updated_at timestamptz NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS control_resource_search_facts (
+  resource_id text NOT NULL REFERENCES control_resources(resource_id) ON DELETE CASCADE,
+  owner_user_id text NOT NULL DEFAULT '',
+  owner_org_id text,
+  project_id text,
+  status text NOT NULL DEFAULT 'active',
+  fact_key text NOT NULL,
+  fact_text text NOT NULL DEFAULT '',
+  fact_number double precision,
+  fact_source text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL
+);
+
+ALTER TABLE control_resource_search_facts ADD COLUMN IF NOT EXISTS owner_user_id text NOT NULL DEFAULT '';
+ALTER TABLE control_resource_search_facts ADD COLUMN IF NOT EXISTS owner_org_id text;
+ALTER TABLE control_resource_search_facts ADD COLUMN IF NOT EXISTS project_id text;
+ALTER TABLE control_resource_search_facts ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
+
+UPDATE control_resource_search_facts sf
+SET owner_user_id = r.owner_user_id,
+    owner_org_id = r.owner_org_id,
+    project_id = r.project_id,
+    status = r.status
+FROM control_resources r
+WHERE sf.resource_id = r.resource_id
+  AND sf.owner_user_id = '';
 
 CREATE TABLE IF NOT EXISTS control_resource_events (
   event_id text PRIMARY KEY,
@@ -502,6 +531,10 @@ CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   UNIQUE(user_id, org_id, root_url)
 );
 
+DROP INDEX IF EXISTS control_run_events_run_sequence_idx;
+DROP INDEX IF EXISTS control_run_events_run_event_idx;
+DROP INDEX IF EXISTS control_data_agent_job_events_job_sequence_idx;
+
 CREATE INDEX IF NOT EXISTS control_thread_messages_thread_created_idx ON control_thread_messages(thread_id, created_at);
 CREATE INDEX IF NOT EXISTS control_runs_user_status_updated_idx ON control_runs(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_runs(thread_id, status, updated_at DESC);
@@ -509,8 +542,6 @@ CREATE INDEX IF NOT EXISTS control_threads_user_status_updated_idx ON control_th
 CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
   ON control_runs(thread_id, user_id, (metadata->>'idempotency_key'))
   WHERE COALESCE(metadata->>'idempotency_key', '') <> '';
-CREATE INDEX IF NOT EXISTS control_run_events_run_sequence_idx ON control_run_events(run_id, sequence_number);
-CREATE INDEX IF NOT EXISTS control_run_events_run_event_idx ON control_run_events(run_id, event_id);
 -- Partial index for the admin activity aggregate: only tool-call/artifact
 -- events pay the write cost, and the dashboard's grouped count query reads
 -- just these rows instead of scanning the whole events table.
@@ -530,6 +561,11 @@ CREATE INDEX IF NOT EXISTS control_resources_tag_keys_idx ON control_resources U
 CREATE INDEX IF NOT EXISTS control_resource_search_documents_vector_idx ON control_resource_search_documents USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS control_resource_search_documents_owner_status_idx ON control_resource_search_documents(owner_user_id, owner_org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_resource_search_documents_project_status_idx ON control_resource_search_documents(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_search_facts_resource_idx ON control_resource_search_facts(resource_id);
+CREATE INDEX IF NOT EXISTS control_resource_search_facts_number_idx ON control_resource_search_facts(fact_key, fact_number, resource_id) WHERE fact_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS control_resource_search_facts_text_idx ON control_resource_search_facts(fact_key, fact_text, resource_id) WHERE fact_text <> '';
+CREATE INDEX IF NOT EXISTS control_resource_search_facts_owner_number_idx ON control_resource_search_facts(owner_user_id, owner_org_id, status, fact_key, fact_number, resource_id) WHERE fact_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS control_resource_search_facts_owner_text_idx ON control_resource_search_facts(owner_user_id, owner_org_id, status, fact_key, fact_text, resource_id) WHERE fact_text <> '';
 CREATE INDEX IF NOT EXISTS control_resource_events_resource_ts_idx ON control_resource_events(resource_id, ts DESC);
 CREATE INDEX IF NOT EXISTS control_resource_events_ts_idx ON control_resource_events(ts DESC, event_id ASC);
 CREATE INDEX IF NOT EXISTS control_resource_events_type_ts_idx ON control_resource_events(event_type, ts DESC);
@@ -557,7 +593,6 @@ CREATE INDEX IF NOT EXISTS control_data_agent_jobs_type_idx ON control_data_agen
 CREATE INDEX IF NOT EXISTS control_data_agent_jobs_project_idx ON control_data_agent_jobs(project_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_data_agent_job_resources_resource_idx ON control_data_agent_job_resources(resource_id);
 CREATE INDEX IF NOT EXISTS control_data_agent_job_resources_position_idx ON control_data_agent_job_resources(job_id, position);
-CREATE INDEX IF NOT EXISTS control_data_agent_job_events_job_sequence_idx ON control_data_agent_job_events(job_id, sequence);
 CREATE INDEX IF NOT EXISTS control_data_agent_job_leases_expires_idx ON control_data_agent_job_leases(lease_expires_at);
 CREATE INDEX IF NOT EXISTS control_upload_sessions_owner_status_idx ON control_upload_sessions(owner_user_id, owner_org_id, status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS control_upload_sessions_idempotency_idx

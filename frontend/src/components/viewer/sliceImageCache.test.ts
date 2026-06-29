@@ -50,6 +50,25 @@ describe("sliceImageCache", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("caps concurrent prefetches and drops superseded pending ones (latest-wins)", async () => {
+    let started = 0;
+    // Never-resolving fetch so we can observe how many run concurrently.
+    fetchMock.mockImplementation(() => {
+      started += 1;
+      return new Promise<Response>(() => {});
+    });
+
+    prefetchSliceBitmaps(["/s/1", "/s/2", "/s/3", "/s/4", "/s/5", "/s/6"]);
+    await flush();
+    expect(started).toBe(3); // only PREFETCH_CONCURRENCY warm-ups run at once
+
+    // A new neighborhood supersedes the not-yet-started pending set; the 3 running
+    // (never resolve here) hold the slots, so no NEW fetch starts.
+    prefetchSliceBitmaps(["/s/7", "/s/8"]);
+    await flush();
+    expect(started).toBe(3);
+  });
+
   it("warms uncached neighbours via prefetch but skips cached ones", async () => {
     await loadSliceBitmap("/slice/a");
     expect(fetchMock).toHaveBeenCalledTimes(1);

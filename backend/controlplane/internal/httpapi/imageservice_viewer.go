@@ -386,10 +386,12 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	fallback := deps.handleServeUpload
 	if servePath != path {
 		fallback = func(w http.ResponseWriter, r *http.Request) {
-			deps.proxyImageServiceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
+			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
 		}
 	}
-	deps.proxyImageServiceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
+	// Route slices through the dedicated slice cache so a z-scrub burst can't evict
+	// the DeepZoom viewer's tile/atlas working set from the main image cache.
+	deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
 }
 
 // handleGetUploadScalarVolumeService backs /scalar-volume for non-NIfTI volumes

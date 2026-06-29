@@ -5,7 +5,6 @@ import {
   ImageIcon,
   Link2,
   Loader2,
-  Sparkles,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -22,17 +21,20 @@ import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
 import type { ResourceRecord } from "@/types";
 
-import {
-  COMPOSER_WORKFLOW_GROUP_ORDER,
-  filterComposerWorkflows,
-  type ComposerWorkflowDefinition,
-  type ComposerWorkflowId,
-  type ComposerWorkflowPresetState,
+import type {
+  ComposerWorkflowDefinition,
+  ComposerWorkflowId,
+  ComposerWorkflowPresetState,
 } from "./composer-workflows";
+
+export type ComposerWorkflowGroup = {
+  category: ComposerWorkflowDefinition["category"];
+  items: ComposerWorkflowDefinition[];
+};
 
 type ComposerSlashMenuProps = {
   mode: "workflow" | "resource_picker";
-  workflowQuery?: string;
+  workflowGroups?: ComposerWorkflowGroup[];
   activeWorkflowId?: ComposerWorkflowId | null;
   onSelectWorkflow?: (workflow: ComposerWorkflowDefinition) => void;
   preset?: ComposerWorkflowPresetState | null;
@@ -96,7 +98,7 @@ const scrollActiveCommandItemIntoView = (container: HTMLDivElement | null): void
 
 export function ComposerSlashMenu({
   mode,
-  workflowQuery = "",
+  workflowGroups = [],
   activeWorkflowId = null,
   onSelectWorkflow,
   preset = null,
@@ -115,33 +117,17 @@ export function ComposerSlashMenu({
   const workflowListRef = useRef<HTMLDivElement | null>(null);
   const resourceListRef = useRef<HTMLDivElement | null>(null);
 
-  const filteredWorkflows = useMemo(
-    () => filterComposerWorkflows(workflowQuery),
-    [workflowQuery]
+  const orderedWorkflows = useMemo(
+    () => workflowGroups.flatMap((group) => group.items),
+    [workflowGroups]
   );
-
-  const groupedWorkflows = useMemo(() => {
-    const grouped = new Map<
-      ComposerWorkflowDefinition["category"],
-      ComposerWorkflowDefinition[]
-    >();
-    filteredWorkflows.forEach((workflow) => {
-      const existing = grouped.get(workflow.category) ?? [];
-      existing.push(workflow);
-      grouped.set(workflow.category, existing);
-    });
-    return COMPOSER_WORKFLOW_GROUP_ORDER.map((category) => ({
-      category,
-      items: grouped.get(category) ?? [],
-    })).filter((group) => group.items.length > 0);
-  }, [filteredWorkflows]);
 
   useEffect(() => {
     if (mode !== "workflow" || !activeWorkflowId) {
       return;
     }
     scrollActiveCommandItemIntoView(workflowListRef.current);
-  }, [mode, activeWorkflowId, groupedWorkflows]);
+  }, [mode, activeWorkflowId, orderedWorkflows]);
 
   useEffect(() => {
     if (mode !== "resource_picker" || !activeResourceId) {
@@ -156,32 +142,27 @@ export function ComposerSlashMenu({
         className="absolute right-0 bottom-[calc(100%+0.75rem)] left-0 z-30"
         data-testid="composer-slash-menu"
       >
-        <div className="overflow-hidden rounded-[1.4rem] border border-border/70 bg-popover/95 shadow-2xl backdrop-blur">
-          <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
-            <div className="min-w-0">
-              <p className="text-foreground flex items-center gap-2 text-sm font-medium">
-                <Sparkles className="size-4 text-primary" />
-                Slash workflows
-              </p>
-              <p className="text-muted-foreground text-xs">
-                Choose a structured workflow for this turn.
-              </p>
-            </div>
-            <Badge variant="outline" className="shrink-0 rounded-full px-2 py-0.5 text-[11px]">
-              type `/`
-            </Badge>
-          </div>
-          <Command className="h-auto bg-transparent" shouldFilter={false}>
-            <CommandList ref={workflowListRef} className="max-h-[360px] px-2 py-2">
+        <div className="overflow-hidden rounded-[1.1rem] border border-border/70 bg-popover/95 p-1.5 shadow-xl backdrop-blur">
+          <Command
+            aria-label="Slash workflows"
+            className="h-auto bg-transparent"
+            shouldFilter={false}
+          >
+            <CommandList ref={workflowListRef} className="max-h-[360px] p-0">
               <CommandEmpty className="py-5 text-sm text-muted-foreground">
                 No workflows matched that slash query.
               </CommandEmpty>
-              {groupedWorkflows.map((group) => (
-                <CommandGroup key={group.category} heading={group.category}>
+              {workflowGroups.map((group) => (
+                <CommandGroup key={group.category}>
                   {group.items.map((workflow) => {
                     const Icon = workflow.icon;
                     const comingSoon = workflow.comingSoon === true;
                     const active = !comingSoon && workflow.id === activeWorkflowId;
+                    const selectWorkflow = () => {
+                      if (!comingSoon) {
+                        onSelectWorkflow?.(workflow);
+                      }
+                    };
                     return (
                       <CommandItem
                         key={workflow.id}
@@ -190,32 +171,29 @@ export function ComposerSlashMenu({
                         data-testid={`composer-workflow-${workflow.id}`}
                         data-composer-active={active ? "true" : undefined}
                         className={cn(
-                          "items-center gap-3 rounded-xl px-3 py-3",
-                          active && "bg-accent text-accent-foreground",
+                          "min-h-12 items-center gap-3 rounded-xl px-3 py-2.5",
+                          active && "bg-muted text-foreground",
                           comingSoon && "cursor-not-allowed opacity-55"
                         )}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onSelect={() => {
-                          if (!comingSoon) {
-                            onSelectWorkflow?.(workflow);
-                          }
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          selectWorkflow();
                         }}
+                        onSelect={selectWorkflow}
                       >
-                        <div
+                        <Icon
                           className={cn(
-                            "flex size-9 shrink-0 items-center justify-center rounded-full border",
-                            active
-                              ? "border-primary/35 bg-primary/12 text-primary"
-                              : "border-border/70 bg-background text-muted-foreground"
+                            "size-5 shrink-0",
+                            active ? "text-foreground" : "text-muted-foreground"
                           )}
-                        >
-                          <Icon className="size-4" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{workflow.label}</p>
-                          <p className="text-muted-foreground line-clamp-2 text-xs">
+                        />
+                        <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <span className="shrink-0 text-sm font-medium text-foreground">
+                            {workflow.label}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
                             {workflow.description}
-                          </p>
+                          </span>
                         </div>
                         {comingSoon ? (
                           <Badge
@@ -224,8 +202,6 @@ export function ComposerSlashMenu({
                           >
                             Soon
                           </Badge>
-                        ) : active ? (
-                          <Check className="size-4 shrink-0 text-primary" />
                         ) : null}
                       </CommandItem>
                     );

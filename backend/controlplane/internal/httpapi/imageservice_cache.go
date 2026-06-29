@@ -77,6 +77,20 @@ func newImageResponseCacheFromEnv() *imageResponseCache {
 	return newImageResponseCache(maxBytes)
 }
 
+// newSliceResponseCacheFromEnv builds a SEPARATE, smaller cache dedicated to /slice
+// responses (default 128MiB; ULTRA_CONTROL_IMAGE_SLICE_CACHE_BYTES, "0" disables).
+// A z-scrub generates many one-shot slice URLs; routing them to their own partition
+// keeps them from evicting the DeepZoom viewer's hot tiles/atlas out of the main cache.
+func newSliceResponseCacheFromEnv() *imageResponseCache {
+	maxBytes := int64(128 << 20)
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_IMAGE_SLICE_CACHE_BYTES")); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			maxBytes = v
+		}
+	}
+	return newImageResponseCache(maxBytes)
+}
+
 func (c *imageResponseCache) get(key string) (*cachedResponse, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -143,7 +157,21 @@ func imageCacheKey(endpoint string, query url.Values) (string, bool) {
 // stores a successful response. Falls back to the plain streaming proxy when the cache is
 // disabled or the request can't be keyed.
 func (deps ServerDeps) proxyImageServiceCached(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values, fallback ...http.HandlerFunc) {
-	cache := deps.imageCache
+	deps.proxyImageServiceCachedVia(deps.imageCache, w, r, endpoint, query, fallback...)
+}
+
+// proxyImageServiceSliceCached routes /slice through the dedicated slice cache so a
+// z-scrub burst of one-shot slice URLs can't evict the viewer's tile/atlas working
+// set from the main cache. Falls back to the main cache if the slice cache is off.
+func (deps ServerDeps) proxyImageServiceSliceCached(w http.ResponseWriter, r *http.Request, endpoint string, query url.Values, fallback ...http.HandlerFunc) {
+	cache := deps.sliceCache
+	if cache == nil {
+		cache = deps.imageCache
+	}
+	deps.proxyImageServiceCachedVia(cache, w, r, endpoint, query, fallback...)
+}
+
+func (deps ServerDeps) proxyImageServiceCachedVia(cache *imageResponseCache, w http.ResponseWriter, r *http.Request, endpoint string, query url.Values, fallback ...http.HandlerFunc) {
 	if cache == nil {
 		deps.proxyImageService(w, r, endpoint, query, fallback...)
 		return

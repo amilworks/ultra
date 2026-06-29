@@ -12,7 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
-from ultra_deepagents.imaging.atlas import assemble_atlas, compose_atlas_png  # noqa: E402
+import ultra_deepagents.imaging.atlas as atlas_mod  # noqa: E402
+from ultra_deepagents.imaging.atlas import (  # noqa: E402
+    assemble_atlas,
+    assemble_scalar_volume,
+    compose_atlas_png,
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -60,6 +65,39 @@ def test_parallel_atlas_places_cells_in_grid_order():
         assert (block == (z * 17) % 256).all(), f"cell {z} misplaced"
     assert (img[4:8, 8:12, 0] == 0).all()  # the 6th (empty) grid slot stays zero
     assert sorted(runner.cell_calls) == [0, 1, 2, 3, 4]  # every plane requested exactly once
+
+
+def test_bulk_read_reserves_a_worker_for_interactive(monkeypatch):
+    """A bulk scalar-volume/atlas read must never occupy EVERY decode worker — at
+    least `reserve` worker(s) stay free so a concurrent z-scrub /slice or viewer
+    /tile is served immediately (the fix for the 'open fMRI locks up the viewer')."""
+    monkeypatch.setenv("ULTRA_IMAGE_INTERACTIVE_RESERVE", "1")
+    atlas_mod._bulk_semaphore = None  # force a fresh semaphore for this worker count
+    atlas_mod._bulk_semaphore_size = 0
+
+    class ConcurrencyRunner:
+        workers = 6
+
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+
+        async def call(self, method, path, **kw):
+            if method == "scalar_plan":
+                return {"depth": 60, "channel": 0, "t": 0, "pages": None}
+            if method == "scalar_planes":
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                await asyncio.sleep(0.01)  # hold the worker so concurrency is observable
+                self.active -= 1
+                return [np.zeros((2, 2), dtype="float32") for _ in kw["zs"]]
+            raise AssertionError(f"unexpected method {method}")
+
+    runner = ConcurrencyRunner()
+    asyncio.run(assemble_scalar_volume(runner, "vol.nii"))
+    # 6 workers, reserve 1 → at most 5 concurrent bulk reads; one worker stays free.
+    assert runner.peak == 5, f"bulk peak concurrency {runner.peak} should be workers - reserve (5)"
+    assert atlas_mod._interactive_reserve() == 1
 
 
 def test_compose_atlas_png_row_major_layout():

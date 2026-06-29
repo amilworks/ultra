@@ -89,6 +89,27 @@ const emptyOverview: AdminOverviewResponse = {
       },
     ],
   },
+  database: {
+    available: true,
+    pool: {
+      max_conns: 8,
+      total_conns: 2,
+      acquired_conns: 1,
+      idle_conns: 1,
+      constructing_conns: 0,
+      acquire_count: 100,
+      empty_acquire_count: 0,
+      canceled_acquire_count: 0,
+      new_conns_count: 2,
+      max_lifetime_destroy_count: 0,
+      max_idle_destroy_count: 0,
+      acquire_duration_seconds: 0.12,
+      empty_acquire_wait_seconds: 0,
+      saturation: 0.125,
+      wait_ratio: 0,
+    },
+    top_queries: [],
+  },
   kpis: {
     total_users: 1,
     active_users_24h: 1,
@@ -119,7 +140,11 @@ const emptyOverview: AdminOverviewResponse = {
 };
 
 const openUsersManagement = (): void => {
-  fireEvent.click(screen.getByRole("tab", { name: /Users Management/i }));
+  fireEvent.click(screen.getByRole("tab", { name: /Users/i }));
+};
+
+const openOperations = (): void => {
+  fireEvent.click(screen.getByRole("tab", { name: /Operations/i }));
 };
 
 const chooseSelectOption = async (name: string, optionName: string): Promise<void> => {
@@ -200,6 +225,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[]}
         users={[]}
         runs={[staleRun]}
@@ -236,6 +265,8 @@ describe("AdminConsole", () => {
         onInspectRunEvents={onInspectRunEvents}
       />
     );
+
+    openOperations();
 
     const staleRunsCard = screen.getByText("Stale runs").closest("[data-slot='card']");
     expect(staleRunsCard).not.toBeNull();
@@ -344,6 +375,10 @@ describe("AdminConsole", () => {
             },
           ],
         }}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[]}
         users={[]}
         runs={[]}
@@ -379,6 +414,8 @@ describe("AdminConsole", () => {
       />
     );
 
+    openOperations();
+
     const activityCard = screen.getByText("Activity").closest("[data-slot='card']");
     expect(activityCard).not.toBeNull();
     expect(within(activityCard as HTMLElement).getByText("Daily")).toBeInTheDocument();
@@ -401,6 +438,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[
           {
             org_id: "local-org",
@@ -463,8 +504,9 @@ describe("AdminConsole", () => {
       />
     );
 
-    expect(screen.getByRole("tab", { name: /Overview/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Users Management/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Platform value/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Operations/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Users/i })).toBeInTheDocument();
     expect(screen.queryByLabelText("New user email")).not.toBeInTheDocument();
 
     openUsersManagement();
@@ -482,6 +524,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[
           {
             org_id: "local-org",
@@ -577,6 +623,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[]}
         users={[
           {
@@ -643,6 +693,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[]}
         users={[
           {
@@ -713,6 +767,10 @@ describe("AdminConsole", () => {
     render(
       <AdminConsole
         overview={emptyOverview}
+        metrics={null}
+        loadingMetrics={false}
+        metricsRangeDays={90}
+        onMetricsRangeDaysChange={vi.fn()}
         organizations={[
           {
             org_id: "local-org",

@@ -10,6 +10,21 @@ Use ``--stub`` to force the deterministic stub engine (no native lib required).
 from __future__ import annotations
 
 import argparse
+import os
+
+
+def _default_workers() -> int | None:
+    """Decode process-pool size: the ULTRA_IMAGE_WORKERS env wins so deployments
+    can tune the scarce decode concurrency without rebuilding the image; falls
+    back to None (→ CPU count) when unset."""
+    raw = os.environ.get("ULTRA_IMAGE_WORKERS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def main() -> None:
@@ -19,7 +34,12 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
-    parser.add_argument("--workers", type=int, default=None, help="Process-pool size (default: CPU count).")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=_default_workers(),
+        help="Process-pool size (default: $ULTRA_IMAGE_WORKERS, else CPU count).",
+    )
     parser.add_argument("--stub", action="store_true", help="Force the deterministic stub engine.")
     args = parser.parse_args()
 

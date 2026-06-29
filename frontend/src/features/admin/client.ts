@@ -8,6 +8,7 @@ import type {
   AdminUserStatus,
   AdminUserAccount,
   AdminIssueListResponse,
+  AdminMetricsResponse,
   AdminOverviewResponse,
   AdminRunListResponse,
   AdminUserListResponse,
@@ -44,6 +45,11 @@ export const loadAdminOverview = (
     topUsers: query.topUsers ?? 8,
     issueLimit: query.issueLimit ?? 12,
   });
+
+export const loadAdminMetrics = (
+  apiClient: ApiClient,
+  rangeDays?: number
+): Promise<AdminMetricsResponse> => apiClient.getAdminMetrics({ rangeDays });
 
 export const loadAdminUsers = (
   apiClient: ApiClient,

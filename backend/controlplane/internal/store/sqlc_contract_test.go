@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -145,6 +146,20 @@ func TestResourceSearchQueriesUseMetadataValuesNotSerializedJSONKeys(t *testing.
 			t.Fatalf("%s missing phrase-preserving resource search-text predicate", file.name)
 		}
 	}
+	if !strings.Contains(string(postgres), "control_resource_search_facts") {
+		t.Fatalf("postgres.go missing durable resource search-fact candidate lookup")
+	}
+	for _, file := range []struct {
+		name string
+		text string
+	}{
+		{name: "queries.sql", text: string(source)},
+		{name: "sqlc/queries.sql.go", text: string(generated)},
+	} {
+		if !strings.Contains(file.text, "r.resource_id = ANY($16::text[])") {
+			t.Fatalf("%s missing indexed fact candidate filter", file.name)
+		}
+	}
 	for _, ddl := range []struct {
 		name string
 		text string
@@ -157,10 +172,91 @@ func TestResourceSearchQueriesUseMetadataValuesNotSerializedJSONKeys(t *testing.
 			"search_vector tsvector NOT NULL",
 			"control_resource_search_documents_vector_idx",
 			"control_resource_search_documents_owner_status_idx",
+			"CREATE TABLE IF NOT EXISTS control_resource_search_facts",
+			"fact_number double precision",
+			"control_resource_search_facts_number_idx",
+			"control_resource_search_facts_text_idx",
+			"control_resource_search_facts_owner_number_idx",
+			"control_resource_search_facts_owner_text_idx",
 		} {
 			if !strings.Contains(ddl.text, want) {
 				t.Fatalf("%s missing resource search-document DDL %q", ddl.name, want)
 			}
 		}
+	}
+}
+
+func TestSchemaDoesNotCarryRedundantSequenceIndexes(t *testing.T) {
+	t.Parallel()
+
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000001_run_control.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	for _, ddl := range []struct {
+		name string
+		text string
+	}{
+		{name: "schema.sql", text: string(schema)},
+		{name: "migration", text: string(migration)},
+	} {
+		for _, redundant := range []string{
+			"CREATE INDEX IF NOT EXISTS control_run_events_run_sequence_idx",
+			"CREATE INDEX IF NOT EXISTS control_run_events_run_event_idx",
+			"CREATE INDEX IF NOT EXISTS control_data_agent_job_events_job_sequence_idx",
+		} {
+			if strings.Contains(ddl.text, redundant) {
+				t.Fatalf("%s still creates redundant hot-path index %q", ddl.name, redundant)
+			}
+		}
+	}
+}
+
+func TestPostgresDeploymentEnablesQueryObservability(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Join("..", "..", "..", "..")
+	files := []struct {
+		name string
+		path string
+	}{
+		{name: "docker-compose.yml", path: filepath.Join(repoRoot, "docker-compose.yml")},
+		{name: "docker-compose.postgres.yml", path: filepath.Join(repoRoot, "docker-compose.postgres.yml")},
+		{name: "ultra-postgres.service", path: filepath.Join(repoRoot, "deploy", "systemd", "ultra-postgres.service")},
+	}
+	for _, file := range files {
+		raw, err := os.ReadFile(file.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", file.name, err)
+		}
+		text := string(raw)
+		for _, want := range []string{
+			"shared_preload_libraries=pg_stat_statements",
+			"track_io_timing=on",
+			"track_wal_io_timing=on",
+			"log_temp_files=",
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s missing Postgres observability setting %q", file.name, want)
+			}
+		}
+		if !strings.Contains(text, "wal_compression=lz4") && !strings.Contains(text, "ULTRA_PG_WAL_COMPRESSION:-lz4") {
+			t.Fatalf("%s missing lz4 WAL compression default", file.name)
+		}
+		if !strings.Contains(text, "default_toast_compression=lz4") && !strings.Contains(text, "ULTRA_PG_DEFAULT_TOAST_COMPRESSION:-lz4") {
+			t.Fatalf("%s missing lz4 TOAST compression default", file.name)
+		}
+	}
+
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	if !strings.Contains(string(schema), "CREATE EXTENSION IF NOT EXISTS pg_stat_statements") {
+		t.Fatalf("schema.sql missing pg_stat_statements extension creation")
 	}
 }

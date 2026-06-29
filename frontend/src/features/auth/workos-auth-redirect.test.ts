@@ -47,4 +47,17 @@ describe("WorkOS hosted auth redirect", () => {
     expect(redirectScreenBlock).toContain("statusMessage=");
     expect(source).toContain("statusMessage?: string | null");
   });
+
+  it("does not publish blank post-login draft conversation ids into the URL", () => {
+    const source = readSource("src/App.tsx");
+    const effectMarker = 'authStatus !== "authenticated" || !conversationsHydrated';
+    const effectMarkerIndex = source.indexOf(effectMarker);
+    const urlEffectStart = source.lastIndexOf("useEffect", effectMarkerIndex);
+    const urlEffectEnd = source.indexOf("  const flushConversationSnapshots", urlEffectStart);
+    const urlEffect = source.slice(urlEffectStart, urlEffectEnd);
+
+    expect(urlEffect).toContain("shouldExposeConversationInUrl");
+    expect(urlEffect).toContain("replaceConversationIdInLocation(");
+    expect(urlEffect).toContain("? resolvedConversationId : null");
+  });
 });

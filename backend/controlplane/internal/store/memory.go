@@ -4839,7 +4839,7 @@ func collectionMemberKey(collectionID string, resourceID string) string {
 }
 
 func resourceRecordMatchesQuery(resource domain.ResourceRecord, query string) bool {
-	return strings.Contains(resourceSearchDocument(resource), query)
+	return resourceMatchesParsedSearchQuery(resource, parseResourceSearchQuery(query))
 }
 
 func resourceCollectionMatchesQuery(collection domain.ResourceCollectionRecord, query string) bool {

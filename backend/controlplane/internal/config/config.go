@@ -12,6 +12,8 @@ type Config struct {
 	AppName                    string
 	AppVersion                 string
 	Environment                string
+	PublicURL                  string
+	DefaultUserTimezone        string
 	HTTPAddr                   string
 	ReadHeaderTimeout          time.Duration
 	ReadTimeout                time.Duration
@@ -50,22 +52,32 @@ type Config struct {
 	WorkOSCookiePassword       string
 	WorkOSBaseURL              string
 	WorkOSCookieSecure         bool
-	DevAdminEnabled            bool
-	AllowDevAuthInProduction   bool
-	RunRecoveryEnabled         bool
-	RunRecoveryInterval        time.Duration
-	RunRecoveryBatchLimit      int
-	RetentionGCEnabled         bool
-	RetentionGCInterval        time.Duration
-	RetentionGCBatch           int
-	WorkerToken                string
+	// WorkOSAdminEmails grants the admin role to these (case-insensitive) emails
+	// after WorkOS authentication, regardless of the WorkOS-reported role. This
+	// is the bootstrap path for the first admin (you can't self-promote in-app
+	// until you're already an admin). From ULTRA_CONTROL_ADMIN_EMAILS.
+	WorkOSAdminEmails        []string
+	DevAdminEnabled          bool
+	AllowDevAuthInProduction bool
+	RunRecoveryEnabled       bool
+	RunRecoveryInterval      time.Duration
+	RunRecoveryBatchLimit    int
+	RetentionGCEnabled       bool
+	RetentionGCInterval      time.Duration
+	RetentionGCBatch         int
+	WorkerToken              string
 }
 
 func Load() Config {
 	return Config{
-		AppName:           envString("ULTRA_CONTROL_APP_NAME", "BisQue Ultra Control Plane"),
-		AppVersion:        envString("ULTRA_CONTROL_APP_VERSION", "dev"),
-		Environment:       strings.ToLower(envString("ULTRA_CONTROL_ENVIRONMENT", envString("ENVIRONMENT", "development"))),
+		AppName:     envString("ULTRA_CONTROL_APP_NAME", "BisQue Ultra Control Plane"),
+		AppVersion:  envString("ULTRA_CONTROL_APP_VERSION", "dev"),
+		Environment: strings.ToLower(envString("ULTRA_CONTROL_ENVIRONMENT", envString("ENVIRONMENT", "development"))),
+		PublicURL:   envString("ULTRA_CONTROL_PUBLIC_URL", ""),
+		DefaultUserTimezone: envString(
+			"ULTRA_CONTROL_DEFAULT_USER_TIMEZONE",
+			envString("TZ", "UTC"),
+		),
 		HTTPAddr:          envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
 		ReadHeaderTimeout: envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
 		ReadTimeout:       envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
@@ -108,6 +120,7 @@ func Load() Config {
 		WorkOSCookiePassword:       envString("ULTRA_CONTROL_WORKOS_COOKIE_PASSWORD", ""),
 		WorkOSBaseURL:              envString("ULTRA_CONTROL_WORKOS_BASE_URL", ""),
 		WorkOSCookieSecure:         envBool("ULTRA_CONTROL_WORKOS_COOKIE_SECURE", true),
+		WorkOSAdminEmails:          envStringList("ULTRA_CONTROL_ADMIN_EMAILS"),
 		DevAdminEnabled:            envBool("ULTRA_CONTROL_DEV_ADMIN_ENABLED", true),
 		AllowDevAuthInProduction:   envBool("ULTRA_CONTROL_ALLOW_DEV_AUTH_IN_PRODUCTION", false),
 		RunRecoveryEnabled:         envBool("ULTRA_CONTROL_RUN_RECOVERY_ENABLED", true),
@@ -164,6 +177,23 @@ func envString(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envStringList parses a comma-separated env value into a trimmed, non-empty
+// slice. Missing or blank yields an empty slice.
+func envStringList(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }
 
 func envDurationSeconds(key string, fallback int) time.Duration {

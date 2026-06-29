@@ -2212,6 +2212,31 @@ paths:
           description: Missing or unsafe artifact path
         "404":
           description: Artifact path not found
+  /v2/runs/{run_id}/artifacts/caption:
+    get:
+      operationId: getRunArtifactCaption
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: Run-relative artifact path to caption.
+      responses:
+        "200":
+          description: Lazily generated run artifact caption
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [caption, enabled]
+                properties:
+                  caption: { type: string }
+                  enabled: { type: boolean }
+        "400":
+          description: Missing artifact path
+        "404":
+          description: Artifact path not found for run
   /v2/artifacts/{artifact_id}:
     get:
       operationId: getArtifact
@@ -2301,6 +2326,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2AdminOverviewResponse"
+  /v2/admin/metrics:
+    get:
+      operationId: getV2AdminMetrics
+      parameters:
+        - name: range_days
+          in: query
+          schema: { type: integer, minimum: 14, maximum: 365, default: 90 }
+      responses:
+        "200":
+          description: Admin platform value metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
   /v2/admin/resources/reconcile:
     post:
       operationId: reconcileV2AdminResources

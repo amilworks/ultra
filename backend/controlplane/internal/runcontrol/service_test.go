@@ -65,6 +65,63 @@ func TestServiceCreateRunEmitsAcceptedAndDispatches(t *testing.T) {
 	}
 }
 
+func TestServiceCreateRunStampsRuntimeFacts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	now := time.Date(2026, time.June, 25, 0, 42, 5, 123456789, time.UTC)
+	service := NewServiceWithOptions(mem, bus, ServiceOptions{
+		Now: func() time.Time { return now },
+		RuntimeFacts: RuntimeFactsConfig{
+			ProductName:         "Ultra",
+			AppName:             "BisQue Ultra Control Plane",
+			AppVersion:          "2026.6",
+			Environment:         "production",
+			PublicURL:           "https://ultra.ece.ucsb.edu",
+			DefaultUserTimezone: "UTC",
+		},
+	})
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Runtime facts",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "What is today's date?",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "What is today's date?"}},
+		Metadata: domain.JSONMap{"user_timezone": "America/Los_Angeles"},
+		JobMetadata: domain.JSONMap{
+			"runtime_facts": domain.JSONMap{"current_datetime_utc": "not-trusted"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	runtimeFacts, ok := run.Metadata["runtime_facts"].(domain.JSONMap)
+	if !ok {
+		t.Fatalf("runtime_facts = %#v, want metadata map", run.Metadata["runtime_facts"])
+	}
+	assertRuntimeFacts(t, runtimeFacts)
+
+	select {
+	case job := <-bus.Jobs():
+		jobFacts, ok := job.Metadata["runtime_facts"].(domain.JSONMap)
+		if !ok {
+			t.Fatalf("job runtime_facts = %#v, want metadata map", job.Metadata["runtime_facts"])
+		}
+		assertRuntimeFacts(t, jobFacts)
+	case <-time.After(time.Second):
+		t.Fatalf("expected dispatched job")
+	}
+}
+
 func TestServiceCreateRunWithRetiredRareSpotToolUsesDeepAgentsPathAndPreservesMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -175,6 +232,41 @@ func TestServiceCreateRunWithRetiredRareSpotToolUsesDeepAgentsPathAndPreservesMe
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("expected dispatched RareSpot job")
+	}
+}
+
+func assertRuntimeFacts(t *testing.T, facts domain.JSONMap) {
+	t.Helper()
+	wantInstant := "2026-06-25T00:42:05.123456789Z"
+	if facts["run_started_at"] != wantInstant {
+		t.Fatalf("run_started_at = %#v, want %s", facts["run_started_at"], wantInstant)
+	}
+	if facts["current_datetime_utc"] != wantInstant {
+		t.Fatalf("current_datetime_utc = %#v, want %s", facts["current_datetime_utc"], wantInstant)
+	}
+	if facts["current_date_utc"] != "Thursday, June 25, 2026" {
+		t.Fatalf("current_date_utc = %#v", facts["current_date_utc"])
+	}
+	if facts["user_timezone"] != "America/Los_Angeles" {
+		t.Fatalf("user_timezone = %#v", facts["user_timezone"])
+	}
+	if facts["local_datetime"] != "Wednesday, June 24, 2026 17:42:05 PDT" {
+		t.Fatalf("local_datetime = %#v", facts["local_datetime"])
+	}
+	if facts["product_name"] != "Ultra" {
+		t.Fatalf("product_name = %#v", facts["product_name"])
+	}
+	if facts["app_name"] != "BisQue Ultra Control Plane" {
+		t.Fatalf("app_name = %#v", facts["app_name"])
+	}
+	if facts["app_version"] != "2026.6" {
+		t.Fatalf("app_version = %#v", facts["app_version"])
+	}
+	if facts["deployment_environment"] != "production" {
+		t.Fatalf("deployment_environment = %#v", facts["deployment_environment"])
+	}
+	if facts["public_url"] != "https://ultra.ece.ucsb.edu" {
+		t.Fatalf("public_url = %#v", facts["public_url"])
 	}
 }
 

@@ -29,6 +29,27 @@ func TestApplyPostgresSchemaExecutesCurrentControlSchema(t *testing.T) {
 	}
 }
 
+func TestApplyPostgresSchemaDropsRedundantHotPathIndexes(t *testing.T) {
+	t.Parallel()
+
+	execer := &fakeSchemaExecer{}
+	if err := ApplyPostgresSchema(context.Background(), execer); err != nil {
+		t.Fatalf("ApplyPostgresSchema() error = %v, want nil", err)
+	}
+	for _, indexName := range []string{
+		"control_run_events_run_sequence_idx",
+		"control_run_events_run_event_idx",
+		"control_data_agent_job_events_job_sequence_idx",
+	} {
+		if !strings.Contains(execer.sql, "DROP INDEX IF EXISTS "+indexName) {
+			t.Fatalf("ApplyPostgresSchema() SQL missing redundant index drop for %s", indexName)
+		}
+		if strings.Contains(execer.sql, "CREATE INDEX IF NOT EXISTS "+indexName) {
+			t.Fatalf("ApplyPostgresSchema() SQL recreates redundant index %s", indexName)
+		}
+	}
+}
+
 func TestApplyPostgresSchemaWrapsExecutionErrors(t *testing.T) {
 	t.Parallel()
 

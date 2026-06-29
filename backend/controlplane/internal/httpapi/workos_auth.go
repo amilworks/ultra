@@ -41,6 +41,9 @@ type WorkOSAuthConfig struct {
 	CookiePassword       string
 	CookieSecure         bool
 	BaseURL              string
+	// AdminEmails are granted the admin role after authentication regardless of
+	// the WorkOS-reported role — the bootstrap path for the first admin.
+	AdminEmails []string
 }
 
 type WorkOSAuth struct {
@@ -52,6 +55,7 @@ type WorkOSAuth struct {
 	cookiePassword       string
 	cookieSecure         bool
 	baseURL              string
+	adminEmails          map[string]bool
 
 	// WorkOS rotates refresh tokens on every use, so concurrent requests
 	// holding the same stale session cookie must share one refresh call
@@ -133,8 +137,33 @@ func NewWorkOSAuth(cfg WorkOSAuthConfig) (*WorkOSAuth, error) {
 		cookiePassword:       cookiePassword,
 		cookieSecure:         cfg.CookieSecure,
 		baseURL:              baseURL,
+		adminEmails:          normalizeAdminEmails(cfg.AdminEmails),
 		recentRefreshes:      make(map[string]workOSRecentRefresh),
 	}, nil
+}
+
+// normalizeAdminEmails lower-cases and trims the configured admin emails into a
+// set for case-insensitive lookup.
+func normalizeAdminEmails(emails []string) map[string]bool {
+	if len(emails) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(emails))
+	for _, email := range emails {
+		if normalized := strings.ToLower(strings.TrimSpace(email)); normalized != "" {
+			set[normalized] = true
+		}
+	}
+	return set
+}
+
+// isAdminEmail reports whether the authenticated email is in the bootstrap
+// admin allowlist.
+func (auth *WorkOSAuth) isAdminEmail(email string) bool {
+	if auth == nil || len(auth.adminEmails) == 0 {
+		return false
+	}
+	return auth.adminEmails[strings.ToLower(strings.TrimSpace(email))]
 }
 
 func (auth *WorkOSAuth) Enabled() bool {
@@ -310,7 +339,7 @@ func (auth *WorkOSAuth) authenticateRequest(w http.ResponseWriter, r *http.Reque
 	if !result.Authenticated || result.User == nil {
 		return workOSSessionSnapshot{}, false
 	}
-	return snapshotFromWorkOSResult(result), true
+	return auth.snapshotFromWorkOSResult(result), true
 }
 
 // errWorkOSRefreshRevoked marks a refresh rejected with invalid_grant: the
@@ -385,7 +414,7 @@ func (auth *WorkOSAuth) principalFromRequest(r *http.Request) (requestPrincipal,
 	if err != nil || !result.Authenticated || result.User == nil {
 		return requestPrincipal{}, false
 	}
-	return snapshotFromWorkOSResult(result).Principal, true
+	return auth.snapshotFromWorkOSResult(result).Principal, true
 }
 
 func (snapshot workOSSessionSnapshot) sessionResponse() map[string]any {
@@ -418,7 +447,7 @@ func (snapshot workOSSessionSnapshot) sessionResponse() map[string]any {
 	return session
 }
 
-func snapshotFromWorkOSResult(result *workos.AuthenticateSessionResult) workOSSessionSnapshot {
+func (auth *WorkOSAuth) snapshotFromWorkOSResult(result *workos.AuthenticateSessionResult) workOSSessionSnapshot {
 	userID := ""
 	email := ""
 	firstName := ""
@@ -435,6 +464,9 @@ func snapshotFromWorkOSResult(result *workos.AuthenticateSessionResult) workOSSe
 	}
 	principalUserID := "workos:" + devPrincipalIDSegment(firstNonEmpty(userID, email), "user")
 	role := firstNonEmpty(strings.TrimSpace(result.Role), "researcher")
+	if auth.isAdminEmail(email) {
+		role = "admin"
+	}
 	orgID := firstNonEmpty(strings.TrimSpace(result.OrganizationID), "workos-org")
 	return workOSSessionSnapshot{
 		Principal: requestPrincipal{

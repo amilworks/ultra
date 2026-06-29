@@ -46,6 +46,15 @@ func (p fakeQueueDiagnosticsProvider) QueueDiagnostics(context.Context) (eventbu
 	return p.diagnostics, p.err
 }
 
+type fakeDatabaseDiagnosticsProvider struct {
+	diagnostics adminDatabaseDiagnostics
+	err         error
+}
+
+func (p fakeDatabaseDiagnosticsProvider) DatabaseDiagnostics(context.Context, int) (adminDatabaseDiagnostics, error) {
+	return p.diagnostics, p.err
+}
+
 type recordingDataAgentJobPublisher struct {
 	jobs []eventbus.DataAgentJob
 	err  error
@@ -2318,6 +2327,81 @@ func TestV2AdminOverviewIncludesRuntimeTransportSummary(t *testing.T) {
 	}
 }
 
+func TestV2AdminOverviewIncludesDatabaseDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Runs:    service,
+		Store:   mem,
+		Runtime: RuntimeSummary{StoreBackend: "postgres"},
+		DatabaseDiagnostics: fakeDatabaseDiagnosticsProvider{diagnostics: adminDatabaseDiagnostics{
+			Available: true,
+			Pool: adminDatabasePoolStats{
+				MaxConns:                8,
+				TotalConns:              6,
+				AcquiredConns:           4,
+				IdleConns:               2,
+				AcquireCount:            120,
+				EmptyAcquireCount:       12,
+				CanceledAcquireCount:    1,
+				AcquireDurationSeconds:  3.5,
+				EmptyAcquireWaitSeconds: 0.8,
+				Saturation:              0.5,
+				WaitRatio:               0.1,
+			},
+			TopQueries: []adminDatabaseQueryStats{{
+				QueryID:           "42",
+				Calls:             17,
+				MeanExecMs:        1.25,
+				TotalExecMs:       21.25,
+				Rows:              8500,
+				SharedBlocksHit:   96,
+				SharedBlocksRead:  4,
+				TempBlocksWritten: 0,
+				Query:             "SELECT * FROM control_run_events WHERE run_id = $1",
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/admin/overview", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin overview status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Database adminDatabaseDiagnostics `json:"database"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode admin overview: %v", err)
+	}
+	if !payload.Database.Available {
+		t.Fatalf("database diagnostics unavailable: %+v", payload.Database)
+	}
+	if payload.Database.Pool.MaxConns != 8 || payload.Database.Pool.AcquiredConns != 4 || payload.Database.Pool.WaitRatio != 0.1 {
+		t.Fatalf("database pool stats = %+v, want saturation/wait counters", payload.Database.Pool)
+	}
+	if len(payload.Database.TopQueries) != 1 || payload.Database.TopQueries[0].QueryID != "42" || payload.Database.TopQueries[0].MeanExecMs != 1.25 {
+		t.Fatalf("database top queries = %+v, want pg_stat_statements sample", payload.Database.TopQueries)
+	}
+}
+
+func TestAdminDatabaseDiagnosticsUnavailableWithoutProvider(t *testing.T) {
+	t.Parallel()
+
+	got := (ServerDeps{}).adminDatabaseDiagnostics(context.Background())
+	if got.Available {
+		t.Fatalf("database diagnostics available = true without provider: %+v", got)
+	}
+	if got.Pool.MaxConns != 0 || len(got.TopQueries) != 0 {
+		t.Fatalf("empty database diagnostics = %+v, want no fabricated stats", got)
+	}
+}
+
 func TestV2AdminOverviewIncludesUploadSessionMetrics(t *testing.T) {
 	t.Parallel()
 
@@ -3440,6 +3524,100 @@ func TestV2ResourcesSearchMatchesDataAgentMetadata(t *testing.T) {
 	}
 	if response.Resources[0].Metadata["label"] != "NPH" {
 		t.Fatalf("metadata search result metadata = %#v, want exposed NPH metadata", response.Resources[0].Metadata)
+	}
+}
+
+func TestV2ResourcesSearchParsesScientificPredicatesAndFilePatterns(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	createdAt := time.Date(2026, 6, 27, 9, 0, 0, 0, time.UTC)
+	for _, resource := range []domain.UpsertResourceInput{
+		{
+			ResourceID:   "file_search_nph_64",
+			OwnerUserID:  "scientific-search-user",
+			OwnerOrgID:   "scientific-search-org",
+			OriginalName: "Norm_old_004_64yo.nii.gz",
+			ContentType:  "application/x-nifti",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+			Metadata:     domain.JSONMap{"label": "NPH"},
+		},
+		{
+			ResourceID:   "file_search_control_81",
+			OwnerUserID:  "scientific-search-user",
+			OwnerOrgID:   "scientific-search-org",
+			OriginalName: "Norm_old_001_81yo.nii.gz",
+			ContentType:  "application/x-nifti",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(time.Second),
+			UpdatedAt:    createdAt.Add(time.Second),
+			Metadata:     domain.JSONMap{"label": "control"},
+		},
+		{
+			ResourceID:   "file_search_nph_40",
+			OwnerUserID:  "scientific-search-user",
+			OwnerOrgID:   "scientific-search-org",
+			OriginalName: "Norm_young_005_40yo.nii.gz",
+			ContentType:  "application/x-nifti",
+			SizeBytes:    128,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			Status:       "active",
+			CreatedAt:    createdAt.Add(2 * time.Second),
+			UpdatedAt:    createdAt.Add(2 * time.Second),
+			Metadata:     domain.JSONMap{"label": "NPH"},
+		},
+	} {
+		if _, err := mem.UpsertResource(context.Background(), resource); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resource.ResourceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources?q=NPH+age+%3E+60&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "scientific-search-user")
+	req.Header.Set("X-Ultra-Org-Id", "scientific-search-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scientific search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode scientific search response: %v", err)
+	}
+	if response.Count != 1 || len(response.Resources) != 1 || response.Resources[0].FileID != "file_search_nph_64" {
+		t.Fatalf("scientific search response = %+v, want only NPH subject over 60", response)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/resources?q=*.nii&limit=20", nil)
+	req.Header.Set("X-Ultra-User-Id", "scientific-search-user")
+	req.Header.Set("X-Ultra-Org-Id", "scientific-search-org")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("NIfTI glob search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	response = resourcesResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode NIfTI glob search response: %v", err)
+	}
+	if response.Count != 3 || len(response.Resources) != 3 {
+		t.Fatalf("NIfTI glob search response = %+v, want all NIfTI-family resources", response)
 	}
 }
 
@@ -5089,6 +5267,87 @@ func TestV2ResourcesListComesFromCatalogWhenNFSFileIsMissing(t *testing.T) {
 	}
 	if listResponse.Resources[0].StagedLocally {
 		t.Fatalf("staged_locally = true, want false after blob was removed")
+	}
+}
+
+func TestV2UploadCatalogPersistsImageHeaderMetadataForResourceSearch(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "header-rich.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 6, 4)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadReq.Header.Set("X-Ultra-User-Id", "metadata-user")
+	uploadReq.Header.Set("X-Ultra-Org-Id", "metadata-org")
+	uploadRec := httptest.NewRecorder()
+	router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResponse uploadFilesResponse
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResponse); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(uploadResponse.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one file", uploadResponse.Uploaded)
+	}
+
+	resource, err := mem.GetResourceForUser(context.Background(), uploadResponse.Uploaded[0].FileID, "metadata-user", "metadata-org")
+	if err != nil {
+		t.Fatalf("GetResourceForUser: %v", err)
+	}
+	header, ok := resource.Metadata["image_header"].(domain.JSONMap)
+	if !ok {
+		t.Fatalf("metadata.image_header = %T, want persisted image header map", resource.Metadata["image_header"])
+	}
+	if header["width"] != float64(6) || header["height"] != float64(4) || header["array_dtype"] != "uint8" {
+		t.Fatalf("image_header = %+v, want width/height/array dtype", header)
+	}
+	matches, err := mem.ListResourcesForUser(context.Background(), domain.ResourceListInput{
+		UserID: "metadata-user",
+		OrgID:  "metadata-org",
+		Query:  "width > 4",
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("ListResourcesForUser width predicate: %v", err)
+	}
+	if matches.TotalCount != 1 || len(matches.Resources) != 1 || matches.Resources[0].ResourceID != resource.ResourceID {
+		t.Fatalf("width predicate resources = %+v, want uploaded image", matches)
+	}
+}
+
+func TestParseJPEGEXIFMetadataExtractsCameraAndFocalLength(t *testing.T) {
+	t.Parallel()
+
+	metadata := parseJPEGEXIFMetadata(testJPEGWithEXIFMetadata(t))
+	if metadata["camera_make"] != "OpenAI" || metadata["camera_model"] != "UltraCam" {
+		t.Fatalf("camera metadata = %+v, want OpenAI UltraCam", metadata)
+	}
+	if metadata["iso"] != float64(800) {
+		t.Fatalf("iso = %v, want 800", metadata["iso"])
+	}
+	if metadata["focal_length_mm"] != float64(35) {
+		t.Fatalf("focal_length_mm = %v, want 35", metadata["focal_length_mm"])
 	}
 }
 
@@ -13125,6 +13384,59 @@ func testPNGBytes(t *testing.T, width int, height int) []byte {
 		t.Fatalf("encode test PNG: %v", err)
 	}
 	return buffer.Bytes()
+}
+
+func testJPEGWithEXIFMetadata(t *testing.T) []byte {
+	t.Helper()
+	tiffData := make([]byte, 0, 128)
+	tiffData = append(tiffData, 'I', 'I')
+	tiffData = binary.LittleEndian.AppendUint16(tiffData, 42)
+	tiffData = binary.LittleEndian.AppendUint32(tiffData, 8)
+	ifd0Offset := len(tiffData)
+	tiffData = binary.LittleEndian.AppendUint16(tiffData, 3)
+	ifd0EntriesOffset := len(tiffData)
+	tiffData = append(tiffData, make([]byte, 3*12)...)
+	tiffData = binary.LittleEndian.AppendUint32(tiffData, 0)
+	appendASCII := func(value string) uint32 {
+		offset := uint32(len(tiffData))
+		tiffData = append(tiffData, value...)
+		tiffData = append(tiffData, 0)
+		return offset
+	}
+	makeOffset := appendASCII("OpenAI")
+	modelOffset := appendASCII("UltraCam")
+	exifOffset := uint32(len(tiffData))
+	tiffData = binary.LittleEndian.AppendUint16(tiffData, 2)
+	exifEntriesOffset := len(tiffData)
+	tiffData = append(tiffData, make([]byte, 2*12)...)
+	tiffData = binary.LittleEndian.AppendUint32(tiffData, 0)
+	focalOffset := uint32(len(tiffData))
+	tiffData = binary.LittleEndian.AppendUint32(tiffData, 35)
+	tiffData = binary.LittleEndian.AppendUint32(tiffData, 1)
+	putEntry := func(offset int, tag uint16, typ uint16, count uint32, value uint32) {
+		binary.LittleEndian.PutUint16(tiffData[offset:offset+2], tag)
+		binary.LittleEndian.PutUint16(tiffData[offset+2:offset+4], typ)
+		binary.LittleEndian.PutUint32(tiffData[offset+4:offset+8], count)
+		binary.LittleEndian.PutUint32(tiffData[offset+8:offset+12], value)
+	}
+	putEntry(ifd0EntriesOffset, 0x010f, 2, uint32(len("OpenAI")+1), makeOffset)
+	putEntry(ifd0EntriesOffset+12, 0x0110, 2, uint32(len("UltraCam")+1), modelOffset)
+	putEntry(ifd0EntriesOffset+24, 0x8769, 4, 1, exifOffset)
+	isoValue := make([]byte, 4)
+	binary.LittleEndian.PutUint16(isoValue, 800)
+	putEntry(exifEntriesOffset, 0x8827, 3, 1, binary.LittleEndian.Uint32(isoValue))
+	putEntry(exifEntriesOffset+12, 0x920a, 5, 1, focalOffset)
+	if ifd0Offset != 8 {
+		t.Fatalf("unexpected IFD0 offset %d", ifd0Offset)
+	}
+	payload := append([]byte("Exif\x00\x00"), tiffData...)
+	if len(payload)+2 > math.MaxUint16 {
+		t.Fatalf("EXIF payload too large")
+	}
+	jpegBytes := []byte{0xff, 0xd8, 0xff, 0xe1, byte((len(payload) + 2) >> 8), byte(len(payload) + 2)}
+	jpegBytes = append(jpegBytes, payload...)
+	jpegBytes = append(jpegBytes, 0xff, 0xd9)
+	return jpegBytes
 }
 
 func testRGBPNGBytes(t *testing.T, width int, height int, pixels []color.RGBA) []byte {

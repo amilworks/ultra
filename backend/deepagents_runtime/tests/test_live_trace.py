@@ -26,6 +26,80 @@ def _rarespot_default_config() -> dict[str, float | int]:
     return {"tile_size": 512, "tile_overlap": 0.25, "stride": 384, "conf": 0.25, "iou": 0.45}
 
 
+def _rarespot_skill_turn(
+    *,
+    goal: str = "Run RareSpot prairie dog detection on the uploaded image.",
+    response_text: str | None = None,
+) -> dict:
+    response = response_text or (
+        "RareSpot inference completed with 4 prairie dog detections and 2 burrow "
+        "detections. Configuration: confidence threshold 0.25, tile overlap 0.25. "
+        "Count by class: prairie dog=4, burrow=2. Detection confidence summaries and "
+        "the overlay plus detection CSV are saved for download. "
+    ) * 4
+    return summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "goal": goal,
+            "status": "succeeded",
+            "response_text": response,
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "read_file",
+                    "file_path": "/skills/prairie-dog-detection/SKILL.md",
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "execute",
+                    "command": (
+                        "YOLOv5_AUTOINSTALL=false python "
+                        "/opt/rarespot/rarespot_detect.py --images "
+                        "/workspace/staged_resources --weights "
+                        "/opt/rarespot/RareSpotWeights.pt --yolov5 "
+                        "/opt/rarespot/yolov5 --out /outputs/rarespot_run --no-spectral"
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "execute",
+                    "output_preview": json.dumps(
+                        {
+                            "status": "succeeded",
+                            "configuration": _rarespot_default_config(),
+                        }
+                    ),
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+        linked_artifacts=[
+            {
+                "kind": "image",
+                "path": "outputs/rarespot_run/overlay.png",
+                "download_ok": True,
+            },
+            {
+                "kind": "csv",
+                "path": "outputs/rarespot_run/detections.csv",
+                "download_ok": True,
+            },
+            {
+                "kind": "report",
+                "path": "outputs/rarespot_run/report.md",
+                "download_ok": True,
+            },
+        ],
+    )
+
+
 def test_build_followup_messages_preserves_prior_transcript():
     messages = build_followup_messages(
         prompt="Create the first plot.",
@@ -924,6 +998,93 @@ def test_summarize_run_trace_extracts_rarespot_configuration_from_tool_output():
 
     assert summary["rarespot_configurations"] == [
         {"tile_size": 512, "tile_overlap": 0.25, "stride": 384, "conf": 0.25, "iou": 0.45}
+    ]
+
+
+def test_summarize_run_trace_extracts_skill_usage_signals():
+    summary = summarize_run_trace(
+        run={
+            "run_id": "run-1",
+            "status": "succeeded",
+            "response_text": "I used the prairie dog and medical volume Skills.",
+        },
+        events=[
+            {
+                "event_kind": "tool_call.started",
+                "payload": {"tool_name": "tool_capability_manifest"},
+            },
+            {
+                "event_kind": "tool_call.completed",
+                "payload": {
+                    "tool_name": "tool_capability_manifest",
+                    "output_preview": json.dumps(
+                        {
+                            "deepagents_builtin_tools": [
+                                {"name": "read_file"},
+                                {"name": "execute"},
+                            ],
+                            "registered_tools": [],
+                            "available_skills": [
+                                {"name": "prairie-dog-detection"},
+                                {"name": "medical-volume-slices"},
+                            ],
+                        }
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "read_file",
+                    "file_path": "/skills/prairie-dog-detection/SKILL.md",
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "execute",
+                    "command": (
+                        "python /opt/rarespot/rarespot_detect.py "
+                        "--images /workspace/staged_resources"
+                    ),
+                },
+            },
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "execute",
+                    "input": {
+                        "command": (
+                            "python /opt/medvol/volume_slices.py "
+                            "--input /workspace/staged_uploads/ct.nii.gz"
+                        )
+                    },
+                },
+            },
+            {"event_kind": "run.completed"},
+        ],
+        artifacts=[],
+    )
+
+    assert summary["available_skills"] == [
+        "medical-volume-slices",
+        "prairie-dog-detection",
+    ]
+    assert summary["skill_reads"] == [
+        {
+            "skill": "prairie-dog-detection",
+            "path": "/skills/prairie-dog-detection/SKILL.md",
+        }
+    ]
+    assert summary["skill_scripts"] == [
+        {
+            "skill": "medical-volume-slices",
+            "path": "/opt/medvol/volume_slices.py",
+        },
+        {
+            "skill": "prairie-dog-detection",
+            "path": "/opt/rarespot/rarespot_detect.py",
+        },
     ]
 
 
@@ -2141,6 +2302,69 @@ def test_build_tool_capability_matrix_summarizes_available_and_used_categories()
     assert matrix["turns"][1]["capabilities"]["followup_context_reuse"] is True
 
 
+def test_build_tool_capability_matrix_summarizes_skill_usage():
+    result = {
+        "prompt": {
+            "run_id": "run-1",
+            "status": "succeeded",
+            "tool_names": ["tool_capability_manifest", "read_file", "execute"],
+            "available_skills": ["prairie-dog-detection", "medical-volume-slices"],
+            "skill_reads": [
+                {
+                    "skill": "prairie-dog-detection",
+                    "path": "/skills/prairie-dog-detection/SKILL.md",
+                }
+            ],
+            "skill_scripts": [
+                {
+                    "skill": "prairie-dog-detection",
+                    "path": "/opt/rarespot/rarespot_detect.py",
+                }
+            ],
+            "tool_capability_manifests": [
+                {
+                    "deepagents_builtin_tools": [
+                        {"name": "read_file"},
+                        {"name": "execute"},
+                    ],
+                    "registered_tools": ["tool_capability_manifest"],
+                    "available_skills": [
+                        {"name": "prairie-dog-detection"},
+                        {"name": "medical-volume-slices"},
+                    ],
+                }
+            ],
+            "artifacts": [],
+        },
+    }
+
+    matrix = build_tool_capability_matrix(result)
+
+    assert matrix["available_skills"] == [
+        "medical-volume-slices",
+        "prairie-dog-detection",
+    ]
+    assert matrix["skill_reads"] == [
+        {
+            "skill": "prairie-dog-detection",
+            "path": "/skills/prairie-dog-detection/SKILL.md",
+        }
+    ]
+    assert matrix["skill_scripts"] == [
+        {
+            "skill": "prairie-dog-detection",
+            "path": "/opt/rarespot/rarespot_detect.py",
+        }
+    ]
+    assert matrix["capabilities"]["skills"] == {"available": True, "used": True}
+    assert matrix["capabilities"]["rarespot_detection"] == {
+        "available": True,
+        "used": True,
+    }
+    assert matrix["turns"][0]["capabilities"]["skills"] is True
+    assert matrix["turns"][0]["capabilities"]["rarespot_detection"] is True
+
+
 def test_build_tool_capability_matrix_summarizes_async_delegation():
     result = {
         "prompt": {
@@ -2419,6 +2643,17 @@ def test_evaluate_rarespot_trace_quality_scores_multirun_analysis():
     assert quality["issues"] == []
 
 
+def test_evaluate_rarespot_trace_quality_accepts_skill_driven_run():
+    result = {"prompt": _rarespot_skill_turn()}
+
+    quality = evaluate_rarespot_trace_quality(result)
+
+    assert quality["passed"] is True
+    assert quality["issues"] == []
+    assert quality["signals"]["rarespot_tool"] is True
+    assert quality["signals"]["expected_configuration"] is True
+
+
 def test_evaluate_rarespot_trace_quality_rejects_stub_or_duplicate_outputs():
     result = {
         "prompt": {
@@ -2615,6 +2850,34 @@ def test_evaluate_rarespot_trace_quality_rejects_report_only_rerun():
                 "tool_names": ["artifact_manifest", "rarespot_ecology_inference"],
                 "idle_recovery_count": 0,
             },
+        ],
+    }
+
+    quality = evaluate_rarespot_trace_quality(result)
+
+    assert quality["passed"] is False
+    assert (
+        "report-only RareSpot turn reran inference instead of using prior artifacts"
+        in quality["issues"]
+    )
+    assert quality["signals"]["report_turns_avoid_inference"] is False
+
+
+def test_evaluate_rarespot_trace_quality_rejects_report_only_skill_script_rerun():
+    result = {
+        "prompt": _rarespot_skill_turn(),
+        "followups": [
+            _rarespot_skill_turn(
+                goal=(
+                    "Write a combined quantitative report across all RareSpot runs in "
+                    "this chat. Include thresholds, counts, artifact links, and limitations."
+                ),
+                response_text=(
+                    "Combined report compares threshold, count, confidence, limitations, "
+                    "recommendations, and artifact IDs. "
+                )
+                * 18,
+            )
         ],
     }
 

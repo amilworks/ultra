@@ -32,6 +32,32 @@ from ultra_deepagents.imaging import fusion, pipelines, viewerinfo
 
 __all__ = ["ImageEngine", "LibBioImageEngine", "StubEngine", "EngineUnavailable", "build_engine"]
 
+
+def _engine_cache_entries() -> int:
+    """Max entries for the per-worker metadata caches (env-overridable)."""
+    try:
+        value = int(os.environ.get("ULTRA_IMAGE_ENGINE_CACHE_ENTRIES", "256") or "256")
+    except ValueError:
+        return 256
+    return value if value > 0 else 256
+
+
+class _BoundedDict(dict):
+    """A dict that evicts its oldest entry once it exceeds ``max_size`` (insertion
+    order). Keeps a worker's metadata caches from growing without bound across many
+    distinct files; the per-file working set is tiny, so eviction never thrashes."""
+
+    def __init__(self, max_size: int) -> None:
+        super().__init__()
+        self._max = max(1, max_size)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key in self:
+            super().__delitem__(key)
+        super().__setitem__(key, value)
+        while len(self) > self._max:
+            super().__delitem__(next(iter(self)))
+
 # Target long-edge (px) for a non-full-resolution z-scrub frame: the engine reads
 # the smallest pyramid level whose long edge is still >= this, so a transient scrub
 # frame stays crisp at typical viewports while decoding/transferring far less than
@@ -185,10 +211,13 @@ class LibBioImageEngine:
         self._Image = Image
         self._bim = bim
         self._cache = bim.Cache(size=cache_size)
-        self._signal_score_cache: dict[Any, list[float] | None] = {}
+        # Per-worker metadata caches keyed by (path, mtime, channels). Bounded so a
+        # long-lived worker that has served many DISTINCT files cannot grow its RSS
+        # without limit (insertion-order eviction; the working set is tiny per file).
+        self._signal_score_cache = _BoundedDict(_engine_cache_entries())
         # One robust global display window per (path, mtime, channels) so tiled scalar
         # reads share a single mapping instead of auto-scaling per tile (checkerboard).
-        self._display_window_cache: dict[Any, list[tuple[float, float]]] = {}
+        self._display_window_cache = _BoundedDict(_engine_cache_entries())
 
     # -- public API -----------------------------------------------------------------
     def formats(self) -> list[str]:

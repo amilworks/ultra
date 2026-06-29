@@ -12,6 +12,17 @@ from pathlib import Path
 from typing import Any
 from urllib import parse, request
 
+RARESPOT_SKILL_NAME = "prairie-dog-detection"
+MEDICAL_VOLUME_SKILL_NAME = "medical-volume-slices"
+RARESPOT_TOOL_NAMES = {"rarespot_ecology_inference"}
+RARESPOT_SCRIPT_PATH = "/opt/rarespot/rarespot_detect.py"
+MEDICAL_VOLUME_SCRIPT_PATH = "/opt/medvol/volume_slices.py"
+SKILL_SCRIPT_PATHS = {
+    RARESPOT_SCRIPT_PATH: RARESPOT_SKILL_NAME,
+    MEDICAL_VOLUME_SCRIPT_PATH: MEDICAL_VOLUME_SKILL_NAME,
+}
+SKILL_READ_PATTERN = re.compile(r"/skills/([A-Za-z0-9_.-]+)/SKILL\.md\b")
+
 
 class ControlPlaneClient:
     def __init__(
@@ -262,6 +273,13 @@ def summarize_run_trace(
     idle_recoveries = _idle_recoveries(events)
     rarespot_configurations = _rarespot_configurations(events)
     tool_capability_manifests = _tool_capability_manifests(events)
+    skill_reads = _skill_reads(events)
+    skill_scripts = _skill_scripts(events)
+    available_skills = _available_skills(
+        tool_capability_manifests,
+        skill_reads,
+        skill_scripts,
+    )
     context_tool_hygiene = _context_tool_output_hygiene(events)
     delegation = _delegation_evidence(events)
     async_delegation = _async_delegation_evidence(events)
@@ -276,6 +294,9 @@ def summarize_run_trace(
         "tool_names": tool_names,
         "rarespot_configurations": rarespot_configurations,
         "tool_capability_manifests": tool_capability_manifests,
+        "available_skills": available_skills,
+        "skill_reads": skill_reads,
+        "skill_scripts": skill_scripts,
         "context_tool_hygiene": context_tool_hygiene,
         "delegation": delegation,
         "async_delegation": async_delegation,
@@ -1253,6 +1274,9 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     manifests = _trace_tool_capability_manifests(turns)
     builtin_names = _manifest_builtin_tool_names(manifests)
     registered_names = _manifest_registered_tool_names(manifests)
+    available_skills = _trace_available_skills(turns, manifests)
+    skill_reads = _trace_skill_records(turns, "skill_reads")
+    skill_scripts = _trace_skill_records(turns, "skill_scripts")
     available_subagents = _manifest_available_subagent_names(manifests)
     available_async_subagents = _manifest_available_async_subagent_names(manifests)
     scoped_subagent_context_tools = _manifest_scoped_subagent_context_tool_names(manifests)
@@ -1289,6 +1313,9 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     outputs_declared = any(
         storage.get("outputs") == "/outputs" for storage in storage_routes
     )
+    skills_used = bool(skill_reads or skill_scripts)
+    rarespot_skill_available = RARESPOT_SKILL_NAME in set(available_skills)
+    rarespot_skill_used = _skill_records_have_skill(skill_scripts, RARESPOT_SKILL_NAME)
 
     capabilities = {
         "sandbox_execution": {
@@ -1306,6 +1333,10 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
         "durable_outputs": {
             "available": outputs_declared,
             "used": bool(_trace_artifacts(turns)),
+        },
+        "skills": {
+            "available": bool(available_skills),
+            "used": skills_used,
         },
         "delegation": {
             "available": "task" in builtin_names
@@ -1331,8 +1362,9 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             "used": bool(PAPER_TOOL_NAMES & all_used_tools),
         },
         "rarespot_detection": {
-            "available": bool(RARESPOT_TOOL_NAMES & registered_names),
-            "used": bool(RARESPOT_TOOL_NAMES & all_used_tools),
+            "available": bool(RARESPOT_TOOL_NAMES & registered_names)
+            or rarespot_skill_available,
+            "used": bool(RARESPOT_TOOL_NAMES & all_used_tools) or rarespot_skill_used,
         },
     }
     turn_summaries: list[dict[str, Any]] = []
@@ -1354,6 +1386,7 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             for tool_name in (turn.get("tool_names") or [])
             if str(tool_name).strip()
         }
+        turn_skills_used = bool(turn.get("skill_reads") or turn.get("skill_scripts"))
         turn_summaries.append(
             {
                 "run_id": turn.get("run_id"),
@@ -1376,6 +1409,7 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                         & turn_tools
                     ),
                     "context_staging": bool(_context_staging_tool_names() & turn_tools),
+                    "skills": turn_skills_used,
                     "followup_context_reuse": index > 0
                     and bool(
                         {
@@ -1407,7 +1441,8 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                     )
                     > 0,
                     "paper_review": bool(PAPER_TOOL_NAMES & turn_tools),
-                    "rarespot_detection": bool(RARESPOT_TOOL_NAMES & turn_tools),
+                    "rarespot_detection": bool(RARESPOT_TOOL_NAMES & turn_tools)
+                    or _turn_has_rarespot_skill_script(turn),
                 },
             }
         )
@@ -1417,6 +1452,9 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
         "manifest_count": len(manifests),
         "declared_builtin_tools": sorted(builtin_names),
         "declared_registered_tools": sorted(registered_names),
+        "available_skills": available_skills,
+        "skill_reads": skill_reads,
+        "skill_scripts": skill_scripts,
         "used_tools": sorted(all_used_tools),
         "unknown_tools": sorted(all_used_tools - declared_names - known_builtin_names),
         "capabilities": capabilities,
@@ -1854,6 +1892,77 @@ def _tool_names(events: list[dict[str, Any]]) -> list[str]:
         if tool_name:
             names.append(tool_name)
     return names
+
+
+def _skill_reads(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    records: set[tuple[str, str]] = set()
+    for event in events:
+        if event.get("event_kind") != "tool_call.started":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        )
+        if tool_name != "read_file":
+            continue
+        for text in _payload_strings(payload):
+            for match in SKILL_READ_PATTERN.finditer(text):
+                skill = match.group(1).strip()
+                if skill:
+                    records.add((skill, f"/skills/{skill}/SKILL.md"))
+    return [{"skill": skill, "path": path} for skill, path in sorted(records)]
+
+
+def _skill_scripts(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    records: set[tuple[str, str]] = set()
+    for event in events:
+        if event.get("event_kind") != "tool_call.started":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        )
+        if tool_name != "execute":
+            continue
+        text = "\n".join(_payload_strings(payload))
+        for script_path, skill_name in SKILL_SCRIPT_PATHS.items():
+            if script_path in text:
+                records.add((skill_name, script_path))
+    return [{"skill": skill, "path": path} for skill, path in sorted(records)]
+
+
+def _available_skills(
+    manifests: list[dict[str, Any]],
+    skill_reads: list[dict[str, str]],
+    skill_scripts: list[dict[str, str]],
+) -> list[str]:
+    names = _manifest_available_skill_names(manifests)
+    for record in (*skill_reads, *skill_scripts):
+        skill = str(record.get("skill") or "").strip()
+        if skill:
+            names.add(skill)
+    return sorted(names)
+
+
+def _payload_strings(value: Any) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            strings.extend(_payload_strings(item))
+        return strings
+    if isinstance(value, list | tuple | set):
+        for item in value:
+            strings.extend(_payload_strings(item))
+        return strings
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            strings.append(stripped)
+    return strings
 
 
 def _rarespot_configurations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2625,6 +2734,46 @@ def _trace_context_tool_hygiene(turns: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _trace_available_skills(
+    turns: list[dict[str, Any]],
+    manifests: list[dict[str, Any]],
+) -> list[str]:
+    names = _manifest_available_skill_names(manifests)
+    for turn in turns:
+        for name in turn.get("available_skills") or []:
+            normalized = str(name or "").strip()
+            if normalized:
+                names.add(normalized)
+        records = [
+            *(turn.get("skill_reads") or []),
+            *(turn.get("skill_scripts") or []),
+        ]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            skill = str(record.get("skill") or "").strip()
+            if skill:
+                names.add(skill)
+    return sorted(names)
+
+
+def _trace_skill_records(turns: list[dict[str, Any]], key: str) -> list[dict[str, str]]:
+    records: set[tuple[str, str]] = set()
+    for turn in turns:
+        for raw in turn.get(key) or []:
+            if not isinstance(raw, dict):
+                continue
+            skill = str(raw.get("skill") or "").strip()
+            path = str(raw.get("path") or "").strip()
+            if skill and path:
+                records.add((skill, path))
+    return [{"skill": skill, "path": path} for skill, path in sorted(records)]
+
+
+def _skill_records_have_skill(records: list[dict[str, str]], skill_name: str) -> bool:
+    return any(str(record.get("skill") or "") == skill_name for record in records)
+
+
 def _manifest_builtin_tool_names(manifests: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for manifest in manifests:
@@ -2643,6 +2792,19 @@ def _manifest_registered_tool_names(manifests: list[dict[str, Any]]) -> set[str]
     for manifest in manifests:
         for raw in manifest.get("registered_tools") or []:
             name = str(raw or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _manifest_available_skill_names(manifests: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for manifest in manifests:
+        for raw in manifest.get("available_skills") or []:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "").strip()
+            else:
+                name = str(raw or "").strip()
             if name:
                 names.add(name)
     return names
@@ -2895,7 +3057,6 @@ def _trace_has_technical_content(turns: list[dict[str, Any]]) -> bool:
     return matches >= 4
 
 
-RARESPOT_TOOL_NAMES = {"rarespot_ecology_inference"}
 TOOL_CAPABILITY_TOOL_NAMES = {"tool_capability_manifest"}
 ASYNC_TASK_TOOL_NAMES = {
     "start_async_task",
@@ -2907,14 +3068,31 @@ ASYNC_TASK_TOOL_NAMES = {
 ASYNC_FAILURE_STATUSES = {"error", "failed", "failure", "timeout", "interrupted"}
 
 
+def _turn_has_rarespot_legacy_tool(turn: dict[str, Any]) -> bool:
+    tool_names = turn.get("tool_names") or []
+    return isinstance(tool_names, list) and any(
+        str(name) in RARESPOT_TOOL_NAMES for name in tool_names
+    )
+
+
+def _turn_has_rarespot_skill_script(turn: dict[str, Any]) -> bool:
+    scripts = turn.get("skill_scripts") or []
+    if not isinstance(scripts, list):
+        return False
+    return any(
+        isinstance(script, dict)
+        and str(script.get("skill") or "") == RARESPOT_SKILL_NAME
+        and str(script.get("path") or "") == RARESPOT_SCRIPT_PATH
+        for script in scripts
+    )
+
+
+def _turn_has_rarespot_inference(turn: dict[str, Any]) -> bool:
+    return _turn_has_rarespot_legacy_tool(turn) or _turn_has_rarespot_skill_script(turn)
+
+
 def _trace_has_rarespot_tool(turns: list[dict[str, Any]]) -> bool:
-    for turn in turns:
-        tool_names = turn.get("tool_names") or []
-        if isinstance(tool_names, list) and any(
-            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
-        ):
-            return True
-    return False
+    return any(_turn_has_rarespot_inference(turn) for turn in turns)
 
 
 def _trace_mentions_detection_metrics(turns: list[dict[str, Any]]) -> bool:
@@ -3005,10 +3183,7 @@ def _report_only_rarespot_turns_avoid_inference(turns: list[dict[str, Any]]) -> 
         goal = str(turn.get("goal") or "")
         if not _looks_report_only_rarespot_goal(goal):
             continue
-        tool_names = turn.get("tool_names") or []
-        if isinstance(tool_names, list) and any(
-            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
-        ):
+        if _turn_has_rarespot_inference(turn):
             return False
     return True
 
@@ -3022,10 +3197,7 @@ def _trace_rarespot_config_matches(
 ) -> bool:
     saw_rarespot_turn = False
     for turn in turns:
-        tool_names = turn.get("tool_names") or []
-        if not isinstance(tool_names, list) or not any(
-            str(name) in RARESPOT_TOOL_NAMES for name in tool_names
-        ):
+        if not _turn_has_rarespot_inference(turn):
             continue
         saw_rarespot_turn = True
         configurations = turn.get("rarespot_configurations") or []

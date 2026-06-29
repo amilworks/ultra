@@ -17,6 +17,24 @@
 services:
   postgres:
     image: postgres:18-alpine
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+      - -c
+      - log_temp_files=65536
+      - -c
+      - wal_compression=lz4
+      - -c
+      - default_toast_compression=lz4
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -52,6 +70,18 @@ services:
         BIOIMAGE_REF: ${BIOIMAGE_REF:-main}
     image: ultra-image-service:local
     platform: linux/amd64 # the libbioimage engine is x86/SSE (emulated on arm64)
+    environment:
+      # Decode pool size — the scarce shared resource. Was hardcoded to 2 (the local
+      # bottleneck); tune per host. Each worker is one emulated libbioimage engine.
+      ULTRA_IMAGE_WORKERS: "${ULTRA_IMAGE_WORKERS:-4}"
+      # Keep this many workers free for interactive /slice + /tile while a bulk
+      # atlas/scalar-volume read fans across the rest — prevents the viewer lockup.
+      ULTRA_IMAGE_INTERACTIVE_RESERVE: "${ULTRA_IMAGE_INTERACTIVE_RESERVE:-1}"
+      # The upload volume is local disk here, so the NFS-avoidance pyramid COPY
+      # cache is pure overhead (a 22GB /tmp pile + a slow whole-pyramid copy on the
+      # first tile). Disable it locally; prod (NFS) keeps it on via its own env.
+      ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE: "${ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE:-0}"
+    mem_limit: ${ULTRA_IMAGE_MEM_LIMIT:-12g}
     volumes:
       - ultra-uploads:/data/uploads
     ports:
@@ -66,6 +96,7 @@ services:
     image: ultra-image-service:local # same image, worker role
     platform: linux/amd64
     command: ["python", "-m", "ultra_deepagents.image_convert_worker"]
+    mem_limit: ${ULTRA_IMAGE_CONVERT_MEM_LIMIT:-12g}
     environment:
       ULTRA_CONTROL_NATS_URL: nats://nats:4222
       ULTRA_CONTROL_NATS_IMAGE_JOBS_SUBJECT: ultra.data_agent.jobs
@@ -128,6 +159,12 @@ services:
       # (see ULTRA_DATA_DIR note in the worker service).
       ULTRA_CONTROL_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
       ULTRA_CONTROL_IMAGE_SERVICE_URL: http://image-service:8090
+      # Figure captioning (run-output images) via a grounded VLM — off unless ENABLED
+      # is set and a base URL is provided; degrades to no caption if unreachable.
+      ULTRA_CONTROL_VLM_ENABLED: "${ULTRA_CONTROL_VLM_ENABLED:-}"
+      ULTRA_CONTROL_VLM_BASE_URL: "${ULTRA_CONTROL_VLM_BASE_URL:-}"
+      ULTRA_CONTROL_VLM_MODEL: "${ULTRA_CONTROL_VLM_MODEL:-Qwen3.6-27B}"
+      ULTRA_CONTROL_VLM_API_KEY: "${ULTRA_CONTROL_VLM_API_KEY:-}"
       ULTRA_CONTROL_NGFF_SERVICE_URL: ${ULTRA_CONTROL_NGFF_SERVICE_URL:-http://ngff-service:8091}
       ULTRA_CONTROL_AUTH_PROVIDER: ${ULTRA_AUTH_PROVIDER:-dev}
       ULTRA_CONTROL_DEV_ADMIN_ENABLED: "true"

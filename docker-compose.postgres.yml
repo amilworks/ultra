@@ -3,6 +3,24 @@ services:
     image: postgres:18-alpine
     container_name: bisque-ultra-postgres
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+      - -c
+      - log_temp_files=65536
+      - -c
+      - wal_compression=lz4
+      - -c
+      - default_toast_compression=lz4
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bisque_ultra}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

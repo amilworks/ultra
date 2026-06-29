@@ -24,4 +24,16 @@ describe("mobile composer layout", () => {
       /@media \(max-width:\s*640px\) and \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.app-composer-shell \.app-composer-textarea,[\s\S]*\.app-composer-shell \.app-composer-actions\s*\{[^}]*transition:\s*none;/s
     );
   });
+
+  it("raises the composer above transcript controls while a popover menu is open", () => {
+    expect(appSource).toMatch(
+      /data-composer-menu-open=\{\s*slashMenuOpen \|\| composerResourcePickerOpen \? "true" : undefined\s*\}/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-composer-shell\[data-composer-menu-open="true"\]\s*\{[^}]*position:\s*relative;[^}]*z-index:\s*40;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-composer-shell\[data-composer-menu-open="true"\]\s+\.app-composer-card\s*\{[^}]*overflow:\s*visible;/s
+    );
+  });
 });

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   findReusableBlankDraftConversation,
   isBlankDraftConversation,
+  shouldExposeConversationInUrl,
   shouldShowConversationInHistory,
   shouldPersistConversationSnapshot,
 } from "./conversation-draft";
@@ -89,5 +90,18 @@ describe("conversation draft persistence", () => {
       )
     ).toBe(true);
     expect(shouldShowConversationInHistory(draft({ hydrated: false }))).toBe(true);
+  });
+
+  it("does not expose blank local draft ids in the browser URL", () => {
+    expect(shouldExposeConversationInUrl(draft())).toBe(false);
+    expect(
+      shouldExposeConversationInUrl(
+        draft({
+          id: "conversation-with-work",
+          messages: [{ id: "msg-user", role: "user", content: "hello" }],
+        })
+      )
+    ).toBe(true);
+    expect(shouldExposeConversationInUrl(draft({ hydrated: false }))).toBe(true);
   });
 });

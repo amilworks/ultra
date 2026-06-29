@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyRunDocumentKind,
+  isHydratableRunArtifactDocument,
   isHydratableRunArtifactVisual,
+  isReportRunDocument,
   rewriteArtifactMarkdownImageUrls,
   shouldHydrateRunArtifacts,
 } from "./run-artifact-hydration";
@@ -180,5 +183,70 @@ describe("shouldHydrateRunArtifacts", () => {
     expect(rewritten).toBe(
       'Rendered ![page](/v2/artifacts/artifact-page/download "attention figure")'
     );
+  });
+});
+
+describe("classifyRunDocumentKind", () => {
+  it("classifies reports, code, and data by extension", () => {
+    expect(classifyRunDocumentKind("outputs/report.md")).toBe("report");
+    expect(classifyRunDocumentKind("outputs/analysis.py")).toBe("code");
+    expect(classifyRunDocumentKind("outputs/results.csv")).toBe("data");
+    expect(classifyRunDocumentKind("outputs/notes.txt")).toBe("document");
+  });
+
+  it("falls back to the MIME type when the extension is ambiguous", () => {
+    expect(classifyRunDocumentKind("outputs/report", "text/markdown")).toBe("report");
+    expect(classifyRunDocumentKind("outputs/data", "application/json")).toBe("data");
+  });
+
+  it("returns null for images and unknown binaries", () => {
+    expect(classifyRunDocumentKind("outputs/fig1.png", "image/png")).toBeNull();
+    expect(classifyRunDocumentKind("outputs/model.bin", "application/octet-stream")).toBeNull();
+  });
+
+  it("identifies markdown reports", () => {
+    expect(isReportRunDocument("outputs/toeplitz_report.md")).toBe(true);
+    expect(isReportRunDocument("outputs/script.py")).toBe(false);
+  });
+});
+
+describe("isHydratableRunArtifactDocument", () => {
+  it("surfaces the markdown report and supporting code from a run's outputs", () => {
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "outputs/toeplitz_fft_embedding_report.md",
+        mime_type: "text/markdown",
+      })
+    ).toBe(true);
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "outputs/toeplitz_plots.py",
+        mime_type: "text/x-python",
+      })
+    ).toBe(true);
+  });
+
+  it("never duplicates figures already in the image strip", () => {
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "outputs/fig1_toeplitz_structure.png",
+        mime_type: "image/png",
+      })
+    ).toBe(false);
+  });
+
+  it("ignores uploads and staged inputs that are not run outputs", () => {
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "uploads/source_notes.md",
+        mime_type: "text/markdown",
+      })
+    ).toBe(false);
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "staged_artifacts/run_prev/data.csv",
+        mime_type: "text/csv",
+      })
+    ).toBe(false);
   });
 });

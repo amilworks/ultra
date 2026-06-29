@@ -12,10 +12,12 @@ import {
   AlertTriangle,
   Building2,
   CheckCircle2,
+  Database,
   LayoutDashboard,
   RefreshCw,
   RotateCcw,
   Shield,
+  Sparkles,
   StopCircle,
   Trash2,
   UserPlus,
@@ -49,6 +51,7 @@ import type {
   AdminCreateUserRequest,
   AdminActivityPeriod,
   AdminIssueRecord,
+  AdminMetricsResponse,
   AdminOrganization,
   AdminOverviewResponse,
   AdminRunRecord,
@@ -56,9 +59,14 @@ import type {
   AdminUserSummary,
   RunEvent,
 } from "../types";
+import { AdminPlatformValue } from "./AdminPlatformValue";
 
 type AdminConsoleProps = {
   overview: AdminOverviewResponse | null;
+  metrics: AdminMetricsResponse | null;
+  loadingMetrics: boolean;
+  metricsRangeDays: number;
+  onMetricsRangeDaysChange: (days: number) => void;
   organizations: AdminOrganization[];
   users: AdminUserSummary[];
   runs: AdminRunRecord[];
@@ -98,7 +106,7 @@ type AdminConsoleProps = {
   onInspectRunEvents: (runId: string) => void;
 };
 
-type AdminConsolePage = "overview" | "users";
+type AdminConsolePage = "platform" | "operations" | "users";
 
 const statusOptions = [
   { value: "", label: "All statuses" },
@@ -146,6 +154,25 @@ const formatClock = (iso: string): string => {
 
 const formatCount = (value: number | null | undefined): string =>
   countFormatter.format(Number.isFinite(Number(value)) ? Number(value) : 0);
+
+const formatPercent = (value: number | null | undefined): string => {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric)) {
+    return "0%";
+  }
+  return `${numeric.toFixed(Math.abs(numeric) >= 10 ? 0 : 1)}%`;
+};
+
+const formatMilliseconds = (value: number | null | undefined): string => {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return "0ms";
+  }
+  if (numeric >= 1000) {
+    return `${(numeric / 1000).toFixed(2)}s`;
+  }
+  return `${numeric.toFixed(numeric >= 10 ? 0 : 1)}ms`;
+};
 
 const formatDateTime = (iso: string | null | undefined): string => {
   if (!iso) {
@@ -306,6 +333,10 @@ const userStatusBadgeClass = (status: string): string => {
 
 export function AdminConsole({
   overview,
+  metrics,
+  loadingMetrics,
+  metricsRangeDays,
+  onMetricsRangeDaysChange,
   organizations,
   users,
   runs,
@@ -344,7 +375,7 @@ export function AdminConsole({
   onDeleteConversation,
   onInspectRunEvents,
 }: AdminConsoleProps) {
-  const [activePage, setActivePage] = useState<AdminConsolePage>("overview");
+  const [activePage, setActivePage] = useState<AdminConsolePage>("platform");
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserName, setNewUserName] = useState("");
   const [newUserRole, setNewUserRole] = useState("researcher");
@@ -428,6 +459,9 @@ export function AdminConsole({
   );
   const kpis = overview?.kpis;
   const queue = overview?.queue;
+  const database = overview?.database;
+  const databasePool = database?.pool;
+  const databaseTopQueries = database?.top_queries?.slice(0, 3) ?? [];
   const activeUserShare =
     kpis && kpis.total_users > 0 ? (kpis.active_users_24h / kpis.total_users) * 100 : 0;
   const messagesPerActiveUser =
@@ -510,7 +544,7 @@ export function AdminConsole({
           <div>
             <h2 className="admin-title">Admin Console</h2>
             <p className="admin-subtitle">
-              Platform health, user activity, run control, and operational triage.
+              Platform value, system health, and operational triage.
             </p>
           </div>
           <Button
@@ -519,12 +553,13 @@ export function AdminConsole({
             size="sm"
             className="admin-refresh-button"
             onClick={onRefreshAll}
-            disabled={loadingOverview || loadingUsers || loadingRuns || loadingIssues}
+            disabled={loadingMetrics || loadingOverview || loadingUsers || loadingRuns || loadingIssues}
           >
             <RefreshCw
               className={cn(
                 "size-4",
-                (loadingOverview || loadingUsers || loadingRuns || loadingIssues) && "animate-spin"
+                (loadingMetrics || loadingOverview || loadingUsers || loadingRuns || loadingIssues) &&
+                  "animate-spin"
               )}
             />
             Refresh
@@ -540,12 +575,20 @@ export function AdminConsole({
         >
           <TabsList className="admin-page-tabs-list">
             <TabsTrigger
-              value="overview"
+              value="platform"
               className="admin-page-tab"
-              onClick={() => setActivePage("overview")}
+              onClick={() => setActivePage("platform")}
+            >
+              <Sparkles className="size-4" />
+              Platform value
+            </TabsTrigger>
+            <TabsTrigger
+              value="operations"
+              className="admin-page-tab"
+              onClick={() => setActivePage("operations")}
             >
               <LayoutDashboard className="size-4" />
-              Overview
+              Operations
             </TabsTrigger>
             <TabsTrigger
               value="users"
@@ -553,11 +596,20 @@ export function AdminConsole({
               onClick={() => setActivePage("users")}
             >
               <Users className="size-4" />
-              Users Management
+              Users
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="overview" className="admin-page-panel">
+          <TabsContent value="platform" className="admin-page-panel">
+            <AdminPlatformValue
+              metrics={metrics}
+              loading={loadingMetrics}
+              rangeDays={metricsRangeDays}
+              onRangeDaysChange={onMetricsRangeDaysChange}
+            />
+          </TabsContent>
+
+          <TabsContent value="operations" className="admin-page-panel">
         <Card className="admin-runtime-card">
           <CardHeader>
             <div className="admin-card-title-row">
@@ -611,6 +663,74 @@ export function AdminConsole({
                     : "disabled"}
               </strong>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="admin-runtime-card">
+          <CardHeader>
+            <div className="admin-card-title-row">
+              <div>
+                <CardTitle>Database</CardTitle>
+                <CardDescription>Postgres pool pressure and slow query fingerprints.</CardDescription>
+              </div>
+              <Badge
+                variant="outline"
+                className={database?.available && !database?.error ? "admin-runtime-good" : "admin-runtime-warn"}
+              >
+                {loadingOverview ? "…" : database?.available ? "Postgres" : "Unavailable"}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="admin-queue-panel">
+            <div className="admin-runtime-grid">
+              <div>
+                <span>Saturation</span>
+                <strong>{loadingOverview ? "…" : formatPercent((databasePool?.saturation ?? 0) * 100)}</strong>
+              </div>
+              <div>
+                <span>Waiting</span>
+                <strong>{loadingOverview ? "…" : formatPercent((databasePool?.wait_ratio ?? 0) * 100)}</strong>
+              </div>
+              <div>
+                <span>Connections</span>
+                <strong>
+                  {loadingOverview
+                    ? "…"
+                    : `${formatCount(databasePool?.acquired_conns ?? 0)} / ${formatCount(databasePool?.max_conns ?? 0)}`}
+                </strong>
+              </div>
+              <div>
+                <span>Idle</span>
+                <strong>{loadingOverview ? "…" : formatCount(databasePool?.idle_conns ?? 0)}</strong>
+              </div>
+              <div>
+                <span>Wait time</span>
+                <strong>{loadingOverview ? "…" : formatDuration(databasePool?.empty_acquire_wait_seconds)}</strong>
+              </div>
+              <div>
+                <span>Canceled waits</span>
+                <strong>{loadingOverview ? "…" : formatCount(databasePool?.canceled_acquire_count ?? 0)}</strong>
+              </div>
+            </div>
+            {!loadingOverview && database?.error ? (
+              <p className="admin-queue-error">{database.error}</p>
+            ) : null}
+            {!loadingOverview && databaseTopQueries.length ? (
+              <div className="admin-database-query-list">
+                {databaseTopQueries.map((query) => (
+                  <article key={`${query.query_id}-${query.calls}`} className="admin-database-query">
+                    <div className="admin-database-query-heading">
+                      <div>
+                        <strong>{formatMilliseconds(query.mean_exec_ms)}</strong>
+                        <span>{`${formatCount(query.calls)} calls • ${formatCount(query.rows)} rows`}</span>
+                      </div>
+                      <Database className="size-4" aria-hidden="true" />
+                    </div>
+                    <code>{query.query}</code>
+                  </article>
+                ))}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

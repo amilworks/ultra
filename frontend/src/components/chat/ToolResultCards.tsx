@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { openFigureLightbox, type LightboxFigure } from "@/lib/figureLightbox";
 
 type LazyModule = Record<string, unknown>;
 
@@ -574,6 +575,32 @@ const scientificFigureTabLabel = (figure: ScientificFigureCard): string => {
   return figure.title;
 };
 
+// Open the lightbox over a set of scientific (MegaSeg) figures, focused on one.
+const openScientificFigureLightbox = (
+  figures: Array<ScientificFigureCard | null>,
+  focusUrl: string
+): void => {
+  const lightboxFigures: LightboxFigure[] = figures
+    .filter((figure): figure is ScientificFigureCard => Boolean(figure) && Boolean(figure?.previewable))
+    .map((figure) => ({ url: scientificFigureUrl(figure), downloadUrl: figure.downloadUrl, title: figure.title }))
+    .filter((figure) => figure.url.length > 0);
+  openFigureLightbox(
+    lightboxFigures,
+    lightboxFigures.findIndex((figure) => figure.url === focusUrl)
+  );
+};
+
+// Open the lightbox over a YOLO/prairie figure stack, focused on one figure.
+const openYoloFigureLightbox = (figures: YoloFigureCard[], focusUrl: string): void => {
+  const lightboxFigures: LightboxFigure[] = figures
+    .filter((figure) => figure.previewable && figure.previewUrl)
+    .map((figure) => ({ url: figure.previewUrl, downloadUrl: figure.downloadUrl, title: figure.title }));
+  openFigureLightbox(
+    lightboxFigures,
+    lightboxFigures.findIndex((figure) => figure.url === focusUrl)
+  );
+};
+
 function YoloFigureStack({
   figures,
   variant = "default",
@@ -614,13 +641,20 @@ function YoloFigureStack({
           >
             <div className="chat-tool-figure-media-wrap">
               {figure.previewable ? (
-                <img
-                  src={figure.previewUrl}
-                  alt={figure.title}
-                  loading={index === 0 ? "eager" : "lazy"}
-                  className="chat-tool-figure-image"
-                  data-testid={variant === "prairie" ? "prairie-figure-image" : "yolo-figure-image"}
-                />
+                <button
+                  type="button"
+                  className="chat-tool-figure-imagebtn"
+                  aria-label={`View ${figure.title}`}
+                  onClick={() => openYoloFigureLightbox(figures, figure.previewUrl)}
+                >
+                  <img
+                    src={figure.previewUrl}
+                    alt={figure.title}
+                    loading={index === 0 ? "eager" : "lazy"}
+                    className="chat-tool-figure-image"
+                    data-testid={variant === "prairie" ? "prairie-figure-image" : "yolo-figure-image"}
+                  />
+                </button>
               ) : (
                 <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
                   <ImageIcon className="size-5" />
@@ -641,16 +675,33 @@ function YoloFigureStack({
                 ) : null}
               </div>
               <div className="chat-tool-figure-actions">
-                <Button asChild variant="outline" size="sm">
-                  <a href={figure.previewUrl} target="_blank" rel="noreferrer">
-                    Open annotated
-                  </a>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openYoloFigureLightbox(figures, figure.previewUrl)}
+                >
+                  View annotated
                 </Button>
                 {figure.originalUrl ? (
-                  <Button asChild variant="ghost" size="sm">
-                    <a href={figure.originalUrl} target="_blank" rel="noreferrer">
-                      Open original
-                    </a>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      openFigureLightbox(
+                        [
+                          {
+                            url: figure.originalUrl as string,
+                            downloadUrl: figure.originalUrl,
+                            title: `${figure.title} (original)`,
+                          },
+                        ],
+                        0
+                      )
+                    }
+                  >
+                    View original
                   </Button>
                 ) : null}
                 <Button asChild variant="ghost" size="sm">
@@ -702,6 +753,11 @@ function MegasegCardBody({ card }: { card: ToolResultCard }) {
   );
   const defaultSecondaryFigure =
     visibleSecondaryFigures[0] ?? deferredFigures[0] ?? null;
+  const scientificFigureSet: Array<ScientificFigureCard | null> = [
+    heroFigure,
+    ...visibleSecondaryFigures,
+    ...deferredFigures,
+  ];
 
   return (
     <div className="chat-scientific-result-shell" data-testid="megaseg-card">
@@ -709,12 +765,19 @@ function MegasegCardBody({ card }: { card: ToolResultCard }) {
         <figure className="chat-scientific-hero">
           <div className="chat-scientific-hero-media">
             {heroFigure.previewable ? (
-              <img
-                src={heroFigureUrl}
-                alt={heroFigure.title}
-                loading="eager"
-                className="chat-scientific-hero-image"
-              />
+              <button
+                type="button"
+                className="chat-tool-figure-imagebtn"
+                aria-label={`View ${heroFigure.title}`}
+                onClick={() => openScientificFigureLightbox(scientificFigureSet, heroFigureUrl)}
+              >
+                <img
+                  src={heroFigureUrl}
+                  alt={heroFigure.title}
+                  loading="eager"
+                  className="chat-scientific-hero-image"
+                />
+              </button>
             ) : (
               <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
                 <ImageIcon className="size-5" />
@@ -735,10 +798,13 @@ function MegasegCardBody({ card }: { card: ToolResultCard }) {
               ) : null}
             </div>
             <div className="chat-scientific-caption-actions">
-              <Button asChild variant="outline" size="sm">
-                <a href={heroFigureUrl} target="_blank" rel="noreferrer">
-                  Open figure
-                </a>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => openScientificFigureLightbox(scientificFigureSet, heroFigureUrl)}
+              >
+                View figure
               </Button>
               <Button asChild variant="ghost" size="sm">
                 <a
@@ -799,12 +865,19 @@ function MegasegCardBody({ card }: { card: ToolResultCard }) {
               <figure className="chat-scientific-secondary-figure">
                 <div className="chat-scientific-secondary-media">
                   {figure.previewable ? (
-                    <img
-                      src={scientificFigureUrl(figure)}
-                      alt={figure.title}
-                      loading="lazy"
-                      className="chat-scientific-secondary-image"
-                    />
+                    <button
+                      type="button"
+                      className="chat-tool-figure-imagebtn"
+                      aria-label={`View ${figure.title}`}
+                      onClick={() => openScientificFigureLightbox(scientificFigureSet, scientificFigureUrl(figure))}
+                    >
+                      <img
+                        src={scientificFigureUrl(figure)}
+                        alt={figure.title}
+                        loading="lazy"
+                        className="chat-scientific-secondary-image"
+                      />
+                    </button>
                   ) : (
                     <div className="chat-tool-figure-placeholder chat-tool-image-placeholder">
                       <ImageIcon className="size-5" />

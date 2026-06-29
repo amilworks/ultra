@@ -84,6 +84,13 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
+import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
+import { FigureCaption } from "./components/chat/FigureCaption";
+import {
+  openFigureLightbox,
+  registerLightboxOpenInLens,
+  type LightboxFigure,
+} from "./lib/figureLightbox";
 import { groupPendingUploads } from "./lib/pendingBundles";
 import {
   DEFAULT_API_BASE_URL,
@@ -102,6 +109,7 @@ import {
   createAdminOrganization,
   createAdminUser,
   deleteAdminUser,
+  loadAdminMetrics,
   loadAdminOrganizations,
   loadAdminIssues,
   loadAdminOverview,
@@ -118,8 +126,11 @@ import {
   buildScientificResultGroups,
 } from "./features/chat/scientific-results";
 import {
+  classifyRunDocumentKind,
+  isHydratableRunArtifactDocument,
   isHydratableRunArtifactVisual,
   rewriteArtifactMarkdownImageUrls,
+  type RunDocumentKind,
   shouldHydrateRunArtifacts,
 } from "./features/chat/run-artifact-hydration";
 import {
@@ -131,6 +142,7 @@ import {
 import { extractRunTokenUsage } from "./features/chat/token-usage";
 import {
   findReusableBlankDraftConversation,
+  shouldExposeConversationInUrl,
   shouldShowConversationInHistory,
   shouldPersistConversationSnapshot,
 } from "./features/chat/conversation-draft";
@@ -181,6 +193,7 @@ import type {
   AdminCreateUserRequest,
   AdminIssueRecord,
   AdminOrganization,
+  AdminMetricsResponse,
   AdminOverviewResponse,
   AdminRunRecord,
   AdminUserStatus,
@@ -205,11 +218,17 @@ import type {
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
+import {
+  composeComposerWorkflowPromptForModel,
+  slashWorkflowSearchQuery,
+  visiblePromptAfterComposerWorkflowSelection,
+} from "./components/chat/composer-workflow-prompt";
 import type {
   ComposerWorkflowDefinition,
   ComposerWorkflowId,
   ComposerWorkflowPresetState,
 } from "./components/chat/composer-workflows";
+import type { ComposerWorkflowGroup } from "./components/chat/ComposerSlashMenu";
 import type {
   MegasegFileInsight,
   PrairieImageAnalysis,
@@ -482,6 +501,27 @@ type RunImageArtifact = {
   resultGroupId?: string | null;
 };
 
+// A non-visual durable run output (markdown report, supporting code, data table)
+// surfaced in the chat for inline reading and download. Images use RunImageArtifact.
+type RunDocumentArtifact = {
+  path: string;
+  title: string;
+  downloadUrl: string;
+  kind: RunDocumentKind;
+  mimeType?: string;
+  sizeBytes?: number;
+};
+
+// Fetch a durable artifact's text for inline rendering. The download URL is
+// absolute and same-origin-authenticated, so credentials must ride along.
+const fetchRunDocumentText = async (downloadUrl: string): Promise<string> => {
+  const response = await fetch(downloadUrl, { method: "GET", credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`Unable to load document (${response.status})`);
+  }
+  return response.text();
+};
+
 const formatBisqueShortcutLabel = (
   count: number | null | undefined,
   singular: string,
@@ -514,6 +554,7 @@ const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
 const loadProModeDevTraceModule = () => import("./components/chat/ProModeDevTrace");
 const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
+const loadChatRunDocumentsModule = () => import("./components/chat/ChatRunDocuments");
 const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
 
 type ComposerWorkflowsModule = Awaited<
@@ -637,6 +678,7 @@ const LazyResearchDigestCard = lazyNamed(
   loadToolResultCardsModule,
   "ResearchDigestCard"
 );
+const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
 
 let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
 let adminPanelPreloadPromise: Promise<unknown> | null = null;
@@ -694,6 +736,7 @@ type UiMessage = {
   uploadedFileNames?: string[];
   liveStream?: AsyncIterable<string>;
   runArtifacts?: RunImageArtifact[];
+  runDocuments?: RunDocumentArtifact[];
   quickPreviewFileIds?: string[];
   resolvedBisqueResources?: ToolResourceRow[];
 };
@@ -850,6 +893,7 @@ const EMPTY_UI_MESSAGES: UiMessage[] = [];
 const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
 const EMPTY_RUN_EVENTS: RunEvent[] = [];
 const EMPTY_RUN_IMAGE_ARTIFACTS: RunImageArtifact[] = [];
+const EMPTY_RUN_DOCUMENTS: RunDocumentArtifact[] = [];
 const EMPTY_FILES: File[] = [];
 const EMPTY_UPLOADED_FILES: UploadedFileRecord[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -880,6 +924,17 @@ const mergeRunImageArtifacts = (
   });
   return Array.from(merged.values());
 };
+
+// Map run-output image artifacts to the figure-lightbox shape (previewable only).
+const runArtifactsToFigures = (artifacts: RunImageArtifact[]): LightboxFigure[] =>
+  artifacts
+    .filter((artifact) => artifact.previewable)
+    .map((artifact) => ({
+      url: artifact.url,
+      downloadUrl: artifact.downloadUrl,
+      title: artifact.title,
+      fileId: artifact.linkedFileId ?? undefined,
+    }));
 
 const collectConversationRunArtifacts = (messages: UiMessage[]): RunImageArtifact[] => {
   const artifacts: RunImageArtifact[] = [];
@@ -1531,14 +1586,6 @@ const inferReuseToolNames = (promptText: string): string[] => {
     selected.push("estimate_depth_pro");
   }
   return selected;
-};
-
-const normalizeSlashWorkflowQuery = (value: string): string => {
-  const prompt = String(value || "");
-  if (!prompt.startsWith("/")) {
-    return "";
-  }
-  return prompt.slice(1).trim();
 };
 
 const reuseToolLabel = (toolName: string): string => {
@@ -2642,6 +2689,7 @@ const ConversationMessageRow = memo(
     const progressEvents = message.progressEvents ?? EMPTY_PROGRESS_EVENTS;
     const runEvents = message.runEvents ?? EMPTY_RUN_EVENTS;
     const runArtifacts = message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS;
+    const runDocuments = message.runDocuments ?? EMPTY_RUN_DOCUMENTS;
     const artifactReferences = useMemo(
       () => mergeRunImageArtifacts(runArtifacts, conversationRunArtifacts),
       [conversationRunArtifacts, runArtifacts]
@@ -2991,30 +3039,49 @@ const ConversationMessageRow = memo(
           {runArtifacts.length > 0 && toolResultCards.length === 0 ? (
             <div className="chat-artifact-grid">
               {runArtifacts.map((artifact) => (
-                <a
-                  key={artifact.path}
-                  href={artifact.downloadUrl ?? artifact.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="chat-artifact-card"
-                >
-                  {artifact.previewable ? (
-                    <img
-                      src={artifact.url}
-                      alt={artifact.title}
-                      loading="lazy"
-                      className="chat-artifact-image"
-                    />
-                  ) : (
-                    <div className="chat-artifact-image chat-tool-image-placeholder">
-                      <ImageIcon className="size-5" />
-                      <span>Preview unavailable</span>
-                    </div>
-                  )}
-                  <span className="chat-artifact-title">{artifact.title}</span>
-                </a>
+                <div key={artifact.path} className="chat-artifact-cell">
+                  <button
+                    type="button"
+                    className="chat-artifact-card"
+                    onClick={() => {
+                      const figures = runArtifactsToFigures(runArtifacts);
+                      openFigureLightbox(
+                        figures,
+                        figures.findIndex((figure) => figure.url === artifact.url)
+                      );
+                    }}
+                    disabled={!artifact.previewable}
+                  >
+                    {artifact.previewable ? (
+                      <img
+                        src={artifact.url}
+                        alt={artifact.title}
+                        loading="lazy"
+                        className="chat-artifact-image"
+                      />
+                    ) : (
+                      <div className="chat-artifact-image chat-tool-image-placeholder">
+                        <ImageIcon className="size-5" />
+                        <span>Preview unavailable</span>
+                      </div>
+                    )}
+                    <span className="chat-artifact-title">{artifact.title}</span>
+                  </button>
+                  {artifact.previewable && message.runId ? (
+                    <FigureCaption runId={message.runId} path={artifact.path} apiClient={apiClient} />
+                  ) : null}
+                </div>
               ))}
             </div>
+          ) : null}
+          {runDocuments.length > 0 ? (
+            <Suspense fallback={null}>
+              <LazyChatRunDocuments
+                documents={runDocuments}
+                imageArtifacts={runArtifacts}
+                loadDocumentText={fetchRunDocumentText}
+              />
+            </Suspense>
           ) : null}
           {message.status === "stopped" || message.status === "failed" ? (
             <AssistantTurnRecovery
@@ -7906,6 +7973,9 @@ export function App() {
   const [pendingResourceDelete, setPendingResourceDelete] = useState<ResourceRecord | null>(null);
   const [pendingBulkResourceDelete, setPendingBulkResourceDelete] = useState<ResourceRecord[]>([]);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
+  const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null);
+  const [adminLoadingMetrics, setAdminLoadingMetrics] = useState(false);
+  const [adminMetricsRangeDays, setAdminMetricsRangeDays] = useState(90);
   const [adminOrganizations, setAdminOrganizations] = useState<AdminOrganization[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [adminRuns, setAdminRuns] = useState<AdminRunRecord[]>([]);
@@ -8471,7 +8541,12 @@ export function App() {
       activeConversationId && conversations.some((conversation) => conversation.id === activeConversationId)
         ? activeConversationId
         : conversations[0]?.id ?? null;
-    replaceConversationIdInLocation(resolvedConversationId);
+    const urlConversation = resolvedConversationId
+      ? conversations.find((conversation) => conversation.id === resolvedConversationId) ?? null
+      : null;
+    replaceConversationIdInLocation(
+      shouldExposeConversationInUrl(urlConversation) ? resolvedConversationId : null
+    );
   }, [activeConversationId, authStatus, conversations, conversationsHydrated]);
 
   const flushConversationSnapshots = useCallback(() => {
@@ -8835,6 +8910,45 @@ export function App() {
       cancelQueuedReset();
     };
   }, [activePanel, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
+      return queueEffectUpdate(() => {
+        setAdminMetrics(null);
+        setAdminLoadingMetrics(false);
+      });
+    }
+    let cancelled = false;
+    const cancelQueuedReset = queueEffectUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setAdminLoadingMetrics(true);
+    });
+    void loadAdminMetrics(apiClient, adminMetricsRangeDays)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminMetrics(payload);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setAdminError(normalizeApiError(error));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setAdminLoadingMetrics(false);
+      });
+    return () => {
+      cancelled = true;
+      cancelQueuedReset();
+    };
+  }, [activePanel, adminMetricsRangeDays, adminRefreshToken, apiClient, authIsAdmin, authStatus]);
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !authIsAdmin || activePanel !== "admin") {
@@ -9693,6 +9807,7 @@ export function App() {
     setConversationDeletingById({});
     setResourceDeletingById({});
     setAdminOverview(null);
+    setAdminMetrics(null);
     setAdminOrganizations([]);
     setAdminUsers([]);
     setAdminRuns([]);
@@ -10440,11 +10555,29 @@ export function App() {
     () => new Set(Object.keys(composerResourcePickerSelection)),
     [composerResourcePickerSelection]
   );
-  const slashWorkflowQuery = normalizeSlashWorkflowQuery(activePrompt);
+  const slashWorkflowQuery = slashWorkflowSearchQuery(activePrompt);
   const filteredSlashWorkflows = useMemo(
     () => composerWorkflows?.filterComposerWorkflows(slashWorkflowQuery) ?? [],
     [composerWorkflows, slashWorkflowQuery]
   );
+  const slashWorkflowGroups = useMemo<ComposerWorkflowGroup[]>(() => {
+    if (!composerWorkflows) {
+      return [];
+    }
+    const grouped = new Map<
+      ComposerWorkflowDefinition["category"],
+      ComposerWorkflowDefinition[]
+    >();
+    filteredSlashWorkflows.forEach((workflow) => {
+      const existing = grouped.get(workflow.category) ?? [];
+      existing.push(workflow);
+      grouped.set(workflow.category, existing);
+    });
+    return composerWorkflows.COMPOSER_WORKFLOW_GROUP_ORDER.map((category) => ({
+      category,
+      items: grouped.get(category) ?? [],
+    })).filter((group) => group.items.length > 0);
+  }, [composerWorkflows, filteredSlashWorkflows]);
   const slashMenuOpen =
     !composerResourcePickerOpen &&
     // Allow slash selection even when a persistent workflow such as Pro Mode
@@ -11399,6 +11532,20 @@ export function App() {
     openUploadedFilesInViewer([uploaded], bisqueLink ? { [uploaded.file_id]: bisqueLink } : {});
   };
 
+  // The figure lightbox's "Open in Lens" escape hatch: resolve the resource by id
+  // and hand it to the full scientific viewer.
+  useEffect(() => {
+    registerLightboxOpenInLens((fileId) => {
+      void apiClient
+        .getResource(fileId)
+        .then((resource) => openResourceInViewer(resource))
+        .catch(() => undefined);
+    });
+    return () => registerLightboxOpenInLens(null);
+    // openResourceInViewer is stable for this purpose; apiClient is the only dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClient]);
+
   // --- URL-as-navigation-state -------------------------------------------------------
   // The app has no router; navigation is React state. Reflect the active panel + open
   // Lens resource in the URL so the browser Back/Forward buttons work, a refresh
@@ -11685,12 +11832,8 @@ export function App() {
       updatedAt: Date.now(),
       composerWorkflowPreset: preset,
     }));
-    // Combine the curated workflow scaffold with whatever the user already typed —
-    // the scaffolds end ready for the user's specifics — so picking a workflow keeps
-    // their text instead of overwriting it.
-    const existingDraft = activePrompt.trim();
     setActivePromptValue(
-      existingDraft ? `${workflow.prompt}${existingDraft}` : workflow.prompt
+      visiblePromptAfterComposerWorkflowSelection(workflow, activePrompt)
     );
     setActivePanel("chat");
     setResourceViewerContext(null);
@@ -12347,7 +12490,26 @@ export function App() {
             mime_type: artifact.mime_type,
           })
       );
-      if (durableArtifacts.length === 0) {
+      // Non-visual durable outputs (markdown report, supporting code, data tables)
+      // become readable/downloadable documents in the chat instead of being dropped.
+      const documentArtifacts: RunDocumentArtifact[] = artifactResponse.artifacts
+        .filter(
+          (artifact) =>
+            Math.max(0, Number(artifact.size_bytes) || 0) > 0 &&
+            isHydratableRunArtifactDocument({
+              path: artifact.path,
+              mime_type: artifact.mime_type,
+            })
+        )
+        .map((artifact) => ({
+          path: artifact.path,
+          title: artifactDisplayName(artifact),
+          downloadUrl: apiClient.artifactDownloadUrl(runId, artifact.path),
+          kind: classifyRunDocumentKind(artifact.path, artifact.mime_type) ?? "document",
+          mimeType: String(artifact.mime_type || "").trim() || undefined,
+          sizeBytes: Math.max(0, Number(artifact.size_bytes) || 0) || undefined,
+        }));
+      if (durableArtifacts.length === 0 && documentArtifacts.length === 0) {
         return;
       }
 
@@ -12399,6 +12561,7 @@ export function App() {
                         null,
                     } satisfies RunImageArtifact;
                   }),
+                  runDocuments: documentArtifacts,
                 }
               : item
           ),
@@ -13342,11 +13505,15 @@ export function App() {
         return;
       }
 
+      const modelPromptForTurn = composeComposerWorkflowPromptForModel(
+        composerWorkflowPreset,
+        promptForModel
+      );
       const chatMessages = toChatWire(nextMessages);
-      if (promptForModel !== text) {
+      if (modelPromptForTurn !== text) {
         for (let idx = chatMessages.length - 1; idx >= 0; idx -= 1) {
           if (chatMessages[idx].role === "user") {
-            chatMessages[idx] = { ...chatMessages[idx], content: promptForModel };
+            chatMessages[idx] = { ...chatMessages[idx], content: modelPromptForTurn };
             break;
           }
         }
@@ -13384,7 +13551,7 @@ export function App() {
         uploaded_files: [],
         file_ids: currentUploads.map((file) => file.file_id),
         conversation_id: conversationId,
-        goal: promptForModel,
+        goal: modelPromptForTurn,
         selected_tool_names: effectiveSelectedToolNamesForTurn,
         selection_context: selectionContextForTurn,
         workflow_hint: composerWorkflowPreset?.workflowHint ?? null,
@@ -14255,6 +14422,10 @@ export function App() {
             >
               <LazyAdminConsole
                 overview={adminOverview}
+                metrics={adminMetrics}
+                loadingMetrics={adminLoadingMetrics}
+                metricsRangeDays={adminMetricsRangeDays}
+                onMetricsRangeDaysChange={setAdminMetricsRangeDays}
                 organizations={adminOrganizations}
                 users={adminUsers}
                 runs={adminRuns}
@@ -14504,6 +14675,9 @@ export function App() {
             data-composer-compact={
               isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
             }
+            data-composer-menu-open={
+              slashMenuOpen || composerResourcePickerOpen ? "true" : undefined
+            }
           >
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
@@ -14534,7 +14708,7 @@ export function App() {
                     <Suspense fallback={null}>
                       <LazyComposerSlashMenu
                         mode="workflow"
-                        workflowQuery={slashWorkflowQuery}
+                        workflowGroups={slashWorkflowGroups}
                         activeWorkflowId={resolvedActiveSlashWorkflowId}
                         onSelectWorkflow={handleSelectComposerWorkflow}
                       />
@@ -15181,6 +15355,7 @@ export function App() {
       {activePanel !== "resources" ? (
         <UploadFlightChip inFlightCount={inFlightUploadCount} onOpen={openResourcesPanel} />
       ) : null}
+      <FigureLightboxRoot />
     </SidebarProvider>
   );
 }

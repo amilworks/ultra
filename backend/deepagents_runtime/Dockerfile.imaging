@@ -98,4 +98,6 @@ EXPOSE 8090
 # LibBioImageEngine because libimgcnv.so is present; pass --stub to force the
 # deterministic engine for smoke tests. CMD (not ENTRYPOINT) so `command:` in
 # compose can swap roles cleanly.
-CMD ["python", "-m", "ultra_deepagents.image_service", "--host", "0.0.0.0", "--port", "8090", "--workers", "2"]
+# Decode pool size is driven by $ULTRA_IMAGE_WORKERS (compose/env), falling back
+# to CPU count — no longer hardcoded to 2 (that was the local decode bottleneck).
+CMD ["python", "-m", "ultra_deepagents.image_service", "--host", "0.0.0.0", "--port", "8090"]

@@ -16,9 +16,48 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 from typing import Any
 
 __all__ = ["assemble_atlas", "compose_atlas_png", "assemble_scalar_volume", "build_scalar_volume_dict"]
+
+
+# Bulk reads (a whole atlas / scalar volume) fan the per-plane decodes across the
+# worker pool. Left unbounded they occupy EVERY worker for the full multi-second
+# decode, so a z-scrub or the Lens viewer opened at the same time has zero free
+# decoders and appears to lock up. Cap concurrent bulk chunk-reads to
+# (workers - reserve) so at least `reserve` worker(s) always stay free to serve
+# interactive /slice and /tile requests. The cap is global (one semaphore per
+# process) so even two concurrent volume opens can't consume the reserved slot.
+_bulk_semaphore: asyncio.Semaphore | None = None
+_bulk_semaphore_size = 0
+
+
+def _interactive_reserve() -> int:
+    try:
+        return max(0, int(os.environ.get("ULTRA_IMAGE_INTERACTIVE_RESERVE", "1") or "1"))
+    except ValueError:
+        return 1
+
+
+def _bulk_semaphore_for(workers: int) -> asyncio.Semaphore:
+    global _bulk_semaphore, _bulk_semaphore_size
+    size = max(1, workers - _interactive_reserve())
+    if _bulk_semaphore is None or _bulk_semaphore_size != size:
+        _bulk_semaphore = asyncio.Semaphore(size)
+        _bulk_semaphore_size = size
+    return _bulk_semaphore
+
+
+async def _gather_bulk(semaphore: asyncio.Semaphore, factories: list) -> list:
+    """Run chunk-read coroutine factories, holding at most ``semaphore`` of them in
+    flight so the reserved interactive worker(s) are never occupied by bulk work."""
+
+    async def _guarded(make):
+        async with semaphore:
+            return await make()
+
+    return await asyncio.gather(*[_guarded(make) for make in factories])
 
 
 async def assemble_atlas(
@@ -52,9 +91,10 @@ async def assemble_atlas(
     # per-task submission/IPC overhead (80 tasks -> ~W tasks).
     workers = max(1, int(getattr(runner, "workers", 1) or 1))
     chunks = _split_chunks(plan["depth"], min(plan["depth"], workers))
-    results = await asyncio.gather(
-        *[
-            runner.call(
+    results = await _gather_bulk(
+        _bulk_semaphore_for(workers),
+        [
+            lambda zs=zs: runner.call(
                 "atlas_cells",
                 path,
                 zs=zs,
@@ -67,7 +107,7 @@ async def assemble_atlas(
                 paged=plan["paged"],
             )
             for zs in chunks
-        ]
+        ],
     )
     cells = [cell for chunk_cells in results for cell in chunk_cells]  # flatten in z-order
     # Compose off the event loop: numpy tiling + PNG encode release the GIL, so a worker
@@ -86,11 +126,14 @@ async def assemble_scalar_volume(runner: Any, path: str, *, channel: int = 0, t:
         return build_scalar_volume_dict([], plan["channel"])
     workers = max(1, int(getattr(runner, "workers", 1) or 1))
     chunks = _split_chunks(depth, min(depth, workers))
-    results = await asyncio.gather(
-        *[
-            runner.call("scalar_planes", path, zs=zs, channel=plan["channel"], t=plan["t"], pages=plan["pages"])
+    results = await _gather_bulk(
+        _bulk_semaphore_for(workers),
+        [
+            lambda zs=zs: runner.call(
+                "scalar_planes", path, zs=zs, channel=plan["channel"], t=plan["t"], pages=plan["pages"]
+            )
             for zs in chunks
-        ]
+        ],
     )
     planes = [plane for chunk_planes in results for plane in chunk_planes]  # flatten in z-order
     loop = asyncio.get_running_loop()

@@ -644,6 +644,13 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
                 "path": "outputs/result.csv",
             },
         ),
+        runtime_facts={
+            "current_datetime_utc": "2026-06-25T00:42:05Z",
+            "current_date_utc": "Thursday, June 25, 2026",
+            "user_timezone": "America/Los_Angeles",
+            "product_name": "Ultra",
+            "public_url": "https://ultra.ece.ucsb.edu",
+        },
         run_metadata={"bisque_session_id": "session-secret"},
         auth_claims={"access_token": "secret-token"},
     )
@@ -711,6 +718,13 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
                 "workflow_hint": {},
                 "reasoning_mode": "auto",
                 "benchmark": {},
+                "runtime_facts": {
+                    "current_datetime_utc": "2026-06-25T00:42:05Z",
+                    "current_date_utc": "Thursday, June 25, 2026",
+                    "user_timezone": "America/Los_Angeles",
+                    "product_name": "Ultra",
+                    "public_url": "https://ultra.ece.ucsb.edu",
+                },
                 "run_metadata": {
                     "delegation": {
                         "mode": "async_subagent",
@@ -872,6 +886,132 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     ]
 
 
+def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeypatch):
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    qwen_model = object()
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    monkeypatch.setattr(
+        "ultra_deepagents.agent.build_vision_chat_model",
+        lambda settings: qwen_model,
+        raising=False,
+    )
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        qwen_vlm_enabled=True,
+        qwen_vlm_base_url="http://tesla.test:8000/v1",
+        qwen_vlm_model="Qwen3.6-27B",
+        qwen_vlm_api_key="test-key",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-code",
+        goal="Debug this analysis script, run the code, and inspect the generated CSV artifacts.",
+    )
+
+    build_research_agent(settings, model=object(), backend=object(), context=context)
+
+    by_name = {subagent["name"]: subagent for subagent in captured["subagents"]}
+    assert "code-runner" in by_name
+    assert "qwen-code-runner" in by_name
+    assert "builder" not in by_name
+    assert "model" not in by_name["code-runner"]
+    assert by_name["qwen-code-runner"]["model"] is qwen_model
+    assert "qwen" in by_name["qwen-code-runner"]["description"].lower()
+    assert "multimodal" in by_name["qwen-code-runner"]["description"].lower()
+    assert "visual artifacts" in by_name["qwen-code-runner"]["system_prompt"].lower()
+    assert all(
+        not isinstance(item, TextOnlyMultimodalMiddleware)
+        for item in by_name["qwen-code-runner"].get("middleware", [])
+    )
+    qwen_tool_names = {
+        getattr(tool, "name", "") for tool in by_name["qwen-code-runner"]["tools"]
+    }
+    assert qwen_tool_names == {
+        "artifact_manifest",
+        "stage_artifact_for_analysis",
+        "stage_uploaded_files_for_analysis",
+    }
+    manifest_tool = next(
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
+    )
+    manifest = json.loads(manifest_tool.invoke({}))
+    assert [item["name"] for item in manifest["available_subagents"]] == [
+        "code-runner",
+        "qwen-code-runner",
+    ]
+
+
+def test_builder_is_not_registered_even_when_setting_enabled(monkeypatch):
+    captured = {}
+    builder_calls = []
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    def fake_build_builder_subagent(*args, **kwargs):
+        builder_calls.append((args, kwargs))
+        return {"name": "builder", "description": "should not be registered"}
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    monkeypatch.setattr(
+        "ultra_deepagents.agent.build_builder_subagent",
+        fake_build_builder_subagent,
+        raising=False,
+    )
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        builder_enabled=True,
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-code",
+        goal="Write and test a small simulation script.",
+    )
+
+    build_research_agent(settings, model=object(), backend=object(), context=context)
+
+    assert builder_calls == []
+    assert "builder" not in {subagent["name"] for subagent in captured["subagents"]}
+    manifest_tool = next(
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
+    )
+    manifest = json.loads(manifest_tool.invoke({}))
+    assert "builder" not in {item["name"] for item in manifest["available_subagents"]}
+
+
+def test_system_prompt_does_not_advertise_builder_when_setting_enabled():
+    prompt = build_system_prompt(
+        RuntimeSettings(
+            openai_base_url="http://127.0.0.1:8003/v1",
+            openai_model="deepseek_v4",
+            builder_enabled=True,
+        )
+    )
+
+    assert "builder" not in prompt.lower()
+    assert "autonomous coding sub-coordinator" not in prompt.lower()
+
+
 def test_text_only_system_prompt_guides_inline_plot_captions_and_updates():
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
@@ -901,6 +1041,10 @@ def test_system_prompt_includes_substantial_prose_writing_guidance():
     assert "For substantial prose, match the genre, audience, purpose" in prompt
     assert "Put truth before polish" in prompt
     assert "Never invent facts, citations, figures, quotations, or results" in prompt
+    # Operational anti-fabrication clause: derived quantities must be labeled as
+    # derived, never presented as reported results (see writing-guidance A/B eval).
+    assert "label it explicitly as derived" in prompt
+    assert "never present a derived or assumed value as a reported result" in prompt
     assert "Plainness is the default" in prompt
 
 
@@ -992,6 +1136,47 @@ def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
     assert "stage_artifact_for_analysis" in prompt
     assert "stage_uploaded_files_for_analysis" in prompt
     assert "artifact-plot" in prompt
+
+
+def test_run_context_brief_surfaces_runtime_facts():
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-runtime-facts",
+        goal="What is today's date?",
+        runtime_facts={
+            "run_started_at": "2026-06-25T00:42:05.123456789Z",
+            "current_datetime_utc": "2026-06-25T00:42:05.123456789Z",
+            "current_date_utc": "Thursday, June 25, 2026",
+            "user_timezone": "America/Los_Angeles",
+            "local_datetime": "Wednesday, June 24, 2026 17:42:05 PDT",
+            "product_name": "Ultra",
+            "app_name": "BisQue Ultra Control Plane",
+            "app_version": "2026.6",
+            "deployment_environment": "production",
+            "public_url": "https://ultra.ece.ucsb.edu",
+        },
+    )
+
+    brief = build_run_context_brief(context)
+    prompt = build_system_prompt(settings, context)
+
+    assert "Runtime facts:" in brief
+    assert "current_datetime_utc: 2026-06-25T00:42:05.123456789Z" in brief
+    assert "current_date_utc: Thursday, June 25, 2026" in brief
+    assert "user_timezone: America/Los_Angeles" in brief
+    assert "local_datetime: Wednesday, June 24, 2026 17:42:05 PDT" in brief
+    assert "product_name: Ultra" in brief
+    assert "deployment_environment: production" in brief
+    assert "public_url: https://ultra.ece.ucsb.edu" in brief
+    assert "Use these runtime facts for today, tomorrow, yesterday" in prompt
 
 
 def test_research_agent_registers_prior_artifact_context_tools(monkeypatch):

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type MouseEvent, type WheelEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type WheelEvent } from "react";
 
 import { isScrubbable, neighborSliceUrls, nextZFromWheel, zFromPointerY } from "./zScrub";
 
@@ -22,6 +22,7 @@ export type ZScrubThumbnailProps = {
 
 type SliceImageCacheModule = {
   prefetchSliceBitmaps: (urls: Iterable<string>) => void;
+  cancelPendingSlicePrefetches: () => void;
 };
 
 let sliceImageCacheModulePromise: Promise<SliceImageCacheModule> | null = null;
@@ -42,6 +43,15 @@ const prefetchSliceBitmapsLazily = (urls: string[]): void => {
     .then(({ prefetchSliceBitmaps }) => {
       prefetchSliceBitmaps(urls);
     })
+    .catch(() => undefined);
+};
+
+const cancelPendingPrefetchesLazily = (): void => {
+  if (sliceImageCacheModulePromise === null) {
+    return; // cache module never loaded → nothing queued
+  }
+  void loadSliceImageCacheModule()
+    .then(({ cancelPendingSlicePrefetches }) => cancelPendingSlicePrefetches())
     .catch(() => undefined);
 };
 
@@ -90,8 +100,19 @@ export function ZScrubThumbnail({
   // Current plane mirrored in a ref so the move/wheel handlers read it without a
   // stale closure and without putting side effects inside a state updater.
   const zRef = useRef(0);
+  // Coalesce mousemove → at most ONE slice apply per animation frame ("latest
+  // position wins"). A fast drag over a deep stack otherwise fires one decode
+  // request per pixel and floods the (small, serialized) image-service pool.
+  const pendingZRef = useRef<{ z: number; count: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
 
   const handleMouseLeave = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingZRef.current = null;
+    cancelPendingPrefetchesLazily();
     zRef.current = 0;
     setZ(0);
     setSrc(staticThumbnailUrl);
@@ -110,6 +131,35 @@ export function ZScrubThumbnail({
     [sliceUrlFor, prefetch, prefetchRadius],
   );
 
+  const flushScheduledZ = useCallback(() => {
+    rafRef.current = null;
+    const pending = pendingZRef.current;
+    pendingZRef.current = null;
+    if (pending) {
+      applyZ(pending.z, pending.count);
+    }
+  }, [applyZ]);
+
+  const scheduleZ = useCallback(
+    (next: number, count: number) => {
+      pendingZRef.current = { z: next, count };
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(flushScheduledZ);
+      }
+    },
+    [flushScheduledZ],
+  );
+
+  // Cancel any pending frame on unmount so the callback never fires after teardown.
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, []);
+
   const handleMouseMove = useCallback(
     (event: MouseEvent<HTMLImageElement>) => {
       const count = zCount ?? 0;
@@ -117,9 +167,9 @@ export function ZScrubThumbnail({
         return;
       }
       const rect = event.currentTarget.getBoundingClientRect();
-      applyZ(zFromPointerY(event.clientY - rect.top, rect.height, count), count);
+      scheduleZ(zFromPointerY(event.clientY - rect.top, rect.height, count), count);
     },
-    [zCount, applyZ],
+    [zCount, scheduleZ],
   );
 
   const handleWheel = useCallback(

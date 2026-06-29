@@ -1,6 +1,27 @@
 import { describe, expect, it } from "vitest";
 
+import { thumbnailScrubAxis } from "./thumbnailScrubAxis";
 import { normalizeUploadViewerInfo } from "./viewerManifest";
+
+describe("thumbnailScrubAxis", () => {
+  it("scrubs Z for a focal/depth stack", () => {
+    expect(thumbnailScrubAxis({ Z: 32, T: 1 })).toEqual({ axis: "z", count: 32 });
+  });
+  it("scrubs T for a Z-less time-series (e.g. a 61-frame movie)", () => {
+    // The real prod regression: axes (t,c,y,x), Z=1 — must scrub time, not the single Z plane.
+    expect(thumbnailScrubAxis({ Z: 1, T: 61 })).toEqual({ axis: "t", count: 61 });
+  });
+  it("prefers Z when an image has both depth and time", () => {
+    expect(thumbnailScrubAxis({ Z: 10, T: 5 })).toEqual({ axis: "z", count: 10 });
+  });
+  it("is non-scrubbable (count 1) for a flat single-plane image", () => {
+    expect(thumbnailScrubAxis({ Z: 1, T: 1 })).toEqual({ axis: "z", count: 1 });
+  });
+  it("tolerates missing or invalid axis sizes", () => {
+    expect(thumbnailScrubAxis(null)).toEqual({ axis: "z", count: 1 });
+    expect(thumbnailScrubAxis({ Z: 0, T: 0 } as never)).toEqual({ axis: "z", count: 1 });
+  });
+});
 
 describe("normalizeUploadViewerInfo scalar medical defaults", () => {
   it("promotes CT-like scalar volumes to legible scientific 3D defaults", () => {

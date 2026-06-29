@@ -80,11 +80,27 @@ const heartbeatStatusWriteInterval = 15 * time.Second
 type Service struct {
 	store            Store
 	bus              eventbus.Bus
+	now              func() time.Time
+	runtimeFacts     RuntimeFactsConfig
 	idempotencyLocks [64]sync.Mutex
 	eventIDLocks     [128]sync.Mutex
 
 	heartbeatMu           sync.Mutex
 	heartbeatStatusWrites map[string]time.Time
+}
+
+type ServiceOptions struct {
+	Now          func() time.Time
+	RuntimeFacts RuntimeFactsConfig
+}
+
+type RuntimeFactsConfig struct {
+	ProductName         string
+	AppName             string
+	AppVersion          string
+	Environment         string
+	PublicURL           string
+	DefaultUserTimezone string
 }
 
 type CreateThreadRequest struct {
@@ -174,7 +190,21 @@ type ReleaseRunLeaseRequest struct {
 }
 
 func NewService(store Store, bus eventbus.Bus) *Service {
-	return &Service{store: store, bus: bus, heartbeatStatusWrites: map[string]time.Time{}}
+	return NewServiceWithOptions(store, bus, ServiceOptions{})
+}
+
+func NewServiceWithOptions(store Store, bus eventbus.Bus, opts ServiceOptions) *Service {
+	now := opts.Now
+	if now == nil {
+		now = domain.Now
+	}
+	return &Service{
+		store:                 store,
+		bus:                   bus,
+		now:                   now,
+		runtimeFacts:          normalizeRuntimeFactsConfig(opts.RuntimeFacts),
+		heartbeatStatusWrites: map[string]time.Time{},
+	}
 }
 
 func (s *Service) CreateThread(ctx context.Context, req CreateThreadRequest) (domain.ThreadRecord, error) {
@@ -209,6 +239,7 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 		}
 		metadata["idempotency_key"] = idempotencyKey
 	}
+	s.stampRuntimeFacts(metadata)
 	workflowKind := workflowKindForRun(req, metadata)
 	thread, err := s.store.GetThread(ctx, req.ThreadID)
 	if err != nil {
@@ -371,6 +402,9 @@ func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRe
 func mergeJobMetadata(metadata domain.JSONMap, jobMetadata domain.JSONMap) domain.JSONMap {
 	merged := cloneMap(metadata)
 	for key, value := range jobMetadata {
+		if key == "runtime_facts" {
+			continue
+		}
 		merged[key] = value
 	}
 	return merged
@@ -1365,6 +1399,75 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 		metadata["resource_descriptors"] = copyJSONMaps(req.ResourceDescriptors)
 	}
 	return metadata
+}
+
+func normalizeRuntimeFactsConfig(config RuntimeFactsConfig) RuntimeFactsConfig {
+	config.ProductName = strings.TrimSpace(config.ProductName)
+	if config.ProductName == "" {
+		config.ProductName = "Ultra"
+	}
+	config.AppName = strings.TrimSpace(config.AppName)
+	if config.AppName == "" {
+		config.AppName = "BisQue Ultra Control Plane"
+	}
+	config.AppVersion = strings.TrimSpace(config.AppVersion)
+	if config.AppVersion == "" {
+		config.AppVersion = "dev"
+	}
+	config.Environment = strings.TrimSpace(config.Environment)
+	if config.Environment == "" {
+		config.Environment = "development"
+	}
+	config.PublicURL = strings.TrimRight(strings.TrimSpace(config.PublicURL), "/")
+	config.DefaultUserTimezone = strings.TrimSpace(config.DefaultUserTimezone)
+	if config.DefaultUserTimezone == "" {
+		config.DefaultUserTimezone = "UTC"
+	}
+	return config
+}
+
+func (s *Service) stampRuntimeFacts(metadata domain.JSONMap) {
+	now := s.now()
+	if now.IsZero() {
+		now = domain.Now()
+	}
+	now = now.UTC()
+	timezone, location := runtimeFactsTimezone(metadata, s.runtimeFacts.DefaultUserTimezone)
+	metadata["runtime_facts"] = domain.JSONMap{
+		"run_started_at":         now.Format(time.RFC3339Nano),
+		"current_datetime_utc":   now.Format(time.RFC3339Nano),
+		"current_date_utc":       now.Format("Monday, January 2, 2006"),
+		"user_timezone":          timezone,
+		"local_datetime":         now.In(location).Format("Monday, January 2, 2006 15:04:05 MST"),
+		"product_name":           s.runtimeFacts.ProductName,
+		"app_name":               s.runtimeFacts.AppName,
+		"app_version":            s.runtimeFacts.AppVersion,
+		"deployment_environment": s.runtimeFacts.Environment,
+		"public_url":             s.runtimeFacts.PublicURL,
+	}
+}
+
+func runtimeFactsTimezone(metadata domain.JSONMap, fallback string) (string, *time.Location) {
+	candidates := []string{
+		strings.TrimSpace(anyString(metadata["user_timezone"])),
+		strings.TrimSpace(anyString(metadata["timezone"])),
+	}
+	if nested, ok := metadata["runtime_facts"].(domain.JSONMap); ok {
+		candidates = append(candidates, strings.TrimSpace(anyString(nested["user_timezone"])))
+	} else if nested, ok := metadata["runtime_facts"].(map[string]any); ok {
+		candidates = append(candidates, strings.TrimSpace(anyString(nested["user_timezone"])))
+	}
+	candidates = append(candidates, strings.TrimSpace(fallback), "UTC")
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		location, err := time.LoadLocation(candidate)
+		if err == nil {
+			return candidate, location
+		}
+	}
+	return "UTC", time.UTC
 }
 
 func workflowKindForRun(req CreateRunRequest, metadata domain.JSONMap) string {

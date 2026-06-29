@@ -320,6 +320,7 @@ WITH visible_resources AS (
       OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
       OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
     )
+    AND ($15::bool = false OR r.resource_id = ANY($16::text[]))
     AND (
       cardinality($8::text[]) = 0
       OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]
@@ -473,7 +474,7 @@ WHERE (
     OR ($13::text = 'shared' AND share_status IN ('shared_by_me', 'shared_with_me', 'public'))
   )
 ORDER BY created_at DESC, resource_id ASC
-LIMIT $15 OFFSET $16;
+LIMIT $17 OFFSET $18;
 
 -- name: ListResources :many
 SELECT *
@@ -560,6 +561,7 @@ WITH visible_resources AS (
       OR sd.search_vector @@ plainto_tsquery('simple', $7::text)
       OR lower(COALESCE(sd.search_text, '')) LIKE '%' || lower($7::text) || '%'
     )
+    AND ($15::bool = false OR r.resource_id = ANY($16::text[]))
     AND (
       cardinality($8::text[]) = 0
       OR COALESCE(r.metadata->'tag_keys', '[]'::jsonb) ?& $8::text[]

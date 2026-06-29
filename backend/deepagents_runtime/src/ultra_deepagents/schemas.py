@@ -74,6 +74,7 @@ class RunJobEnvelope:
             workflow_hint=dict(self.workflow_hint),
             reasoning_mode=self.reasoning_mode,
             benchmark=dict(self.benchmark),
+            runtime_facts=_dict(self.metadata.get("runtime_facts")),
             run_metadata=dict(self.metadata),
             resource_descriptors=tuple(dict(item) for item in self.resource_descriptors),
             response_contract=dict(self.response_contract),

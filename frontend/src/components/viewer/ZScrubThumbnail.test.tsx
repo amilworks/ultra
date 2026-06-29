@@ -58,15 +58,17 @@ describe("ZScrubThumbnail", () => {
     fireEvent.mouseEnter(img);
     await waitFor(() => expect(img).toHaveAttribute("data-zscrub", "true"));
 
+    // mousemove is rAF-coalesced (latest-position-wins), so flush a frame before
+    // asserting the applied plane.
     fireEvent.mouseMove(img, { clientY: 100 }); // bottom edge -> last plane
-    expect(img).toHaveAttribute("src", "/slice?z=9");
+    await waitFor(() => expect(img).toHaveAttribute("src", "/slice?z=9"));
     expect(img).toHaveAttribute("data-z", "9");
 
     fireEvent.mouseMove(img, { clientY: 50 }); // middle -> plane 5
-    expect(img).toHaveAttribute("src", "/slice?z=5");
+    await waitFor(() => expect(img).toHaveAttribute("src", "/slice?z=5"));
 
     fireEvent.mouseMove(img, { clientY: 0 }); // top edge -> first plane
-    expect(img).toHaveAttribute("data-z", "0");
+    await waitFor(() => expect(img).toHaveAttribute("data-z", "0"));
   });
 
   it("does not scrub a flat (single-plane) image", async () => {

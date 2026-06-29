@@ -40,14 +40,18 @@ const normalizeMathMarkdown = (source: string): string => {
   let normalized = source;
 
   // Normalize only explicit TeX delimiters so we do not accidentally turn
-  // ordinary bracketed prose into math.
+  // ordinary bracketed prose into math. Strip leading blockquote markers from the
+  // captured display body: models frequently emit `> \[ ... > \]`, and leaving the
+  // `> ` prefixes inside the converted `$$ ... $$` block makes remark-math fail to
+  // parse it, so the equation renders as raw LaTeX instead of math.
   normalized = normalized.replace(
     /\\\[([\s\S]*?)\\\]/g,
-    (_match, expr: string) => `\n$$\n${expr.trim()}\n$$\n`
+    (_match, expr: string) =>
+      `\n$$\n${String(expr).replace(/^[ \t]*>[ \t]?/gm, "").trim()}\n$$\n`
   );
   normalized = normalized.replace(
     /\\\((.+?)\\\)/g,
-    (_match, expr: string) => `$${String(expr).trim()}$`
+    (_match, expr: string) => `$${String(expr).replace(/^[ \t]*>[ \t]?/gm, "").trim()}$`
   );
 
   return normalized;

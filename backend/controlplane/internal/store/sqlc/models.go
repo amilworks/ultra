@@ -94,6 +94,7 @@ type ControlDataAgentJobResource struct {
 	ResourceID string `json:"resource_id"`
 	Position   int64  `json:"position"`
 	Metadata   []byte `json:"metadata"`
+	IoRole     string `json:"io_role"`
 }
 
 type ControlDatasetSnapshot struct {
@@ -252,6 +253,19 @@ type ControlResourceSearchDocument struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ControlResourceSearchFact struct {
+	ResourceID  string             `json:"resource_id"`
+	OwnerUserID string             `json:"owner_user_id"`
+	OwnerOrgID  pgtype.Text        `json:"owner_org_id"`
+	ProjectID   pgtype.Text        `json:"project_id"`
+	Status      string             `json:"status"`
+	FactKey     string             `json:"fact_key"`
+	FactText    string             `json:"fact_text"`
+	FactNumber  pgtype.Float8      `json:"fact_number"`
+	FactSource  string             `json:"fact_source"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ControlResourceShareGrant struct {
 	GrantID         string             `json:"grant_id"`
 	ResourceID      string             `json:"resource_id"`
@@ -312,6 +326,11 @@ type ControlRunEvent struct {
 	Payload        []byte             `json:"payload"`
 }
 
+type ControlRunEventSequence struct {
+	RunID        string `json:"run_id"`
+	LastSequence int64  `json:"last_sequence"`
+}
+
 type ControlRunLease struct {
 	RunID          string             `json:"run_id"`
 	WorkerID       string             `json:"worker_id"`
@@ -319,6 +338,26 @@ type ControlRunLease struct {
 	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlRunTokenUsage struct {
+	RunID        string             `json:"run_id"`
+	UsageEventID string             `json:"usage_event_id"`
+	UserID       string             `json:"user_id"`
+	Model        string             `json:"model"`
+	Day          pgtype.Date        `json:"day"`
+	InputTokens  int64              `json:"input_tokens"`
+	OutputTokens int64              `json:"output_tokens"`
+	TotalTokens  int64              `json:"total_tokens"`
+	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlRunTokenUsageFinalized struct {
+	RunID       string             `json:"run_id"`
+	UserID      string             `json:"user_id"`
+	Day         pgtype.Date        `json:"day"`
+	FinalizedAt pgtype.Timestamptz `json:"finalized_at"`
 }
 
 type ControlThread struct {
@@ -438,26 +477,6 @@ type ControlUserTokenUsageLifetime struct {
 	PeakDailyTotal int64              `json:"peak_daily_total"`
 	LastActiveDay  pgtype.Date        `json:"last_active_day"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-}
-
-type ControlRunTokenUsage struct {
-	RunID        string             `json:"run_id"`
-	UsageEventID string             `json:"usage_event_id"`
-	UserID       string             `json:"user_id"`
-	Model        string             `json:"model"`
-	Day          pgtype.Date        `json:"day"`
-	InputTokens  int64              `json:"input_tokens"`
-	OutputTokens int64              `json:"output_tokens"`
-	TotalTokens  int64              `json:"total_tokens"`
-	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-}
-
-type ControlRunTokenUsageFinalized struct {
-	RunID       string             `json:"run_id"`
-	UserID      string             `json:"user_id"`
-	Day         pgtype.Date        `json:"day"`
-	FinalizedAt pgtype.Timestamptz `json:"finalized_at"`
 }
 
 type ControlWorkerHeartbeat struct {

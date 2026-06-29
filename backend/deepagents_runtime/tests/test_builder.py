@@ -301,16 +301,16 @@ def test_builder_multimodal_adds_vision_tools(monkeypatch):
     assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
 
 
-def test_builder_delegation_guidance_in_prompt_only_when_enabled():
-    """The coordinator gets the 'delegate heavy coding to the Builder early' discipline only when
-    the Builder is enabled; otherwise it would steer toward an absent subagent."""
+def test_builder_delegation_guidance_not_in_coordinator_prompt_while_disabled():
+    """Builder remains unit-tested, but the coordinator does not advertise it while
+    development has shifted to scoped coding agents."""
     from ultra_deepagents.agent import build_system_prompt
     from ultra_deepagents.builder import BUILDER_DELEGATION_GUIDANCE
 
     on = build_system_prompt(_settings(builder_enabled=True))
     off = build_system_prompt(_settings(builder_enabled=False))
-    assert BUILDER_DELEGATION_GUIDANCE in on
-    assert "DELEGATE IT TO THE BUILDER EARLY" in on
+    assert BUILDER_DELEGATION_GUIDANCE not in on
+    assert "DELEGATE IT TO THE BUILDER EARLY" not in on
     assert BUILDER_DELEGATION_GUIDANCE not in off
 
 

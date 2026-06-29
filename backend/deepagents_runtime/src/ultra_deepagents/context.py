@@ -23,6 +23,7 @@ class AgentRunContext:
     workflow_hint: dict[str, Any] = field(default_factory=dict)
     reasoning_mode: str = "auto"
     benchmark: dict[str, Any] = field(default_factory=dict)
+    runtime_facts: dict[str, Any] = field(default_factory=dict)
     run_metadata: dict[str, Any] = field(default_factory=dict)
     resource_descriptors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     response_contract: dict[str, Any] = field(default_factory=dict)

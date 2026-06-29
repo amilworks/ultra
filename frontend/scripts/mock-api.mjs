@@ -660,8 +660,144 @@ const metadataScalarValues = (value) => {
   return [];
 };
 
+const normalizeSearchField = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const flattenMetadataNumbers = (value, prefix = "") => {
+  if (value == null) {
+    return [];
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return [[prefix, value]];
+  }
+  if (typeof value === "string") {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) && value.trim() !== "" ? [[prefix, numberValue]] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => flattenMetadataNumbers(item, `${prefix}.${index}`));
+  }
+  if (typeof value === "object") {
+    return Object.entries(value).flatMap(([key, child]) =>
+      flattenMetadataNumbers(child, prefix ? `${prefix}.${key}` : key)
+    );
+  }
+  return [];
+};
+
+const filenameAge = (resource) => {
+  const name = String(resource.original_name || "");
+  const match = name.match(/(?:^|[_\-\s])(\d{1,3})\s*(?:yo|yrs?|years?)(?=$|[_\-\s.])/i);
+  if (!match) {
+    return null;
+  }
+  const age = Number(match[1]);
+  return Number.isFinite(age) ? age : null;
+};
+
+const numericFactsForResource = (resource) => {
+  const facts = new Map();
+  const addFact = (key, value) => {
+    const normalized = normalizeSearchField(key);
+    const numberValue = Number(value);
+    if (!normalized || !Number.isFinite(numberValue)) {
+      return;
+    }
+    if (!facts.has(normalized)) {
+      facts.set(normalized, []);
+    }
+    facts.get(normalized).push(numberValue);
+  };
+  flattenMetadataNumbers(resource.metadata || {}).forEach(([path, value]) => {
+    addFact(path, value);
+    const segments = String(path || "").split(".").filter(Boolean);
+    if (segments.length > 0) {
+      addFact(segments[segments.length - 1], value);
+    }
+  });
+  const age = filenameAge(resource);
+  if (age != null) {
+    addFact("age", age);
+    addFact("subject_age", age);
+  }
+  if (facts.has("subject_age") && !facts.has("age")) {
+    facts.set("age", [...facts.get("subject_age")]);
+  }
+  if (facts.has("focal_length_mm") && !facts.has("focal_length")) {
+    facts.set("focal_length", [...facts.get("focal_length_mm")]);
+  }
+  return facts;
+};
+
+const compareNumber = (actual, operator, expected) => {
+  if (operator === "<") return actual < expected;
+  if (operator === "<=") return actual <= expected;
+  if (operator === ">") return actual > expected;
+  if (operator === ">=") return actual >= expected;
+  if (operator === "=" || operator === "==") return actual === expected;
+  return false;
+};
+
+const parseResourceSearchQuery = (rawQuery) => {
+  let residual = String(rawQuery || "").trim();
+  const numericPredicates = [];
+  residual = residual.replace(
+    /\b([a-zA-Z][\w.-]*)\s*(<=|>=|==|=|<|>)\s*(-?\d+(?:\.\d+)?)\b/g,
+    (_match, field, operator, value) => {
+      numericPredicates.push({
+        field: normalizeSearchField(field),
+        operator,
+        value: Number(value),
+      });
+      return " ";
+    }
+  );
+  const filePatterns = [];
+  residual = residual.replace(/(^|\s)(\*\.?[^\s,]+)(?=$|\s|,)/g, (match, prefix, pattern) => {
+    filePatterns.push(String(pattern || "").toLowerCase());
+    return prefix || " ";
+  });
+  return {
+    numericPredicates,
+    filePatterns,
+    residual: residual.replace(/\s+/g, " ").trim(),
+  };
+};
+
+const resourceMatchesNumericPredicates = (resource, predicates) => {
+  if (predicates.length === 0) {
+    return true;
+  }
+  const facts = numericFactsForResource(resource);
+  return predicates.every((predicate) => {
+    const values = facts.get(predicate.field) || [];
+    return values.some((value) => compareNumber(value, predicate.operator, predicate.value));
+  });
+};
+
+const resourceMatchesFilePatterns = (resource, patterns) => {
+  if (patterns.length === 0) {
+    return true;
+  }
+  const filename = String(resource.original_name || "").toLowerCase();
+  return patterns.every((pattern) => {
+    if (pattern.startsWith("*.")) {
+      const extension = pattern.slice(2);
+      return filename.endsWith(`.${extension}`) || filename.includes(`.${extension}.`);
+    }
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`).test(filename);
+  });
+};
+
 const resourceMatchesQuery = (resource, queryInput = {}) => {
-  const query = String(queryInput.q || queryInput.query || "").trim().toLowerCase();
+  const rawQuery = String(queryInput.q || queryInput.query || "").trim();
+  const parsedQuery = parseResourceSearchQuery(rawQuery);
+  const query = parsedQuery.residual.toLowerCase();
   const kind = String(queryInput.kind || "").trim();
   const source = String(queryInput.source || "").trim();
   const projectId = String(queryInput.project_id || queryInput.projectId || "").trim();
@@ -669,6 +805,12 @@ const resourceMatchesQuery = (resource, queryInput = {}) => {
   const tags = Array.isArray(queryInput.tags)
     ? queryInput.tags.map((tag) => String(tag).trim()).filter(Boolean)
     : [];
+  if (!resourceMatchesNumericPredicates(resource, parsedQuery.numericPredicates)) {
+    return false;
+  }
+  if (!resourceMatchesFilePatterns(resource, parsedQuery.filePatterns)) {
+    return false;
+  }
   if (query) {
     const searchable = [
       resource.file_id,

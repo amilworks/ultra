@@ -58,6 +58,16 @@ class RuntimeSettings:
     # that let a stalled vision call wedge a worker for 1h43m).
     model_stream_idle_timeout_seconds: float = 3600.0
     model_stream_idle_max_recoveries: int = 2
+    # Per-delegated-task (task tool) HARD wall-clock budget for BOUNDED subagents only
+    # (vision-reasoner, literature-reviewer — see DEADLINE_BOUNDED_SUBAGENTS). Distinct from the
+    # idle watchdog above (which resets on every event and is run-level at 3600s): a bounded
+    # subagent that goes silent for many minutes is HUNG, not progressing. On expiry it returns a
+    # degraded ToolMessage (the subagent is isolated; siblings in a parallel fan-out are unaffected;
+    # the coordinator continues with partial results). Default 1800s (30m): well above bounded
+    # subagents' measured legit work (vision p90 ~22m) yet far below the 60m idle watchdog that
+    # let a hung vision-reasoner stall a run. Computational delegates (code-runner etc.) are
+    # EXCLUDED — they legitimately run 30-67m. 0 disables.
+    subagent_task_timeout_seconds: float = 1800.0
     max_retries: int = 1
     # Qwen3.6-27B vision-language model (the "vision-reasoner" subagent's own model,
     # distinct from the text coordinator above). On-prem vLLM, OpenAI-compatible.
@@ -234,6 +244,9 @@ class RuntimeSettings:
                 0.0,
                 # Default armed (3600 = the field default); only an explicit env 0 disables it.
                 float(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "3600")),
+            ),
+            subagent_task_timeout_seconds=max(
+                0.0, float(os.getenv("ULTRA_DEEPAGENTS_SUBAGENT_TASK_TIMEOUT_SECONDS", "1800"))
             ),
             model_stream_idle_max_recoveries=max(
                 0,

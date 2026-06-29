@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 
 import pytest
 from langgraph.graph import END, START, StateGraph
@@ -9,6 +10,8 @@ from ultra_deepagents.checkpointing import (
     DurableCheckpointer,
     InMemoryCheckpointStateStore,
     PostgresCheckpointStateStore,
+    _decode_thread_slice,
+    _encode_thread_slice,
     run_graph_config,
 )
 
@@ -165,6 +168,76 @@ def test_run_graph_config_scopes_checkpoints_to_the_run():
     assert config["recursion_limit"] == 1000
     assert config["configurable"]["thread_id"] == "run_xyz"
     assert config["configurable"]["checkpoint_ns"] == ""
+
+
+def test_checkpoint_thread_slice_is_compressed_and_backward_compatible():
+    large_message = "deterministic checkpoint payload " * 10000
+    slice_ = {
+        "storage": {
+            "": {
+                "checkpoint-1": {
+                    "channel_values": {
+                        "messages": [{"role": "assistant", "content": large_message}]
+                    }
+                }
+            }
+        },
+        "blobs": {},
+        "writes": {},
+    }
+    legacy_blob = pickle.dumps({"version": 1, "slice": slice_}, protocol=pickle.HIGHEST_PROTOCOL)
+
+    encoded = _encode_thread_slice(slice_)
+
+    assert encoded.startswith(b"ULTRA_DEEPAGENTS_CKPT")
+    assert len(encoded) < len(legacy_blob) * 0.35
+    assert _decode_thread_slice(encoded) == slice_
+    assert _decode_thread_slice(legacy_blob) == slice_
+
+
+def test_postgres_checkpoint_store_schema_indexes_updated_at_for_gc():
+    import asyncio
+
+    statements: list[str] = []
+
+    class _FakeConn:
+        closed = False
+
+        async def execute(self, sql, _params=None):
+            statements.append(sql)
+
+    class _FakeStore(PostgresCheckpointStateStore):
+        async def _connection(self):
+            return _FakeConn()
+
+    asyncio.run(_FakeStore("postgresql://unused").ensure_schema())
+
+    joined = "\n".join(statements)
+    assert "CREATE TABLE IF NOT EXISTS deepagents_checkpoint_threads" in joined
+    assert "deepagents_checkpoint_threads_updated_at_idx" in joined
+    assert "ON deepagents_checkpoint_threads (updated_at)" in joined
+
+
+def test_postgres_checkpoint_store_skips_identical_state_rewrites():
+    import asyncio
+
+    statements: list[str] = []
+
+    class _FakeConn:
+        closed = False
+
+        async def execute(self, sql, _params=None):
+            statements.append(sql)
+
+    class _FakeStore(PostgresCheckpointStateStore):
+        async def _connection(self):
+            return _FakeConn()
+
+    asyncio.run(_FakeStore("postgresql://unused").save("run-1", b"state"))
+
+    save_sql = "\n".join(statements)
+    assert "ON CONFLICT (thread_id)" in save_sql
+    assert "state IS DISTINCT FROM EXCLUDED.state" in save_sql
 
 
 def test_run_job_resumes_with_none_payload_and_seeded_sequencer_when_checkpoint_pending(tmp_path):

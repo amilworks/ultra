@@ -46,26 +46,17 @@ export type ChatBenchmarkConfig = {
 
 export type ChatWorkflowHintId =
   | "find_bisque_assets"
-  | "search_bisque_resources"
-  | "bisque_advanced_search"
-  | "load_bisque_resource"
   | "bisque_download_resource"
-  | "bisque_download_dataset"
   | "upload_to_bisque"
   | "bisque_create_dataset"
-  | "bisque_add_to_dataset"
-  | "bisque_add_gobjects"
-  | "add_tags_to_resource"
-  | "bisque_fetch_xml"
-  | "delete_bisque_resource"
+  | "run_bisque_module"
   | "rarespot_ecology"
   | "detect_prairie_dog"
-  | "detect_yolo"
-  | "estimate_depth_pro"
   | "pro_mode"
-  | "scientific_calculator"
-  | "chemistry_workbench"
-  | "run_bisque_module";
+  | "goal_driven_build"
+  | "quantitative_analysis"
+  | "image_analysis"
+  | "megaseg";
 
 export type ChatWorkflowHint = {
   id: ChatWorkflowHintId;
@@ -1526,6 +1517,43 @@ export type AdminQueueDiagnostics = {
   error?: string;
 };
 
+export type AdminDatabasePoolStats = {
+  max_conns: number;
+  total_conns: number;
+  acquired_conns: number;
+  idle_conns: number;
+  constructing_conns: number;
+  acquire_count: number;
+  empty_acquire_count: number;
+  canceled_acquire_count: number;
+  new_conns_count: number;
+  max_lifetime_destroy_count: number;
+  max_idle_destroy_count: number;
+  acquire_duration_seconds: number;
+  empty_acquire_wait_seconds: number;
+  saturation: number;
+  wait_ratio: number;
+};
+
+export type AdminDatabaseQueryStats = {
+  query_id: string;
+  calls: number;
+  mean_exec_ms: number;
+  total_exec_ms: number;
+  rows: number;
+  shared_blocks_hit: number;
+  shared_blocks_read: number;
+  temp_blocks_written: number;
+  query: string;
+};
+
+export type AdminDatabaseDiagnostics = {
+  available: boolean;
+  pool: AdminDatabasePoolStats;
+  top_queries: AdminDatabaseQueryStats[];
+  error?: string;
+};
+
 export type AdminWorkerRecord = {
   worker_id: string;
   worker_kind: string;
@@ -1613,6 +1641,7 @@ export type AdminOverviewResponse = {
   generated_at: string;
   runtime: AdminRuntimeSummary;
   queue: AdminQueueDiagnostics;
+  database: AdminDatabaseDiagnostics;
   kpis: AdminPlatformKpis;
   activity: AdminActivityPeriod[];
   usage_last_24h: AdminUsageBucket[];
@@ -1706,6 +1735,108 @@ export type AdminConversationActionResponse = {
   conversation_id: string;
   user_id: string;
   deleted: boolean;
+};
+
+export type AdminMetricWeekPoint = {
+  week_start: string;
+  value: number;
+};
+
+export type AdminMetricNorthStar = {
+  label: string;
+  definition: string;
+  current_week: number;
+  previous_week: number;
+  delta_pct: number | null;
+  weekly: AdminMetricWeekPoint[];
+};
+
+export type AdminMetricKpis = {
+  wau: number;
+  mau: number;
+  stickiness_pct: number | null;
+  new_users: number;
+  activation_rate_pct: number | null;
+  activation_window_days: number;
+  week4_retention_pct: number | null;
+  useful_run_rate_pct: number | null;
+  useful_runs: number;
+  total_runs: number;
+};
+
+export type AdminMetricCohort = {
+  cohort_start: string;
+  size: number;
+  values_pct: Array<number | null>;
+  retained: number[];
+};
+
+export type AdminMetricRetention = {
+  unit: string;
+  max_periods: number;
+  cohorts: AdminMetricCohort[];
+};
+
+export type AdminMetricPowerBucket = {
+  days_active: number;
+  users: number;
+};
+
+export type AdminMetricPowerCurve = {
+  window_days: number;
+  total_users: number;
+  power_user_threshold: number;
+  power_users: number;
+  power_user_share_pct: number | null;
+  buckets: AdminMetricPowerBucket[];
+};
+
+export type AdminMetricFunnelStage = {
+  stage: string;
+  users: number;
+  of_previous_pct: number | null;
+  of_top_pct: number | null;
+};
+
+export type AdminMetricModelCost = {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  runs: number;
+  cost: number | null;
+  priced: boolean;
+};
+
+export type AdminMetricCostDay = {
+  day: string;
+  total_tokens: number;
+  cost: number | null;
+};
+
+export type AdminMetricCost = {
+  currency: string;
+  priced: boolean;
+  total_tokens: number;
+  total_cost: number | null;
+  cost_per_useful_run: number | null;
+  tokens_per_useful_run: number | null;
+  useful_runs: number;
+  unpriced_models: string[];
+  by_model: AdminMetricModelCost[];
+  daily: AdminMetricCostDay[];
+};
+
+export type AdminMetricsResponse = {
+  generated_at: string;
+  available: boolean;
+  range_days: number;
+  north_star: AdminMetricNorthStar;
+  kpis: AdminMetricKpis;
+  retention_cohorts: AdminMetricRetention;
+  power_user_curve: AdminMetricPowerCurve;
+  activation_funnel: AdminMetricFunnelStage[];
+  cost: AdminMetricCost;
 };
 
 export type SantaBarbaraWeatherResponse = {

@@ -27,6 +27,7 @@ func upsertResourceSearchDocumentTx(ctx context.Context, tx pgx.Tx, resource dom
 	if updatedAt.IsZero() {
 		updatedAt = domain.Now()
 	}
+	resourceID := strings.TrimSpace(resource.ResourceID)
 	_, err := tx.Exec(ctx, `
 INSERT INTO control_resource_search_documents (
   resource_id, owner_user_id, owner_org_id, project_id, status, search_text, search_vector, updated_at
@@ -40,7 +41,7 @@ ON CONFLICT (resource_id) DO UPDATE SET
   search_text = EXCLUDED.search_text,
   search_vector = EXCLUDED.search_vector,
   updated_at = EXCLUDED.updated_at`,
-		strings.TrimSpace(resource.ResourceID),
+		resourceID,
 		strings.TrimSpace(resource.OwnerUserID),
 		strings.TrimSpace(resource.OwnerOrgID),
 		strings.TrimSpace(resource.ProjectID),
@@ -48,7 +49,43 @@ ON CONFLICT (resource_id) DO UPDATE SET
 		searchText,
 		timestamptz(updatedAt),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	batch := &pgx.Batch{}
+	batch.Queue(`DELETE FROM control_resource_search_facts WHERE resource_id = $1`, resourceID)
+	for _, fact := range resourceSearchFacts(resource) {
+		var factNumber any
+		if fact.Number != nil {
+			factNumber = *fact.Number
+		}
+		batch.Queue(`
+INSERT INTO control_resource_search_facts (
+  resource_id, owner_user_id, owner_org_id, project_id, status, fact_key, fact_text, fact_number, fact_source, updated_at
+)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10)`,
+			resourceID,
+			strings.TrimSpace(resource.OwnerUserID),
+			strings.TrimSpace(resource.OwnerOrgID),
+			strings.TrimSpace(resource.ProjectID),
+			strings.TrimSpace(resource.Status),
+			fact.Key,
+			fact.Text,
+			factNumber,
+			fact.Source,
+			timestamptz(updatedAt),
+		)
+	}
+	results := tx.SendBatch(ctx, batch)
+	defer func() {
+		_ = results.Close()
+	}()
+	for index := 0; index < batch.Len(); index++ {
+		if _, err := results.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
@@ -2135,6 +2172,327 @@ FROM control_resources WHERE status = 'active' AND trim(COALESCE(project_id, '')
 	return stats, rows.Err()
 }
 
+// AdminMetrics computes the value-proving ("platform value") metric set from
+// existing run/message/token/artifact data. A "useful run" is a succeeded run
+// that produced at least one artifact; user activity counts runs created plus
+// user thread-messages, so engagement without a completed run still registers.
+// Cost in currency is layered on by the handler from the configured price map.
+func (s *PostgresStore) AdminMetrics(ctx context.Context, p domain.AdminMetricsParams) (domain.AdminMetrics, error) {
+	rangeStart := timestamptz(p.RangeStart)
+	metrics := domain.AdminMetrics{ActivationWindowDays: p.ActivationWindowDays}
+
+	weekly, err := s.adminNorthStarWeekly(ctx, rangeStart)
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.NorthStar.Weekly = weekly
+
+	if err := s.pool.QueryRow(ctx, `SELECT count(*)::int FROM control_users WHERE created_at >= $1`, rangeStart).Scan(&metrics.NewUsers); err != nil {
+		return domain.AdminMetrics{}, err
+	}
+
+	wauStart := timestamptz(p.Now.Add(-7 * 24 * time.Hour))
+	mauStart := timestamptz(p.Now.Add(-28 * 24 * time.Hour))
+	if err := s.pool.QueryRow(ctx, `
+WITH active AS (
+  SELECT user_id, created_at AS ts FROM control_runs WHERE created_at >= $2
+  UNION ALL
+  SELECT t.user_id, m.created_at FROM control_thread_messages m
+    JOIN control_threads t ON t.thread_id = m.thread_id
+   WHERE m.created_at >= $2 AND lower(m.role) = 'user'
+)
+SELECT count(DISTINCT user_id) FILTER (WHERE ts >= $1)::int, count(DISTINCT user_id)::int FROM active
+`, wauStart, mauStart).Scan(&metrics.WAU, &metrics.MAU); err != nil {
+		return domain.AdminMetrics{}, err
+	}
+
+	activationCutoff := timestamptz(p.Now.Add(-time.Duration(p.ActivationWindowDays) * 24 * time.Hour))
+	if err := s.pool.QueryRow(ctx, `
+WITH cohort AS (
+  SELECT user_id, created_at FROM control_users WHERE created_at >= $1 AND created_at < $2
+),
+useful AS (
+  SELECT user_id, min(created_at) AS first_useful
+  FROM control_runs r
+  WHERE r.status = 'succeeded' AND EXISTS (SELECT 1 FROM control_artifacts a WHERE a.run_id = r.run_id)
+  GROUP BY user_id
+)
+SELECT
+  count(*) FILTER (WHERE u.first_useful IS NOT NULL AND u.first_useful <= c.created_at + make_interval(days => $3))::int,
+  count(*)::int
+FROM cohort c LEFT JOIN useful u ON u.user_id = c.user_id
+`, rangeStart, activationCutoff, p.ActivationWindowDays).Scan(&metrics.ActivationActivated, &metrics.ActivationCohort); err != nil {
+		return domain.AdminMetrics{}, err
+	}
+
+	cohorts, err := s.adminRetentionCohorts(ctx, rangeStart, p.CohortMaxPeriods)
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.RetentionCohorts = cohorts
+
+	curve, err := s.adminPowerUserCurve(ctx, p.Now, p.PowerUserWindowDays, p.PowerUserThreshold)
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.PowerUserCurve = curve
+
+	funnel, err := s.adminActivationFunnel(ctx, rangeStart)
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.Funnel = funnel
+
+	if err := s.pool.QueryRow(ctx, `
+SELECT
+  count(*) FILTER (WHERE r.status = 'succeeded' AND EXISTS (SELECT 1 FROM control_artifacts a WHERE a.run_id = r.run_id))::int,
+  count(*)::int
+FROM control_runs r WHERE r.created_at >= $1
+`, rangeStart).Scan(&metrics.UsefulRuns, &metrics.TotalRuns); err != nil {
+		return domain.AdminMetrics{}, err
+	}
+
+	byModel, err := s.adminTokensByModel(ctx, rangeStart)
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.TokensByModel = byModel
+
+	daily, err := s.adminTokensDaily(ctx, timestamptz(p.CostSince))
+	if err != nil {
+		return domain.AdminMetrics{}, err
+	}
+	metrics.TokensDaily = daily
+
+	return metrics, nil
+}
+
+func (s *PostgresStore) adminNorthStarWeekly(ctx context.Context, rangeStart pgtype.Timestamptz) ([]domain.AdminWeekPoint, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT date_trunc('week', r.created_at AT TIME ZONE 'UTC')::date AS wk, count(DISTINCT r.user_id)::int
+FROM control_runs r
+WHERE r.created_at >= $1
+  AND r.status = 'succeeded'
+  AND EXISTS (SELECT 1 FROM control_artifacts a WHERE a.run_id = r.run_id)
+GROUP BY 1 ORDER BY 1
+`, rangeStart)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := []domain.AdminWeekPoint{}
+	for rows.Next() {
+		var pt domain.AdminWeekPoint
+		if err := rows.Scan(&pt.WeekStart, &pt.Value); err != nil {
+			return nil, err
+		}
+		points = append(points, pt)
+	}
+	return points, rows.Err()
+}
+
+func (s *PostgresStore) adminRetentionCohorts(ctx context.Context, rangeStart pgtype.Timestamptz, maxPeriods int) ([]domain.AdminRetentionCohort, error) {
+	if maxPeriods < 1 {
+		maxPeriods = 1
+	}
+	sizeRows, err := s.pool.Query(ctx, `
+SELECT date_trunc('week', created_at AT TIME ZONE 'UTC')::date AS cw, count(*)::int
+FROM control_users WHERE created_at >= $1 GROUP BY 1 ORDER BY 1
+`, rangeStart)
+	if err != nil {
+		return nil, err
+	}
+	defer sizeRows.Close()
+	order := []time.Time{}
+	cohortByWeek := map[time.Time]*domain.AdminRetentionCohort{}
+	for sizeRows.Next() {
+		var cw time.Time
+		var size int
+		if err := sizeRows.Scan(&cw, &size); err != nil {
+			return nil, err
+		}
+		cohort := &domain.AdminRetentionCohort{CohortStart: cw, Size: size, Retained: make([]int, maxPeriods)}
+		cohortByWeek[cw] = cohort
+		order = append(order, cw)
+	}
+	if err := sizeRows.Err(); err != nil {
+		return nil, err
+	}
+
+	retRows, err := s.pool.Query(ctx, `
+WITH signup AS (
+  SELECT user_id, date_trunc('week', created_at AT TIME ZONE 'UTC')::date AS cw
+  FROM control_users WHERE created_at >= $1
+),
+activity AS (
+  SELECT user_id, date_trunc('week', created_at AT TIME ZONE 'UTC')::date AS aw
+    FROM control_runs WHERE created_at >= $1
+  UNION
+  SELECT t.user_id, date_trunc('week', m.created_at AT TIME ZONE 'UTC')::date
+    FROM control_thread_messages m JOIN control_threads t ON t.thread_id = m.thread_id
+   WHERE m.created_at >= $1 AND lower(m.role) = 'user'
+)
+SELECT s.cw, ((a.aw - s.cw) / 7)::int AS period, count(DISTINCT s.user_id)::int
+FROM signup s JOIN activity a ON a.user_id = s.user_id AND a.aw >= s.cw
+GROUP BY 1, 2 ORDER BY 1, 2
+`, rangeStart)
+	if err != nil {
+		return nil, err
+	}
+	defer retRows.Close()
+	for retRows.Next() {
+		var cw time.Time
+		var period, retained int
+		if err := retRows.Scan(&cw, &period, &retained); err != nil {
+			return nil, err
+		}
+		cohort, ok := cohortByWeek[cw]
+		if !ok || period < 0 || period >= maxPeriods {
+			continue
+		}
+		cohort.Retained[period] = retained
+	}
+	if err := retRows.Err(); err != nil {
+		return nil, err
+	}
+
+	cohorts := make([]domain.AdminRetentionCohort, 0, len(order))
+	for _, cw := range order {
+		cohorts = append(cohorts, *cohortByWeek[cw])
+	}
+	return cohorts, nil
+}
+
+func (s *PostgresStore) adminPowerUserCurve(ctx context.Context, now time.Time, windowDays, threshold int) (domain.AdminPowerUserCurve, error) {
+	if windowDays < 1 {
+		windowDays = 28
+	}
+	curve := domain.AdminPowerUserCurve{WindowDays: windowDays, PowerUserThreshold: threshold}
+	since := timestamptz(now.Add(-time.Duration(windowDays) * 24 * time.Hour))
+	rows, err := s.pool.Query(ctx, `
+WITH active_days AS (
+  SELECT user_id, count(DISTINCT d)::int AS days FROM (
+    SELECT user_id, date_trunc('day', created_at AT TIME ZONE 'UTC')::date AS d
+      FROM control_runs WHERE created_at >= $1
+    UNION
+    SELECT t.user_id, date_trunc('day', m.created_at AT TIME ZONE 'UTC')::date
+      FROM control_thread_messages m JOIN control_threads t ON t.thread_id = m.thread_id
+     WHERE m.created_at >= $1 AND lower(m.role) = 'user'
+  ) x GROUP BY user_id
+)
+SELECT days, count(*)::int FROM active_days GROUP BY days ORDER BY days
+`, since)
+	if err != nil {
+		return domain.AdminPowerUserCurve{}, err
+	}
+	defer rows.Close()
+	counts := make(map[int]int, windowDays)
+	for rows.Next() {
+		var days, users int
+		if err := rows.Scan(&days, &users); err != nil {
+			return domain.AdminPowerUserCurve{}, err
+		}
+		counts[days] = users
+	}
+	if err := rows.Err(); err != nil {
+		return domain.AdminPowerUserCurve{}, err
+	}
+	curve.Buckets = make([]domain.AdminPowerUserBucket, 0, windowDays)
+	for d := 1; d <= windowDays; d++ {
+		curve.Buckets = append(curve.Buckets, domain.AdminPowerUserBucket{DaysActive: d, Users: counts[d]})
+	}
+	return curve, nil
+}
+
+func (s *PostgresStore) adminActivationFunnel(ctx context.Context, rangeStart pgtype.Timestamptz) ([]domain.AdminFunnelStage, error) {
+	var signedUp, startedRun, producedOutput, returned int
+	err := s.pool.QueryRow(ctx, `
+WITH cohort AS (
+  SELECT user_id, date_trunc('week', created_at AT TIME ZONE 'UTC')::date AS cw
+  FROM control_users WHERE created_at >= $1
+),
+runs AS (SELECT DISTINCT user_id FROM control_runs WHERE created_at >= $1),
+useful AS (
+  SELECT DISTINCT user_id FROM control_runs r
+  WHERE r.created_at >= $1 AND r.status = 'succeeded'
+    AND EXISTS (SELECT 1 FROM control_artifacts a WHERE a.run_id = r.run_id)
+),
+activity AS (
+  SELECT user_id, date_trunc('week', created_at AT TIME ZONE 'UTC')::date AS aw
+    FROM control_runs WHERE created_at >= $1
+  UNION
+  SELECT t.user_id, date_trunc('week', m.created_at AT TIME ZONE 'UTC')::date
+    FROM control_thread_messages m JOIN control_threads t ON t.thread_id = m.thread_id
+   WHERE m.created_at >= $1 AND lower(m.role) = 'user'
+),
+returned AS (
+  SELECT DISTINCT s.user_id FROM cohort s
+  JOIN activity a ON a.user_id = s.user_id AND a.aw > s.cw
+)
+SELECT
+  (SELECT count(*) FROM cohort)::int,
+  (SELECT count(*) FROM cohort c WHERE c.user_id IN (SELECT user_id FROM runs))::int,
+  (SELECT count(*) FROM cohort c WHERE c.user_id IN (SELECT user_id FROM useful))::int,
+  (SELECT count(*) FROM returned)::int
+`, rangeStart).Scan(&signedUp, &startedRun, &producedOutput, &returned)
+	if err != nil {
+		return nil, err
+	}
+	return []domain.AdminFunnelStage{
+		{Stage: "Signed up", Users: signedUp},
+		{Stage: "Started a run", Users: startedRun},
+		{Stage: "Produced an output", Users: producedOutput},
+		{Stage: "Returned and ran again", Users: returned},
+	}, nil
+}
+
+func (s *PostgresStore) adminTokensByModel(ctx context.Context, rangeStart pgtype.Timestamptz) ([]domain.AdminModelTokens, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT model,
+  COALESCE(sum(input_tokens), 0)::bigint,
+  COALESCE(sum(output_tokens), 0)::bigint,
+  COALESCE(sum(total_tokens), 0)::bigint,
+  count(DISTINCT run_id)::int
+FROM control_run_token_usage WHERE occurred_at >= $1 GROUP BY model ORDER BY 4 DESC
+`, rangeStart)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.AdminModelTokens{}
+	for rows.Next() {
+		var m domain.AdminModelTokens
+		if err := rows.Scan(&m.Model, &m.InputTokens, &m.OutputTokens, &m.TotalTokens, &m.Runs); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) adminTokensDaily(ctx context.Context, since pgtype.Timestamptz) ([]domain.AdminDayModelTokens, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT day, model,
+  COALESCE(sum(input_tokens), 0)::bigint,
+  COALESCE(sum(output_tokens), 0)::bigint,
+  COALESCE(sum(total_tokens), 0)::bigint
+FROM control_run_token_usage WHERE day >= $1::date GROUP BY day, model ORDER BY day
+`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.AdminDayModelTokens{}
+	for rows.Next() {
+		var d domain.AdminDayModelTokens
+		if err := rows.Scan(&d.Day, &d.Model, &d.InputTokens, &d.OutputTokens, &d.TotalTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
 	if eventID == "" {
 		return domain.RunEventRecord{}, false, nil
@@ -2149,62 +2507,193 @@ func (s *PostgresStore) GetRunEvent(ctx context.Context, eventID string) (domain
 	return runEventFromRow(row), true, nil
 }
 
+const listRunEventsSQL = `
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM (
+  SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE run_id = $1 ORDER BY sequence_number DESC LIMIT $2
+) recent_events
+ORDER BY sequence_number ASC
+`
+
+const listRunEventsForUserSQL = `
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM (
+  SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+  FROM control_run_events e
+  JOIN control_runs r ON r.run_id = e.run_id
+  WHERE e.run_id = $1
+    AND r.user_id = $2
+  ORDER BY e.sequence_number DESC
+  LIMIT $3
+) recent_events
+ORDER BY sequence_number ASC
+`
+
+const listRunEventsAfterSQL = `
+SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM control_run_events
+WHERE run_id = $1 AND sequence_number > $2
+ORDER BY sequence_number ASC
+LIMIT $3
+`
+
+const listRunEventsAfterForUserSQL = `
+SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+FROM control_run_events e
+JOIN control_runs r ON r.run_id = e.run_id
+WHERE e.run_id = $1
+  AND r.user_id = $2
+  AND e.sequence_number > $3
+ORDER BY e.sequence_number ASC
+LIMIT $4
+`
+
 func (s *PostgresStore) ListRunEvents(ctx context.Context, runID string, limit int) ([]domain.RunEventRecord, error) {
-	rows, err := s.queries.ListRunEvents(ctx, sqlc.ListRunEventsParams{
-		RunID: runID,
-		Limit: limit32(limit, 500),
-	})
+	resolvedLimit := limit32(limit, 500)
+	rows, err := s.pool.Query(ctx, listRunEventsSQL, runID, resolvedLimit)
 	if err != nil {
 		return nil, err
 	}
-	return runEventsFromRows(rows), nil
+	return scanRunEventRows(rows, runEventListCapacity(resolvedLimit, true))
 }
 
 func (s *PostgresStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {
-	rows, err := s.queries.ListRunEventsForUser(ctx, sqlc.ListRunEventsForUserParams{
-		RunID:  runID,
-		UserID: userID,
-		Limit:  limit32(limit, 500),
-	})
+	resolvedLimit := limit32(limit, 500)
+	rows, err := s.pool.Query(ctx, listRunEventsForUserSQL, runID, userID, resolvedLimit)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	events, err := scanRunEventRows(rows, runEventListCapacity(resolvedLimit, true))
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
 		if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
 			return nil, err
 		}
 	}
-	return runEventsFromRows(rows), nil
+	return events, nil
 }
 
 func (s *PostgresStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
-	rows, err := s.queries.ListRunEventsAfter(ctx, sqlc.ListRunEventsAfterParams{
-		RunID:          runID,
-		SequenceNumber: afterSequence,
-		Limit:          limit32(limit, 500),
-	})
+	resolvedLimit := limit32(limit, 500)
+	if afterSequence > 0 {
+		rows, err := s.queries.ListRunEventsAfter(ctx, sqlc.ListRunEventsAfterParams{
+			RunID:          runID,
+			SequenceNumber: afterSequence,
+			Limit:          resolvedLimit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return runEventsFromRows(rows), nil
+	}
+	rows, err := s.pool.Query(ctx, listRunEventsAfterSQL, runID, afterSequence, resolvedLimit)
 	if err != nil {
 		return nil, err
 	}
-	return runEventsFromRows(rows), nil
+	return scanRunEventRows(rows, runEventListCapacity(resolvedLimit, true))
 }
 
 func (s *PostgresStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
-	rows, err := s.queries.ListRunEventsAfterForUser(ctx, sqlc.ListRunEventsAfterForUserParams{
-		RunID:          runID,
-		UserID:         userID,
-		SequenceNumber: afterSequence,
-		Limit:          limit32(limit, 500),
-	})
+	resolvedLimit := limit32(limit, 500)
+	if afterSequence > 0 {
+		rows, err := s.queries.ListRunEventsAfterForUser(ctx, sqlc.ListRunEventsAfterForUserParams{
+			RunID:          runID,
+			UserID:         userID,
+			SequenceNumber: afterSequence,
+			Limit:          resolvedLimit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
+				return nil, err
+			}
+		}
+		return runEventsFromRows(rows), nil
+	}
+	rows, err := s.pool.Query(ctx, listRunEventsAfterForUserSQL, runID, userID, afterSequence, resolvedLimit)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	events, err := scanRunEventRows(rows, runEventListCapacity(resolvedLimit, afterSequence <= 0))
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
 		if _, err := s.GetRunForUser(ctx, runID, userID); err != nil {
 			return nil, err
 		}
 	}
-	return runEventsFromRows(rows), nil
+	return events, nil
+}
+
+func scanRunEventRows(rows pgx.Rows, capacity int) ([]domain.RunEventRecord, error) {
+	if capacity < 0 {
+		capacity = 0
+	}
+	events := make([]domain.RunEventRecord, 0, capacity)
+	var event domain.RunEventRecord
+	var threadID pgtype.Text
+	var eventType pgtype.Text
+	var nodeName pgtype.Text
+	var taskID pgtype.Text
+	var checkpointID pgtype.Text
+	var scopeID pgtype.Text
+	var agentRole pgtype.Text
+	var level pgtype.Text
+	var ts pgtype.Timestamptz
+	var message pgtype.Text
+	var payload []byte
+	scanTargets := []any{
+		&event.EventID,
+		&event.Sequence,
+		&event.RunID,
+		&threadID,
+		&event.EventKind,
+		&eventType,
+		&nodeName,
+		&taskID,
+		&checkpointID,
+		&scopeID,
+		&agentRole,
+		&level,
+		&ts,
+		&message,
+		&payload,
+	}
+	_, err := pgx.ForEachRow(rows, scanTargets, func() error {
+		event.ThreadID = textValue(threadID)
+		event.EventType = textValue(eventType)
+		event.NodeName = textValue(nodeName)
+		event.TaskID = textValue(taskID)
+		event.CheckpointID = textValue(checkpointID)
+		event.ScopeID = textValue(scopeID)
+		event.AgentRole = textValue(agentRole)
+		event.Level = textValue(level)
+		event.TS = timeValue(ts)
+		event.Message = textValue(message)
+		event.Payload = jsonMap(payload)
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func runEventListCapacity(limit int32, preallocate bool) int {
+	if !preallocate || limit <= 0 {
+		return 0
+	}
+	const maxPreallocatedRunEvents = 500
+	if limit > maxPreallocatedRunEvents {
+		return maxPreallocatedRunEvents
+	}
+	return int(limit)
 }
 
 func runEventsFromRows(rows []sqlc.ControlRunEvent) []domain.RunEventRecord {
@@ -3123,10 +3612,186 @@ WHERE owner_user_id = $1
 	return existing, nil
 }
 
+func (s *PostgresStore) resourceSearchCandidateIDs(ctx context.Context, parsed parsedResourceSearchQuery, input domain.ResourceListInput, status string) ([]string, bool, error) {
+	if !parsed.hasFactPredicates() {
+		return nil, false, nil
+	}
+	var candidates map[string]struct{}
+	intersect := func(ids []string) {
+		if candidates == nil {
+			candidates = make(map[string]struct{}, len(ids))
+			for _, id := range ids {
+				candidates[id] = struct{}{}
+			}
+			return
+		}
+		seen := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			seen[id] = struct{}{}
+		}
+		for id := range candidates {
+			if _, ok := seen[id]; !ok {
+				delete(candidates, id)
+			}
+		}
+	}
+	for _, predicate := range parsed.NumericPredicates {
+		ids, err := s.resourceSearchCandidateIDsForNumericPredicate(ctx, predicate, input, status)
+		if err != nil {
+			return nil, true, err
+		}
+		intersect(ids)
+		if len(candidates) == 0 {
+			return []string{}, true, nil
+		}
+	}
+	for _, predicate := range parsed.TextPredicates {
+		ids, err := s.resourceSearchCandidateIDsForTextPredicate(ctx, predicate, input, status)
+		if err != nil {
+			return nil, true, err
+		}
+		intersect(ids)
+		if len(candidates) == 0 {
+			return []string{}, true, nil
+		}
+	}
+	out := make([]string, 0, len(candidates))
+	for id := range candidates {
+		out = append(out, id)
+	}
+	return out, true, nil
+}
+
+func (s *PostgresStore) resourceSearchCandidateIDsForNumericPredicate(ctx context.Context, predicate resourceSearchNumericPredicate, input domain.ResourceListInput, status string) ([]string, error) {
+	factPredicate := `
+sf.fact_key = $1
+  AND sf.fact_number IS NOT NULL
+  AND sf.fact_number = $2`
+	switch predicate.Op {
+	case "gt":
+		factPredicate = `
+sf.fact_key = $1
+  AND sf.fact_number IS NOT NULL
+  AND sf.fact_number > $2`
+	case "gte":
+		factPredicate = `
+sf.fact_key = $1
+  AND sf.fact_number IS NOT NULL
+  AND sf.fact_number >= $2`
+	case "lt":
+		factPredicate = `
+sf.fact_key = $1
+  AND sf.fact_number IS NOT NULL
+  AND sf.fact_number < $2`
+	case "lte":
+		factPredicate = `
+sf.fact_key = $1
+  AND sf.fact_number IS NOT NULL
+  AND sf.fact_number <= $2`
+	case "eq":
+	default:
+		return []string{}, nil
+	}
+	return s.resourceSearchCandidateIDsForQuery(ctx, postgresResourceSearchCandidateQuery(factPredicate), predicate.Key, predicate.Number, status, strings.TrimSpace(input.UserID), strings.TrimSpace(input.OrgID))
+}
+
+func (s *PostgresStore) resourceSearchCandidateIDsForTextPredicate(ctx context.Context, predicate resourceSearchTextPredicate, input domain.ResourceListInput, status string) ([]string, error) {
+	return s.resourceSearchCandidateIDsForQuery(ctx, postgresResourceSearchCandidateQuery(`
+sf.fact_key = $1
+  AND sf.fact_text = $2`),
+		predicate.Key,
+		predicate.Text,
+		status,
+		strings.TrimSpace(input.UserID),
+		strings.TrimSpace(input.OrgID),
+	)
+}
+
+func postgresResourceSearchCandidateQuery(factPredicate string) string {
+	return `
+SELECT DISTINCT resource_id
+FROM (
+  SELECT sf.resource_id
+  FROM control_resource_search_facts sf
+  WHERE ` + factPredicate + `
+    AND sf.status = $3
+    AND sf.owner_user_id = $4
+    AND (COALESCE(sf.owner_org_id, '') = '' OR sf.owner_org_id = $5)
+  UNION
+  SELECT sf.resource_id
+  FROM control_resource_search_facts sf
+  JOIN control_resources r ON r.resource_id = sf.resource_id
+  WHERE ` + factPredicate + `
+  ` + postgresResourceSearchSharedCandidateVisibilitySQL() + `
+) AS candidate_resources`
+}
+
+func postgresResourceSearchSharedCandidateVisibilitySQL() string {
+	return `
+AND sf.status = $3
+AND sf.status = 'active'
+AND r.status = 'active'
+AND EXISTS (
+  SELECT 1
+  FROM control_resource_share_grants g
+  WHERE g.resource_id = r.resource_id
+    AND g.status = 'active'
+    AND (
+      COALESCE(g.grantee_user_id, '') = '__public__'
+      OR (
+        COALESCE(g.grantee_user_id, '') <> ''
+        AND g.grantee_user_id = $4
+        AND (COALESCE(g.grantee_org_id, '') = '' OR g.grantee_org_id = $5)
+      )
+      OR (
+        COALESCE(g.grantee_user_id, '') = ''
+        AND COALESCE(g.grantee_org_id, '') <> ''
+        AND g.grantee_org_id = $5
+      )
+    )
+  )
+`
+}
+
+func (s *PostgresStore) resourceSearchCandidateIDsForQuery(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var resourceID string
+		if err := rows.Scan(&resourceID); err != nil {
+			return nil, mapPgError(err)
+		}
+		ids = append(ids, resourceID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return ids, nil
+}
+
 func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.ResourceListInput) (domain.ResourceListPage, error) {
 	status := strings.TrimSpace(input.Status)
 	if status == "" {
 		status = "active"
+	}
+	parsedQuery := parseResourceSearchQuery(input.Query)
+	candidateIDs, factFilterEnabled, err := s.resourceSearchCandidateIDs(ctx, parsedQuery, input, status)
+	if err != nil {
+		return domain.ResourceListPage{}, err
+	}
+	limit := limit32(input.Limit, 200)
+	offset := offset32(input.Offset)
+	if factFilterEnabled && len(candidateIDs) == 0 {
+		return domain.ResourceListPage{
+			Resources:  []domain.ResourceRecord{},
+			TotalCount: 0,
+			Limit:      int(limit),
+			Offset:     int(offset),
+		}, nil
 	}
 	metadataFilterSpecs := resourceMetadataFilterSpecs(input.MetadataFilters)
 	descriptorFilters := normalizeResourceDescriptors(input.Descriptors)
@@ -3137,7 +3802,7 @@ func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.R
 		Column4:     strings.TrimSpace(input.Kind),
 		Column5:     strings.TrimSpace(input.Source),
 		Column6:     strings.TrimSpace(input.ProjectID),
-		Column7:     strings.TrimSpace(input.Query),
+		Column7:     strings.TrimSpace(parsedQuery.ResidualText),
 		Column8:     resourceTagKeys(input.Tags),
 		Column9:     metadataFilterSpecs,
 		Column10:    nullableTimestamptz(input.CreatedAfter),
@@ -3145,8 +3810,10 @@ func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.R
 		Column12:    strings.ToLower(strings.TrimSpace(input.ProcessingStatus)),
 		Column13:    strings.ToLower(strings.TrimSpace(input.Sharing)),
 		Column14:    descriptorFilters,
-		Limit:       limit32(input.Limit, 200),
-		Offset:      offset32(input.Offset),
+		Column15:    factFilterEnabled,
+		Column16:    candidateIDs,
+		Limit:       limit,
+		Offset:      offset,
 	}
 	rows, err := s.queries.ListResourcesForUser(ctx, params)
 	if err != nil {
@@ -3167,6 +3834,8 @@ func (s *PostgresStore) ListResourcesForUser(ctx context.Context, input domain.R
 		Column12:    params.Column12,
 		Column13:    params.Column13,
 		Column14:    params.Column14,
+		Column15:    params.Column15,
+		Column16:    params.Column16,
 	})
 	if err != nil {
 		return domain.ResourceListPage{}, err

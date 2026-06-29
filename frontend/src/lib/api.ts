@@ -10,6 +10,7 @@ import type {
   AdminIssueListResponse,
   AdminOrganization,
   AdminOrganizationListResponse,
+  AdminMetricsResponse,
   AdminOverviewResponse,
   AdminRunActionResponse,
   AdminRunListResponse,
@@ -341,6 +342,14 @@ const resourceMetadataFilterSpecs = (
 const asOptionalString = (value: unknown): string | null => {
   const text = asTrimmedString(value);
   return text.length > 0 ? text : null;
+};
+
+const browserUserTimeZone = (): string | null => {
+  try {
+    return asOptionalString(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  } catch {
+    return null;
+  }
 };
 
 const asStringArray = (value: unknown): string[] =>
@@ -1473,6 +1482,7 @@ export class ApiClient {
       idempotency_key: asOptionalString(request.idempotency_key),
       metadata: {
         conversation_id: request.conversation_id ?? null,
+        user_timezone: browserUserTimeZone(),
         uploaded_files: request.uploaded_files ?? [],
         frontend_bridge: "v2-chat",
       },
@@ -1586,6 +1596,23 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as AdminOverviewResponse;
+  }
+
+  async getAdminMetrics(options?: { rangeDays?: number }): Promise<AdminMetricsResponse> {
+    const params: Record<string, string> = {};
+    const rangeDays = Number(options?.rangeDays);
+    if (Number.isFinite(rangeDays) && rangeDays > 0) {
+      params.range_days = String(Math.round(rangeDays));
+    }
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/metrics", params), {
+      method: "GET",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as AdminMetricsResponse;
   }
 
   async listAdminUsers(options?: {
@@ -5444,6 +5471,17 @@ export class ApiClient {
     return buildUrl(this.baseUrl, `/v2/runs/${encodeURIComponent(runId)}/artifacts/download`, {
       path,
     });
+  }
+
+  // getRunArtifactCaption fetches a lazily-generated, server-cached academic caption
+  // for a run-output figure. Always resolves (caption is "" when captioning is
+  // disabled/unavailable), so callers never need to special-case failure.
+  async getRunArtifactCaption(runId: string, path: string): Promise<{ caption: string; enabled: boolean }> {
+    return this.fetchJson<{ caption: string; enabled: boolean }>(
+      `/v2/runs/${encodeURIComponent(runId)}/artifacts/caption`,
+      {},
+      { path }
+    );
   }
 
   async createReproReport(req: ReproReportRequest): Promise<ReproReportResponse> {

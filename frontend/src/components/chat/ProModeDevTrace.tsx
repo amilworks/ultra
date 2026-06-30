@@ -1,3 +1,4 @@
+import { memo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -119,12 +120,16 @@ const proModeDevConversationCopyText = (conversation: RecordMap): string => {
   return sections.join("\n\n").trim() || JSON.stringify(conversation, null, 2);
 };
 
-export function ProModeDevTrace({
+function ProModeDevTraceComponent({
   messageId,
   conversation,
   isCopied,
   onCopy,
 }: ProModeDevTraceProps) {
+  // Render the (potentially large) nested round/message tree ONLY while expanded. Collapsed is the
+  // default and common case, so it must cost nothing beyond the cheap summary counts below — a
+  // <details> still mounts (and React reconciles) hidden children, so we gate on real open state.
+  const [open, setOpen] = useState(false);
   const rounds = toRecordArray(conversation.rounds);
   const calculatorResults = toRecordArray(conversation.calculator_results);
   const verifier = toRecord(conversation.verifier);
@@ -132,10 +137,22 @@ export function ProModeDevTrace({
   if (rounds.length === 0 && calculatorResults.length === 0 && !verifier && !synthesis) {
     return null;
   }
+  const messageCount = rounds.reduce(
+    (sum, round) => sum + toRecordArray(round.messages).length,
+    0
+  );
   return (
-    <details className="pro-mode-dev-trace" data-testid="pro-mode-dev-trace">
+    <details
+      className="pro-mode-dev-trace"
+      data-testid="pro-mode-dev-trace"
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>
         <span>Internal Pro Mode conversation (development only)</span>
+        <span className="pro-mode-dev-trace-summary-counts">
+          {`${rounds.length} ${rounds.length === 1 ? "round" : "rounds"}`}
+          {messageCount > 0 ? ` · ${messageCount} messages` : ""}
+        </span>
         <button
           type="button"
           className={cn("pro-mode-dev-copy-button", isCopied && "pro-mode-dev-copy-button--copied")}
@@ -160,6 +177,8 @@ export function ProModeDevTrace({
         </button>
       </summary>
       <div className="pro-mode-dev-trace-content">
+        {open ? (
+          <>
         {rounds.map((round, roundIndex) => {
           const roundNumber = Number(round.round_index ?? roundIndex + 1);
           const messages = toRecordArray(round.messages);
@@ -297,7 +316,11 @@ export function ProModeDevTrace({
             ) : null}
           </section>
         ) : null}
+          </>
+        ) : null}
       </div>
     </details>
   );
 }
+
+export const ProModeDevTrace = memo(ProModeDevTraceComponent);

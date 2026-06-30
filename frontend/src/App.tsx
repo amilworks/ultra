@@ -21,7 +21,6 @@ import {
   FileUploadTrigger,
   FileUploadFolderTrigger,
   Loader,
-  MarkdownResponseStream,
   Message,
   MessageAction,
   MessageActions,
@@ -141,6 +140,13 @@ import {
   shouldRecoverRunResultMessage,
 } from "./features/chat/run-recovery";
 import { extractRunTokenUsage } from "./features/chat/token-usage";
+import { isEphemeralDeltaEvent, runHasToolActivity } from "./features/chat/run-events";
+import { MESSAGE_WINDOW_SIZE, windowTailMessages } from "./features/chat/message-window";
+import { isTabHidden, onVisibilityChange } from "./features/chat/tab-visibility";
+import {
+  classifyStreamFailure,
+  composeStreamFailureReason,
+} from "./features/chat/stream-failure";
 import {
   findReusableBlankDraftConversation,
   shouldExposeConversationInUrl,
@@ -220,6 +226,7 @@ import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
+import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import {
   composeComposerWorkflowPromptForModel,
   slashWorkflowSearchQuery,
@@ -558,6 +565,7 @@ const loadProModeDevTraceModule = () => import("./components/chat/ProModeDevTrac
 const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
 const loadChatRunDocumentsModule = () => import("./components/chat/ChatRunDocuments");
 const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
+const loadVirtuosoModule = () => import("react-virtuoso");
 
 type ComposerWorkflowsModule = Awaited<
   ReturnType<typeof loadComposerWorkflowsModule>
@@ -671,6 +679,7 @@ const LazyInlineDataQuickPreview = lazyNamed(
   loadInlineDataQuickPreviewModule,
   "InlineDataQuickPreview"
 );
+const LazyVirtuoso = lazyNamed(loadVirtuosoModule, "Virtuoso");
 const LazyProModeDevTrace = lazyNamed(loadProModeDevTraceModule, "ProModeDevTrace");
 const LazyToolResultCardSection = lazyNamed(
   loadToolResultCardsModule,
@@ -2776,6 +2785,11 @@ const ConversationMessageRow = memo(
       [message]
     );
     const tokenUsage = useMemo(() => extractRunTokenUsage(message), [message]);
+    // A multi-step agentic run (it ran tools / executed code) shows the calm step timeline as the
+    // primary surface and folds its running first-person narration into an opt-in "live reasoning"
+    // disclosure — so a scientist watching a long run sees structured progress, not a monologue.
+    // A plain text reply keeps streaming inline (responsive). Monotonic, so no flip-flop mid-run.
+    const isAgenticRun = useMemo(() => runHasToolActivity(runEvents), [runEvents]);
     const showAssistantMetadataLine =
       Boolean(elapsedLabel) || Boolean(summaryModeLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
@@ -2915,16 +2929,12 @@ const ConversationMessageRow = memo(
             </Suspense>
           ) : null}
           {isStreamingAssistant && message.liveStream ? (
-            <div
-              id={message.id}
-              className="pk-message-content rounded-lg bg-transparent p-0 text-foreground break-words whitespace-normal"
-            >
-              <MarkdownResponseStream
-                className="w-full bg-transparent p-0 text-foreground"
-                textStream={message.liveStream}
-                onComplete={() => actions.onStreamingRenderComplete(message.id)}
-              />
-            </div>
+            <LiveStreamRegion
+              messageId={message.id}
+              liveStream={message.liveStream}
+              foldIntoReasoning={isAgenticRun}
+              onComplete={() => actions.onStreamingRenderComplete(message.id)}
+            />
           ) : (
             collapseScientificInterpretation ? (
               <details className="chat-scientific-appendix">
@@ -3174,6 +3184,58 @@ const ConversationTranscript = memo(
       () => collectConversationRunArtifacts(messages),
       [messages]
     );
+    const { scrollRef } = useStickToBottomContext();
+    const [virtualizedScrollParent, setVirtualizedScrollParent] = useState<HTMLElement | null>(null);
+    useLayoutEffect(() => {
+      setVirtualizedScrollParent(scrollRef.current);
+    }, [scrollRef]);
+
+    // Short chats keep the normal stick-to-bottom content path. Long hydrated transcripts switch to
+    // react-virtuoso so all messages remain reachable while the mounted DOM stays bounded.
+    const shouldVirtualizeMessages = messages.length > MESSAGE_WINDOW_SIZE;
+    const [messageWindow, setMessageWindow] = useState(MESSAGE_WINDOW_SIZE);
+    const firstMessageId = messages.length > 0 ? messages[0].id : null;
+    const prevFirstMessageIdRef = useRef(firstMessageId);
+    useEffect(() => {
+      if (prevFirstMessageIdRef.current !== firstMessageId) {
+        prevFirstMessageIdRef.current = firstMessageId;
+        setMessageWindow(MESSAGE_WINDOW_SIZE);
+      }
+    }, [firstMessageId]);
+    const { visible: visibleMessages, hiddenCount: hiddenMessageCount } = windowTailMessages(
+      messages,
+      messageWindow
+    );
+    const renderMessageRow = useCallback(
+      (message: UiMessage, index: number, totalMessages: number) => (
+        <ErrorBoundary
+          key={message.id}
+          source="message-row"
+          resetKeys={[message.id, message.content, message.runId]}
+        >
+          <ConversationMessageRow
+            message={message}
+            isLastMessage={index === totalMessages - 1}
+            isStreamingAssistant={streamingMessageId === message.id}
+            copiedMessageId={copiedMessageId}
+            conversationRunArtifacts={conversationRunArtifacts}
+            uploadedFiles={uploadedFiles}
+            bisqueLinksByFileId={bisqueLinksByFileId}
+            apiClient={apiClient}
+            actions={actions}
+          />
+        </ErrorBoundary>
+      ),
+      [
+        actions,
+        apiClient,
+        bisqueLinksByFileId,
+        conversationRunArtifacts,
+        copiedMessageId,
+        streamingMessageId,
+        uploadedFiles,
+      ]
+    );
     return (
       <ChatContainerContent
         className="space-y-0 px-4 py-8 sm:px-6 sm:py-14"
@@ -3220,26 +3282,40 @@ const ConversationTranscript = memo(
               />
             )}
           </div>
+        ) : shouldVirtualizeMessages && virtualizedScrollParent ? (
+          // Only mount Virtuoso once the StickToBottom scroll element is captured — otherwise
+          // customScrollParent is undefined and Virtuoso would spin up its OWN nested scroller
+          // inside the existing scroll area (a broken double-scrollbar) for the first paint. Until
+          // then the bounded-window fallback below renders (already DOM-bounded), then it swaps in.
+          <Suspense fallback={null}>
+            <LazyVirtuoso
+              className="w-full"
+              customScrollParent={virtualizedScrollParent}
+              data={messages}
+              computeItemKey={(_: number, message: UiMessage) => message.id}
+              followOutput="auto"
+              initialTopMostItemIndex={messages.length - 1}
+              increaseViewportBy={{ top: 900, bottom: 1_200 }}
+              itemContent={(index: number, message: UiMessage) =>
+                renderMessageRow(message, index, messages.length)
+              }
+            />
+          </Suspense>
         ) : (
-          messages.map((message, index) => (
-            <ErrorBoundary
-              key={message.id}
-              source="message-row"
-              resetKeys={[message.id, message.content, message.runId]}
-            >
-              <ConversationMessageRow
-                message={message}
-                isLastMessage={index === messages.length - 1}
-                isStreamingAssistant={streamingMessageId === message.id}
-                copiedMessageId={copiedMessageId}
-                conversationRunArtifacts={conversationRunArtifacts}
-                uploadedFiles={uploadedFiles}
-                bisqueLinksByFileId={bisqueLinksByFileId}
-                apiClient={apiClient}
-                actions={actions}
-              />
-            </ErrorBoundary>
-          ))
+          <>
+            {hiddenMessageCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => setMessageWindow((size) => size + MESSAGE_WINDOW_SIZE)}
+                className="mx-auto mb-2 flex items-center justify-center rounded-full border border-[var(--line)] bg-[var(--bg-panel)] px-4 py-1.5 text-[12px] font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--text-main)]"
+              >
+                {`Show earlier messages (${hiddenMessageCount.toLocaleString()})`}
+              </button>
+            ) : null}
+            {visibleMessages.map((message, index) => (
+              renderMessageRow(message, index, visibleMessages.length)
+            ))}
+          </>
         )}
       </ChatContainerContent>
     );
@@ -9895,16 +9971,30 @@ export function App() {
     let afterSequence = 0;
 
     const pollRunEvents = async (): Promise<void> => {
+      // A backgrounded tab does no polling work: network and rAF are throttled there, and a hidden
+      // tab needs no live trace updates. It catches up immediately on visibilitychange below.
+      if (isTabHidden()) {
+        return;
+      }
       try {
         const response = await listRunEvents(apiClient, runId, 200, { afterSequence });
         if (cancelled || response.events.length === 0) {
           return;
         }
-        collectedEvents = [...collectedEvents, ...response.events];
+        // Advance the cursor past EVERY event (incl. per-token deltas) so the next tick never
+        // re-fetches them...
         afterSequence = response.events.reduce((current, event) => {
           const sequence = Math.floor(Number(event.payload?.sequence) || 0);
           return sequence > current ? sequence : current;
         }, afterSequence);
+        // ...but only accumulate the durable structural events into runEvents — ephemeral deltas
+        // must never enter the array (the same invariant the live SSE reducer enforces; otherwise
+        // the poll re-introduces the per-token bloat the live path was fixed to avoid).
+        const fresh = response.events.filter((event) => !isEphemeralDeltaEvent(event));
+        if (fresh.length === 0) {
+          return;
+        }
+        collectedEvents = [...collectedEvents, ...fresh];
         const snapshot = collectedEvents;
         updateConversation(conversationId, (current) => ({
           ...current,
@@ -9926,9 +10016,15 @@ export function App() {
     const intervalId = window.setInterval(() => {
       void pollRunEvents();
     }, 1250);
+    const stopVisibility = onVisibilityChange((hidden) => {
+      if (!hidden) {
+        void pollRunEvents(); // immediate catch-up when the tab returns to the foreground
+      }
+    });
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      stopVisibility();
     };
 	  }, [
 	    activeConversation?.id,
@@ -12197,6 +12293,43 @@ export function App() {
               chatError: null,
               streamingMessageId: target.messageId,
             }));
+            // Batch resume-stream token application to one state commit per animation frame (mirrors
+            // the live path's rAF batching) so a heavy-run reconnect rebuilds content in O(n), not the
+            // O(n^2) re-render-and-concat-per-token the naive append caused. resumedContent is seeded
+            // lazily from the message's current content so both the reload (empty) and in-session
+            // (tail) resume cases append correctly; the authoritative response_text overwrites it on
+            // completion (resumeSettled gates any late flush from clobbering that).
+            let resumedContent: string | null = null;
+            let pendingResumeText = "";
+            let resumeFlushRaf = 0;
+            let resumeSettled = false;
+            const flushResumeText = () => {
+              resumeFlushRaf = 0;
+              if (resumeSettled || controller.signal.aborted || !pendingResumeText) {
+                pendingResumeText = "";
+                return;
+              }
+              const chunk = pendingResumeText;
+              pendingResumeText = "";
+              updateConversation(target.conversationId, (conversation) => ({
+                ...conversation,
+                messages: conversation.messages.map((message) => {
+                  if (message.id !== target.messageId) {
+                    return message;
+                  }
+                  const base = resumedContent ?? message.content ?? "";
+                  resumedContent = base + chunk;
+                  return { ...message, content: resumedContent };
+                }),
+              }));
+            };
+            const settleResume = () => {
+              resumeSettled = true;
+              if (resumeFlushRaf) {
+                cancelAnimationFrame(resumeFlushRaf);
+                resumeFlushRaf = 0;
+              }
+            };
             void apiClient
               .resumeRunStream(target.runId, {
                 afterSequence: target.afterSequence,
@@ -12215,23 +12348,19 @@ export function App() {
                   }));
                 },
                 onToken: (delta) => {
-                  updateConversation(target.conversationId, (conversation) => ({
-                    ...conversation,
-                    messages: conversation.messages.map((message) =>
-                      message.id === target.messageId
-                        ? {
-                            ...message,
-                            content: `${message.content ?? ""}${delta}`,
-                          }
-                        : message
-                    ),
-                  }));
+                  pendingResumeText += delta;
+                  if (typeof requestAnimationFrame !== "function") {
+                    flushResumeText();
+                  } else if (!resumeFlushRaf) {
+                    resumeFlushRaf = requestAnimationFrame(flushResumeText);
+                  }
                 },
               })
               .then((response) => {
                 if (controller.signal.aborted) {
                   return;
                 }
+                settleResume();
                 const recoveredText =
                   response.response_text?.trim() || "No response text returned.";
                 applyGeneratedConversationTitle(target.conversationId, response);
@@ -12263,6 +12392,7 @@ export function App() {
                 hydrateRunDetails(target.conversationId, target.messageId, response.run_id);
               })
               .catch((error) => {
+                settleResume();
                 if (controller.signal.aborted) {
                   return;
                 }
@@ -13240,7 +13370,15 @@ export function App() {
 
       streamController?.fail(finalError);
       streamController = null;
-      const message = normalizeApiError(finalError);
+      // Categorize the failure into a calm, actionable headline (auth / rate-limit / transport /
+      // server) carrying the technical detail in parentheses, instead of surfacing a raw status
+      // string. Partial streamed text is preserved as the failed message's content below.
+      const failureDetail = normalizeApiError(finalError);
+      const failureStatus = finalError instanceof ApiError ? finalError.status : null;
+      const message = composeStreamFailureReason(
+        classifyStreamFailure(failureStatus, failureDetail),
+        failureDetail
+      );
       if (assistantMessageId) {
         const partial = streamedText.trim();
         // Mark the turn failed and stash the technical detail (rendered in muted

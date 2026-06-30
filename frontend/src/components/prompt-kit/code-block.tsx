@@ -180,6 +180,11 @@ const useResolvedTheme = (): "light" | "dark" => {
   return resolvedTheme;
 };
 
+// Giant code blocks (e.g. a tool dumping a large file) are clamped to this many lines by default:
+// only the preview is highlighted and mounted, with a toggle to expand the full content on demand.
+// Copy always yields the complete source regardless of clamp state.
+const MAX_CODE_PREVIEW_LINES = 400;
+
 function CodeBlockCode({
   code,
   language = "text",
@@ -193,6 +198,7 @@ function CodeBlockCode({
   const resolvedTheme = useResolvedTheme();
   const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
   const [isCopied, setIsCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const codeText = useMemo(() => String(code ?? ""), [code]);
   const displayCodeText = useMemo(
@@ -203,6 +209,15 @@ function CodeBlockCode({
   const lineCount = useMemo(
     () => (displayCodeText ? displayCodeText.split("\n").length : 0),
     [displayCodeText]
+  );
+  const isClampable = lineCount > MAX_CODE_PREVIEW_LINES;
+  const isClamped = isClampable && !expanded;
+  const sourceForDisplay = useMemo(
+    () =>
+      isClamped
+        ? displayCodeText.split("\n").slice(0, MAX_CODE_PREVIEW_LINES).join("\n")
+        : displayCodeText,
+    [displayCodeText, isClamped]
   );
   const languageMeta = useMemo(
     () => buildLanguageMeta(languageText, lineCount),
@@ -218,7 +233,7 @@ function CodeBlockCode({
 
   useEffect(() => {
     let cancelled = false;
-    const source = displayCodeText;
+    const source = sourceForDisplay;
 
     const renderHighlight = async () => {
       if (!source) {
@@ -261,7 +276,7 @@ function CodeBlockCode({
     return () => {
       cancelled = true;
     };
-  }, [displayCodeText, languageText, themeName]);
+  }, [sourceForDisplay, languageText, themeName]);
 
   const onCopy = async () => {
     const source = normalizeCodeForClipboard(codeText, languageText);
@@ -336,10 +351,20 @@ function CodeBlockCode({
       ) : (
         <div className={contentClassName} {...props}>
           <pre>
-            <code>{displayCodeText}</code>
+            <code>{sourceForDisplay}</code>
           </pre>
         </div>
       )}
+      {isClampable ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="flex w-full items-center justify-center gap-1.5 border-t border-[color-mix(in_oklab,var(--line)_88%,transparent)] bg-[color-mix(in_oklab,var(--bg-panel)_94%,transparent)] px-4 py-2 text-[12px] font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--text-main)]"
+        >
+          {expanded ? "Collapse" : `Show all ${lineCount.toLocaleString()} lines`}
+        </button>
+      ) : null}
     </div>
   );
 }

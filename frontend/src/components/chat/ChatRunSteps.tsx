@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+
 import { cn } from "@/lib/utils";
 import {
   Steps,
@@ -137,7 +139,12 @@ const statusFromV2ToolEvent = (eventType: string, payload: Record<string, unknow
   return "completed";
 };
 
-const buildStepItems = (
+// Exported for golden testing: the canonical run-event → step grouping. It is a PURE, deterministic
+// function of the ordered (runEvents, progressEvents) — the same inputs always coalesce into the same
+// bounded set of foldable steps (e.g. all reasoning deltas → one "Thinking" step; a tool's
+// started+completed → one tool step). This is the RunStep model; keeping it deterministic is what lets
+// the trace render identically on reconnect / across replicas.
+export const buildStepItems = (
   runEvents: RunEvent[],
   progressEvents: ProgressEvent[]
 ): ChatStepItem[] => {
@@ -329,10 +336,17 @@ export function ChatRunSteps({
   stopLabel = "Stop",
   className,
 }: ChatRunStepsProps) {
+  // Memoize the step derivation so it only recomputes when the event arrays actually change.
+  // Their references change on STRUCTURAL events only — token deltas never touch
+  // runEvents/progressEvents — so this skips the O(events) walk on every streaming re-render.
+  // (Hook stays above the early return to satisfy the rules-of-hooks ordering.)
+  const stepItems = useMemo(
+    () => buildStepItems(runEvents, progressEvents),
+    [runEvents, progressEvents]
+  );
   if (!isStreaming) {
     return null;
   }
-  const stepItems = buildStepItems(runEvents, progressEvents);
 
   let activeItem: ChatStepItem | null = null;
   for (let index = stepItems.length - 1; index >= 0; index -= 1) {

@@ -169,6 +169,10 @@ export type V2RunEventsResponse = {
   run_id: string;
   count: number;
   events: V2GraphEventRecord[];
+  // Keyset pagination (present only on a full forward page, i.e. ?after_sequence/cursor): pass
+  // next_cursor back as ?cursor= to drain the next page. Absent on the last page / tail snapshot.
+  next_cursor?: string;
+  has_more?: boolean;
 };
 
 export type V2ArtifactRecord = {

@@ -34,6 +34,13 @@ export type UseTextStreamResult = {
 const STREAM_CATCHUP_PENDING_CHARS = 240
 const STREAM_CATCHUP_MAX_CHUNK = 64
 
+// Honor the OS "reduce motion" preference: skip the typewriter pacing entirely and let streamed
+// text settle immediately, rather than animating it character-by-character.
+const prefersReducedMotion = (): boolean =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches
+
 type WordSegment = { segment: string }
 
 type IntlWithSegmenter = typeof Intl & {
@@ -208,6 +215,9 @@ function useTextStream({
   )
 
   const waitForProcessingDelay = useCallback(async () => {
+    if (prefersReducedMotion()) {
+      return // reduced-motion: no typewriter pacing
+    }
     const delay = Math.min(
       48,
       Math.max(16, Math.round(getProcessingDelay() * 1.5))
@@ -222,6 +232,9 @@ function useTextStream({
 
   const getAsyncChunkSize = useCallback(
     (pendingChars: number) => {
+      if (prefersReducedMotion()) {
+        return pendingChars // reduced-motion: commit the whole pending buffer at once
+      }
       const baseChunkSize = Math.max(1, getChunkSize())
       if (pendingChars <= baseChunkSize) {
         return pendingChars

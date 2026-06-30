@@ -64,6 +64,34 @@ func TestDetectSpecialFormatByName(t *testing.T) {
 	}
 }
 
+func TestNgffServiceUnavailableGuard(t *testing.T) {
+	zarr := resourceRecord{OriginalName: "scan.ome.zarr"}
+	plain := resourceRecord{OriginalName: "scan.tif"}
+
+	// Configured: OME-Zarr serves via the ngff-service, and the unavailable guard is OFF.
+	configured := ServerDeps{NgffServiceURL: "http://ngff.test"}
+	if !configured.servesViaNgff(zarr, "scan.ome.zarr") {
+		t.Fatal("ome-zarr should serve via ngff when configured")
+	}
+	if configured.ngffServiceUnavailable(zarr, "scan.ome.zarr") {
+		t.Fatal("guard must be off when ngff is configured")
+	}
+
+	// Unconfigured: it can NOT serve via ngff; the guard fires for OME-Zarr so it is never handed
+	// to libbioimage (which only returns a confusing empty (0,0,0) region for a directory store),
+	// but stays off for a plain image libbioimage can decode.
+	unconfigured := ServerDeps{NgffServiceURL: ""}
+	if unconfigured.servesViaNgff(zarr, "scan.ome.zarr") {
+		t.Fatal("ome-zarr cannot serve via ngff when unconfigured")
+	}
+	if !unconfigured.ngffServiceUnavailable(zarr, "scan.ome.zarr") {
+		t.Fatal("guard must fire for an ome-zarr when ngff is unconfigured")
+	}
+	if unconfigured.ngffServiceUnavailable(plain, "scan.tif") {
+		t.Fatal("guard must NOT fire for a plain libbioimage-decodable image")
+	}
+}
+
 func join(xs []string) string {
 	out := ""
 	for i, x := range xs {

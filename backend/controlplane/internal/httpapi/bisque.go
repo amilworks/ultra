@@ -1476,6 +1476,16 @@ func (service *BisqueService) UploadFile(ctx context.Context, record resourceRec
 }
 
 func (service *BisqueService) UploadNamedFile(ctx context.Context, originalName string, path string, credentials BisqueCredentials) (BisqueUploadRecord, error) {
+	// A directory bundle (e.g. an OME-Zarr: a .ome.zarr tree of chunk files) is not a single
+	// uploadable file. Without this guard os.Open succeeds on the directory and io.Copy below
+	// fails with EISDIR, which writeBisqueError maps to an opaque 500 that propagates and fails
+	// the whole run. Return a typed client error so the caller gets a clean, actionable 4xx.
+	if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+		return BisqueUploadRecord{}, bisqueClientError(fmt.Sprintf(
+			"resource %q is a directory bundle (e.g. an OME-Zarr), not a single file; bundle upload to BisQue is not supported",
+			originalName,
+		))
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return BisqueUploadRecord{}, err

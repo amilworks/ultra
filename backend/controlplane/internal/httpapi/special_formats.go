@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,24 @@ func (deps ServerDeps) servesViaNgff(record resourceRecord, path string) bool {
 	sf := specialFormatForResource(record, path)
 	return sf != nil && sf.Serve == "ngff"
 }
+
+// ngffServiceUnavailable reports whether a resource REQUIRES the ngff-service — it is an
+// ngff-served special format (e.g. an OME-Zarr directory bundle) — but the service is not
+// configured for this control plane. Such a resource must NOT fall through to libbioimage,
+// which can only return a confusing empty (0,0,0) region for a directory store; callers should
+// surface a clear, actionable error instead.
+func (deps ServerDeps) ngffServiceUnavailable(record resourceRecord, path string) bool {
+	if strings.TrimSpace(deps.NgffServiceURL) != "" {
+		return false
+	}
+	sf := specialFormatForResource(record, path)
+	return sf != nil && sf.Serve == "ngff"
+}
+
+var errNgffServiceNotConfigured = errors.New(
+	"this resource is an OME-Zarr served by the ngff-service, which is not configured for this " +
+		"control plane (set ULTRA_CONTROL_NGFF_SERVICE_URL); it cannot be rendered via libbioimage",
+)
 
 // ngffDeps returns a copy of deps with ImageServiceURL pointed at the ngff-service, so
 // the existing proxy helpers (cache, backpressure, fallback) route to it unchanged.

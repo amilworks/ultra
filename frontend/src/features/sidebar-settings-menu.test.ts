@@ -180,4 +180,31 @@ describe("sidebar settings menu", () => {
     expect(styles).not.toMatch(/var\(--fg\)/);
     expect(styles).toMatch(/@media \(max-width: 760px\)/);
   });
+
+  it("offers a sidebar CTA to link BisQue and opens settings on the BisQue tab", () => {
+    const app = readSource("src/App.tsx");
+    const settingsDialog = readSource("src/components/AppSettingsDialog.tsx");
+
+    // The settings dialog can be opened directly to a chosen tab.
+    expect(settingsDialog).toMatch(/initialTab\?: SettingsTab;/);
+    expect(settingsDialog).toMatch(/initialTab = "general"/);
+    expect(settingsDialog).toMatch(/<Tabs defaultValue=\{initialTab\}/);
+    expect(app).toMatch(/const openSettings = useCallback\(/);
+    expect(app).toMatch(/initialTab=\{settingsInitialTab\}/);
+    expect(app).toMatch(/onOpenSettings=\{\(\) => openSettings\("general"\)\}/);
+
+    // Unlinked users get a Link-BisQue CTA that jumps to the BisQue settings tab;
+    // the resource counts only render once linked.
+    expect(app).toMatch(/app-bisque-link-cta/);
+    expect(app).toMatch(/onClick=\{\(\) => openSettings\("bisque"\)\}/);
+    expect(app).toMatch(/<span>Link BisQue account<\/span>/);
+    expect(app).toMatch(/\{bisqueCredentialsLinked \? \(/);
+
+    // The BisQue settings tab is decluttered: keep the why/login, drop the
+    // redundant production/shortcut/Ultra-panel sections.
+    expect(settingsDialog).toMatch(/Why link BisQue\?/);
+    expect(settingsDialog).not.toMatch(/BisQue production/);
+    expect(settingsDialog).not.toMatch(/Ultra panels/);
+    expect(settingsDialog).not.toMatch(/app-settings-link-grid/);
+  });
 });

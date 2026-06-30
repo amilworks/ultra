@@ -4,17 +4,14 @@ import {
   Check,
   Database,
   ExternalLink,
-  FolderOpen,
   GitBranch,
   IdCard,
-  Images,
   Info,
   Link2,
   Loader2,
   LogOut,
   Settings,
   Shield,
-  Table2,
   Unlink,
   UserRound,
   X,
@@ -64,6 +61,13 @@ import { SystemMessage } from "./prompt-kit/system-message";
 
 type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
+export type SettingsTab =
+  | "general"
+  | "profile"
+  | "usage"
+  | "account"
+  | "bisque"
+  | "about";
 
 type ThemeOption = {
   value: ThemePreference;
@@ -78,6 +82,7 @@ type LinkBisqueAccountPayload = {
 export type AppSettingsDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  initialTab?: SettingsTab;
   authUser: string | null;
   authMode: AuthMode | null;
   authIsAdmin: boolean;
@@ -86,8 +91,6 @@ export type AppSettingsDialogProps = {
   resolvedTheme: "light" | "dark";
   bisqueNavLinks: BisqueNavLinks | null;
   onThemePreferenceChange: (value: ThemePreference) => void;
-  onOpenResources: () => void;
-  onOpenTraining: () => void;
   onOpenAdmin: () => void;
   onLogout: () => Promise<void>;
   onUnlinkBisqueAccount: () => Promise<void>;
@@ -185,6 +188,7 @@ const getAccountInitials = (displayName: string): string => {
 export function AppSettingsDialog({
   open,
   onOpenChange,
+  initialTab = "general",
   authUser,
   authMode,
   authIsAdmin,
@@ -193,8 +197,6 @@ export function AppSettingsDialog({
   resolvedTheme,
   bisqueNavLinks,
   onThemePreferenceChange,
-  onOpenResources,
-  onOpenTraining,
   onOpenAdmin,
   onLogout,
   onUnlinkBisqueAccount,
@@ -384,7 +386,7 @@ export function AppSettingsDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="app-settings-dialog" showCloseButton={false}>
-        <Tabs defaultValue="general" className="app-settings-shell">
+        <Tabs defaultValue={initialTab} className="app-settings-shell">
           <aside className="app-settings-sidebar-pane">
             <DialogClose asChild>
               <Button
@@ -661,19 +663,21 @@ export function AppSettingsDialog({
             <TabsContent value="bisque" className="app-settings-tab-content">
               <div className="app-settings-panel-heading">
                 <h2>BisQue</h2>
-                <p>Link your BisQue account or jump into production resources.</p>
+                <p>Connect your BisQue account so Ultra can work directly with your data.</p>
               </div>
               <Separator />
-              <form className="app-settings-bisque-link-form" onSubmit={submitBisqueLink}>
-                <div className="app-settings-row">
-                  <div className="app-settings-row-copy">
-                    <div className="app-settings-row-title">Linked account</div>
-                    <p>
-                      Store a local session so Ultra can query, download, and upload
-                      BisQue data during autonomous runs.
-                    </p>
-                  </div>
+              <div className="app-settings-row">
+                <div className="app-settings-row-copy">
+                  <div className="app-settings-row-title">Why link BisQue?</div>
+                  <p>
+                    BisQue is the UCSB image database where your microscopy images,
+                    datasets, and tables live. Link your account once and Ultra can
+                    search, open, and analyze your BisQue data — and save results
+                    back — during a run, with no manual uploads.
+                  </p>
                 </div>
+              </div>
+              <form className="app-settings-bisque-link-form" onSubmit={submitBisqueLink}>
                 {bisqueLinked && authUser ? (
                   <Alert className="app-settings-bisque-linked-alert">
                     <Check data-icon="inline-start" aria-hidden="true" />
@@ -759,84 +763,6 @@ export function AppSettingsDialog({
                   )}
                 </div>
               </form>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">BisQue production</div>
-                  <p>Open the configured BisQue instance in a new browser tab.</p>
-                </div>
-                {bisqueNavLinks ? (
-                  <Button asChild variant="outline" size="sm">
-                    <a href={bisqueNavLinks.home} target="_blank" rel="noreferrer">
-                      <ExternalLink data-icon="inline-start" aria-hidden="true" />
-                      Open
-                    </a>
-                  </Button>
-                ) : (
-                  <Button type="button" variant="outline" size="sm" disabled>
-                    Open
-                  </Button>
-                )}
-              </div>
-              <Separator />
-              <div className="app-settings-link-grid">
-                {bisqueNavLinks ? (
-                  <>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.images} target="_blank" rel="noreferrer">
-                        <Images data-icon="inline-start" aria-hidden="true" />
-                        Images
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.datasets} target="_blank" rel="noreferrer">
-                        <Database data-icon="inline-start" aria-hidden="true" />
-                        Datasets
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                    <Button asChild variant="ghost" className="app-settings-link-button">
-                      <a href={bisqueNavLinks.tables} target="_blank" rel="noreferrer">
-                        <Table2 data-icon="inline-start" aria-hidden="true" />
-                        Tables
-                        <ExternalLink data-icon="inline-end" aria-hidden="true" />
-                      </a>
-                    </Button>
-                  </>
-                ) : (
-                  <div className="app-settings-unavailable">
-                    BisQue shortcuts are unavailable until the production root is configured.
-                  </div>
-                )}
-              </div>
-              <Separator />
-              <div className="app-settings-row">
-                <div className="app-settings-row-copy">
-                  <div className="app-settings-row-title">Ultra panels</div>
-                  <p>Open resources or model training inside this app.</p>
-                </div>
-                <div className="app-settings-inline-actions">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => runAndClose(onOpenResources)}
-                  >
-                    <FolderOpen data-icon="inline-start" aria-hidden="true" />
-                    Resources
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => runAndClose(onOpenTraining)}
-                  >
-                    <Database data-icon="inline-start" aria-hidden="true" />
-                    Training
-                  </Button>
-                </div>
-              </div>
             </TabsContent>
 
             <TabsContent value="about" className="app-settings-tab-content">

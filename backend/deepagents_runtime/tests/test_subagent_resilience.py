@@ -53,15 +53,33 @@ def test_successful_task_passes_through_unchanged():
     assert _run(mw.awrap_tool_call(_req(), handler)) is sentinel
 
 
-def test_non_task_tool_is_not_wrapped():
-    """Blast radius: only `task` is intercepted; every other tool's exceptions propagate as before."""
+def test_non_task_tool_failure_is_isolated():
+    """A failing ordinary tool (e.g. bisque_upload_files hitting a control-plane error) is degraded
+    to a ToolMessage instead of propagating and killing the run. The degraded message names the
+    actual tool (not 'task') and carries no subagent-fan-out language."""
     mw = SubagentFailureIsolationMiddleware()
 
     async def handler(_req):
-        raise RuntimeError("execute failed")
+        raise RuntimeError("upload failed")
 
-    with pytest.raises(RuntimeError):
-        _run(mw.awrap_tool_call(_req(name="execute"), handler))
+    out = _run(mw.awrap_tool_call(_req(name="bisque_upload_files", subagent=None), handler))
+    assert isinstance(out, ToolMessage)
+    assert out.status == "error"
+    assert out.name == "bisque_upload_files" and out.tool_call_id == "call_1"
+    assert "RuntimeError" in out.content and "isolated" in out.content.lower()
+    assert "UNAFFECTED" not in out.content  # not subagent-fan-out phrasing
+
+
+def test_non_task_tool_has_no_deadline():
+    """The per-task deadline must never apply to an ordinary tool — only isolation does."""
+    mw = SubagentFailureIsolationMiddleware(timeout_seconds=0.05)
+    sentinel = ToolMessage("ok", tool_call_id="call_1")
+
+    async def handler(_req):
+        await asyncio.sleep(0.2)  # longer than the timeout; must NOT be cut off for a non-task tool
+        return sentinel
+
+    assert _run(mw.awrap_tool_call(_req(name="search_resources", subagent=None), handler)) is sentinel
 
 
 def test_graph_interrupt_propagates_not_swallowed():
@@ -170,11 +188,12 @@ def test_sync_graph_interrupt_propagates():
         mw.wrap_tool_call(_req(), handler)
 
 
-def test_sync_non_task_not_wrapped():
+def test_sync_non_task_tool_failure_is_isolated():
     mw = SubagentFailureIsolationMiddleware()
 
     def handler(_req):
         raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError):
-        mw.wrap_tool_call(_req(name="read_file"), handler)
+    out = mw.wrap_tool_call(_req(name="read_file", subagent=None), handler)
+    assert isinstance(out, ToolMessage)
+    assert out.status == "error" and out.name == "read_file" and "RuntimeError" in out.content

@@ -151,6 +151,42 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     assert "source_path" not in public["staged_resources"][0]
 
 
+def test_stage_catalog_resources_copies_ome_zarr_bundle_directory(tmp_path):
+    # OME-Zarr (and any folder-format upload) is committed as a DIRECTORY bundle under
+    # {root}/bundles/{id}/{name}/, not a single blob. Staging must copytree the whole tree
+    # into the sandbox so downstream code (otsu, etc.) can read the zarr. Regression for the
+    # run that failed "file_not_in_upload_store" even though the bundle was present on disk.
+    uploads = tmp_path / "uploads"
+    bundle = uploads / "bundles" / "file_zarr1" / "scan.ome.zarr"
+    (bundle / "0").mkdir(parents=True)
+    (bundle / ".zgroup").write_text('{"zarr_format": 2}')
+    (bundle / ".zattrs").write_text('{"multiscales": []}')
+    (bundle / "0" / ".zarray").write_text('{"shape": [4, 4]}')
+    (bundle / "0" / "0.0").write_bytes(b"CHUNK")
+    context = _context(tmp_path)
+
+    result = stage_catalog_resources(
+        context,
+        upload_roots=(str(uploads),),
+        resources=[
+            {"resource_id": "file_zarr1", "original_name": "scan.ome.zarr", "source_type": "upload"},
+        ],
+    )
+    assert result["ok"] is True
+    staged = result["staged_resources"][0]
+    assert staged["kind"] == "directory"
+    assert staged["sandbox_path"] == "/workspace/staged_resources/file_zarr1/scan.ome.zarr"
+    # The whole zarr tree is physically copied into the run workspace.
+    copied = Path(context.workspace_root) / "staged_resources" / "file_zarr1" / "scan.ome.zarr"
+    assert copied.is_dir()
+    assert (copied / ".zgroup").read_text() == '{"zarr_format": 2}'
+    assert (copied / "0" / "0.0").read_bytes() == b"CHUNK"
+    # Host paths stay redacted in the model-visible projection.
+    public = _public_stage_result(result)
+    assert str(uploads) not in json.dumps(public)
+    assert public["staged_resources"][0]["kind"] == "directory"
+
+
 def test_stage_catalog_resources_rejects_unsafe_resource_id_before_glob(tmp_path):
     # Defense-in-depth: the worker enforces the safe-id charset itself, so a
     # malformed/traversal id never reaches the filesystem glob even if the control

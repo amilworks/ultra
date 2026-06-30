@@ -72,15 +72,16 @@ def stage_uploaded_files(
             missing.append(file_id)
             continue
         target_name = _uploaded_original_name(source.name, file_id)
-        target = stage_root / _safe_path_token(file_id) / target_name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        token = _safe_path_token(file_id)
+        target = stage_root / token / target_name
+        is_bundle = _stage_source_into(source, target)
         staged_files.append(
             {
                 "file_id": file_id,
                 "source_path": str(source),
                 "staged_path": str(target),
-                "sandbox_path": f"/workspace/staged_uploads/{_safe_path_token(file_id)}/{target_name}",
+                "sandbox_path": f"/workspace/staged_uploads/{token}/{target_name}",
+                "kind": "directory" if is_bundle else "file",
             }
         )
 
@@ -101,13 +102,15 @@ def stage_catalog_resources(
 
     ``resources`` are the control-plane-verified records (resource_id +
     original_name + source_type) returned by the resource-resolve endpoint, so
-    the run owner's read access is already enforced there. Each resource's file is
-    located in the shared upload store by id (same store ``stage_uploaded_files``
-    reads) and copied in; resources with no locally stored file are reported under
-    ``unavailable`` so the agent can fall back (e.g. to BisQue) instead of silently
-    missing data. The resource id is re-validated against the safe id charset
-    before it reaches any filesystem glob — defense-in-depth so the worker enforces
-    its own invariant rather than trusting the upstream id shape.
+    the run owner's read access is already enforced there. Each resource is located
+    in the shared upload store by id (same store ``stage_uploaded_files`` reads) and
+    copied in — either a single-file blob OR a directory bundle (e.g. an OME-Zarr
+    committed under ``bundles/{id}/``), which is staged as a whole tree via
+    ``copytree`` (see :func:`_stage_source_into`); resources with no locally stored
+    file are reported under ``unavailable`` so the agent can fall back (e.g. to
+    BisQue) instead of silently missing data. The resource id is re-validated against
+    the safe id charset before it reaches any filesystem glob — defense-in-depth so
+    the worker enforces its own invariant rather than trusting the upstream id shape.
     """
     roots = _resolved_upload_roots(upload_roots)
     stage_root = Path(context.workspace_root).expanduser().resolve() / "staged_resources"
@@ -133,8 +136,7 @@ def stage_catalog_resources(
         target_name = _uploaded_original_name(source.name, resource_id)
         token = _safe_path_token(resource_id)
         target = stage_root / token / target_name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        is_bundle = _stage_source_into(source, target)
         staged.append(
             {
                 "resource_id": resource_id,
@@ -143,6 +145,7 @@ def stage_catalog_resources(
                 "source_path": str(source),
                 "staged_path": str(target),
                 "sandbox_path": f"/workspace/staged_resources/{token}/{target_name}",
+                "kind": "directory" if is_bundle else "file",
             }
         )
     return {
@@ -733,11 +736,31 @@ def _find_uploaded_file(file_id: str, roots: tuple[Path, ...]) -> Path | None:
     for root in roots:
         if not root.exists():
             continue
+        # Single-file blob committed at the top of the upload root (the common case).
         for pattern in (file_id, f"{file_id}__*", f"{file_id}.*"):
             for candidate in sorted(root.glob(pattern)):
                 path = candidate.expanduser().resolve()
                 if path.is_file() and _is_under(path, root):
                     return path
+        # Directory BUNDLE (e.g. an OME-Zarr: .zattrs/.zgroup + a multiscale chunk tree)
+        # committed under {root}/bundles/{id}/{name}/ by the upload-bundle finalize path.
+        # Without this branch every directory-format upload is invisible to staging and
+        # reports "file_not_in_upload_store" even though the data is present on disk.
+        bundles_root = (root / "bundles").resolve()
+        bundle_dir = (root / "bundles" / file_id).resolve()
+        if (
+            bundle_dir.is_dir()
+            and bundle_dir != bundles_root
+            and _is_under(bundle_dir, bundles_root)
+        ):
+            members = sorted(p for p in bundle_dir.iterdir() if not p.name.startswith("."))
+            # A bundle wraps exactly one member (the <name>.ome.zarr root); return that so the
+            # staged tree is the zarr root itself, not an extra wrapper dir.
+            if len(members) == 1:
+                member = members[0].resolve()
+                if _is_under(member, root):
+                    return member
+            return bundle_dir
     return None
 
 
@@ -746,3 +769,16 @@ def _uploaded_original_name(filename: str, file_id: str) -> str:
     if filename.startswith(prefix):
         return _safe_path_token(filename[len(prefix):]) or "upload"
     return _safe_path_token(filename) or "upload"
+
+
+def _stage_source_into(source: Path, target: Path) -> bool:
+    """Copy a resolved upload source into ``target``. Returns True if the source is a
+    DIRECTORY bundle (e.g. an OME-Zarr tree), False for a single file — so callers can
+    tell the model how to read the staged path. A bundle is copied with ``copytree`` so the
+    whole .ome.zarr (.zattrs/.zgroup + chunks) lands in the sandbox; a file uses ``copy2``."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        return True
+    shutil.copy2(source, target)
+    return False

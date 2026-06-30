@@ -106,14 +106,16 @@ def _extension_of(path: str) -> str:
 def _prefer_bioio_extensions() -> frozenset[str]:
     """Extensions ALWAYS routed through the bioio transcode, even when libbioimage could
     decode them — bioio assembles these better (Zeiss .czi mosaics/scenes, which
-    libbioimage rendered blocky/unstitched) or reads them at all (OME-Zarr). It is a SOFT
-    preference: if bioio can't read a given file, the runner falls back to libbioimage.
-    Override with ULTRA_IMGSVC_PREFER_BIOIO_EXTS (comma-separated, e.g. "czi,zarr,nd2")."""
+    libbioimage rendered blocky/unstitched) or reads them at all (Leica .lif, DeltaVision
+    .dv). It is a SOFT preference: if bioio can't read a given file, the runner falls back
+    to libbioimage. Override with ULTRA_IMGSVC_PREFER_BIOIO_EXTS (comma-separated, e.g.
+    "czi,lif,nd2")."""
     raw = os.environ.get("ULTRA_IMGSVC_PREFER_BIOIO_EXTS")
     if raw is not None:
         return frozenset(e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip())
-    # .zarr would belong here too, but bioio-ome-zarr isn't installed yet (directory store
-    # needs a zip/dir upload path) — add it (and the plugin) when that lands.
+    # .zarr is intentionally NOT here: OME-Zarr is served natively by the ngff-service straight
+    # from its directory bundle (see the special-format / ngff routing), so it never enters the
+    # bioio transcode lane at all — it needs no convert-to-pyramid step.
     return frozenset({"czi"})
 
 

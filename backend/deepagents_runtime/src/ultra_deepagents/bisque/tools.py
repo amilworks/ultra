@@ -256,12 +256,29 @@ def upload_bisque_outputs(
         for artifact_id in (artifact_ids or [])
         if str(artifact_id).strip()
     ]
-    return control_post_json(
-        settings,
-        "/v2/bisque/upload",
-        {"file_ids": cleaned, "artifact_ids": cleaned_artifacts},
-        context=context,
-    )
+    try:
+        return control_post_json(
+            settings,
+            "/v2/bisque/upload",
+            {"file_ids": cleaned, "artifact_ids": cleaned_artifacts},
+            context=context,
+        )
+    except Exception as exc:
+        # Degrade a control-plane failure into a structured result instead of raising. A raised
+        # exception here propagates through the coordinator's ToolNode and fails the whole run
+        # (the OME-Zarr otsu run died exactly this way on a 500). The sibling
+        # download_bisque_resources already degrades; mirror it. A directory bundle now returns a
+        # clean 4xx the model can read and route around (e.g. stage it for analysis instead).
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        result: dict[str, Any] = {
+            "ok": False,
+            "error": _control_failure_result("upload", exc).get("error") or exc.__class__.__name__,
+            "file_ids": cleaned,
+            "artifact_ids": cleaned_artifacts,
+        }
+        if isinstance(status_code, int):
+            result["status_code"] = status_code
+        return result
 
 
 def upload_bisque_workspace_files(

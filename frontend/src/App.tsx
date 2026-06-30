@@ -85,6 +85,7 @@ import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
 import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
+import { AnimatedTokenCount } from "./components/chat/AnimatedTokenCount";
 import { FigureCaption } from "./components/chat/FigureCaption";
 import {
   openFigureLightbox,
@@ -2865,12 +2866,15 @@ const ConversationMessageRow = memo(
                       : undefined
                   }
                 >
-                  {[
-                    tokenUsage ? `${formatTokens(tokenUsage.total_tokens)} tokens` : null,
-                    elapsedLabel,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
+                  {tokenUsage ? (
+                    isStreamingAssistant ? (
+                      <AnimatedTokenCount value={tokenUsage.total_tokens} />
+                    ) : (
+                      `${formatTokens(tokenUsage.total_tokens)} tokens`
+                    )
+                  ) : null}
+                  {tokenUsage && elapsedLabel ? " · " : null}
+                  {elapsedLabel}
                 </span>
               ) : null}
             </div>
@@ -7132,7 +7136,7 @@ const getAccountDisplayName = (
     return "Guest";
   }
   if (authMode === "workos") {
-    return "WorkOS user";
+    return "Researcher";
   }
   return "BisQue user";
 };
@@ -7145,7 +7149,7 @@ const getAccountSubtitle = (
     return "Guest access";
   }
   if (authMode === "workos") {
-    return authIsAdmin ? "WorkOS admin" : "WorkOS account";
+    return authIsAdmin ? "Administrator" : "Researcher";
   }
   if (authIsAdmin) {
     return "Admin account";

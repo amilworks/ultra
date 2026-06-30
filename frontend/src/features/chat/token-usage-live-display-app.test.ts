@@ -25,9 +25,22 @@ describe("assistant token usage live display wiring", () => {
     // Token usage (now shown alongside the elapsed time) must render directly,
     // not behind a completed-message-only branch.
     expect(assistantHeader).toContain("{tokenUsage || elapsedLabel ? (");
+    expect(assistantHeader).toContain("isStreamingAssistant ? (");
+    expect(assistantHeader).toContain("<AnimatedTokenCount value={tokenUsage.total_tokens} />");
     expect(assistantHeader).toContain("formatTokens(tokenUsage.total_tokens)");
     expect(assistantHeader).not.toContain(
       ") : reasonedDurationLabel || summaryModeLabel || tokenUsage ? ("
     );
+  });
+
+  it("keeps the live token ticker out of the composer loader", () => {
+    const composerStart = appSource.indexOf('<div className="composer-running">');
+    const composerEnd = appSource.indexOf("<PromptInputTextarea", composerStart);
+    expect(composerStart).toBeGreaterThan(-1);
+    expect(composerEnd).toBeGreaterThan(composerStart);
+
+    const composerRunning = appSource.slice(composerStart, composerEnd);
+    expect(composerRunning).toContain("formatTokens(activeStreamingTokenUsage.total_tokens)");
+    expect(composerRunning).not.toContain("AnimatedTokenCount");
   });
 });

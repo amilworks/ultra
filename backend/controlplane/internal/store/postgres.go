@@ -1211,6 +1211,24 @@ func (s *PostgresStore) ListThreadMessages(ctx context.Context, threadID string)
 	return messages, nil
 }
 
+// ListThreadMessagePageForUser returns a "load earlier" page of a thread's messages. It currently
+// loads the (small) message set and pages in Go; the limit+before-cursor contract is keyset-friendly
+// so this can become a single keyset query if thread sizes ever warrant it, without changing callers.
+func (s *PostgresStore) ListThreadMessagePageForUser(
+	ctx context.Context,
+	threadID string,
+	userID string,
+	beforeMessageID string,
+	limit int,
+) ([]domain.ThreadMessage, bool, error) {
+	all, err := s.ListThreadMessagesForUser(ctx, threadID, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	page, hasMore := pageThreadMessagesTail(all, beforeMessageID, limit)
+	return page, hasMore, nil
+}
+
 func (s *PostgresStore) ListThreadMessagesForUser(ctx context.Context, threadID string, userID string) ([]domain.ThreadMessage, error) {
 	if _, err := s.GetThreadForUser(ctx, threadID, userID); err != nil {
 		return nil, err
@@ -2547,6 +2565,36 @@ WHERE e.run_id = $1
 ORDER BY e.sequence_number ASC
 LIMIT $4
 `
+
+// PruneRunEventDeltas deletes ephemeral token-delta events (the given event kinds) for runs that
+// reached a TERMINAL status and completed before olderThan, up to limit rows per call. It NEVER
+// touches an active run (completed_at IS NULL guards that even if a status were ever mislabeled),
+// and only ever removes the listed delta kinds — structural, terminal, and token-usage events are
+// preserved for the trace/observability. The durable answer already lives in control_thread_messages,
+// so dropping the per-token deltas is lossless for the conversation. Batched (LIMIT) to keep the
+// delete bounded and avoid long locks on a large table.
+func (s *PostgresStore) PruneRunEventDeltas(ctx context.Context, olderThan time.Time, kinds []string, limit int) (int64, error) {
+	if len(kinds) == 0 || limit <= 0 {
+		return 0, nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM control_run_events
+		WHERE event_id IN (
+			SELECT e.event_id
+			FROM control_run_events e
+			JOIN control_runs r ON r.run_id = e.run_id
+			WHERE r.status IN ('succeeded', 'failed', 'canceled')
+			  AND r.completed_at IS NOT NULL
+			  AND r.completed_at < $1
+			  AND e.event_kind = ANY($2)
+			LIMIT $3
+		)`,
+		timestamptz(olderThan), kinds, limit)
+	if err != nil {
+		return 0, mapPgError(err)
+	}
+	return tag.RowsAffected(), nil
+}
 
 func (s *PostgresStore) ListRunEvents(ctx context.Context, runID string, limit int) ([]domain.RunEventRecord, error) {
 	resolvedLimit := limit32(limit, 500)

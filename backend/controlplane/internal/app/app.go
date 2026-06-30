@@ -197,6 +197,17 @@ func New(cfg config.Config) (*App, error) {
 			})
 		}
 	}
+	// Independently, prune per-token delta events for runs that completed long ago — bounds the
+	// control_run_events trace table (~96% of a heavy run is deltas) without touching active runs or
+	// the durable answer in control_thread_messages. Opt-in via the delta TTL.
+	if cfg.RunEventDeltaRetention > 0 {
+		if deltaStore, ok := controlStore.(httpapi.RunEventRetentionStore); ok {
+			startFns = append(startFns, func(ctx context.Context) error {
+				go httpapi.RunRunEventDeltaRetentionGC(ctx, deltaStore, cfg.RunEventDeltaRetention, cfg.RetentionGCInterval, cfg.RetentionGCBatch)
+				return nil
+			})
+		}
+	}
 	bisqueService := httpapi.NewBisqueService(httpapi.BisqueServiceConfig{
 		RootURL:       cfg.BisqueRootURL,
 		DevUsername:   cfg.BisqueUsername,

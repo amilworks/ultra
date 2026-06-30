@@ -1888,12 +1888,22 @@ type threadMessagesResponse struct {
 	ThreadID string                 `json:"thread_id"`
 	Count    int                    `json:"count"`
 	Messages []domain.ThreadMessage `json:"messages"`
+	// Pagination (present only when ?limit/?before is used): NextCursor is the oldest message id in
+	// this page — pass it back as ?before to load the previous (older) page. HasMore is false on the
+	// first/oldest page. Absent when the endpoint returns the full thread (no pagination params).
+	NextCursor string `json:"next_cursor,omitempty"`
+	HasMore    bool   `json:"has_more,omitempty"`
 }
 
 type runEventsResponse struct {
 	RunID  string                  `json:"run_id"`
 	Count  int                     `json:"count"`
 	Events []domain.RunEventRecord `json:"events"`
+	// NextCursor/HasMore implement keyset pagination: when a full page is returned, NextCursor is
+	// an opaque token the client passes back via ?cursor= to fetch the next page. Omitted on the
+	// last page so callers can drain a large trace deterministically without hand-tracking sequence.
+	NextCursor string `json:"next_cursor,omitempty"`
+	HasMore    bool   `json:"has_more,omitempty"`
 }
 
 type runArtifactsResponse struct {
@@ -3206,12 +3216,29 @@ func (deps ServerDeps) handleListThreadMessages(w http.ResponseWriter, r *http.R
 	}
 	threadID := chi.URLParam(r, "thread_id")
 	principal := deps.principalFromRequest(r, "")
-	messages, err := deps.Store.ListThreadMessagesForUser(r.Context(), threadID, principal.UserID)
+	limit := parseLimitParam(r, "limit", 0)
+	before := strings.TrimSpace(r.URL.Query().Get("before"))
+	// Back-compat: with no pagination params, return the full thread (current behavior). With ?limit
+	// (and optional ?before) the client gets a "load earlier" page + a cursor for infinite scroll-up.
+	if limit <= 0 && before == "" {
+		messages, err := deps.Store.ListThreadMessagesForUser(r.Context(), threadID, principal.UserID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, threadMessagesResponse{ThreadID: threadID, Count: len(messages), Messages: messages})
+		return
+	}
+	page, hasMore, err := deps.Store.ListThreadMessagePageForUser(r.Context(), threadID, principal.UserID, before, limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, threadMessagesResponse{ThreadID: threadID, Count: len(messages), Messages: messages})
+	resp := threadMessagesResponse{ThreadID: threadID, Count: len(page), Messages: page, HasMore: hasMore}
+	if hasMore && len(page) > 0 {
+		resp.NextCursor = page[0].MessageID // oldest in this page → pass as ?before for the next-older page
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
@@ -10109,6 +10136,13 @@ func (deps ServerDeps) handleListRunEvents(w http.ResponseWriter, r *http.Reques
 	runID := chi.URLParam(r, "run_id")
 	limit := clampLimit(parseLimit(r, 500), runEventMaxPageLimit)
 	afterSequence, hasAfterSequence := parseAfterSequence(r)
+	// An opaque ?cursor= (keyset convention) takes precedence over the legacy after_sequence param;
+	// a malformed cursor is ignored so a stale token degrades to "from the start" rather than 400.
+	if cursor := strings.TrimSpace(r.URL.Query().Get("cursor")); cursor != "" {
+		if seq, ok := decodeSeqCursor(cursor); ok {
+			afterSequence, hasAfterSequence = seq, true
+		}
+	}
 	workerAuth := deps.workerRequestAuth(r)
 	if r.URL.Query().Get("stream") == "true" {
 		switch workerAuth {
@@ -10154,7 +10188,17 @@ func (deps ServerDeps) handleListRunEvents(w http.ResponseWriter, r *http.Reques
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, runEventsResponse{RunID: runID, Count: len(events), Events: events})
+	resp := runEventsResponse{RunID: runID, Count: len(events), Events: events}
+	// Cursor pagination applies only to FORWARD drain (after_sequence / cursor present), where the
+	// page is an ascending slice keyed on sequence — a full page means more may follow, so hand back
+	// an opaque cursor at the last (max) sequence. The no-cursor call returns the newest tail (a
+	// convenience snapshot, not a drain), so it carries no forward cursor. A forward drain begins at
+	// ?after_sequence=0. (events[last].Sequence is the max in a forward page.)
+	if hasAfterSequence && limit > 0 && len(events) == limit {
+		resp.NextCursor = encodeSeqCursor(events[len(events)-1].Sequence)
+		resp.HasMore = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (deps ServerDeps) streamRunEvents(w http.ResponseWriter, r *http.Request, runID string, afterSequence int64, hasAfterSequence bool, limit int) {

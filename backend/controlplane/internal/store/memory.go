@@ -967,6 +967,23 @@ func (s *MemoryStore) ListThreadMessagesForUser(ctx context.Context, threadID st
 	return messages, nil
 }
 
+// ListThreadMessagePageForUser returns a "load earlier" page of a thread's messages (most-recent
+// `limit` ending before beforeMessageID), ascending, plus whether older messages remain.
+func (s *MemoryStore) ListThreadMessagePageForUser(
+	ctx context.Context,
+	threadID string,
+	userID string,
+	beforeMessageID string,
+	limit int,
+) ([]domain.ThreadMessage, bool, error) {
+	all, err := s.ListThreadMessagesForUser(ctx, threadID, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	page, hasMore := pageThreadMessagesTail(all, beforeMessageID, limit)
+	return page, hasMore, nil
+}
+
 func (s *MemoryStore) AppendThreadMessage(ctx context.Context, message domain.ThreadMessage) (domain.ThreadMessage, error) {
 	_ = ctx
 	s.mu.Lock()
@@ -1528,6 +1545,49 @@ func (s *MemoryStore) ListRunEvents(ctx context.Context, runID string, limit int
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneLatestRunEventsPage(s.events[runID], limit), nil
+}
+
+// PruneRunEventDeltas mirrors PostgresStore.PruneRunEventDeltas for the in-memory store: it removes
+// the listed delta kinds from TERMINAL runs completed before olderThan (never active runs), up to
+// limit rows total, keeping all structural/terminal/usage events.
+func (s *MemoryStore) PruneRunEventDeltas(ctx context.Context, olderThan time.Time, kinds []string, limit int) (int64, error) {
+	_ = ctx
+	if len(kinds) == 0 || limit <= 0 {
+		return 0, nil
+	}
+	kindSet := make(map[string]struct{}, len(kinds))
+	for _, k := range kinds {
+		kindSet[k] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed int64
+	for runID, events := range s.events {
+		if removed >= int64(limit) {
+			break
+		}
+		run, ok := s.runs[runID]
+		if !ok || run.CompletedAt == nil || !run.CompletedAt.Before(olderThan) {
+			continue // unknown or still-active run: never prune
+		}
+		switch run.Status {
+		case domain.RunStatusSucceeded, domain.RunStatusFailed, domain.RunStatusCanceled:
+		default:
+			continue // non-terminal status: never prune
+		}
+		kept := make([]domain.RunEventRecord, 0, len(events))
+		for _, event := range events {
+			if removed < int64(limit) {
+				if _, prune := kindSet[event.EventKind]; prune {
+					removed++
+					continue
+				}
+			}
+			kept = append(kept, event)
+		}
+		s.events[runID] = kept
+	}
+	return removed, nil
 }
 
 func (s *MemoryStore) ListRunEventsForUser(ctx context.Context, runID string, userID string, limit int) ([]domain.RunEventRecord, error) {

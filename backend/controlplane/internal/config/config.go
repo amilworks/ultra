@@ -65,6 +65,7 @@ type Config struct {
 	RetentionGCEnabled       bool
 	RetentionGCInterval      time.Duration
 	RetentionGCBatch         int
+	RunEventDeltaRetention   time.Duration
 	WorkerToken              string
 }
 
@@ -130,7 +131,10 @@ func Load() Config {
 		RetentionGCEnabled:  envBool("ULTRA_CONTROL_RETENTION_GC_ENABLED", false),
 		RetentionGCInterval: envDurationSeconds("ULTRA_CONTROL_RETENTION_GC_INTERVAL_SECONDS", 3600),
 		RetentionGCBatch:    envInt("ULTRA_CONTROL_RETENTION_GC_BATCH", 100),
-		WorkerToken:         envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
+		// Per-token delta events are pruned for runs that completed more than this long ago (0 = keep
+		// forever / disabled). The durable answer is in control_thread_messages, so this is lossless.
+		RunEventDeltaRetention: envDurationSeconds("ULTRA_CONTROL_RUN_EVENT_DELTA_TTL_SECONDS", 0),
+		WorkerToken:            envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
 	}
 }
 

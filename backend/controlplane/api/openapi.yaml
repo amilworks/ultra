@@ -253,6 +253,14 @@ paths:
       operationId: listThreadMessages
       parameters:
         - $ref: "#/components/parameters/ThreadID"
+        - name: limit
+          in: query
+          description: Optional newest-tail page size. When omitted with no before cursor, the endpoint returns the full thread for backward compatibility.
+          schema: { type: integer, minimum: 1, default: 30 }
+        - name: before
+          in: query
+          description: Message id cursor returned as next_cursor; returns the previous older page before that message.
+          schema: { type: string }
       responses:
         "200":
           description: Thread messages
@@ -2162,6 +2170,10 @@ paths:
           in: query
           description: Return events with sequence numbers greater than this cursor. Use 0 to page from the beginning of a long run.
           schema: { type: integer, minimum: 0 }
+        - name: cursor
+          in: query
+          description: Opaque cursor returned as next_cursor; takes precedence over after_sequence for forward pagination.
+          schema: { type: string }
         - name: stream
           in: query
           schema: { type: boolean, default: false }
@@ -3673,6 +3685,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2ThreadMessage"
+        next_cursor:
+          type: string
+          description: Present on paginated responses when older messages remain. Pass as before to load the next older page.
+        has_more:
+          type: boolean
+          description: Present on paginated responses; true when older messages remain.
     V2ThreadCreateRequest:
       type: object
       properties:
@@ -4946,6 +4964,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2GraphEventRecord"
+        next_cursor:
+          type: string
+          description: Present on full forward pages. Pass as cursor to drain the next event page.
+        has_more:
+          type: boolean
+          description: Present on forward pages; true when another page may be available.
     V2ArtifactRecord:
       type: object
       required: [artifact_id, run_id, kind, created_at, metadata]

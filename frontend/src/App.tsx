@@ -216,6 +216,7 @@ import type {
   TokenUsageResponse,
   UploadedFileRecord,
 } from "./types";
+import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { RunningStatusPill } from "./components/chat/RunningStatusPill";
@@ -7291,6 +7292,16 @@ export function App() {
   const hostedAuthRedirectAttemptedRef = useRef(false);
   const sessionRevalidatedAtRef = useRef(0);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] =
+    useState<SettingsTab>("general");
+  const openSettings = useCallback(
+    (tab: SettingsTab = "general") => {
+      void loadAppSettingsDialogModule();
+      setSettingsInitialTab(tab);
+      setSettingsDialogOpen(true);
+    },
+    []
+  );
   const [blankChatTokenUsage, setBlankChatTokenUsage] =
     useState<TokenUsageResponse | null>(null);
   const [blankChatUsageLoading, setBlankChatUsageLoading] = useState(false);
@@ -13630,63 +13641,79 @@ export function App() {
                         </a>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild className="app-bisque-link-button">
-                        <a
-                          href={bisqueNavLinks.images}
-                          target="_blank"
-                          rel="noreferrer"
+                    {bisqueCredentialsLinked ? (
+                      <>
+                        <SidebarMenuItem>
+                          <SidebarMenuButton asChild className="app-bisque-link-button">
+                            <a
+                              href={bisqueNavLinks.images}
+                              target="_blank"
+                              rel="noreferrer"
+                              {...mobileSidebarCloseProps}
+                            >
+                              <Images className="size-4" />
+                              <span>
+                                {formatBisqueShortcutLabel(
+                                  bisqueResourceCounts?.image,
+                                  "Image",
+                                  "Images"
+                                )}
+                              </span>
+                            </a>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                        <SidebarMenuItem>
+                          <SidebarMenuButton asChild className="app-bisque-link-button">
+                            <a
+                              href={bisqueNavLinks.datasets}
+                              target="_blank"
+                              rel="noreferrer"
+                              {...mobileSidebarCloseProps}
+                            >
+                              <Database className="size-4" />
+                              <span>
+                                {formatBisqueShortcutLabel(
+                                  bisqueResourceCounts?.dataset,
+                                  "Dataset",
+                                  "Datasets"
+                                )}
+                              </span>
+                            </a>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                        <SidebarMenuItem>
+                          <SidebarMenuButton asChild className="app-bisque-link-button">
+                            <a
+                              href={bisqueNavLinks.tables}
+                              target="_blank"
+                              rel="noreferrer"
+                              {...mobileSidebarCloseProps}
+                            >
+                              <Table2 className="size-4" />
+                              <span>
+                                {formatBisqueShortcutLabel(
+                                  bisqueResourceCounts?.table,
+                                  "Table",
+                                  "Tables"
+                                )}
+                              </span>
+                            </a>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      </>
+                    ) : (
+                      <SidebarMenuItem>
+                        <SidebarMenuButton
+                          className="app-bisque-link-button app-bisque-link-cta"
+                          onClick={() => openSettings("bisque")}
+                          title="Link your BisQue account"
                           {...mobileSidebarCloseProps}
                         >
-                          <Images className="size-4" />
-                          <span>
-                            {formatBisqueShortcutLabel(
-                              bisqueResourceCounts?.image,
-                              "Image",
-                              "Images"
-                            )}
-                          </span>
-                        </a>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild className="app-bisque-link-button">
-                        <a
-                          href={bisqueNavLinks.datasets}
-                          target="_blank"
-                          rel="noreferrer"
-                          {...mobileSidebarCloseProps}
-                        >
-                          <Database className="size-4" />
-                          <span>
-                            {formatBisqueShortcutLabel(
-                              bisqueResourceCounts?.dataset,
-                              "Dataset",
-                              "Datasets"
-                            )}
-                          </span>
-                        </a>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton asChild className="app-bisque-link-button">
-                        <a
-                          href={bisqueNavLinks.tables}
-                          target="_blank"
-                          rel="noreferrer"
-                          {...mobileSidebarCloseProps}
-                        >
-                          <Table2 className="size-4" />
-                          <span>
-                            {formatBisqueShortcutLabel(
-                              bisqueResourceCounts?.table,
-                              "Table",
-                              "Tables"
-                            )}
-                          </span>
-                        </a>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
+                          <Link2 className="size-4" />
+                          <span>Link BisQue account</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    )}
                   </>
                 ) : (
                   <SidebarMenuItem>
@@ -13779,10 +13806,7 @@ export function App() {
             authIsAdmin={authIsAdmin}
             themePreference={themePreference}
             onThemePreferenceChange={setThemePreference}
-            onOpenSettings={() => {
-              void loadAppSettingsDialogModule();
-              setSettingsDialogOpen(true);
-            }}
+            onOpenSettings={() => openSettings("general")}
             onLogout={logoutBisque}
           />
         </SidebarContent>
@@ -13792,6 +13816,7 @@ export function App() {
           <LazyAppSettingsDialog
             open={settingsDialogOpen}
             onOpenChange={setSettingsDialogOpen}
+            initialTab={settingsInitialTab}
             authUser={authUser}
             authMode={authMode}
             authIsAdmin={authIsAdmin}
@@ -13800,8 +13825,6 @@ export function App() {
             resolvedTheme={resolvedTheme}
             bisqueNavLinks={bisqueNavLinks}
             onThemePreferenceChange={setThemePreference}
-            onOpenResources={openResourcesPanel}
-            onOpenTraining={openTrainingPanel}
             onOpenAdmin={openAdminPanel}
             onLogout={logoutBisque}
             onUnlinkBisqueAccount={unlinkBisqueAccount}

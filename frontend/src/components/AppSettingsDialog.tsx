@@ -151,7 +151,7 @@ const getAccountDisplayName = (
     return "Guest";
   }
   if (authMode === "workos") {
-    return "WorkOS user";
+    return "Researcher";
   }
   return "BisQue user";
 };
@@ -164,7 +164,7 @@ const getAccountSubtitle = (
     return "Guest access";
   }
   if (authMode === "workos") {
-    return authIsAdmin ? "WorkOS admin" : "WorkOS account";
+    return authIsAdmin ? "Administrator" : "Researcher";
   }
   if (authIsAdmin) {
     return "Admin account";

@@ -19,9 +19,13 @@ describe("classifyWheelGesture", () => {
     expect(classifyWheelGesture({ ...base, deltaY: -120 })).toBe("zoom");
   });
 
-  it("treats a trackpad two-finger scroll as pan", () => {
+  it("treats vertical trackpad scroll as zoom so the fitted image does not feel inert", () => {
+    expect(classifyWheelGesture({ ...base, deltaY: 8.5 })).toBe("zoom"); // fine/fractional
+    expect(classifyWheelGesture({ ...base, deltaY: 12 })).toBe("zoom"); // small step
+  });
+
+  it("treats horizontal-dominant trackpad scroll as pan", () => {
     expect(classifyWheelGesture({ ...base, deltaX: 12, deltaY: 0 })).toBe("pan"); // horizontal
-    expect(classifyWheelGesture({ ...base, deltaY: 8.5 })).toBe("pan"); // fine/fractional
-    expect(classifyWheelGesture({ ...base, deltaY: 12 })).toBe("pan"); // small step
+    expect(classifyWheelGesture({ ...base, deltaX: 12, deltaY: 3 })).toBe("pan"); // mostly horizontal
   });
 });

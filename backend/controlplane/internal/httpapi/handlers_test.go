@@ -13217,6 +13217,37 @@ func TestV2BisqueUploadPostsLocalUploadToBisque(t *testing.T) {
 	}
 }
 
+func TestBisqueUploadNamedFileRejectsDirectoryBundleAsCleanClientError(t *testing.T) {
+	t.Parallel()
+	// Regression: an OME-Zarr (and any folder upload) resolves to a DIRECTORY path. Before the
+	// guard, os.Open succeeded on the dir and io.Copy failed with EISDIR -> writeBisqueError
+	// default branch -> opaque 500 that propagated and failed the whole run. The directory must
+	// be refused as a typed client error that maps to a clean 4xx the caller can interpret.
+	svc := NewBisqueService(BisqueServiceConfig{
+		RootURL:       "http://bisque.invalid",
+		DevUsername:   "ada",
+		DevPassword:   "secret",
+		AllowedRoots:  []string{"http://bisque.invalid"},
+		MaxImportSize: 8 << 20,
+	})
+	bundleDir := t.TempDir() // stands in for a .ome.zarr directory bundle
+
+	_, err := svc.UploadNamedFile(context.Background(), "scan.ome.zarr", bundleDir, BisqueCredentials{})
+	if err == nil {
+		t.Fatal("uploading a directory bundle should error, got nil")
+	}
+	var clientErr bisqueClientError
+	if !errors.As(err, &clientErr) {
+		t.Fatalf("error = %T (%v), want bisqueClientError so it maps to 4xx", err, err)
+	}
+	// And confirm the HTTP mapping is a clean 400, not the old opaque 500.
+	rec := httptest.NewRecorder()
+	writeBisqueError(rec, err)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("writeBisqueError status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
 func TestV2BisqueUploadParsesBQAPIUploadedWrapper(t *testing.T) {
 	t.Parallel()
 

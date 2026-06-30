@@ -217,6 +217,10 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusOK, core)
 		return
 	}
+	if deps.ngffServiceUnavailable(record, path) {
+		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
+		return
+	}
 	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
 		// The engine recognized the file but cannot decode it (415/422): a permanent,
@@ -358,6 +362,10 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 		deps.ngffDeps().proxyImageServiceCached(w, r, "/slice", q)
 		return
 	}
+	if deps.ngffServiceUnavailable(record, path) {
+		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
+		return
+	}
 	// Prefer the derived tiled pyramid when one exists: its native level 0 is
 	// pixel-identical to the source but a bounded (tiled) read, so a z-scrub plane
 	// decodes ~8x faster than re-decoding a full plane from a non-pyramidal source
@@ -487,6 +495,10 @@ func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *ht
 	// OME-Zarr thumbnails come from the ngff-service (smallest multiscale level).
 	if deps.servesViaNgff(record, path) {
 		deps.ngffDeps().proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}})
+		return
+	}
+	if deps.ngffServiceUnavailable(record, path) {
+		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
 		return
 	}
 	servePath := path
@@ -711,8 +723,9 @@ func hasPyramidMicroscopyExtension(name string) bool {
 // prefersBioioReader reports whether a resource's format should be read via bioio (the
 // convert worker transcodes it to a pyramid) in preference to libbioimage's native read:
 // Zeiss .czi, where libbioimage renders mosaics blocky/unstitched. Mirrors the Python
-// PREFER_BIOIO_EXTENSIONS default in imaging/job.py. (.zarr is deferred until bioio-ome-zarr
-// is installed and OME-Zarr directory uploads are supported.)
+// PREFER_BIOIO_EXTENSIONS default in imaging/job.py. (.zarr is intentionally excluded:
+// OME-Zarr directory bundles are served natively by the ngff-service from the store, so
+// they never enter the bioio transcode lane — see shouldDerivePyramid / servesViaNgff.)
 func prefersBioioReader(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	for _, ext := range []string{".czi"} {

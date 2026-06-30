@@ -755,6 +755,68 @@ def test_bisque_download_returns_structured_failure_without_tool_exception(monke
     assert "should-not-leak" not in repr(captured)
 
 
+def test_bisque_upload_returns_structured_failure_without_tool_exception(monkeypatch):
+    # Regression for the OME-Zarr otsu run: bisque_upload_files hit a control-plane error and the
+    # bare raise_for_status() propagated, failing the WHOLE run. The upload must degrade into a
+    # structured result (like its download sibling) so the model can read the error and route
+    # around it — here the new clean 4xx for a directory bundle that can't be uploaded as a file.
+    import httpx
+
+    settings = RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        openai_api_key="should-not-leak",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-bisque",
+        goal="Upload an OME-Zarr to BisQue",
+    )
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 400
+
+        def __init__(self):
+            self.request = httpx.Request("POST", "http://control.test/v2/bisque/upload")
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("bad request", request=self.request, response=self)
+
+        def json(self):
+            return {"error": "resource is a directory bundle, not a single file"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+    result = upload_bisque_outputs(settings, file_ids=["file_zarr1"], context=context)
+
+    assert result["ok"] is False
+    assert result["status_code"] == 400
+    assert "directory bundle" in result["error"]
+    assert result["file_ids"] == ["file_zarr1"]
+    assert "should-not-leak" not in repr(captured)
+
+
 def test_bisque_download_continues_after_failed_candidate(monkeypatch):
     import httpx
 

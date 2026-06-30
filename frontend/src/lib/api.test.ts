@@ -253,7 +253,9 @@ describe("ApiClient V2 chat bridge", () => {
       total_tokens: 12,
       model: "deepseek_v4",
     });
-    expect(runEvents).toEqual(["run.token_usage", "message.delta", "run.completed"]);
+    // message.delta is ephemeral text-stream-only: it drives onToken (see tokens above) but
+    // must NOT enter the runEvents array. Structural events still flow through.
+    expect(runEvents).toEqual(["run.token_usage", "run.completed"]);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/threads",
       "https://ultra.example.org/v2/threads/thread_v2_123/runs",
@@ -318,11 +320,64 @@ describe("ApiClient V2 chat bridge", () => {
 
     expect(response.response_text).toBe("done more");
     expect(tokens).toEqual([" more"]);
-    expect(eventSequences).toEqual([8, 9]);
+    // The message.delta at sequence 8 drives the token stream (above) but is gated out of
+    // onRunEvent; only the structural run.completed at sequence 9 reaches onRunEvent.
+    expect(eventSequences).toEqual([9]);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/runs/run_resume/events?stream=true&after_sequence=7",
       "https://ultra.example.org/v2/runs/run_resume",
     ]);
+  });
+
+  it("gates message.delta out of onRunEvent while streaming every token", async () => {
+    const encoder = new TextEncoder();
+    const deltas = ["a", "b", "c", "d", "e"];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/runs/run_qw1/events?stream=true&after_sequence=0") {
+        const lines = [
+          'event: run_event\ndata: {"run_id":"run_qw1","event_kind":"run.token_usage","sequence":1,"payload":{"usage_event_id":"u1","input_tokens":3,"output_tokens":1,"total_tokens":4}}\n\n',
+          ...deltas.map(
+            (text, i) =>
+              `event: run_event\ndata: {"run_id":"run_qw1","event_kind":"message.delta","sequence":${i + 2},"payload":{"text":"${text}"}}\n\n`
+          ),
+          // A subagent text delta: also ephemeral, but NOT the main answer text — it must be dropped
+          // from BOTH onRunEvent and onToken.
+          'event: run_event\ndata: {"run_id":"run_qw1","event_kind":"subagent.message.delta","sequence":7,"payload":{"text":"SUB"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_qw1","event_kind":"tool_call","sequence":8,"payload":{"name":"code_runner"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_qw1","event_kind":"run.completed","sequence":9,"payload":{"response_text":"abcde"}}\n\n',
+        ];
+        return new Response(encoder.encode(lines.join("")), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_qw1") {
+        return new Response(
+          JSON.stringify({ run_id: "run_qw1", status: "succeeded", response_text: "abcde" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const tokens: string[] = [];
+    const runEventKinds: string[] = [];
+    await client.resumeRunStream("run_qw1", {
+      afterSequence: 0,
+      onToken: (delta) => tokens.push(delta),
+      onRunEvent: (event) => runEventKinds.push(event.event_type),
+    });
+
+    // Every coordinator token delta drives onToken; the subagent delta is dropped (not main text).
+    expect(tokens).toEqual(deltas);
+    // onRunEvent fires ONLY for the structural events — never the 5 message deltas NOR the subagent
+    // delta. This is the load-bearing perf invariant: a heavy turn's ~44k deltas produce 0
+    // onRunEvent calls (was 1 full-array rebuild + O(n) dedup scan each), so the message-array
+    // update loop stays idle while text streams.
+    expect(runEventKinds).toEqual(["run.token_usage", "tool_call", "run.completed"]);
   });
 
   it("skips duplicate run event sequences so replay overlap never doubles streamed text", async () => {

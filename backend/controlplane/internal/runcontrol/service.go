@@ -25,6 +25,7 @@ type Store interface {
 	ListThreadsForUser(context.Context, string, int, int, string) (domain.ThreadListPage, error)
 	ListThreadMessages(context.Context, string) ([]domain.ThreadMessage, error)
 	ListThreadMessagesForUser(context.Context, string, string) ([]domain.ThreadMessage, error)
+	ListThreadMessagePageForUser(context.Context, string, string, string, int) ([]domain.ThreadMessage, bool, error)
 	AppendThreadMessage(context.Context, domain.ThreadMessage) (domain.ThreadMessage, error)
 	CreateRun(context.Context, domain.CreateRunInput) (domain.RunRecord, error)
 	FindRunByIdempotencyKey(context.Context, string, string, string) (domain.RunRecord, bool, error)

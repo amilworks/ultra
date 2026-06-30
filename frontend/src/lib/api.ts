@@ -141,6 +141,7 @@ import type {
 } from "../types";
 import type * as ViewerManifest from "./viewerManifest";
 import { reportClientError } from "./client-diagnostics";
+import { isEphemeralDeltaEventKind } from "@/features/chat/run-events";
 
 export type ApiClientOptions = {
   baseUrl: string;
@@ -2626,6 +2627,28 @@ export class ApiClient {
 
       const eventKind =
         asTrimmedString(payload.event_kind) || asTrimmedString(payload.event_type) || "run_event";
+
+      // Token deltas are ephemeral and belong on EXACTLY one path: the rAF-batched text
+      // stream (onToken -> streamedText). They must never enter the runEvents/progressEvents
+      // arrays. Routing each of the ~37k deltas/turn through onRunEvent rebuilt the entire
+      // messages array and ran an O(n) dedup scan PER TOKEN, saturating the main thread and
+      // freezing the tab on long conversations. The sequence-dedup above still runs first, so
+      // reconnect/replay overlap stays correct — a re-delivered delta is dropped before here.
+      if (eventKind === "message.delta") {
+        const delta = v2DeltaFromRunEvent(payload);
+        if (delta) {
+          streamedText += delta;
+          options?.onToken?.(delta);
+        }
+        return;
+      }
+      // Other ephemeral per-token deltas (subagent/trace text) carry no durable trace meaning and
+      // are not rendered token-by-token; drop them so they never bloat runEvents either. (The
+      // sequence-dedup above already ran, so the reconnect cursor still advances past them.)
+      if (isEphemeralDeltaEventKind(eventKind)) {
+        return;
+      }
+
       if (eventKind === "artifact.created") {
         this.rememberV2ArtifactEvent(payload);
       }
@@ -2633,14 +2656,6 @@ export class ApiClient {
       const normalized = normalizeV2RunEvent(payload);
       progressEvents.push(progressEventFromV2RunEvent(payload));
       options?.onRunEvent?.(normalized);
-
-      if (eventKind === "message.delta") {
-        const delta = v2DeltaFromRunEvent(payload);
-        if (delta) {
-          streamedText += delta;
-          options?.onToken?.(delta);
-        }
-      }
 
       if (!isV2TerminalEventKind(eventKind)) {
         return;

@@ -19,6 +19,61 @@ type RetentionGCStore interface {
 	PurgeResource(context.Context, string) error
 }
 
+// RunEventRetentionStore is the surface the run-event delta retention sweep needs.
+type RunEventRetentionStore interface {
+	PruneRunEventDeltas(context.Context, time.Time, []string, int) (int64, error)
+}
+
+// prunableRunEventDeltaKinds are the per-token, text-stream-only event kinds that bloat the
+// control_run_events trace table (a heavy run is ~96% these). They carry no durable meaning beyond
+// the live stream — the final answer lives in control_thread_messages and the structural trace
+// (run.*, tool_call.*, trace.reasoning.*, artifact.*, run.token_usage) is retained — so they are
+// safe to prune for completed runs after a grace TTL.
+var prunableRunEventDeltaKinds = []string{"message.delta", "subagent.message.delta"}
+
+// RunRunEventDeltaRetentionGC periodically prunes per-token delta events for runs that completed
+// more than `retention` ago. It only ever removes prunableRunEventDeltaKinds from TERMINAL runs, so
+// it is safe to run alongside live streaming and reconnect/catch-up (active runs keep their full
+// event prefix). Each tick drains the backlog in batches of `batch` rows to bound lock duration.
+func RunRunEventDeltaRetentionGC(ctx context.Context, store RunEventRetentionStore, retention, interval time.Duration, batch int) {
+	if retention <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	if batch <= 0 {
+		batch = 1000
+	}
+	slog.InfoContext(ctx, "run-event delta retention enabled",
+		"retention", retention.String(), "interval", interval.String(), "batch", batch)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-retention)
+			var total int64
+			for {
+				n, err := store.PruneRunEventDeltas(ctx, cutoff, prunableRunEventDeltaKinds, batch)
+				if err != nil {
+					slog.WarnContext(ctx, "run-event delta prune failed", "error", err)
+					break
+				}
+				total += n
+				if n < int64(batch) {
+					break // partial batch => backlog drained for this cycle
+				}
+			}
+			if total > 0 {
+				slog.InfoContext(ctx, "run-event delta prune", "deleted_events", total)
+			}
+		}
+	}
+}
+
 // resourceArtifactPaths returns every on-disk file that belongs to a resource: the source
 // upload, its derived tiled pyramid, any decompressed NIfTI sidecar, and the upload
 // metadata sidecar. Only paths UNDER root are returned, so the GC can never delete outside

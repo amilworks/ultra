@@ -74,3 +74,4 @@ data/runtime/MedSAM2/
 
 # Local agent/workflow scratch artifacts
 .workflow/
+automations/

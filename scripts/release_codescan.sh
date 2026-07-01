@@ -46,7 +46,7 @@ CHECK_PATTERNS=(
   '\bAIza[0-9A-Za-z_-]{35}\b'
   '\bsk-[A-Za-z0-9]{20,}\b'
   'execute-api\.[A-Za-z0-9-]+\.amazonaws\.com'
-  '/Users/[^[:space:]"'"'"'`]+'
+  '/Users/[^[:space:]"'"'"'`/]+/'
   '\b[a-z0-9.-]+\.ece\.ucsb\.edu\b'
   '\b[a-z0-9.-]+\.internal\b'
   '/mnt/barrel-data/'

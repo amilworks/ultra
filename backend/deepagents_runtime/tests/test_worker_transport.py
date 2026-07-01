@@ -54,7 +54,7 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
                     "current_date_utc": "Thursday, June 25, 2026",
                     "user_timezone": "America/Los_Angeles",
                     "product_name": "Ultra",
-                    "public_url": "https://ultra.ece.ucsb.edu",
+                    "public_url": "https://ultra.example.edu",
                 },
             },
         }
@@ -82,7 +82,7 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
         "current_date_utc": "Thursday, June 25, 2026",
         "user_timezone": "America/Los_Angeles",
         "product_name": "Ultra",
-        "public_url": "https://ultra.ece.ucsb.edu",
+        "public_url": "https://ultra.example.edu",
     }
     assert context.auth_claims["role"] == "researcher"
 

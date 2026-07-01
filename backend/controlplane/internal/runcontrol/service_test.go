@@ -78,7 +78,7 @@ func TestServiceCreateRunStampsRuntimeFacts(t *testing.T) {
 			AppName:             "BisQue Ultra Control Plane",
 			AppVersion:          "2026.6",
 			Environment:         "production",
-			PublicURL:           "https://ultra.ece.ucsb.edu",
+			PublicURL:           "https://ultra.example.edu",
 			DefaultUserTimezone: "UTC",
 		},
 	})
@@ -265,7 +265,7 @@ func assertRuntimeFacts(t *testing.T, facts domain.JSONMap) {
 	if facts["deployment_environment"] != "production" {
 		t.Fatalf("deployment_environment = %#v", facts["deployment_environment"])
 	}
-	if facts["public_url"] != "https://ultra.ece.ucsb.edu" {
+	if facts["public_url"] != "https://ultra.example.edu" {
 		t.Fatalf("public_url = %#v", facts["public_url"])
 	}
 }

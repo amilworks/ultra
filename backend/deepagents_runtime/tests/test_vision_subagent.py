@@ -94,10 +94,12 @@ def test_config_loads_qwen_vlm_fields(monkeypatch, tmp_path):
     keyfile = tmp_path / "k.api-key"
     keyfile.write_text("secret-123\n")
     monkeypatch.setenv("QWEN_VLM_ENABLED", "true")
+    monkeypatch.setenv("QWEN_VLM_BASE_URL", "http://vlm.example.test:8000/v1")
     monkeypatch.setenv("QWEN_VLM_API_KEY_FILE", str(keyfile))
     monkeypatch.delenv("QWEN_VLM_API_KEY", raising=False)
     s = RuntimeSettings.from_env()
     assert s.qwen_vlm_enabled is True
+    assert s.qwen_vlm_base_url == "http://vlm.example.test:8000/v1"
     assert s.qwen_vlm_model == "Qwen3.6-27B"
     assert s.qwen_vlm_api_key == "secret-123"  # resolved from the file
     assert s.qwen_vlm_client_max_edge == 1280
@@ -116,6 +118,7 @@ def test_gate_includes_rarespot_goals_unlike_scoped_delegation():
 
 def test_gate_off_when_disabled_or_image_context():
     assert _should_register_vision_subagent(_ctx("look at this image"), _settings(qwen_vlm_enabled=False)) is False
+    assert _should_register_vision_subagent(_ctx("look at this image"), _settings(qwen_vlm_base_url="")) is False
     # Image context (selected files) triggers it even on a terse goal.
     assert _should_register_vision_subagent(_ctx("analyze", selected_file_ids=("f1",)), _settings())
 

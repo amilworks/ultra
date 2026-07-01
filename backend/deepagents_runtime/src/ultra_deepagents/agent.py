@@ -675,6 +675,12 @@ def _should_register_vision_subagent(
     detection is the headline vision use case."""
     if not settings.qwen_vlm_enabled or context is None:
         return False
+    if not settings.qwen_vlm_base_url:
+        logging.getLogger(__name__).warning(
+            "qwen_vlm_enabled but no QWEN_VLM_BASE_URL configured; "
+            "vision-reasoner will NOT be registered."
+        )
+        return False
     # Fail safe, not silently broken: if the VLM is enabled but no key resolved, do not
     # register a tool that can only error on first use; warn the operator instead.
     if not settings.qwen_vlm_api_key or settings.qwen_vlm_api_key == "EMPTY":
@@ -699,6 +705,12 @@ def _should_register_qwen_code_runner(
     if not _should_register_scoped_delegation_subagents(context):
         return False
     if not settings.qwen_vlm_enabled:
+        return False
+    if not settings.qwen_vlm_base_url:
+        logging.getLogger(__name__).warning(
+            "qwen_vlm_enabled but no QWEN_VLM_BASE_URL configured; "
+            "qwen-code-runner will NOT be registered."
+        )
         return False
     if not settings.qwen_vlm_api_key or settings.qwen_vlm_api_key == "EMPTY":
         logging.getLogger(__name__).warning(

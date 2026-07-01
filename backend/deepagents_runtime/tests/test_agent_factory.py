@@ -649,7 +649,7 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
             "current_date_utc": "Thursday, June 25, 2026",
             "user_timezone": "America/Los_Angeles",
             "product_name": "Ultra",
-            "public_url": "https://ultra.ece.ucsb.edu",
+            "public_url": "https://ultra.example.edu",
         },
         run_metadata={"bisque_session_id": "session-secret"},
         auth_claims={"access_token": "secret-token"},
@@ -723,7 +723,7 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
                     "current_date_utc": "Thursday, June 25, 2026",
                     "user_timezone": "America/Los_Angeles",
                     "product_name": "Ultra",
-                    "public_url": "https://ultra.ece.ucsb.edu",
+                    "public_url": "https://ultra.example.edu",
                 },
                 "run_metadata": {
                     "delegation": {
@@ -1161,7 +1161,7 @@ def test_run_context_brief_surfaces_runtime_facts():
             "app_name": "BisQue Ultra Control Plane",
             "app_version": "2026.6",
             "deployment_environment": "production",
-            "public_url": "https://ultra.ece.ucsb.edu",
+            "public_url": "https://ultra.example.edu",
         },
     )
 
@@ -1175,7 +1175,7 @@ def test_run_context_brief_surfaces_runtime_facts():
     assert "local_datetime: Wednesday, June 24, 2026 17:42:05 PDT" in brief
     assert "product_name: Ultra" in brief
     assert "deployment_environment: production" in brief
-    assert "public_url: https://ultra.ece.ucsb.edu" in brief
+    assert "public_url: https://ultra.example.edu" in brief
     assert "Use these runtime facts for today, tomorrow, yesterday" in prompt
 
 

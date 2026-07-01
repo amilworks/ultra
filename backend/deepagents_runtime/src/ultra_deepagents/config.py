@@ -69,14 +69,14 @@ class RuntimeSettings:
     # EXCLUDED — they legitimately run 30-67m. 0 disables.
     subagent_task_timeout_seconds: float = 1800.0
     max_retries: int = 1
-    # Qwen3.6-27B vision-language model (the "vision-reasoner" subagent's own model,
-    # distinct from the text coordinator above). On-prem vLLM, OpenAI-compatible.
-    # Enabled per-env; when disabled the subagent is never registered. The endpoint
-    # is multimodal+thinking; max_input_tokens is its 128K window (prompt+images+
-    # thinking+answer must all fit). client_max_edge bounds image longest-side before
-    # send (the V100 engine crashes on huge images; server also caps ~1024px).
+    # Optional OpenAI-compatible vision-language model for the "vision-reasoner"
+    # subagent. Enabled per-env; when disabled, or when endpoint/key are missing,
+    # the subagent is never registered. max_input_tokens is the endpoint's context
+    # window (prompt+images+thinking+answer must all fit). client_max_edge bounds
+    # image longest-side before send so large scientific images do not overload the
+    # configured server.
     qwen_vlm_enabled: bool = False
-    qwen_vlm_base_url: str = "http://tesla.ece.ucsb.edu:8000/v1"
+    qwen_vlm_base_url: str = ""
     qwen_vlm_model: str = "Qwen3.6-27B"
     qwen_vlm_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
     qwen_vlm_max_input_tokens: int = 131072
@@ -254,9 +254,7 @@ class RuntimeSettings:
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
             qwen_vlm_enabled=_env_bool("QWEN_VLM_ENABLED", False),
-            qwen_vlm_base_url=os.getenv(
-                "QWEN_VLM_BASE_URL", "http://tesla.ece.ucsb.edu:8000/v1"
-            ),
+            qwen_vlm_base_url=os.getenv("QWEN_VLM_BASE_URL", ""),
             qwen_vlm_model=os.getenv("QWEN_VLM_MODEL", "Qwen3.6-27B"),
             qwen_vlm_api_key=_resolve_secret(
                 "QWEN_VLM_API_KEY", "QWEN_VLM_API_KEY_FILE", default="EMPTY"

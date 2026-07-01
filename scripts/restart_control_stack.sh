@@ -106,11 +106,11 @@ OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://localhost:8001/v1}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-oss-120b}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 
-# Qwen3.6-27B vision-reasoner (on-prem vLLM on tesla). Enabled for the local stack so
-# the coordinator can delegate vision tasks to the vision-reasoner subagent. Key is
-# read from the gitignored repo file by default.
-QWEN_VLM_ENABLED="${QWEN_VLM_ENABLED:-true}"
-QWEN_VLM_BASE_URL="${QWEN_VLM_BASE_URL:-http://tesla.ece.ucsb.edu:8000/v1}"
+# Optional external OpenAI-compatible vision VLM for the vision-reasoner
+# subagent. Keep it disabled unless the operator provides a reachable endpoint
+# and key through the environment or a gitignored local key file.
+QWEN_VLM_ENABLED="${QWEN_VLM_ENABLED:-false}"
+QWEN_VLM_BASE_URL="${QWEN_VLM_BASE_URL:-}"
 QWEN_VLM_MODEL="${QWEN_VLM_MODEL:-Qwen3.6-27B}"
 QWEN_VLM_API_KEY_FILE="${QWEN_VLM_API_KEY_FILE:-$ROOT/qwen36-vllm.api-key}"
 

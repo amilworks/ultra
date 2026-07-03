@@ -53,6 +53,7 @@ imaging = [
     "bioio-lif>=1.4.2,<2",   # Leica .lif  (libbioimage's leica reader is non-functional)
     "bioio-dv>=1.2.0,<2",    # DeltaVision .dv / .r3d  (mrc backend)
     "bioio-czi>=2.7.2,<3",   # Zeiss .czi (preferred over libbioimage for mosaics)
+    "bioio-nd2>=1.8.0,<2",   # Nikon .nd2 (no libbioimage reader; the frontend accepts .nd2 uploads)
     "aicspylibczi>=3.3.1",   # czi native reader — pin to a cp312-wheel release (no compiler)
     "pylibczirw>=6.0.1",     # czi native reader — pin to a cp312-wheel release (no compiler)
 ]

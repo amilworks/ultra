@@ -104,19 +104,26 @@ def _extension_of(path: str) -> str:
 
 
 def _prefer_bioio_extensions() -> frozenset[str]:
-    """Extensions ALWAYS routed through the bioio transcode, even when libbioimage could
-    decode them — bioio assembles these better (Zeiss .czi mosaics/scenes, which
-    libbioimage rendered blocky/unstitched) or reads them at all (Leica .lif, DeltaVision
-    .dv). It is a SOFT preference: if bioio can't read a given file, the runner falls back
-    to libbioimage. Override with ULTRA_IMGSVC_PREFER_BIOIO_EXTS (comma-separated, e.g.
-    "czi,lif,nd2")."""
+    """Proprietary microscopy formats ALWAYS routed through the bioio transcode (pure-Python
+    readers), even when libbioimage nominally recognizes them — bioio is the more reliable
+    reader here: it assembles Zeiss .czi mosaics/scenes (libbioimage rendered them
+    blocky/unstitched), reads Nikon .nd2 (no libbioimage reader at all), and reads Leica
+    .lif / DeltaVision .dv/.r3d that libbioimage handles poorly or not at all. Routing them
+    here is DETERMINISTIC — it skips the wasted libbioimage meta probe that just returns
+    empty for these — and the matching bioio plugin is baked into the image
+    (bioio-czi/-nd2/-lif/-dv). Still a SOFT preference: if bioio cannot read a given file the
+    runner falls back to libbioimage. Override with ULTRA_IMGSVC_PREFER_BIOIO_EXTS
+    (comma-separated, e.g. "czi,nd2,lif,dv").
+
+    NOT here: plain TIFF/OME-TIFF/SVS slides (libbioimage decodes those natively; bioio would
+    be pure redundancy) and .zarr — OME-Zarr is served NATIVELY by the ngff-service straight
+    from its directory bundle (native chunk serving, never transcode; see the special-format /
+    ngff routing), so it never enters the bioio pyramid lane at all.
+    """
     raw = os.environ.get("ULTRA_IMGSVC_PREFER_BIOIO_EXTS")
     if raw is not None:
         return frozenset(e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip())
-    # .zarr is intentionally NOT here: OME-Zarr is served natively by the ngff-service straight
-    # from its directory bundle (see the special-format / ngff routing), so it never enters the
-    # bioio transcode lane at all — it needs no convert-to-pyramid step.
-    return frozenset({"czi"})
+    return frozenset({"czi", "nd2", "lif", "dv", "r3d"})
 
 
 def _source_is_native_tiled_pyramid(meta: dict[str, Any] | None) -> bool:

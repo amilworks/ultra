@@ -4,11 +4,15 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
+const chatAutoScrollSource = readFileSync(
+  path.join(process.cwd(), "src/components/chat/ChatAutoScroll.tsx"),
+  "utf8"
+);
 const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 
 describe("mobile composer layout", () => {
   it("wires scroll-away state to a phone-only compact composer", () => {
-    expect(appSource).toMatch(/onScrolledAwayChange\?: \(away: boolean\) => void;/);
+    expect(chatAutoScrollSource).toMatch(/onScrolledAwayChange\?: \(away: boolean\) => void;/);
     expect(appSource).toMatch(/const \[composerScrolledAway,\s*setComposerScrolledAway\]/);
     expect(appSource).toMatch(/onScrolledAwayChange=\{setComposerScrolledAway\}/);
     expect(appSource).toMatch(

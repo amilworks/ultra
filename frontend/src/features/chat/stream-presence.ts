@@ -8,7 +8,7 @@
 // The staleness core (PresenceRegistry) is pure + time-injected for deterministic tests; the
 // BroadcastChannel wiring is a thin, SSR-safe shell around it.
 
-export const HEARTBEAT_INTERVAL_MS = 2000;
+const HEARTBEAT_INTERVAL_MS = 2000;
 export const HEARTBEAT_TTL_MS = 5000; // > 2x interval: tolerate a missed beat before takeover
 
 type HeartbeatMessage = { type: "stream-heartbeat"; runId: string; tabId: string; at: number };

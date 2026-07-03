@@ -94,17 +94,6 @@
   flex: 1 1 320px;
 }
 
-.viewer-hdf-hero-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid color-mix(in oklab, var(--line) 84%, white 16%);
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--viewer-panel-bg) 84%, white 16%);
-  padding: 6px 10px;
-  color: var(--text-main);
-}
-
 .viewer-hdf-context-trigger {
   height: 30px;
   padding-inline: 10px;
@@ -162,7 +151,6 @@
   border-color: var(--line);
   background: var(--viewer-panel-bg);
 }
-.viewer-hdf-stage-header,
 .viewer-hdf-dashboard-header {
   border-bottom: 1px solid color-mix(in oklab, var(--line) 84%, transparent 16%);
   gap: 10px;
@@ -224,10 +212,6 @@
 .viewer-hdf-tree-scroll,
 .viewer-hdf-detail-scroll {
   min-height: 260px;
-}
-
-.viewer-hdf-scroll-empty {
-  height: 100%;
 }
 
 .viewer-hdf-command {
@@ -302,140 +286,11 @@
   white-space: nowrap;
 }
 
-.viewer-hdf-tree,
-.viewer-hdf-tree-branch {
-  margin: 0;
-  padding-left: 0;
-  list-style: none;
-  display: grid;
-  gap: 8px;
-}
-
-.viewer-hdf-tree {
-  padding-right: 8px;
-}
-
-.viewer-hdf-tree-branch {
-  margin-left: 0;
-  padding-left: 0;
-  border-left: 0;
-}
-
-.viewer-hdf-node {
-  --hdf-depth: 0;
-  --hdf-indent: calc(var(--hdf-depth) * 18px);
-  --hdf-guide-color: color-mix(in oklab, var(--text-muted) 36%, transparent 64%);
-  --hdf-dot-color: color-mix(in oklab, var(--text-muted) 68%, white 32%);
-  color: var(--text-main);
-}
-
-.viewer-hdf-node:hover {
-  --hdf-guide-color: color-mix(in oklab, white 76%, var(--line) 24%);
-  --hdf-dot-color: color-mix(in oklab, white 88%, var(--line) 12%);
-}
-
-.viewer-hdf-node.has-selected-descendant {
-  --hdf-guide-color: color-mix(in oklab, var(--accent) 24%, white 76%);
-  --hdf-dot-color: color-mix(in oklab, var(--accent) 42%, white 58%);
-}
-
-.viewer-hdf-node.is-selected {
-  --hdf-guide-color: color-mix(in oklab, var(--accent) 42%, white 58%);
-  --hdf-dot-color: color-mix(in oklab, var(--accent) 72%, white 28%);
-}
-
-.viewer-hdf-node.has-selected-descendant > details > .viewer-hdf-node-summary {
-  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
-  background-color: color-mix(in oklab, var(--accent-soft) 70%, white 30%);
-}
-
-.viewer-hdf-node details {
-  display: grid;
-  gap: 8px;
-}
-
-.viewer-hdf-node-summary,
-.viewer-hdf-node-leaf {
-  position: relative;
-  display: grid;
-  gap: 3px;
-  width: calc(100% - var(--hdf-indent));
-  border: 1px solid transparent;
-  border-radius: 12px;
-  margin-left: var(--hdf-indent);
-  padding: 9px 12px 9px 28px;
-  background-color: transparent;
-  text-align: left;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease;
-}
-
-.viewer-hdf-node-summary::before,
-.viewer-hdf-node-leaf::before {
-  content: "";
-  position: absolute;
-  left: 12px;
-  top: 8px;
-  bottom: 8px;
-  width: 1px;
-  background: var(--hdf-guide-color);
-}
-
-.viewer-hdf-node-summary::after,
-.viewer-hdf-node-leaf::after {
-  content: "";
-  position: absolute;
-  left: 9px;
-  top: 16px;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--hdf-dot-color);
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--viewer-panel-bg) 88%, white 12%);
-}
-
-.viewer-hdf-node-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 8px;
-}
-
-.viewer-hdf-node-summary {
-  cursor: pointer;
-}
-
-.viewer-hdf-node-summary::-webkit-details-marker {
-  display: none;
-}
-
-.viewer-hdf-node-summary:hover,
-.viewer-hdf-node-leaf:hover {
-  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
-  background-color: color-mix(in oklab, var(--accent-soft) 82%, white 18%);
-}
-
-.viewer-hdf-node-leaf.is-selected,
-.viewer-hdf-node.is-selected > .viewer-hdf-node-leaf {
-  border-color: color-mix(in oklab, var(--accent) 48%, var(--line) 52%);
-  background-color: color-mix(in oklab, var(--accent-soft) 88%, white 12%);
-  box-shadow:
-    inset 3px 0 0 color-mix(in oklab, var(--accent) 88%, black 12%),
-    0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent 82%);
-}
-
 .viewer-hdf-node-name {
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--text-main);
   word-break: break-word;
-}
-
-.viewer-hdf-node-leaf.is-selected .viewer-hdf-node-name,
-.viewer-hdf-node.is-selected > .viewer-hdf-node-leaf .viewer-hdf-node-name {
-  color: color-mix(in oklab, var(--text-main) 88%, black 12%);
 }
 
 .viewer-hdf-node-meta {
@@ -796,9 +651,7 @@
   padding-right: 4px;
 }
 
-.viewer-hdf-material-meta-label,
-.viewer-hdf-material-section-label,
-.viewer-hdf-material-source-label {
+.viewer-hdf-material-section-label {
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.08em;

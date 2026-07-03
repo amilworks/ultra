@@ -1,10 +1,7 @@
 import {
   Suspense,
-  lazy,
   memo,
   type CSSProperties,
-  type ComponentType,
-  type MutableRefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -35,7 +32,6 @@ import {
 } from "./components/prompt-kit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -53,15 +49,8 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { Input } from "@/components/ui/input";
 import {
   Sidebar,
   SidebarContent,
@@ -69,19 +58,24 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
-  SidebarMenuAction,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
   SidebarTrigger,
-  useSidebar,
+  mobileSidebarCloseProps,
 } from "@/components/ui/sidebar";
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
-import { ApiClient, ApiError, UploadPausedError, type UploadProgressEvent } from "./lib/api";
+import {
+  ApiClient,
+  ApiError,
+  UploadPausedError,
+  type StreamTokenEvent,
+  type UploadProgressEvent,
+} from "./lib/api";
 import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
 import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
 import { AnimatedTokenCount } from "./components/chat/AnimatedTokenCount";
@@ -123,9 +117,6 @@ import {
   listSessionConversations,
 } from "./features/chat/client";
 import {
-  buildScientificResultGroups,
-} from "./features/chat/scientific-results";
-import {
   classifyRunDocumentKind,
   isHydratableRunArtifactDocument,
   isHydratableRunArtifactVisual,
@@ -140,7 +131,11 @@ import {
   shouldRecoverRunResultMessage,
 } from "./features/chat/run-recovery";
 import { extractRunTokenUsage } from "./features/chat/token-usage";
-import { isEphemeralDeltaEvent, runHasToolActivity } from "./features/chat/run-events";
+import {
+  appendRunEventCoalescing,
+  isEphemeralDeltaEvent,
+  runHasToolActivity,
+} from "./features/chat/run-events";
 import { MESSAGE_WINDOW_SIZE, windowTailMessages } from "./features/chat/message-window";
 import { isTabHidden, onVisibilityChange } from "./features/chat/tab-visibility";
 import {
@@ -188,11 +183,7 @@ import {
   createResourceUploadProgressFrameBatcher,
   mergeResourceUploadProgress,
 } from "./features/resources/uploadProgressBatcher";
-import {
-  DEFAULT_THINKING_TEXT,
-  getPhaseThinkingText,
-  getToolStatusThinkingText,
-} from "./lib/runStepCopy";
+import { DEFAULT_THINKING_TEXT } from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
 import { UserTokenUsagePanel } from "./components/UserTokenUsagePanel";
 import type {
@@ -205,7 +196,6 @@ import type {
   AdminRunRecord,
   AdminUserStatus,
   AdminUserSummary,
-  AssistantContract,
   ArtifactRecord,
   BisqueAuthSessionResponse,
   ChatResponse,
@@ -213,7 +203,6 @@ import type {
   ConversationRecord,
   CurrentUserProfile,
   ProgressEvent,
-  ResourceComputationSuggestion,
   ResourceCollectionRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
@@ -225,7 +214,6 @@ import type {
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
-import { RunningStatusPill } from "./components/chat/RunningStatusPill";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import {
   composeComposerWorkflowPromptForModel,
@@ -239,14 +227,8 @@ import type {
 } from "./components/chat/composer-workflows";
 import type { ComposerWorkflowGroup } from "./components/chat/ComposerSlashMenu";
 import type {
-  MegasegFileInsight,
   PrairieImageAnalysis,
-  ResearchDigestData,
-  ResearchDigestMeasurementRow,
-  ResearchDigestStatisticRow,
-  ScientificFigureCard,
   ToolCardImage,
-  ToolCardMetric,
   ToolDetectionBox,
   ToolDownloadRow,
   ToolImageHoverDetails,
@@ -269,8 +251,6 @@ import type {
 import {
   ArrowUp,
   Check,
-  CircleAlert,
-  CircleSlash,
   ChevronDown,
   Copy,
   Database,
@@ -278,21 +258,13 @@ import {
   FolderUp,
   ImageIcon,
   Images,
-  Laptop,
   Link2,
-  LogOut,
-  MessageCircle,
-  Moon,
-  MoreHorizontal,
   Pencil,
   Plus,
   PlusIcon,
-  RotateCcw,
-  Settings,
   Shield,
   Square,
   SquarePen,
-  Sun,
   Table2,
   ThumbsDown,
   ThumbsUp,
@@ -300,10 +272,40 @@ import {
   X,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import type * as Sonner from "sonner";
-
-type SonnerModule = typeof Sonner;
-type ToastSuccessOptions = Parameters<SonnerModule["toast"]["success"]>[1];
+import { toNumber, toRecord } from "./lib/coerce";
+import { queueEffectUpdate } from "./lib/queueEffectUpdate";
+import { showErrorToast, showSuccessToast } from "./lib/toast";
+import { useThemePreference } from "./lib/useThemePreference";
+import {
+  MISSING_REQUESTED_CONVERSATION_MESSAGE,
+  shouldShowAppShellBanner,
+} from "./features/app-shell-banner";
+import { dedupeBisqueResourceRows } from "./features/chat/bisque-resource-rows";
+import {
+  HISTORY_PERIOD_ORDER,
+  type HistoryItem,
+  type HistoryPeriod,
+} from "./features/chat/history";
+import { useBlankChatTokenUsage } from "./features/chat/useBlankChatTokenUsage";
+import { DeferredToaster } from "./components/DeferredToaster";
+import { PanelLoadingState } from "./components/PanelLoadingState";
+import { UploadFlightChip } from "./components/UploadFlightChip";
+import {
+  AuthScreenLoadingFallback,
+  WorkOSRedirectScreen,
+} from "./components/auth/AuthShellScreens";
+import { AssistantTurnRecovery } from "./components/chat/AssistantTurnRecovery";
+import {
+  ChatAutoScroll,
+  captureConversationScrollMemory,
+  type ConversationScrollMemory,
+} from "./components/chat/ChatAutoScroll";
+import { CollapsedSidebarRail } from "./components/chat/CollapsedSidebarRail";
+import {
+  ConversationHistoryRow,
+  ConversationRenameEditor,
+} from "./components/chat/ConversationHistoryRow";
+import { SidebarAccountSettingsButton } from "./components/chat/SidebarAccountSettingsButton";
 
 type UiRole = "user" | "assistant";
 type ThemePreference = "system" | "light" | "dark";
@@ -322,35 +324,10 @@ type BisqueResourceCountsState = {
   counts: BisqueResourceCounts | null;
 };
 
-const MISSING_REQUESTED_CONVERSATION_MESSAGE =
-  "Requested chat was not found. Opened the latest available conversation instead.";
-
 // Per-file scrub axis for gallery thumbnails. loadZCount (async, on first hover)
 // resolves the axis from viewerinfo and records it here so the synchronous slice-URL
 // builder can request the same axis — Z for a focal stack, T for a Z-less time-series.
 const THUMBNAIL_SCRUB_AXIS = new Map<string, "z" | "t">();
-
-export const shouldShowAppShellBanner = (
-  activePanel: ActivePanel,
-  message: string | null
-): boolean => {
-  if (!message) {
-    return false;
-  }
-  return activePanel === "chat" || message !== MISSING_REQUESTED_CONVERSATION_MESSAGE;
-};
-
-const queueEffectUpdate = (callback: () => void): (() => void) => {
-  let cancelled = false;
-  window.queueMicrotask(() => {
-    if (!cancelled) {
-      callback();
-    }
-  });
-  return () => {
-    cancelled = true;
-  };
-};
 
 const readAuthErrorFromLocation = (): string | null => {
   if (typeof window === "undefined") {
@@ -373,130 +350,6 @@ const clearAuthErrorFromLocation = (): void => {
   const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
   window.history.replaceState({}, "", nextUrl);
 };
-
-type WorkOSRedirectScreenProps = {
-  checking: boolean;
-  loading: boolean;
-  errorMessage?: string | null;
-  statusMessage?: string | null;
-  onRetry: () => Promise<void> | void;
-};
-
-function WorkOSRedirectScreen({
-  checking,
-  loading,
-  errorMessage,
-  statusMessage,
-  onRetry,
-}: WorkOSRedirectScreenProps) {
-  const title = checking
-    ? "Checking your session"
-    : statusMessage
-      ? "Account not yet available"
-      : errorMessage
-        ? "Unable to open WorkOS"
-        : "Opening WorkOS sign in";
-  const message =
-    statusMessage ||
-    errorMessage ||
-    "Taking you directly to the BisQue Ultra sign-in page.";
-  const canRetry = !checking && !loading && Boolean(errorMessage || statusMessage);
-
-  return (
-    <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
-      <section
-        className="grid w-full max-w-sm gap-4 rounded-2xl border bg-card p-6 text-center shadow-sm"
-        aria-live="polite"
-      >
-        <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-          <BisqueMarkIcon className="size-5" />
-        </div>
-        <div className="grid gap-1">
-          <h1 className="text-base font-semibold tracking-normal">{title}</h1>
-          <p className="text-sm leading-6 text-muted-foreground">{message}</p>
-        </div>
-        {canRetry ? (
-          <Button type="button" className="h-9 rounded-xl" onClick={() => void onRetry()}>
-            Try again
-          </Button>
-        ) : null}
-      </section>
-    </main>
-  );
-}
-
-function AuthScreenLoadingFallback() {
-  return (
-    <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
-      <section className="grid w-full max-w-sm gap-3 rounded-2xl border bg-card p-6 text-center shadow-sm">
-        <Loader className="mx-auto size-5 animate-spin text-muted-foreground" />
-        <h1 className="text-xl font-semibold tracking-tight">Opening sign in</h1>
-        <p className="text-sm text-muted-foreground">
-          Preparing BisQue Ultra.
-        </p>
-      </section>
-    </main>
-  );
-}
-
-function UploadFlightChip({
-  inFlightCount,
-  onOpen,
-}: {
-  inFlightCount: number;
-  onOpen: () => void;
-}) {
-  if (inFlightCount <= 0) {
-    return null;
-  }
-  return (
-    <button
-      type="button"
-      className="upload-flight-chip"
-      onClick={onOpen}
-      aria-label={`Uploading ${inFlightCount} ${
-        inFlightCount === 1 ? "file" : "files"
-      }. Open Resources.`}
-    >
-      <Loader className="upload-flight-chip-spinner" aria-hidden="true" />
-      <span className="upload-flight-chip-label">Uploading {inFlightCount}...</span>
-    </button>
-  );
-}
-
-function DeferredToaster({ theme }: { theme: "light" | "dark" }) {
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const show = () => setReady(true);
-    if (typeof window.requestIdleCallback === "function") {
-      const idleId = window.requestIdleCallback(show, { timeout: 3_000 });
-      return () => window.cancelIdleCallback(idleId);
-    }
-
-    const timeoutId = window.setTimeout(show, 1_200);
-    return () => window.clearTimeout(timeoutId);
-  }, []);
-
-  if (!ready) {
-    return null;
-  }
-
-  return (
-    <Suspense fallback={null}>
-      <LazyToaster
-        theme={theme}
-        richColors
-        position="bottom-right"
-        toastOptions={{ duration: 4200 }}
-      />
-    </Suspense>
-  );
-}
 
 type RunImageArtifact = {
   path: string;
@@ -561,7 +414,6 @@ const loadComposerSlashMenuModule = () => import("./components/chat/ComposerSlas
 const loadChatRunStepsModule = () => import("./components/chat/ChatRunSteps");
 const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
-const loadProModeDevTraceModule = () => import("./components/chat/ProModeDevTrace");
 const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
 const loadChatRunDocumentsModule = () => import("./components/chat/ChatRunDocuments");
 const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
@@ -581,36 +433,6 @@ const loadComposerWorkflows = (): Promise<ComposerWorkflowsModule> => {
     }
   );
   return composerWorkflowsModulePromise;
-};
-
-let sonnerModulePromise: Promise<SonnerModule> | null = null;
-
-const loadSonnerModule = (): Promise<SonnerModule> => {
-  sonnerModulePromise ??= import("sonner").catch((error: unknown) => {
-    sonnerModulePromise = null;
-    throw error;
-  });
-  return sonnerModulePromise;
-};
-
-const showSuccessToast = (
-  message: string,
-  options?: ToastSuccessOptions
-): void => {
-  void loadSonnerModule().then(({ toast }) => {
-    toast.success(message, options);
-  });
-};
-
-type ToastErrorOptions = Parameters<SonnerModule["toast"]["error"]>[1];
-
-const showErrorToast = (
-  message: string,
-  options?: ToastErrorOptions
-): void => {
-  void loadSonnerModule().then(({ toast }) => {
-    toast.error(message, options);
-  });
 };
 
 const RESOURCE_UPLOAD_IN_FLIGHT_STATUSES = new Set([
@@ -652,12 +474,6 @@ const LazyAppSettingsDialog = lazyNamed(
   "AppSettingsDialog"
 );
 const LazyAuthScreen = lazyNamed(loadAuthScreenModule, "AuthScreen");
-const LazyToaster = lazy(async () => {
-  const module = await loadSonnerModule();
-  return {
-    default: module.Toaster as ComponentType<any>,
-  };
-});
 const LazyTrainingDashboard = lazyNamed(
   loadTrainingDashboardModule,
   "TrainingDashboard"
@@ -680,14 +496,9 @@ const LazyInlineDataQuickPreview = lazyNamed(
   "InlineDataQuickPreview"
 );
 const LazyVirtuoso = lazyNamed(loadVirtuosoModule, "Virtuoso");
-const LazyProModeDevTrace = lazyNamed(loadProModeDevTraceModule, "ProModeDevTrace");
 const LazyToolResultCardSection = lazyNamed(
   loadToolResultCardsModule,
   "ToolResultCardSection"
-);
-const LazyResearchDigestCard = lazyNamed(
-  loadToolResultCardsModule,
-  "ResearchDigestCard"
 );
 const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
 
@@ -752,128 +563,10 @@ type UiMessage = {
   resolvedBisqueResources?: ToolResourceRow[];
 };
 
-type HistoryPeriod = "Today" | "Yesterday" | "Last 7 days" | "Older";
-
-type HistoryItem = {
-  id: string;
-  title: string;
-  preview: string;
-  period: HistoryPeriod;
-  running: boolean;
-  messageCount: number;
-};
-
-// Module constant so the history grouping keeps a stable array reference (it is
-// re-derived on every App render, including each keystroke).
-const HISTORY_PERIOD_ORDER: HistoryPeriod[] = ["Today", "Yesterday", "Last 7 days", "Older"];
-
-type CollapsedSidebarRailProps = {
-  recentItems: HistoryItem[];
-  activeConversationId: string | null;
-  resourcesActive: boolean;
-  onCreateConversation: () => void;
-  onOpenResources: () => void;
-  onOpenRecent: (conversation: HistoryItem) => void;
-};
-
-function CollapsedSidebarRail({
-  recentItems,
-  activeConversationId,
-  resourcesActive,
-  onCreateConversation,
-  onOpenResources,
-  onOpenRecent,
-}: CollapsedSidebarRailProps) {
-  const [recentsOpen, setRecentsOpen] = useState(false);
-
-  return (
-    <nav className="app-collapsed-sidebar-rail" aria-label="Collapsed navigation">
-      <SidebarTrigger
-        className="app-collapsed-sidebar-toggle"
-        aria-label="Expand sidebar"
-        title="Expand sidebar"
-      />
-
-      <div className="app-collapsed-sidebar-actions" role="list">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="app-collapsed-sidebar-action"
-          aria-label="New chat"
-          title="New chat"
-          onClick={onCreateConversation}
-        >
-          <PlusIcon data-icon="inline-start" />
-        </Button>
-
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="app-collapsed-sidebar-action"
-          aria-label="Resources"
-          title="Resources"
-          data-active={resourcesActive ? "true" : undefined}
-          onClick={onOpenResources}
-        >
-          <FolderOpen data-icon="inline-start" />
-        </Button>
-
-        <Popover open={recentsOpen} onOpenChange={setRecentsOpen}>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="app-collapsed-sidebar-action"
-              aria-label="Recents"
-              title="Recents"
-              data-active={recentsOpen ? "true" : undefined}
-            >
-              <MessageCircle data-icon="inline-start" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            side="right"
-            align="center"
-            sideOffset={8}
-            className="app-collapsed-recents-popover"
-          >
-            <div className="app-collapsed-recents-header">Recents</div>
-            <div className="app-collapsed-recents-list">
-              {recentItems.length > 0 ? (
-                recentItems.map((conversation) => (
-                  <button
-                    key={conversation.id}
-                    type="button"
-                    className="app-collapsed-recent-item"
-                    data-active={conversation.id === activeConversationId ? "true" : undefined}
-                    onClick={() => {
-                      onOpenRecent(conversation);
-                      setRecentsOpen(false);
-                    }}
-                  >
-                    <span className="truncate">{conversation.title}</span>
-                    {conversation.running ? <RunningStatusPill size="compact" /> : null}
-                  </button>
-                ))
-              ) : (
-                <div className="app-collapsed-recents-empty">No recent chats yet</div>
-              )}
-            </div>
-          </PopoverContent>
-        </Popover>
-      </div>
-    </nav>
-  );
-}
-
 type BisqueViewerLink = {
   clientViewUrl: string;
   resourceUri?: string | null;
   imageServiceUrl?: string | null;
-  inputUrl?: string;
 };
 
 type ConversationState = {
@@ -958,23 +651,9 @@ const collectConversationRunArtifacts = (messages: UiMessage[]): RunImageArtifac
   return artifacts.length > 0 ? mergeRunImageArtifacts([], artifacts) : EMPTY_RUN_IMAGE_ARTIFACTS;
 };
 
-type ConversationScrollMemory = {
-  scrollTop: number;
-  wasNearBottom: boolean;
-};
-
-const mobileSidebarCloseProps = {
-  "data-sidebar-close-mobile": "true",
-} as const;
-
-const mobileSidebarKeepOpenProps = {
-  "data-sidebar-close-mobile": "false",
-} as const;
-
 const CONVERSATION_QUERY_PARAM = "conversation";
 const CONVERSATION_PAGE_SIZE = 25;
 const RESOURCE_PAGE_SIZE = 50;
-const SCROLL_RESTORE_BOTTOM_THRESHOLD_PX = 280;
 
 const parseResourceTagFilter = (value: string): string[] => {
   const seen = new Set<string>();
@@ -990,16 +669,66 @@ const parseResourceTagFilter = (value: string): string[] => {
   return tags;
 };
 
-const captureConversationScrollMemory = (
-  scrollElement: HTMLElement
-): ConversationScrollMemory => {
-  const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
-  const scrollTop = Math.min(Math.max(scrollElement.scrollTop, 0), maxScrollTop);
-  return {
-    scrollTop,
-    wasNearBottom: maxScrollTop - scrollTop <= SCROLL_RESTORE_BOTTOM_THRESHOLD_PX,
-  };
+type ResourceListRequestParams = {
+  collectionId: string;
+  query: string;
+  kind: ResourceKindFilter;
+  source: ResourceSourceFilter;
+  sharing: ResourceSharingFilter;
+  status: ResourceStatusFilter;
+  tags: string[];
+  refreshToken: number;
 };
+
+// Fingerprint + request construction shared by the resource-list effect and
+// loadMoreResources, so a one-sided filter addition can't silently break the
+// stale-response guard.
+const buildResourceListKey = (params: ResourceListRequestParams): string =>
+  [
+    params.collectionId ? `folder:${params.collectionId}` : "library",
+    params.query,
+    params.kind,
+    params.source,
+    params.sharing,
+    params.status,
+    params.tags.join("\u0001"),
+    String(params.refreshToken),
+  ].join("\u0000");
+
+const buildResourceListRequest = (
+  apiClient: ApiClient,
+  params: ResourceListRequestParams,
+  offset: number
+) =>
+  params.collectionId
+    ? loadResourceFolderResources(apiClient, params.collectionId, {
+        limit: RESOURCE_PAGE_SIZE,
+        offset,
+        query: params.query || undefined,
+        kind: params.kind,
+        source: params.source,
+        sharing: params.sharing,
+        status: params.status,
+        tags: params.tags,
+      })
+    : loadLibraryResources(apiClient, {
+        limit: RESOURCE_PAGE_SIZE,
+        offset,
+        query: params.query || undefined,
+        kind: params.kind,
+        source: params.source,
+        sharing: params.sharing,
+        status: params.status,
+        tags: params.tags,
+      });
+
+// Shared ArrowUp/ArrowDown wrap-around cycling for the slash menu and the
+// composer resource picker.
+const cycleListIndex = (
+  currentIndex: number,
+  direction: number,
+  length: number
+): number => (currentIndex < 0 ? 0 : (currentIndex + direction + length) % length);
 
 const readConversationIdFromLocation = (): string | null => {
   if (typeof window === "undefined") {
@@ -1153,33 +882,6 @@ type PendingConversationRename = {
   title: string;
 };
 
-type ConversationHistoryActionsProps = {
-  conversationId: string;
-  conversationTitle: string;
-  deleting: boolean;
-  renaming: boolean;
-  onCopyLink: (conversationId: string) => Promise<void>;
-  onCopyId: (conversationId: string) => Promise<void>;
-  onRename: (conversationId: string, conversationTitle: string) => void;
-  onDelete: (conversationId: string) => void;
-};
-
-type ReuseDecision = "load" | "rerun";
-
-type ReuseCandidateRun = {
-  runId: string;
-  suggestions: ResourceComputationSuggestion[];
-  matchType: "sha256" | "filename";
-  toolNames: string[];
-  conversationTitle?: string | null;
-  conversationUpdatedAt?: string | null;
-};
-
-type PendingReusePrompt = {
-  suggestions: ResourceComputationSuggestion[];
-  candidate: ReuseCandidateRun;
-};
-
 type BisqueReferenceSelection = {
   sourceRows: ToolResourceRow[];
   selectedRows: ToolResourceRow[];
@@ -1190,204 +892,6 @@ type BisqueImportedSelection = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
 };
-
-const ConversationHistoryActions = ({
-  conversationId,
-  conversationTitle,
-  deleting,
-  renaming,
-  onCopyLink,
-  onCopyId,
-  onRename,
-  onDelete,
-}: ConversationHistoryActionsProps) => {
-  const { isMobile } = useSidebar();
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <SidebarMenuAction asChild showOnHover {...mobileSidebarKeepOpenProps}>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={`Conversation actions for ${conversationTitle}`}
-            disabled={deleting}
-            className="app-history-action-button size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-          >
-            <MoreHorizontal />
-            <span className="sr-only">Conversation actions</span>
-          </Button>
-        </SidebarMenuAction>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        className="w-52 rounded-lg"
-        side={isMobile ? "bottom" : "right"}
-        align={isMobile ? "end" : "start"}
-        sideOffset={8}
-      >
-        <DropdownMenuItem
-          disabled={deleting || renaming}
-          onClick={() => {
-            if (deleting || renaming) {
-              return;
-            }
-            onRename(conversationId, conversationTitle);
-          }}
-        >
-          <Pencil className="text-muted-foreground" />
-          <span>Rename chat</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void onCopyLink(conversationId)}>
-          <Link2 className="text-muted-foreground" />
-          <span>Copy chat link</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void onCopyId(conversationId)}>
-          <Copy className="text-muted-foreground" />
-          <span>Copy chat ID</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          variant="destructive"
-          disabled={deleting}
-          onClick={() => {
-            if (deleting) {
-              return;
-            }
-            onDelete(conversationId);
-          }}
-        >
-          <Trash />
-          <span>Delete chat</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-};
-
-type ConversationRenameEditorProps = {
-  conversation: HistoryItem;
-  value: string;
-  disabled: boolean;
-  onTitleChange: (conversationId: string, title: string) => void;
-  onSubmit: () => Promise<void>;
-  onCancel: () => void;
-};
-
-const ConversationRenameEditor = memo(function ConversationRenameEditor({
-  conversation,
-  value,
-  disabled,
-  onTitleChange,
-  onSubmit,
-  onCancel,
-}: ConversationRenameEditorProps) {
-  return (
-    <div className="app-history-rename-shell">
-      <Input
-        value={value}
-        onChange={(event) => {
-          onTitleChange(conversation.id, event.target.value);
-        }}
-        onFocus={(event) => {
-          event.currentTarget.select();
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            void onSubmit();
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            onCancel();
-          }
-        }}
-        autoFocus
-        maxLength={120}
-        aria-label={`Rename ${conversation.title}`}
-        data-testid="conversation-rename-input"
-        className="app-history-rename-input"
-        disabled={disabled}
-      />
-      <div className="app-history-rename-actions">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="app-history-rename-button"
-          aria-label="Save chat name"
-          onClick={() => {
-            void onSubmit();
-          }}
-          disabled={disabled}
-        >
-          <Check className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="app-history-rename-button"
-          aria-label="Cancel renaming chat"
-          onClick={onCancel}
-          disabled={disabled}
-        >
-          <X className="size-4" />
-        </Button>
-      </div>
-    </div>
-  );
-});
-
-type ConversationHistoryRowProps = {
-  conversation: HistoryItem;
-  active: boolean;
-  deleting: boolean;
-  renaming: boolean;
-  onOpen: (conversation: HistoryItem) => void;
-  onCopyLink: (conversationId: string) => Promise<void>;
-  onCopyId: (conversationId: string) => Promise<void>;
-  onRename: (conversationId: string, conversationTitle: string) => void;
-  onDelete: (conversationId: string) => void;
-};
-
-const ConversationHistoryRow = memo(function ConversationHistoryRow({
-  conversation,
-  active,
-  deleting,
-  renaming,
-  onOpen,
-  onCopyLink,
-  onCopyId,
-  onRename,
-  onDelete,
-}: ConversationHistoryRowProps) {
-  return (
-    <SidebarMenuItem className="app-history-item">
-      <SidebarMenuButton
-        isActive={active}
-        className="app-history-button group/history h-auto py-2"
-        onClick={() => onOpen(conversation)}
-        {...mobileSidebarCloseProps}
-      >
-        <div className="flex min-w-0 w-full items-center gap-2">
-          <span className="truncate">{conversation.title}</span>
-          <div className="ml-auto flex items-center gap-1.5">
-            {conversation.running ? <RunningStatusPill size="compact" /> : null}
-          </div>
-        </div>
-      </SidebarMenuButton>
-      <ConversationHistoryActions
-        conversationId={conversation.id}
-        conversationTitle={conversation.title}
-        deleting={deleting}
-        renaming={renaming}
-        onCopyLink={onCopyLink}
-        onCopyId={onCopyId}
-        onRename={onRename}
-        onDelete={onDelete}
-      />
-    </SidebarMenuItem>
-  );
-});
 
 const scientificFileExtensions = [
   ".tif",
@@ -1489,7 +993,6 @@ type PromptWorkflowIntent = {
   asksForSegmentation: boolean;
   asksForDepth: boolean;
   asksForDetection: boolean;
-  isMultiToolWorkflow: boolean;
 };
 
 const inferPromptWorkflowIntent = (promptText: string): PromptWorkflowIntent => {
@@ -1501,20 +1004,11 @@ const inferPromptWorkflowIntent = (promptText: string): PromptWorkflowIntent => 
   );
   const asksForDetection =
     /\b(yolo|detect|detection|object detection|bbox|bounding boxes?)\b/.test(normalized);
-  const referencesPipeline =
-    /\b(and then|then|after|follow(?:ed)? by|next|pipeline|chain|use .* output|using .* output|take .* output|feed .* into)\b/.test(
-      normalized
-    );
-  const requestedDomains = Number(asksForSegmentation) + Number(asksForDepth) + Number(asksForDetection);
-  const isMultiToolWorkflow =
-    requestedDomains > 1 ||
-    (asksForSegmentation && referencesPipeline && (asksForDepth || asksForDetection));
 
   return {
     asksForSegmentation,
     asksForDepth,
     asksForDetection,
-    isMultiToolWorkflow,
   };
 };
 
@@ -1587,16 +1081,6 @@ const coerceComposerWorkflowPresetState = (
   };
 };
 
-const inferReuseToolNames = (): string[] => {
-  // No reuse-loadable tools remain: the detection/depth tools this surfaced
-  // (yolo_detect / estimate_depth_pro) were removed from the product.
-  return [];
-};
-
-const reuseToolLabel = (toolName: string): string => toolName;
-
-const autoLoadReuseToolNames = new Set<string>();
-
 const promptExplicitlyRequestsReuseLoad = (promptText: string): boolean => {
   const lowered = String(promptText || "").trim().toLowerCase();
   if (!lowered) {
@@ -1610,205 +1094,9 @@ const promptExplicitlyRequestsReuseLoad = (promptText: string): boolean => {
   );
 };
 
-const promptRequestsFreshReuseComputation = (promptText: string): boolean => {
-  const lowered = String(promptText || "").trim().toLowerCase();
-  if (!lowered) {
-    return false;
-  }
-  return /\b(run again|rerun|re-run|recompute|fresh|from scratch|new analysis|new run)\b/.test(
-    lowered
-  );
-};
-
-const parseIsoTimestamp = (value: string | null | undefined): number => {
-  const parsed = Date.parse(String(value ?? "").trim());
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-const formatReuseTimestamp = (value: string | null | undefined): string | null => {
-  const parsed = parseIsoTimestamp(value);
-  if (!parsed) {
-    return null;
-  }
-  return new Date(parsed).toLocaleString();
-};
-
-const reuseSimilarityStopWords = new Set([
-  "the",
-  "and",
-  "with",
-  "this",
-  "that",
-  "from",
-  "into",
-  "your",
-  "their",
-  "then",
-  "than",
-  "have",
-  "make",
-  "some",
-  "more",
-  "same",
-  "image",
-  "file",
-  "chat",
-  "please",
-  "using",
-  "used",
-  "show",
-  "tell",
-  "give",
-  "also",
-  "what",
-  "does",
-  "mean",
-  "about",
-  "below",
-  "above",
-  "around",
-  "again",
-  "run",
-]);
-
-const tokenizeReusePrompt = (value: string): string[] =>
-  Array.from(
-    new Set(
-      String(value || "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .split(/\s+/)
-        .map((token) => token.trim())
-        .filter(
-          (token) => token.length >= 3 && !reuseSimilarityStopWords.has(token)
-        )
-    )
-  );
-
-const reuseGoalSimilarityScore = (
-  promptText: string,
-  suggestion: ResourceComputationSuggestion
-): number => {
-  const promptTokens = tokenizeReusePrompt(promptText);
-  if (promptTokens.length === 0) {
-    return 0;
-  }
-  const candidateTokens = new Set(
-    tokenizeReusePrompt(
-      `${String(suggestion.run_goal || "").trim()} ${String(
-        suggestion.conversation_title || ""
-      ).trim()}`
-    )
-  );
-  if (candidateTokens.size === 0) {
-    return 0;
-  }
-  const overlap = promptTokens.filter((token) => candidateTokens.has(token)).length;
-  return overlap / promptTokens.length;
-};
-
-const selectReuseCandidateRun = (
-  suggestions: ResourceComputationSuggestion[],
-  promptText: string
-): ReuseCandidateRun | null => {
-  if (suggestions.length === 0) {
-    return null;
-  }
-  const grouped = new Map<
-    string,
-    {
-      suggestions: ResourceComputationSuggestion[];
-      toolNames: Set<string>;
-      hasShaMatch: boolean;
-      latestUpdatedAt: number;
-      conversationTitle?: string | null;
-      conversationUpdatedAt?: string | null;
-      bestPromptSimilarity: number;
-    }
-  >();
-
-  suggestions.forEach((suggestion) => {
-    const runId = String(suggestion.run_id || "").trim();
-    if (!runId) {
-      return;
-    }
-    const existing = grouped.get(runId) ?? {
-      suggestions: [],
-      toolNames: new Set<string>(),
-      hasShaMatch: false,
-      latestUpdatedAt: 0,
-      conversationTitle: null,
-      conversationUpdatedAt: null,
-      bestPromptSimilarity: 0,
-    };
-    existing.suggestions.push(suggestion);
-    existing.toolNames.add(String(suggestion.tool_name || "").trim());
-    if (suggestion.match_type === "sha256") {
-      existing.hasShaMatch = true;
-    }
-    existing.latestUpdatedAt = Math.max(
-      existing.latestUpdatedAt,
-      parseIsoTimestamp(suggestion.run_updated_at)
-    );
-    existing.bestPromptSimilarity = Math.max(
-      existing.bestPromptSimilarity,
-      reuseGoalSimilarityScore(promptText, suggestion)
-    );
-    if (!existing.conversationTitle && suggestion.conversation_title) {
-      existing.conversationTitle = suggestion.conversation_title;
-    }
-    if (!existing.conversationUpdatedAt && suggestion.conversation_updated_at) {
-      existing.conversationUpdatedAt = suggestion.conversation_updated_at;
-    }
-    grouped.set(runId, existing);
-  });
-
-  const ranked = Array.from(grouped.entries()).sort((left, right) => {
-    const leftPayload = left[1];
-    const rightPayload = right[1];
-    if (Number(rightPayload.hasShaMatch) !== Number(leftPayload.hasShaMatch)) {
-      return Number(rightPayload.hasShaMatch) - Number(leftPayload.hasShaMatch);
-    }
-    if (rightPayload.bestPromptSimilarity !== leftPayload.bestPromptSimilarity) {
-      return rightPayload.bestPromptSimilarity - leftPayload.bestPromptSimilarity;
-    }
-    if (rightPayload.suggestions.length !== leftPayload.suggestions.length) {
-      return rightPayload.suggestions.length - leftPayload.suggestions.length;
-    }
-    return rightPayload.latestUpdatedAt - leftPayload.latestUpdatedAt;
-  });
-  if (ranked.length === 0) {
-    return null;
-  }
-  const [runId, payload] = ranked[0];
-  return {
-    runId,
-    suggestions: payload.suggestions,
-    matchType: payload.hasShaMatch ? "sha256" : "filename",
-    toolNames: Array.from(payload.toolNames).filter((toolName) => toolName.length > 0),
-    conversationTitle: payload.conversationTitle,
-    conversationUpdatedAt: payload.conversationUpdatedAt,
-  };
-};
-
-const shouldAutoLoadReuseCandidate = (
-  promptText: string,
-  candidate: ReuseCandidateRun
-): boolean => {
-  if (candidate.matchType !== "sha256") {
-    return false;
-  }
-  if (promptRequestsFreshReuseComputation(promptText)) {
-    return false;
-  }
-  if (candidate.toolNames.length === 0) {
-    return false;
-  }
-  if (!promptExplicitlyRequestsReuseLoad(promptText)) {
-    return false;
-  }
-  return candidate.toolNames.every((toolName) => autoLoadReuseToolNames.has(toolName));
-};
+// Poll-side counterpart of appendRunEventCoalescing's reasoning-delta rule.
+const isReasoningDeltaRunEvent = (event: RunEvent): boolean =>
+  String(event.event_type || "").trim() === "trace.reasoning.delta";
 
 const makeId = (): string =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -2068,7 +1356,6 @@ const toBisqueLinks = (value: unknown): Record<string, BisqueViewerLink> => {
       clientViewUrl,
       resourceUri: row.resourceUri ? String(row.resourceUri) : null,
       imageServiceUrl: row.imageServiceUrl ? String(row.imageServiceUrl) : null,
-      inputUrl: row.inputUrl ? String(row.inputUrl) : undefined,
     };
   });
   return output;
@@ -2275,8 +1562,15 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
         errorReason: message.errorReason,
         runId: message.runId,
         durationSeconds: message.durationSeconds,
-        progressEvents: message.progressEvents ?? [],
-        runEvents: message.runEvents ?? [],
+        // Reasoning deltas are live-stream scaffolding (each one supersedes the
+        // previous); persisting them ballooned every snapshot POST during a run.
+        // Filter them from the serialized copies only — in-memory state is untouched.
+        progressEvents: (message.progressEvents ?? []).filter(
+          (event) => event.event !== "trace.reasoning.delta"
+        ),
+        runEvents: (message.runEvents ?? []).filter(
+          (event) => String(event.event_type || "").trim() !== "trace.reasoning.delta"
+        ),
         responseMetadata: message.responseMetadata ?? null,
         uploadedFileNames: message.uploadedFileNames ?? [],
         runArtifacts: message.runArtifacts ?? [],
@@ -2295,6 +1589,29 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
       streamingMessageId: conversation.streamingMessageId,
     },
   };
+};
+
+// Snapshot fingerprints are memoized per conversation-object identity: every state
+// mutation in this codebase replaces the ConversationState object, so an unchanged
+// identity means an unchanged record. This keeps the debounced snapshot flush at
+// O(1) per unchanged conversation instead of re-serializing every hydrated
+// transcript (all runEvents/progressEvents) at ~1-2Hz during streaming.
+const conversationRecordFingerprints = new WeakMap<
+  ConversationState,
+  { record: ConversationRecord; fingerprint: string }
+>();
+
+const recordAndFingerprintFor = (
+  conversation: ConversationState
+): { record: ConversationRecord; fingerprint: string } => {
+  const cached = conversationRecordFingerprints.get(conversation);
+  if (cached) {
+    return cached;
+  }
+  const record = conversationToRecord(conversation);
+  const entry = { record, fingerprint: JSON.stringify(record) };
+  conversationRecordFingerprints.set(conversation, entry);
+  return entry;
 };
 
 type StreamController = {
@@ -2405,174 +1722,10 @@ const uniqueFileIds = (rows: string[]): string[] => {
   return ordered;
 };
 
-function ChatAutoScroll({
-  conversationId,
-  conversationHydrated,
-  scrollRequestKey,
-  scrollMemoryRef,
-  scrollElementRef,
-  scrollWriteBlockRef,
-  onScrolledAwayChange,
-}: {
-  conversationId: string | null;
-  conversationHydrated: boolean;
-  scrollRequestKey: number;
-  scrollMemoryRef: MutableRefObject<Record<string, ConversationScrollMemory>>;
-  scrollElementRef: MutableRefObject<HTMLElement | null>;
-  scrollWriteBlockRef: MutableRefObject<string | null>;
-  // Lifts a "scrolled away from the bottom" signal (with hysteresis) so the
-  // composer can collapse while the user reads back through a long answer.
-  onScrolledAwayChange?: (away: boolean) => void;
-}) {
-  const { scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
-  const restoredConversationIdRef = useRef<string | null>(null);
-  const liveConversationIdRef = useRef<string | null>(conversationId);
-  const previousScrollRequestKeyRef = useRef(scrollRequestKey);
-  const scrolledAwayRef = useRef(false);
-  const setScrolledAway = useCallback(
-    (away: boolean) => {
-      if (scrolledAwayRef.current === away) {
-        return;
-      }
-      scrolledAwayRef.current = away;
-      onScrolledAwayChange?.(away);
-    },
-    [onScrolledAwayChange]
-  );
-
-  const rememberScrollPosition = useCallback(
-    (targetConversationId: string | null) => {
-      const scrollElement = scrollRef.current;
-      if (!targetConversationId || !scrollElement) {
-        return;
-      }
-      scrollMemoryRef.current[targetConversationId] = captureConversationScrollMemory(scrollElement);
-    },
-    [scrollMemoryRef, scrollRef]
-  );
-
-  useLayoutEffect(() => {
-    liveConversationIdRef.current = conversationId;
-  }, [conversationId]);
-
-  useLayoutEffect(() => {
-    const scrollElement = scrollRef.current;
-    scrollElementRef.current = scrollElement;
-    return () => {
-      if (scrollElementRef.current === scrollElement) {
-        scrollElementRef.current = null;
-      }
-    };
-  }, [scrollElementRef, scrollRef]);
-
-  useLayoutEffect(() => {
-    if (!conversationId) {
-      restoredConversationIdRef.current = null;
-      return;
-    }
-    if (!conversationHydrated || restoredConversationIdRef.current === conversationId) {
-      return;
-    }
-    restoredConversationIdRef.current = conversationId;
-    let rafIdOne = 0;
-    let rafIdTwo = 0;
-    rafIdOne = requestAnimationFrame(() => {
-      rafIdTwo = requestAnimationFrame(() => {
-        const remembered = scrollMemoryRef.current[conversationId];
-        if (remembered && !remembered.wasNearBottom) {
-          const scrollElement = scrollRef.current;
-          if (!scrollElement) {
-            return;
-          }
-          stopScroll();
-          const maxScrollTop = Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0);
-          scrollElement.scrollTop = Math.min(remembered.scrollTop, maxScrollTop);
-          rememberScrollPosition(conversationId);
-          if (scrollWriteBlockRef.current === conversationId) {
-            scrollWriteBlockRef.current = null;
-          }
-          return;
-        }
-        scrollToBottom({ animation: "instant", ignoreEscapes: true });
-        if (scrollWriteBlockRef.current === conversationId) {
-          scrollWriteBlockRef.current = null;
-        }
-      });
-    });
-    return () => {
-      if (rafIdOne) {
-        cancelAnimationFrame(rafIdOne);
-      }
-      if (rafIdTwo) {
-        cancelAnimationFrame(rafIdTwo);
-      }
-    };
-  }, [
-    conversationHydrated,
-    conversationId,
-    rememberScrollPosition,
-    scrollMemoryRef,
-    scrollRef,
-    scrollToBottom,
-    scrollWriteBlockRef,
-    stopScroll,
-  ]);
-
-  useEffect(() => {
-    if (!conversationId || !conversationHydrated) {
-      return;
-    }
-    const scrollElement = scrollRef.current;
-    if (!scrollElement) {
-      return;
-    }
-    // A fresh conversation starts at the bottom, so the composer is expanded.
-    setScrolledAway(false);
-    const handleScroll = () => {
-      // Hysteresis so a tiny scroll doesn't flicker the composer: collapse once
-      // ~160px from the bottom, expand again only within ~48px of it.
-      const distanceFromBottom =
-        scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
-      setScrolledAway(
-        scrolledAwayRef.current ? distanceFromBottom > 48 : distanceFromBottom > 160
-      );
-      if (
-        liveConversationIdRef.current !== conversationId ||
-        scrollWriteBlockRef.current === conversationId
-      ) {
-        return;
-      }
-      rememberScrollPosition(conversationId);
-    };
-    scrollElement.addEventListener("scroll", handleScroll, { passive: true });
-    return () => {
-      scrollElement.removeEventListener("scroll", handleScroll);
-    };
-  }, [
-    conversationHydrated,
-    conversationId,
-    rememberScrollPosition,
-    scrollRef,
-    scrollWriteBlockRef,
-    setScrolledAway,
-  ]);
-
-  useEffect(() => {
-    if (!conversationId || scrollRequestKey === previousScrollRequestKeyRef.current) {
-      return;
-    }
-    previousScrollRequestKeyRef.current = scrollRequestKey;
-    scrollToBottom({ animation: "smooth", ignoreEscapes: true });
-  }, [conversationId, scrollRequestKey, scrollToBottom]);
-
-  return null;
-}
-
 type ConversationTranscriptActions = {
   onStopConversation: () => void;
   onStreamingRenderComplete: (messageId: string) => void;
   onCopy: (value: string, feedbackKey?: string) => Promise<void>;
-  onPromptBisqueAuthentication: (message: string) => Promise<void>;
   onOpenConversationFilesInViewer: (fileIds: string[]) => void;
   onImportBisqueResourcesIntoConversation: (
     resourcesToImport: string[],
@@ -2591,66 +1744,6 @@ type ConversationTranscriptActions = {
   onDeleteUserMessage: (messageId: string) => void;
   onRetryAssistant: (assistantMessageId: string, options: { edit: boolean }) => void;
 };
-
-type AssistantTurnRecoveryProps = {
-  status: UiMessageStatus;
-  errorReason?: string;
-  onRetry: () => void;
-  onEdit: () => void;
-};
-
-// Calm inline recovery affordance for a stopped or failed assistant turn —
-// understated muted status line + ghost Retry/Edit actions, matching the app's
-// "Could not …" voice. Replaces the previous silent dead-end.
-function AssistantTurnRecovery({
-  status,
-  errorReason,
-  onRetry,
-  onEdit,
-}: AssistantTurnRecoveryProps) {
-  const stopped = status === "stopped";
-  return (
-    <div className="mt-1.5 flex flex-col gap-1.5" role="status" aria-live="polite">
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
-        <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-          {stopped ? (
-            <CircleSlash aria-hidden className="size-3.5" />
-          ) : (
-            <CircleAlert aria-hidden className="size-3.5 text-destructive/70" />
-          )}
-          {stopped ? "You stopped this response." : "This response couldn’t be completed."}
-        </span>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 rounded-full px-2.5 text-muted-foreground hover:text-foreground"
-            onClick={onRetry}
-          >
-            <RotateCcw className="size-3.5" />
-            Retry
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 rounded-full px-2.5 text-muted-foreground hover:text-foreground"
-            onClick={onEdit}
-          >
-            <Pencil className="size-3.5" />
-            Edit
-          </Button>
-        </div>
-      </div>
-      {!stopped && errorReason ? (
-        <p className="font-mono text-[11px] leading-relaxed text-muted-foreground/75">
-          {errorReason}
-        </p>
-      ) : null}
-    </div>
-  );
-}
 
 type ConversationMessageRowProps = {
   message: UiMessage;
@@ -2678,8 +1771,6 @@ const ConversationMessageRow = memo(
   }: ConversationMessageRowProps) {
     const isAssistant = message.role === "assistant";
     const isCopied = copiedMessageId === message.id;
-    const proModeDevCopyKey = `pro-mode-dev-${message.id}`;
-    const isProModeDevCopied = copiedMessageId === proModeDevCopyKey;
     const progressEvents = message.progressEvents ?? EMPTY_PROGRESS_EVENTS;
     const runEvents = message.runEvents ?? EMPTY_RUN_EVENTS;
     const runArtifacts = message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS;
@@ -2702,18 +1793,9 @@ const ConversationMessageRow = memo(
           progressEvents,
           runArtifacts,
           uploadedFiles,
-          uploadPreviewUrlForFile,
-          {
-            runId: message.runId,
-            buildArtifactDownloadUrl: (runId, path) =>
-              apiClient.artifactDownloadUrl(runId, path),
-            responseMetadata: message.responseMetadata ?? null,
-          }
+          uploadPreviewUrlForFile
         ),
       [
-        apiClient,
-        message.responseMetadata,
-        message.runId,
         progressEvents,
         runArtifacts,
         uploadedFiles,
@@ -2728,61 +1810,18 @@ const ConversationMessageRow = memo(
       () => toolResultCards.filter((card) => card.placement !== "before_text"),
       [toolResultCards]
     );
-    const researchDigest = useMemo(
-      () =>
-        isAssistant
-          ? buildResearchDigestData({
-              message,
-              hasToolCards: toolResultCards.length > 0,
-              hasScientificPrimary: toolResultCards.some((card) => Boolean(card.megasegInsights)),
-            })
-          : null,
-      [isAssistant, message, toolResultCards]
-    );
-    const hasScientificPrimaryToolCard = toolResultCards.some((card) =>
-      Boolean(card.megasegInsights)
-    );
-    const collapseScientificInterpretation = useMemo(() => {
-      if (isStreamingAssistant || !hasScientificPrimaryToolCard) {
-        return false;
-      }
-      const content = String(message.content || "").trim();
-      if (!content) {
-        return false;
-      }
-      return (
-        content.length > 320 ||
-        /(^|\n)#{1,6}\s+/m.test(content) ||
-        /(^|\n)\|.+\|/m.test(content) ||
-        /(^|\n)(?:- |\d+\. )/m.test(content)
-      );
-    }, [hasScientificPrimaryToolCard, isStreamingAssistant, message.content]);
     const hasPrimaryToolCard = toolResultCards.length > 0;
-    const showResearchDigest =
-      Boolean(researchDigest) && (!isStreamingAssistant || !message.liveStream);
     const showLeadingToolResultCards =
       leadingToolResultCards.length > 0 && (!isStreamingAssistant || !message.liveStream);
     const showTrailingToolResultCards =
       trailingToolResultCards.length > 0 && (!isStreamingAssistant || !message.liveStream);
-    const bisqueAuthGate = useMemo(
-      () => extractBisqueAuthGate(progressEvents),
-      [progressEvents]
-    );
     const thinkingBarText = useMemo(
       () => thinkingBarTextForRunEvents(runEvents, isStreamingAssistant),
       [isStreamingAssistant, runEvents]
     );
-    const proModeDevConversation = useMemo(
-      () => proModeDevConversationForMessage(message),
-      [message]
-    );
     const elapsedLabel = useMemo(
       () => formatElapsedDuration(message.durationSeconds),
       [message.durationSeconds]
-    );
-    const summaryModeLabel = useMemo(
-      () => summaryModeLabelForMessage(message),
-      [message]
     );
     const tokenUsage = useMemo(() => extractRunTokenUsage(message), [message]);
     // A multi-step agentic run (it ran tools / executed code) shows the calm step timeline as the
@@ -2790,12 +1829,14 @@ const ConversationMessageRow = memo(
     // disclosure — so a scientist watching a long run sees structured progress, not a monologue.
     // A plain text reply keeps streaming inline (responsive). Monotonic, so no flip-flop mid-run.
     const isAgenticRun = useMemo(() => runHasToolActivity(runEvents), [runEvents]);
-    const showAssistantMetadataLine =
-      Boolean(elapsedLabel) || Boolean(summaryModeLabel) || Boolean(tokenUsage);
+    const showAssistantMetadataLine = Boolean(elapsedLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
       return (
         <Message
-          className="chat-width-frame mx-auto w-full justify-end px-4 sm:px-6"
+          className={cn(
+            "chat-width-frame mx-auto w-full justify-end px-4 sm:px-6",
+            isLastMessage && "pk-message-enter"
+          )}
         >
           <div className="group flex w-full flex-col items-end gap-1">
             <MessageContent className="max-w-full bg-muted text-primary rounded-3xl px-5 py-2.5">
@@ -2860,16 +1901,14 @@ const ConversationMessageRow = memo(
 
     return (
       <Message
-        className="chat-width-frame mx-auto w-full justify-start px-4 sm:px-6"
+        className={cn(
+          "chat-width-frame mx-auto w-full justify-start px-4 sm:px-6",
+          isLastMessage && "pk-message-enter"
+        )}
       >
         <div className="group flex w-full flex-1 flex-col gap-2">
           {showAssistantMetadataLine ? (
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
-              {summaryModeLabel ? (
-                <span className="text-[11px] font-medium tracking-[0.02em] text-sky-600/70 dark:text-sky-300/68">
-                  {summaryModeLabel}
-                </span>
-              ) : null}
               {tokenUsage || elapsedLabel ? (
                 <span
                   className="tabular-nums"
@@ -2936,71 +1975,14 @@ const ConversationMessageRow = memo(
               onComplete={() => actions.onStreamingRenderComplete(message.id)}
             />
           ) : (
-            collapseScientificInterpretation ? (
-              <details className="chat-scientific-appendix">
-                <summary>Model interpretation</summary>
-                <div className="chat-scientific-appendix-body">
-                  <MessageContent
-                    className="w-full bg-transparent p-0 text-foreground"
-                    id={message.id}
-                    markdown
-                  >
-                    {displayContent}
-                  </MessageContent>
-                </div>
-              </details>
-            ) : (
-              <MessageContent
-                className="w-full bg-transparent p-0 text-foreground"
-                id={message.id}
-                markdown
-              >
-                {displayContent}
-              </MessageContent>
-            )
-          )}
-          {proModeDevConversation ? (
-            <Suspense fallback={null}>
-              <LazyProModeDevTrace
-                messageId={message.id}
-                conversation={proModeDevConversation}
-                isCopied={isProModeDevCopied}
-                onCopy={(copyText: string) =>
-                  void actions.onCopy(copyText, proModeDevCopyKey)
-                }
-              />
-            </Suspense>
-          ) : null}
-          {bisqueAuthGate ? (
-            <div
-              className="mt-3 flex flex-col gap-3 rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 text-sm text-amber-950 shadow-sm backdrop-blur"
-              data-testid="bisque-auth-required"
+            <MessageContent
+              className="w-full bg-transparent p-0 text-foreground"
+              id={message.id}
+              markdown
             >
-              <div className="flex flex-col gap-1">
-                <strong className="text-sm font-semibold">
-                  BisQue sign-in required
-                </strong>
-                <p className="m-0">{bisqueAuthGate.message}</p>
-                {bisqueAuthGate.selectedTools.length > 0 ? (
-                  <p className="m-0 text-xs text-amber-900/80">
-                    Needed tools: {bisqueAuthGate.selectedTools.join(", ")}
-                  </p>
-                ) : null}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    void actions.onPromptBisqueAuthentication(
-                      bisqueAuthGate.message
-                    );
-                  }}
-                >
-                  Sign in to BisQue
-                </Button>
-              </div>
-            </div>
-          ) : null}
+              {displayContent}
+            </MessageContent>
+          )}
           {message.quickPreviewFileIds &&
           message.quickPreviewFileIds.length > 0 &&
           !hasPrimaryToolCard ? (
@@ -3023,14 +2005,6 @@ const ConversationMessageRow = memo(
                   actions.onImportBisqueResourcesIntoConversation
                 }
                 onCopyBisqueResourceUri={actions.onCopyBisqueResourceUri}
-              />
-            </Suspense>
-          ) : null}
-          {showResearchDigest && researchDigest ? (
-            <Suspense fallback={null}>
-              <LazyResearchDigestCard
-                digest={researchDigest}
-                followsVisuals={showLeadingToolResultCards}
               />
             </Suspense>
           ) : null}
@@ -3775,116 +2749,6 @@ const prioritizeHydratedImageArtifacts = (
     .slice(0, limit);
 };
 
-const isPlotArtifact = (
-  artifact:
-    | Pick<ArtifactRecord, "path" | "title">
-    | Pick<RunImageArtifact, "path" | "title" | "sourceName">
-): boolean => {
-  const haystack = [
-    String(artifact.path || ""),
-    String(artifact.title || ""),
-    "sourceName" in artifact ? String(artifact.sourceName || "") : "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  return /(class_distribution|confidence|histogram|distribution|low_confidence|review|outlier|tail)/i.test(
-    haystack
-  );
-};
-
-const formatPercentMetric = (value: number | null | undefined, digits = 2): string => {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "n/a";
-  }
-  return `${Number(value).toFixed(digits)}%`;
-};
-
-const formatIntegerMetric = (value: number | null | undefined): string => {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "n/a";
-  }
-  return Math.round(Number(value)).toLocaleString();
-};
-
-const scientificFigureSortKey = (
-  value: Pick<ScientificFigureCard, "title" | "subtitle" | "summary">
-): [number, string] => {
-  const normalized = [value.title, value.subtitle, value.summary]
-    .filter((item): item is string => Boolean(item))
-    .join(" ")
-    .toLowerCase();
-  if (/\bmip\b|maximum/i.test(normalized)) {
-    return [0, normalized];
-  }
-  if (/mid[-\s]?z|midplane|representative/i.test(normalized)) {
-    return [1, normalized];
-  }
-  return [2, normalized];
-};
-
-const eventArtifactToToolImage = ({
-  artifact,
-  runId,
-  buildArtifactDownloadUrl,
-}: {
-  artifact: Record<string, unknown>;
-  runId?: string;
-  buildArtifactDownloadUrl?: (runId: string, path: string) => string;
-}): ToolCardImage | null => {
-  const path = String(artifact.path ?? "").trim();
-  if (!path || !isImageArtifactPath(path) || !runId || !buildArtifactDownloadUrl) {
-    return null;
-  }
-  const mimeType = String(artifact.mime_type ?? "").trim() || undefined;
-  const downloadUrl = buildArtifactDownloadUrl(runId, path);
-  const title =
-    String(artifact.title ?? artifactDisplayName({ path, title: "", source_path: String(artifact.source_path ?? "") }))
-      .trim() || artifactTitleFromPath(path);
-  return {
-    path,
-    url: downloadUrl,
-    downloadUrl,
-    title,
-    sourceName: title,
-    sourcePath: String(artifact.source_path ?? "").trim() || undefined,
-    previewable: isInlineImageArtifact(path, mimeType),
-  } satisfies ToolCardImage;
-};
-
-const buildMegasegNarrative = ({
-  fileRows,
-  processed,
-  meanCoverage,
-  meanObjectCount,
-}: {
-  fileRows: MegasegFileInsight[];
-  processed: number | null;
-  meanCoverage: number | null;
-  meanObjectCount: number | null;
-}): string | undefined => {
-  const firstRow = fileRows[0];
-  const technicalSummary = String(firstRow?.technicalSummary ?? "").trim();
-  if (technicalSummary) {
-    return technicalSummary;
-  }
-
-  const processedCount = Math.max(
-    fileRows.length,
-    Math.round(processed ?? fileRows.length)
-  );
-  if (processedCount <= 0) {
-    return undefined;
-  }
-
-  const coverageClause =
-    meanCoverage !== null
-      ? `${formatPercentMetric(meanCoverage)} mean segmented coverage`
-      : "a completed segmentation pass";
-  const objectClause =
-    meanObjectCount !== null ? ` with ${meanObjectCount.toFixed(1)} mean objects per image` : "";
-  return `${coverageClause}${objectClause} across ${pluralizeCount(processedCount, "image")}. Review the overlays first to confirm boundary fidelity, then use the table to compare coverage and object counts across inputs.`;
-};
-
 const artifactLookupKeys = (value: string): string[] => {
   const rawName = extractFilename(value).toLowerCase().trim();
   if (!rawName) {
@@ -3984,26 +2848,6 @@ const normalizeToolName = (value: unknown): string => {
   return TOOL_NAME_CARD_ALIASES[trimmed] ?? trimmed;
 };
 
-const toNumber = (value: unknown): number | null => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return null;
-};
-
-const toRecord = (value: unknown): Record<string, unknown> | null => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-};
-
 const generatedConversationTitleFromResponse = (
   response: ChatResponse | null | undefined
 ): string | null => {
@@ -4029,304 +2873,47 @@ const shouldApplyGeneratedConversationTitle = (
   );
 };
 
-const humanizeScientificLabel = (value: string): string => {
-  const normalized = String(value || "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) {
-    return "Value";
-  }
-  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-};
-
-const formatScientificScalar = (value: unknown): string => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    if (Number.isInteger(value)) {
-      return value.toLocaleString();
-    }
-    return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  }
-  const numeric = toNumber(value);
-  if (numeric !== null) {
-    return formatScientificScalar(numeric);
-  }
-  const text = String(value ?? "").trim();
-  return text || "n/a";
-};
-
-const formatContractMeasurement = (record: Record<string, unknown>): ResearchDigestMeasurementRow | null => {
-  const rawName = String(record.name ?? record.metric ?? record.label ?? "").trim();
-  const name = humanizeScientificLabel(rawName || "measurement");
-  const value = record.value ?? record.result ?? record.measurement;
-  const unit = String(record.unit ?? "").trim();
-  const ci95 = Array.isArray(record.ci95) ? record.ci95 : null;
-  const ciLabel =
-    ci95 &&
-    ci95.length === 2 &&
-    ci95.every((item) => toNumber(item) !== null)
-      ? ` (95% CI ${formatScientificScalar(ci95[0])} to ${formatScientificScalar(ci95[1])}${unit ? ` ${unit}` : ""})`
-      : "";
-  const baseValue = `${formatScientificScalar(value)}${unit ? ` ${unit}` : ""}`.trim();
-  if (!name || !baseValue) {
+const streamTokenDeliveryKey = (
+  conversationId: string,
+  messageId: string,
+  event?: StreamTokenEvent
+): string | null => {
+  const sequence = Math.floor(Number(event?.sequence ?? 0));
+  if (!Number.isFinite(sequence) || sequence <= 0) {
     return null;
   }
-  return {
-    name,
-    valueLabel: `${baseValue}${ciLabel}`.trim(),
-  };
+  const runId = String(event?.runId ?? "").trim();
+  return `${conversationId}:${messageId}:${runId}:${sequence}`;
 };
 
-const summarizeStatisticalRecord = (record: Record<string, unknown>): ResearchDigestStatisticRow | null => {
-  const preferredLabel =
-    String(record.summary ?? record.test ?? record.method ?? record.name ?? record.metric ?? "")
-      .trim();
-  const label = humanizeScientificLabel(preferredLabel || "analysis");
-  const pieces: string[] = [];
-  [
-    ["comparison", record.comparison],
-    ["finding", record.finding],
-    ["p", record.p_value],
-    ["effect", record.effect_size],
-    ["n", record.n],
-    ["statistic", record.statistic],
-    ["notes", record.notes],
-  ].forEach(([key, value]) => {
-    if (value === null || value === undefined || value === "") {
-      return;
+const shouldApplyStreamToken = (
+  delivered: Map<string, true>,
+  conversationId: string,
+  messageId: string,
+  event?: StreamTokenEvent
+): boolean => {
+  const key = streamTokenDeliveryKey(conversationId, messageId, event);
+  if (!key) {
+    return true;
+  }
+  if (delivered.has(key)) {
+    return false;
+  }
+  delivered.set(key, true);
+  return true;
+};
+
+const clearStreamTokenDeliveries = (
+  delivered: Map<string, true>,
+  conversationId: string,
+  messageId: string
+): void => {
+  const prefix = `${conversationId}:${messageId}:`;
+  Array.from(delivered.keys()).forEach((key) => {
+    if (key.startsWith(prefix)) {
+      delivered.delete(key);
     }
-    pieces.push(`${humanizeScientificLabel(String(key))} ${formatScientificScalar(value)}`);
   });
-  const summary = pieces.join(" · ").trim() || String(record.summary ?? "").trim();
-  if (!summary) {
-    return null;
-  }
-  return { label, summary };
-};
-
-const coerceAssistantContract = (value: unknown): AssistantContract | null => {
-  const record = toRecord(value);
-  if (!record) {
-    return null;
-  }
-  const result = String(record.result ?? "").trim();
-  const evidence = Array.isArray(record.evidence)
-    ? record.evidence.map((item) => toRecord(item)).filter((item): item is Record<string, unknown> => item !== null)
-    : [];
-  const measurements = Array.isArray(record.measurements)
-    ? record.measurements
-        .map((item) => toRecord(item))
-        .filter((item): item is Record<string, unknown> => item !== null)
-    : [];
-  const statisticalAnalysisRaw = record.statistical_analysis;
-  const statisticalAnalysis = Array.isArray(statisticalAnalysisRaw)
-    ? statisticalAnalysisRaw
-        .map((item) => toRecord(item))
-        .filter((item): item is Record<string, unknown> => item !== null)
-    : [];
-  const confidenceRecord = toRecord(record.confidence);
-  const qcWarnings = Array.isArray(record.qc_warnings)
-    ? record.qc_warnings.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
-  const limitations = Array.isArray(record.limitations)
-    ? record.limitations.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
-  const nextSteps = Array.isArray(record.next_steps)
-    ? record.next_steps
-        .map((item) => {
-          if (typeof item === "string") {
-            return { action: item };
-          }
-          const step = toRecord(item);
-          return step ? { action: String(step.action ?? "").trim() } : null;
-        })
-        .filter((item): item is { action: string } => Boolean(item?.action))
-    : [];
-  if (
-    !result &&
-    evidence.length === 0 &&
-    measurements.length === 0 &&
-    statisticalAnalysis.length === 0 &&
-    qcWarnings.length === 0 &&
-    limitations.length === 0 &&
-    nextSteps.length === 0
-  ) {
-    return null;
-  }
-  return {
-    result,
-    evidence: evidence as AssistantContract["evidence"],
-    measurements: measurements as AssistantContract["measurements"],
-    statistical_analysis: statisticalAnalysis,
-    confidence: {
-      level:
-        String(confidenceRecord?.level ?? "").trim().toLowerCase() === "high"
-          ? "high"
-          : String(confidenceRecord?.level ?? "").trim().toLowerCase() === "low"
-            ? "low"
-            : "medium",
-      why: Array.isArray(confidenceRecord?.why)
-        ? confidenceRecord.why.map((item) => String(item || "").trim()).filter(Boolean)
-        : [],
-    },
-    qc_warnings: qcWarnings,
-    limitations,
-    next_steps: nextSteps,
-  };
-};
-
-const extractAssistantContractFromMessage = (message: UiMessage): AssistantContract | null => {
-  const metadata = toRecord(message.responseMetadata);
-  const contractCandidates: unknown[] = [
-    metadata?.contract,
-    toRecord(metadata?.pro_mode)?.contract,
-    toRecord(toRecord(metadata?.ui_hydrated)?.contract),
-  ];
-  for (const candidate of contractCandidates) {
-    const contract = coerceAssistantContract(candidate);
-    if (contract) {
-      return contract;
-    }
-  }
-  for (const event of [...(message.progressEvents ?? [])].reverse()) {
-    if (String(event.event || "").trim().toLowerCase() !== "workpad_contract") {
-      continue;
-    }
-    const contract = coerceAssistantContract(event.contract);
-    if (contract) {
-      return contract;
-    }
-  }
-  return null;
-};
-
-const buildResearchDigestData = ({
-  message,
-  hasToolCards,
-  hasScientificPrimary,
-}: {
-  message: UiMessage;
-  hasToolCards: boolean;
-  hasScientificPrimary: boolean;
-}): ResearchDigestData | null => {
-  const contract = extractAssistantContractFromMessage(message);
-  if (!contract) {
-    return null;
-  }
-  const metadata = toRecord(message.responseMetadata);
-  const proMode = toRecord(metadata?.pro_mode);
-  const executionPath = String(proMode?.execution_path ?? "").trim().toLowerCase();
-  const toolInvocations = Array.isArray(metadata?.tool_invocations)
-    ? metadata.tool_invocations
-        .map((item) => toRecord(item))
-        .filter((item): item is Record<string, unknown> => item !== null)
-    : [];
-  const hasToolBackedContext =
-    hasToolCards ||
-    toolInvocations.length > 0 ||
-    executionPath === "tool_workflow" ||
-    executionPath === "research_program";
-  const evidence = contract.evidence
-    .map((item) => toRecord(item))
-    .filter((item): item is Record<string, unknown> => item !== null)
-    .map((item) => ({
-      source: humanizeScientificLabel(String(item.source ?? "evidence").trim() || "evidence"),
-      summary: String(item.summary ?? "").trim() || undefined,
-      artifact: String(item.artifact ?? "").trim() || undefined,
-      runId: String(item.run_id ?? "").trim() || null,
-    }))
-    .filter((item) => item.source || item.summary)
-    .slice(0, 4);
-  const measurements = contract.measurements
-    .map((item) => toRecord(item))
-    .filter((item): item is Record<string, unknown> => item !== null)
-    .map((item) => formatContractMeasurement(item))
-    .filter((item): item is ResearchDigestMeasurementRow => item !== null)
-    .slice(0, 6);
-  const statisticalAnalysis = contract.statistical_analysis
-    .map((item) => summarizeStatisticalRecord(item))
-    .filter((item): item is ResearchDigestStatisticRow => item !== null)
-    .slice(0, 4);
-  const qcWarnings = contract.qc_warnings.slice(0, 4);
-  const limitations = contract.limitations.slice(0, 4);
-  const nextSteps = contract.next_steps
-    .map((item) => String(item.action ?? "").trim())
-    .filter(Boolean)
-    .slice(0, 4);
-  const result = String(contract.result || "").trim() || String(message.content || "").trim();
-  const hasQuantitativeEvidence = measurements.length > 0 || statisticalAnalysis.length > 0;
-  const populatedSections = [
-    evidence.length > 0,
-    measurements.length > 0,
-    statisticalAnalysis.length > 0,
-    qcWarnings.length > 0,
-    limitations.length > 0,
-    nextSteps.length > 0,
-  ].filter(Boolean).length;
-  if (!result) {
-    return null;
-  }
-  if (!hasToolBackedContext || !hasQuantitativeEvidence) {
-    return null;
-  }
-  if (hasScientificPrimary) {
-    return null;
-  }
-  if (!hasToolCards && populatedSections < 2 && result.length < 120) {
-    return null;
-  }
-  return {
-    result,
-    confidenceLevel: contract.confidence?.level,
-    confidenceWhy: Array.isArray(contract.confidence?.why) ? contract.confidence.why.slice(0, 2) : [],
-    evidence,
-    measurements,
-    statisticalAnalysis,
-    qcWarnings,
-    limitations,
-    nextSteps,
-  };
-};
-
-const runEventIdentity = (event: RunEvent): string =>
-  JSON.stringify({
-    event_type: String(event.event_type || "").trim().toLowerCase(),
-    level: String(event.level || "").trim().toLowerCase(),
-    payload: toRecord(event.payload) ?? event.payload ?? null,
-  });
-
-const appendUniqueRunEvent = (events: RunEvent[], nextEvent: RunEvent): RunEvent[] => {
-  const nextIdentity = runEventIdentity(nextEvent);
-  if (events.some((event) => runEventIdentity(event) === nextIdentity)) {
-    return events;
-  }
-  return [...events, nextEvent];
-};
-
-const extractBisqueAuthGate = (
-  progressEvents: ProgressEvent[]
-): { message: string; selectedTools: string[] } | null => {
-  for (const event of progressEvents) {
-    const summary = toRecord(event.summary);
-    if (!summary) {
-      continue;
-    }
-    if (String(summary.error_code ?? "").trim().toLowerCase() !== "bisque_auth_required") {
-      continue;
-    }
-    const selectedTools = Array.isArray(summary.selected_tools)
-      ? summary.selected_tools
-          .map((item) => String(item ?? "").trim())
-          .filter((item) => item.length > 0)
-      : [];
-    return {
-      message:
-        String(event.message ?? "").trim() ||
-        "BisQue authentication is required for this request.",
-      selectedTools,
-    };
-  }
-  return null;
 };
 
 const isPrairieDetectionClassName = (className: string): boolean => {
@@ -4414,48 +3001,21 @@ const buildToolResultCards = (
   runArtifacts: RunImageArtifact[],
   uploadedFiles: UploadedFileRecord[] = [],
   buildUploadPreviewUrl: (fileId: string) => string = (fileId) =>
-    `/v2/uploads/${encodeURIComponent(fileId)}/preview`,
-  options?: {
-    runId?: string;
-    buildArtifactDownloadUrl?: (runId: string, path: string) => string;
-    responseMetadata?: Record<string, unknown> | null;
-  }
+    `/v2/uploads/${encodeURIComponent(fileId)}/preview`
 ): ToolResultCard[] => {
   if (!progressEvents.length) {
     return [];
   }
   type BisqueSearchCandidate = {
     index: number;
-    toolName: "search_bisque_resources" | "bisque_advanced_search";
+    toolName: "search_bisque_resources";
     matchCount: number | null;
     resourceType?: string;
     resourceRows: ToolResourceRow[];
   };
 
   const artifactBySource = new Map<string, RunImageArtifact[]>();
-  const toolInvocationSummaryByTool = new Map<string, Record<string, unknown>>();
   const uploadedPreviewLookup = buildUploadedArtifactPreviewLookup(uploadedFiles);
-  const responseMetadataRecord = toRecord(options?.responseMetadata);
-  const toolInvocations = Array.isArray(responseMetadataRecord?.tool_invocations)
-    ? responseMetadataRecord.tool_invocations
-    : [];
-  const toolInvocationRecords = toolInvocations
-    .map((entry) => toRecord(entry))
-    .filter((entry): entry is Record<string, unknown> => entry !== null);
-  const scientificToolInvocations = toolInvocationRecords.map((entry) => ({
-    tool: String(entry.tool ?? ""),
-    status: String(entry.status ?? ""),
-    output_summary: toRecord(entry.output_summary),
-    output_envelope: toRecord(entry.output_envelope),
-  }));
-  toolInvocationRecords.forEach((entry) => {
-      const tool = normalizeToolName(entry.tool);
-      const outputSummary = toRecord(entry.output_summary);
-      if (!tool || !outputSummary) {
-        return;
-      }
-      toolInvocationSummaryByTool.set(tool, outputSummary);
-    });
   runArtifacts.forEach((artifact) => {
     const lookupValues = new Set<string>([
       artifact.sourceName,
@@ -4479,160 +3039,17 @@ const buildToolResultCards = (
   const bisqueDownloadRows: ToolDownloadRow[] = [];
   let latestBisqueDownloadIndex = -1;
   let latestBisqueUploadCard: ToolResultCard | null = null;
-  let bestBisqueFindAssetsCard: ToolResultCard | null = null;
-  let bestBisqueFindAssetsScore = Number.NEGATIVE_INFINITY;
-  let bestBisqueFindAssetsIndex = -1;
-  const scientificResultGroups = buildScientificResultGroups({
-    progressEvents,
-    toolInvocations: scientificToolInvocations,
-    runArtifacts: runArtifacts.map((artifact) => ({
-      path: artifact.path,
-      title: artifact.title,
-      sourcePath: artifact.sourcePath,
-      url: artifact.url,
-      downloadUrl: artifact.downloadUrl,
-      previewable: artifact.previewable,
-      resultGroupId: artifact.resultGroupId ?? null,
-    })),
-    runId: options?.runId,
-    buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
-  });
-  scientificResultGroups.forEach((group, groupIndex) => {
-    const singleFile = group.fileRows.length <= 1;
-    const firstRow = group.fileRows[0];
-    cards.push({
-      id: `scientific-result-${group.resultGroupId}-${groupIndex}`,
-      tool: "segment_image_megaseg",
-      title:
-        group.fileRows.length > 1 ? "Megaseg cohort summary" : "Megaseg segmentation",
-      metrics: singleFile
-        ? [
-            {
-              label: "Coverage",
-              value: formatPercentMetric(group.metrics.coveragePercent),
-            },
-            {
-              label: "Objects",
-              value: formatIntegerMetric(group.metrics.objectCount),
-            },
-            {
-              label: "Active z-slices",
-              value:
-                group.metrics.activeSliceCount !== null &&
-                group.metrics.activeSliceCount !== undefined &&
-                group.metrics.zSliceCount !== null &&
-                group.metrics.zSliceCount !== undefined
-                  ? `${formatIntegerMetric(group.metrics.activeSliceCount)}/${formatIntegerMetric(group.metrics.zSliceCount)}`
-                  : "n/a",
-            },
-            {
-              label: "Largest component",
-              value: formatIntegerMetric(group.metrics.largestComponentVoxels),
-            },
-          ]
-        : [
-            {
-              label: "Images",
-              value: `${group.fileRows.length}`,
-            },
-            {
-              label: "Mean coverage",
-              value: formatPercentMetric(group.metrics.coveragePercent),
-            },
-            {
-              label: "Mean objects",
-              value: formatIntegerMetric(group.metrics.objectCount),
-            },
-            {
-              label: "Representative figures",
-              value: `${1 + group.secondaryFigures.length}`,
-            },
-          ],
-      classes: [],
-      images: [],
-      resourceRows: [],
-      downloadRows: [],
-      placement: "before_text",
-      narrative:
-        group.technicalSummary ??
-        buildMegasegNarrative({
-          fileRows: group.fileRows,
-          processed: group.fileRows.length,
-          meanCoverage: group.metrics.coveragePercent,
-          meanObjectCount: group.metrics.objectCount,
-        }),
-      megasegInsights: {
-        resultGroupId: group.resultGroupId,
-        heroFigure: group.heroFigure,
-        secondaryFigures: group.secondaryFigures,
-        fileRows: group.fileRows,
-        reportPath: group.reportPath ?? null,
-        summaryCsvPath: group.summaryCsvPath ?? null,
-        reportDownloadUrl:
-          group.reportPath && options?.runId && options?.buildArtifactDownloadUrl
-            ? options.buildArtifactDownloadUrl(options.runId, group.reportPath)
-            : null,
-        summaryCsvDownloadUrl:
-          group.summaryCsvPath && options?.runId && options?.buildArtifactDownloadUrl
-            ? options.buildArtifactDownloadUrl(options.runId, group.summaryCsvPath)
-            : null,
-        technicalSummary: group.technicalSummary ?? null,
-        collectionLabel:
-          group.fileRows.length > 1
-            ? `${group.fileRows.length} images summarized in one report-first result`
-            : firstRow?.file
-              ? toDisplayFileLabel(firstRow.file)
-              : undefined,
-        device: null,
-        structureChannel: null,
-        nucleusChannel: null,
-      },
-    });
-  });
-  const hasMegasegScientificResultSurface = scientificResultGroups.length > 0;
-  const mergeBisqueResourceRows = (
-    left: ToolResourceRow[],
-    right: ToolResourceRow[]
-  ): ToolResourceRow[] => {
-    const merged = new Map<string, ToolResourceRow>();
-    [...left, ...right].forEach((row) => {
-      const key =
-        row.resourceUri?.toLowerCase() ||
-        row.clientViewUrl?.toLowerCase() ||
-        row.uri?.toLowerCase() ||
-        `${row.name.toLowerCase()}|${String(row.owner ?? "").toLowerCase()}|${String(
-          row.created ?? ""
-        ).toLowerCase()}|${String(row.resourceType ?? "").toLowerCase()}`;
-      if (!merged.has(key)) {
-        merged.set(key, row);
-      }
-    });
-    return Array.from(merged.values()).slice(0, 12);
-  };
   progressEvents.forEach((event, index) => {
     if (event.event !== "completed") {
       return;
     }
     const toolName = normalizeToolName(event.tool);
     if (
-      toolName !== "segment_image_megaseg" &&
       toolName !== "yolo_detect" &&
-      toolName !== "quantify_segmentation_masks" &&
-      toolName !== "plot_quantified_detections" &&
       toolName !== "upload_to_bisque" &&
       toolName !== "bisque_download_resource" &&
       toolName !== "bisque_create_dataset" &&
-      toolName !== "search_bisque_resources" &&
-      toolName !== "bisque_advanced_search" &&
-      toolName !== "bisque_find_assets"
-    ) {
-      return;
-    }
-
-    if (
-      hasMegasegScientificResultSurface &&
-      (toolName === "segment_image_megaseg" ||
-        toolName === "quantify_segmentation_masks")
+      toolName !== "search_bisque_resources"
     ) {
       return;
     }
@@ -4674,11 +3091,7 @@ const buildToolResultCards = (
       });
     });
 
-    if (
-      toolName === "search_bisque_resources" ||
-      toolName === "bisque_advanced_search" ||
-      toolName === "bisque_find_assets"
-    ) {
+    if (toolName === "search_bisque_resources") {
       if (summary?.success === false) {
         return;
       }
@@ -4706,126 +3119,41 @@ const buildToolResultCards = (
           };
         })
         .slice(0, 12);
-      const downloadRows = (
-        Array.isArray(summary?.download_rows) ? summary.download_rows : []
-      )
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => ({
-          status: String(row.status ?? "unknown").trim() || "unknown",
-          outputPath: String(row.output_path ?? "").trim() || undefined,
-          resourceUri: String(row.resource_uri ?? "").trim() || undefined,
-          clientViewUrl: String(row.client_view_url ?? "").trim() || undefined,
-          imageServiceUrl: String(row.image_service_url ?? "").trim() || undefined,
-          error: String(row.error ?? "").trim() || undefined,
-        }))
-        .slice(0, 12);
       const matchCount = toNumber(summary?.count);
       const resourceType =
         typeof summary?.resource_type === "string" && summary.resource_type.trim()
           ? summary.resource_type.trim()
           : undefined;
-      const metadataLoaded = toNumber(summary?.metadata_loaded);
-      const downloadsTotal = toNumber(summary?.downloads_total);
-      const downloadsSuccess = toNumber(summary?.downloads_success);
 
-      if (toolName !== "bisque_find_assets") {
-        const resourceTypeKey = (resourceType || "resource").toLowerCase();
-        const candidate: BisqueSearchCandidate = {
-          index,
-          toolName:
-            toolName === "bisque_advanced_search"
-              ? "bisque_advanced_search"
-              : "search_bisque_resources",
-          matchCount,
-          resourceType,
-          resourceRows,
-        };
-        const existing = bisqueSearchByType.get(resourceTypeKey);
-        if (!existing) {
-          bisqueSearchByType.set(resourceTypeKey, candidate);
-          return;
-        }
-        const mergedRows = mergeBisqueResourceRows(existing.resourceRows, candidate.resourceRows);
-        const mergedCount = Math.max(
-          mergedRows.length,
-          existing.matchCount ?? 0,
-          candidate.matchCount ?? 0
-        );
-        bisqueSearchByType.set(resourceTypeKey, {
-          index: Math.max(existing.index, candidate.index),
-          toolName:
-            candidate.toolName === "bisque_advanced_search" ||
-            existing.toolName === "bisque_advanced_search"
-              ? "bisque_advanced_search"
-              : "search_bisque_resources",
-          matchCount: mergedCount,
-          resourceType: candidate.resourceType ?? existing.resourceType,
-          resourceRows: mergedRows,
-        });
-        return;
-      }
-
-      const hasMeaningfulFindAssetsResult =
-        resourceRows.length > 0 ||
-        downloadRows.length > 0 ||
-        (matchCount ?? 0) > 0 ||
-        (metadataLoaded ?? 0) > 0 ||
-        (downloadsTotal ?? 0) > 0 ||
-        (downloadsSuccess ?? 0) > 0;
-      if (!hasMeaningfulFindAssetsResult) {
-        return;
-      }
-
-      const findAssetsCard: ToolResultCard = {
-        id: `${toolName}-${index}`,
-        tool: "bisque_find_assets",
-        title: "BisQue assets",
-        subtitle: resourceType ? `${resourceType} resources` : undefined,
-        metrics: [
-          {
-            label: "Matches",
-            value:
-              matchCount !== null
-                ? `${Math.round(matchCount)}`
-                : `${resourceRows.length}`,
-          },
-          {
-            label: "Shown",
-            value: `${resourceRows.length}`,
-          },
-          {
-            label: "Metadata",
-            value:
-              metadataLoaded !== null ? `${Math.round(metadataLoaded)}` : "0",
-          },
-          {
-            label: "Downloads",
-            value:
-              downloadsTotal !== null
-                ? `${Math.round(downloadsSuccess ?? 0)}/${Math.round(downloadsTotal)}`
-                : "0",
-          },
-        ],
-        classes: [],
-        images: toolCardImagesFromBisqueResourceRows(resourceRows, 1),
+      const resourceTypeKey = (resourceType || "resource").toLowerCase();
+      const candidate: BisqueSearchCandidate = {
+        index,
+        toolName: "search_bisque_resources",
+        matchCount,
+        resourceType,
         resourceRows,
-        downloadRows,
       };
-      const findAssetsScore =
-        (matchCount ?? resourceRows.length) * 1000 +
-        resourceRows.length * 10 +
-        (metadataLoaded ?? 0) +
-        (downloadsSuccess ?? 0);
-      if (
-        findAssetsScore > bestBisqueFindAssetsScore ||
-        (findAssetsScore === bestBisqueFindAssetsScore &&
-          index > bestBisqueFindAssetsIndex)
-      ) {
-        bestBisqueFindAssetsScore = findAssetsScore;
-        bestBisqueFindAssetsIndex = index;
-        bestBisqueFindAssetsCard = findAssetsCard;
+      const existing = bisqueSearchByType.get(resourceTypeKey);
+      if (!existing) {
+        bisqueSearchByType.set(resourceTypeKey, candidate);
+        return;
       }
+      const mergedRows = dedupeBisqueResourceRows(
+        [...existing.resourceRows, ...candidate.resourceRows],
+        12
+      );
+      const mergedCount = Math.max(
+        mergedRows.length,
+        existing.matchCount ?? 0,
+        candidate.matchCount ?? 0
+      );
+      bisqueSearchByType.set(resourceTypeKey, {
+        index: Math.max(existing.index, candidate.index),
+        toolName: "search_bisque_resources",
+        matchCount: mergedCount,
+        resourceType: candidate.resourceType ?? existing.resourceType,
+        resourceRows: mergedRows,
+      });
       return;
     }
 
@@ -4967,510 +3295,6 @@ const buildToolResultCards = (
       }
       latestBisqueDownloadIndex = Math.max(latestBisqueDownloadIndex, index);
       rows.forEach((row) => bisqueDownloadRows.push(row));
-      return;
-    }
-
-    if (toolName === "segment_image_megaseg") {
-      const toolInvocationSummary =
-        toolInvocationSummaryByTool.get(toolName) ?? null;
-      const hydratedUi = toRecord(toRecord(options?.responseMetadata)?.ui_hydrated);
-      const megasegSummary: Record<string, unknown> = {
-        ...(toolInvocationSummary ?? {}),
-        ...summary,
-        scientific_summary:
-          summary?.scientific_summary ?? toolInvocationSummary?.scientific_summary,
-        visualization_paths:
-          summary?.visualization_paths ?? toolInvocationSummary?.visualization_paths,
-        files_processed:
-          summary?.files_processed ?? toolInvocationSummary?.files_processed,
-        aggregate: summary?.aggregate ?? toolInvocationSummary?.aggregate,
-      };
-      const scientificSummary = toRecord(megasegSummary.scientific_summary);
-      const aggregate =
-        toRecord(scientificSummary?.aggregate) ??
-        toRecord(megasegSummary.aggregate) ??
-        {};
-      const scientificSummaryFiles = Array.isArray(scientificSummary?.files)
-        ? scientificSummary.files
-        : [];
-      const scientificRows = (
-        scientificSummaryFiles.length > 0
-          ? scientificSummaryFiles
-          : Array.isArray(megasegSummary.files_processed)
-            ? megasegSummary.files_processed
-            : []
-      )
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null);
-      const summaryFileRows: MegasegFileInsight[] = scientificRows.map((row) => ({
-        file:
-          String(row.file ?? "").trim() ||
-          String(row.path ?? "").trim() ||
-          "image",
-        coveragePercent: toNumber(row.coverage_percent),
-        objectCount: toNumber(row.object_count),
-        activeSliceCount: toNumber(row.active_slice_count),
-        zSliceCount: toNumber(row.z_slice_count),
-        largestComponentVoxels: toNumber(row.largest_component_voxels),
-        technicalSummary: String(row.technical_summary ?? "").trim() || undefined,
-      }));
-      const hydratedRows = (
-        Array.isArray(hydratedUi?.megaseg_file_summaries)
-          ? hydratedUi.megaseg_file_summaries
-          : []
-      )
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null)
-        .map((row) => {
-          const segmentation = toRecord(row.segmentation);
-          return {
-            file:
-              String(row.file ?? "").trim() ||
-              String(row.path ?? "").trim() ||
-              "image",
-            coveragePercent: toNumber(segmentation?.coverage_percent),
-            objectCount: toNumber(segmentation?.object_count),
-            activeSliceCount: toNumber(segmentation?.active_slice_count),
-            zSliceCount: toNumber(segmentation?.z_slice_count),
-            largestComponentVoxels: toNumber(segmentation?.largest_component_voxels),
-            technicalSummary: String(row.technical_summary ?? "").trim() || undefined,
-          } satisfies MegasegFileInsight;
-        });
-      const fileRows = Array.from(
-        [...summaryFileRows, ...hydratedRows].reduce((map, row) => {
-          const key =
-            artifactLookupKeys(row.file)[0] || String(row.file || "").toLowerCase();
-          const existing = map.get(key);
-          map.set(key, {
-            ...(existing ?? {}),
-            ...row,
-          });
-          return map;
-        }, new Map<string, MegasegFileInsight>())
-      ).map(([, row]) => row);
-
-      const computedMeanCoverage =
-        fileRows.length > 0
-          ? fileRows
-              .map((row) => row.coveragePercent)
-              .filter((value): value is number => value !== null && value !== undefined)
-          : [];
-      const computedMeanObjects =
-        fileRows.length > 0
-          ? fileRows
-              .map((row) => row.objectCount)
-              .filter((value): value is number => value !== null && value !== undefined)
-          : [];
-      const meanCoverage =
-        toNumber(megasegSummary.mean_coverage_percent) ??
-        toNumber(aggregate?.mean_coverage_percent) ??
-        (computedMeanCoverage.length > 0
-          ? computedMeanCoverage.reduce((sum, value) => sum + value, 0) /
-            computedMeanCoverage.length
-          : null);
-      const meanObjectCount =
-        toNumber(megasegSummary.mean_object_count) ??
-        toNumber(aggregate?.mean_object_count) ??
-        (computedMeanObjects.length > 0
-          ? computedMeanObjects.reduce((sum, value) => sum + value, 0) /
-            computedMeanObjects.length
-          : null);
-      const processed =
-        toNumber(megasegSummary.processed) ??
-        toNumber(aggregate?.processed_files);
-      const totalFiles =
-        toNumber(megasegSummary.total_files) ??
-        toNumber(aggregate?.total_files);
-
-      const visualizationRows = (Array.isArray(megasegSummary.visualization_paths)
-        ? megasegSummary.visualization_paths
-        : [])
-        .map((row) => toRecord(row))
-        .filter((row): row is Record<string, unknown> => row !== null);
-
-      const fallbackMegasegImages = artifacts
-        .map((artifact) =>
-          eventArtifactToToolImage({
-            artifact,
-            runId: options?.runId,
-            buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
-          })
-        )
-        .filter((artifact): artifact is ToolCardImage => artifact !== null)
-        .filter((artifact) => /(megaseg|overlay|midz|mip)/i.test(`${artifact.path} ${artifact.title}`));
-
-      const rowForValue = (value: string): MegasegFileInsight | undefined => {
-        const keys = new Set(artifactLookupKeys(value));
-        return fileRows.find((row) =>
-          artifactLookupKeys(row.file).some((key) => keys.has(key))
-        );
-      };
-
-      const figureCards = visualizationRows
-        .map((row, vizIndex): ScientificFigureCard | null => {
-          const path = String(row.path ?? "").trim();
-          if (!path) {
-            return null;
-          }
-          const sourceFile = String(row.file ?? "").trim();
-          let displayedArtifact =
-            artifactLookupKeys(path)
-              .flatMap((key) => artifactBySource.get(key) ?? [])
-              .find(Boolean) ?? null;
-          if (!displayedArtifact && sourceFile) {
-            displayedArtifact =
-              artifactLookupKeys(sourceFile)
-                .flatMap((key) => artifactBySource.get(key) ?? [])
-                .find(Boolean) ?? null;
-          }
-          const fallbackArtifact =
-            displayedArtifact ??
-            eventArtifactToToolImage({
-              artifact: {
-                path,
-                title: row.title,
-                source_path: sourceFile,
-              },
-              runId: options?.runId,
-              buildArtifactDownloadUrl: options?.buildArtifactDownloadUrl,
-            });
-          if (!fallbackArtifact) {
-            return null;
-          }
-          const fileInsight = rowForValue(sourceFile || path);
-          const figureKind = String(row.kind ?? "").trim().toLowerCase();
-          const figureSummaryParts = [
-            figureKind === "overlay_mip"
-              ? "Maximum-intensity projection overlay"
-              : figureKind === "overlay_mid_z"
-                ? "Representative mid-Z overlay"
-                : null,
-            fileInsight?.coveragePercent !== null &&
-            fileInsight?.coveragePercent !== undefined
-              ? `coverage ${formatPercentMetric(fileInsight.coveragePercent)}`
-              : toNumber(row.coverage_percent) !== null
-                ? `coverage ${formatPercentMetric(toNumber(row.coverage_percent))}`
-                : null,
-            fileInsight?.objectCount !== null &&
-            fileInsight?.objectCount !== undefined
-              ? `${formatIntegerMetric(fileInsight.objectCount)} objects`
-              : null,
-            fileInsight?.activeSliceCount !== null &&
-            fileInsight?.activeSliceCount !== undefined &&
-            fileInsight?.zSliceCount !== null &&
-            fileInsight?.zSliceCount !== undefined
-              ? `${formatIntegerMetric(fileInsight.activeSliceCount)}/${formatIntegerMetric(fileInsight.zSliceCount)} active z-slices`
-              : null,
-          ].filter((value): value is string => value !== null);
-          return {
-            key: `${path}-${vizIndex}`,
-            title: String(row.title ?? "Megaseg overlay").trim() || "Megaseg overlay",
-            subtitle: sourceFile ? toDisplayFileLabel(sourceFile) : undefined,
-            summary: figureSummaryParts.join(" · ") || undefined,
-            previewUrl: fallbackArtifact.url,
-            downloadUrl: fallbackArtifact.downloadUrl ?? fallbackArtifact.url,
-            previewable: fallbackArtifact.previewable,
-          } satisfies ScientificFigureCard;
-        })
-        .filter((row): row is ScientificFigureCard => row !== null)
-        .sort((left, right) => {
-          const leftKey = scientificFigureSortKey(left);
-          const rightKey = scientificFigureSortKey(right);
-          return leftKey[0] - rightKey[0] || leftKey[1].localeCompare(rightKey[1]);
-        });
-
-      const figureCardsFromHydratedArtifacts: ScientificFigureCard[] =
-        figureCards.length > 0
-          ? figureCards
-          : runArtifacts
-              .filter((artifact) =>
-                /(megaseg.*overlay|overlay.*megaseg|overlay_mip|overlay_midz|mask_preview)/i.test(
-                  `${artifact.path} ${artifact.title} ${artifact.sourceName}`
-                )
-              )
-              .map((artifact, artifactIndex): ScientificFigureCard => ({
-                key: `${artifact.path}-${artifactIndex}`,
-                title: artifact.title || "Megaseg figure",
-                subtitle:
-                  artifact.sourcePath || artifact.sourceName
-                    ? toDisplayFileLabel(artifact.sourcePath || artifact.sourceName)
-                    : undefined,
-                summary: /overlay_mip|mip/i.test(`${artifact.path} ${artifact.title}`)
-                  ? "Maximum-intensity projection overlay"
-                  : /overlay_midz|mid[-\s]?z/i.test(`${artifact.path} ${artifact.title}`)
-                    ? "Representative mid-Z overlay"
-                    : /mask_preview/i.test(`${artifact.path} ${artifact.title}`)
-                      ? "Binary mask preview"
-                      : undefined,
-                previewUrl: artifact.url,
-                downloadUrl: artifact.downloadUrl ?? artifact.url,
-                previewable: artifact.previewable,
-              }))
-              .sort((left, right) => {
-                const leftKey = scientificFigureSortKey(left);
-                const rightKey = scientificFigureSortKey(right);
-                return leftKey[0] - rightKey[0] || leftKey[1].localeCompare(rightKey[1]);
-              });
-
-      const megasegImages: ToolCardImage[] =
-        figureCardsFromHydratedArtifacts.length > 0
-          ? figureCardsFromHydratedArtifacts.flatMap((figure) => {
-              const url = figure.previewUrl ?? figure.url;
-              if (!url) {
-                return [];
-              }
-              return [
-                {
-                  path: figure.key,
-                  url,
-                  downloadUrl: figure.downloadUrl ?? url,
-                  title: figure.title,
-                  sourceName: figure.file ?? figure.subtitle ?? figure.title,
-                  previewable: figure.previewable,
-                },
-              ];
-            })
-          : fallbackMegasegImages.slice(0, 6);
-
-      const hasMeaningfulMegasegResult =
-        megasegSummary.success !== false &&
-        (fileRows.length > 0 ||
-          figureCardsFromHydratedArtifacts.length > 0 ||
-          fallbackMegasegImages.length > 0 ||
-          processed !== null);
-
-      if (!hasMeaningfulMegasegResult) {
-        return;
-      }
-
-      const firstRow = fileRows[0];
-      const singleFile = fileRows.length <= 1;
-      const metrics: ToolCardMetric[] = singleFile
-        ? [
-            {
-              label: "Coverage",
-              value: formatPercentMetric(firstRow?.coveragePercent ?? meanCoverage),
-            },
-            {
-              label: "Objects",
-              value: formatIntegerMetric(firstRow?.objectCount ?? meanObjectCount),
-            },
-            {
-              label: "Active z-slices",
-              value:
-                firstRow?.activeSliceCount !== null &&
-                firstRow?.activeSliceCount !== undefined &&
-                firstRow?.zSliceCount !== null &&
-                firstRow?.zSliceCount !== undefined
-                  ? `${formatIntegerMetric(firstRow.activeSliceCount)}/${formatIntegerMetric(firstRow.zSliceCount)}`
-                  : "n/a",
-            },
-            {
-              label: "Largest component",
-              value: formatIntegerMetric(firstRow?.largestComponentVoxels),
-            },
-          ]
-        : [
-            {
-              label: "Processed",
-              value:
-                processed !== null && totalFiles !== null
-                  ? `${formatIntegerMetric(processed)}/${formatIntegerMetric(totalFiles)}`
-                  : formatIntegerMetric(processed),
-            },
-            {
-              label: "Mean coverage",
-              value: formatPercentMetric(meanCoverage),
-            },
-            {
-              label: "Mean objects",
-              value:
-                meanObjectCount !== null ? meanObjectCount.toFixed(1) : "n/a",
-            },
-            {
-              label: "Overlays",
-              value: formatIntegerMetric(figureCards.length || fallbackMegasegImages.length),
-            },
-          ];
-
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "segment_image_megaseg",
-        title: "Megaseg segmentation",
-        subtitle:
-          typeof megasegSummary.model === "string" && megasegSummary.model.trim()
-            ? megasegSummary.model.trim()
-            : undefined,
-        metrics,
-        classes: [],
-        images: megasegImages,
-        resourceRows: [],
-        downloadRows: [],
-        narrative: buildMegasegNarrative({
-          fileRows,
-          processed,
-          meanCoverage,
-          meanObjectCount,
-        }),
-        placement: "before_text",
-        scientificFigures: figureCardsFromHydratedArtifacts,
-        megasegInsights: {
-          resultGroupId:
-            String(megasegSummary.result_group_id ?? megasegSummary.output_directory ?? `${toolName}-${index}`),
-          heroFigure:
-            figureCardsFromHydratedArtifacts[0]
-              ? {
-                  key: figureCardsFromHydratedArtifacts[0].key,
-                  kind: "overlay_mip",
-                  title: figureCardsFromHydratedArtifacts[0].title,
-                  file: figureCardsFromHydratedArtifacts[0].subtitle,
-                  summary: figureCardsFromHydratedArtifacts[0].summary,
-                  url: figureCardsFromHydratedArtifacts[0].previewUrl,
-                  downloadUrl:
-                    figureCardsFromHydratedArtifacts[0].downloadUrl ??
-                    figureCardsFromHydratedArtifacts[0].previewUrl,
-                  previewable: figureCardsFromHydratedArtifacts[0].previewable,
-                }
-              : null,
-          secondaryFigures: figureCardsFromHydratedArtifacts.slice(1).map((figure) => ({
-            key: figure.key,
-            kind: /overlay_midz|mid[-\s]?z/i.test(`${figure.title} ${figure.summary}`)
-              ? "overlay_mid_z"
-              : /mask_preview/i.test(`${figure.title} ${figure.summary}`)
-                ? "mask_preview"
-                : "figure",
-            title: figure.title,
-            file: figure.subtitle,
-            summary: figure.summary,
-            url: figure.previewUrl,
-            downloadUrl: figure.downloadUrl ?? figure.previewUrl,
-            previewable: figure.previewable,
-          })),
-          fileRows,
-          reportPath:
-            typeof megasegSummary.report_path === "string" ? megasegSummary.report_path : null,
-          summaryCsvPath:
-            typeof megasegSummary.summary_csv_path === "string"
-              ? megasegSummary.summary_csv_path
-              : null,
-          reportDownloadUrl: null,
-          summaryCsvDownloadUrl: null,
-          technicalSummary:
-            typeof firstRow?.technicalSummary === "string" ? firstRow.technicalSummary : null,
-          collectionLabel:
-            processed !== null && totalFiles !== null
-              ? `${formatIntegerMetric(processed)} of ${formatIntegerMetric(totalFiles)} images processed`
-              : undefined,
-          device:
-            typeof megasegSummary.device === "string" && megasegSummary.device.trim()
-              ? megasegSummary.device.trim()
-              : null,
-          structureChannel: toNumber(megasegSummary.structure_channel),
-          nucleusChannel: toNumber(megasegSummary.nucleus_channel),
-        },
-      });
-      return;
-    }
-
-    if (toolName === "quantify_segmentation_masks") {
-      const summaryRecord = toRecord(summary?.summary) ?? {};
-      const metricsMean = toRecord(summary?.metrics_mean) ?? {};
-      const successfulMasks = toNumber(summaryRecord?.successful_masks);
-      const meanCoverage = toNumber(summaryRecord?.mean_coverage_percent);
-      const meanObjectCount = toNumber(summaryRecord?.mean_object_count);
-      const rowCount = toNumber(summary?.row_count);
-      const diceMean = toNumber(metricsMean?.dice);
-      const hasMeaningfulQuantification =
-        successfulMasks !== null ||
-        meanCoverage !== null ||
-        meanObjectCount !== null ||
-        rowCount !== null ||
-        diceMean !== null;
-
-      if (!hasMeaningfulQuantification) {
-        return;
-      }
-
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "quantify_segmentation_masks",
-        title: "Segmentation quantification",
-        subtitle:
-          typeof summary?.evaluation_pairing_fallback_used === "boolean" &&
-          summary.evaluation_pairing_fallback_used
-            ? "evaluation paired by index fallback"
-            : undefined,
-        metrics: [
-          {
-            label: "Masks",
-            value: successfulMasks !== null ? `${Math.round(successfulMasks)}` : "n/a",
-          },
-          {
-            label: "Mean coverage",
-            value: meanCoverage !== null ? `${meanCoverage.toFixed(2)}%` : "n/a",
-          },
-          {
-            label: "Mean objects",
-            value: meanObjectCount !== null ? `${meanObjectCount.toFixed(2)}` : "n/a",
-          },
-          ...(rowCount !== null ? [{ label: "Rows", value: `${Math.round(rowCount)}` }] : []),
-          ...(diceMean !== null ? [{ label: "Mean Dice", value: diceMean.toFixed(3) }] : []),
-        ],
-        classes: [],
-        images: [],
-        resourceRows: [],
-        downloadRows: [],
-      });
-      return;
-    }
-
-    if (toolName === "plot_quantified_detections") {
-      if (matchedImages.length === 0) {
-        runArtifacts
-          .filter((artifact) => isPlotArtifact(artifact))
-          .slice(0, 6)
-          .forEach((artifact) => addMatchedImage(artifact));
-      }
-      const plottedImages = matchedImages.some((artifact) => isPlotArtifact(artifact))
-        ? matchedImages.filter((artifact) => isPlotArtifact(artifact))
-        : [...matchedImages];
-      const summaryRecord = toRecord(summary?.summary) ?? summary;
-      const totalDetections = toNumber(summaryRecord?.total_detections);
-      const lowConfidenceCount = toNumber(summaryRecord?.low_confidence_count);
-      const confidenceThreshold = toNumber(summaryRecord?.confidence_threshold);
-      const generatedPlotCount = toNumber(summaryRecord?.generated_plot_count);
-      cards.push({
-        id: `${toolName}-${index}`,
-        tool: "plot_quantified_detections",
-        title: "Detection uncertainty plots",
-        subtitle:
-          typeof summaryRecord?.image_name === "string" && summaryRecord.image_name.trim()
-            ? summaryRecord.image_name.trim()
-            : undefined,
-        metrics: [
-          {
-            label: "Detections",
-            value: totalDetections !== null ? `${Math.round(totalDetections)}` : "n/a",
-          },
-          {
-            label: "Below threshold",
-            value: lowConfidenceCount !== null ? `${Math.round(lowConfidenceCount)}` : "n/a",
-          },
-          {
-            label: "Threshold",
-            value:
-              confidenceThreshold !== null ? `${(confidenceThreshold * 100).toFixed(0)}%` : "n/a",
-          },
-          {
-            label: "Plots",
-            value: generatedPlotCount !== null ? `${Math.round(generatedPlotCount)}` : `${plottedImages.length}`,
-          },
-        ],
-        classes: [],
-        images: plottedImages,
-        resourceRows: [],
-        downloadRows: [],
-      });
       return;
     }
 
@@ -5936,32 +3760,20 @@ const buildToolResultCards = (
   });
 
   let mergedBisqueSearchCard: ToolResultCard | null = null;
-  let mergedBisqueSearchMatchCount = 0;
 
   if (bisqueSearchByType.size > 0) {
     const selectedBisqueSearches = Array.from(bisqueSearchByType.values()).sort(
       (left, right) => left.index - right.index
     );
-    const uniqueRows = new Map<string, ToolResourceRow>();
-    selectedBisqueSearches.forEach((candidate) => {
-      candidate.resourceRows.forEach((row) => {
-        const key =
-          row.uri?.toLowerCase() ||
-          `${row.name.toLowerCase()}|${String(row.owner ?? "").toLowerCase()}|${String(
-            row.created ?? ""
-          ).toLowerCase()}|${String(row.resourceType ?? "").toLowerCase()}`;
-        if (!uniqueRows.has(key)) {
-          uniqueRows.set(key, row);
-        }
-      });
-    });
-    const mergedRows = Array.from(uniqueRows.values()).slice(0, 12);
+    const mergedRows = dedupeBisqueResourceRows(
+      selectedBisqueSearches.flatMap((candidate) => candidate.resourceRows),
+      12
+    );
     const totalMatches = selectedBisqueSearches.reduce((sum, candidate) => {
       const countValue = candidate.matchCount ?? candidate.resourceRows.length;
       return sum + Math.max(0, Math.round(countValue));
     }, 0);
     if (totalMatches <= 0 && mergedRows.length === 0) {
-      mergedBisqueSearchMatchCount = 0;
       mergedBisqueSearchCard = null;
     } else {
       const resourceTypes = Array.from(
@@ -5978,19 +3790,10 @@ const buildToolResultCards = (
             ? `${resourceTypes[0]} resources`
             : `${resourceTypes.slice(0, 2).join(" + ")}${resourceTypes.length > 2 ? " + more" : ""} resources`;
       const lastCandidate = selectedBisqueSearches[selectedBisqueSearches.length - 1];
-      mergedBisqueSearchMatchCount = totalMatches;
       mergedBisqueSearchCard = {
         id: `bisque-search-${lastCandidate.index}`,
-        tool:
-          selectedBisqueSearches.length === 1 &&
-          selectedBisqueSearches[0].toolName === "bisque_advanced_search"
-            ? "bisque_advanced_search"
-            : "search_bisque_resources",
-        title:
-          selectedBisqueSearches.length === 1 &&
-          selectedBisqueSearches[0].toolName === "bisque_advanced_search"
-            ? "BisQue advanced search"
-            : "BisQue search",
+        tool: "search_bisque_resources",
+        title: "BisQue search",
         subtitle,
         metrics: [
           {
@@ -6015,44 +3818,7 @@ const buildToolResultCards = (
     primaryBisqueCard = latestBisqueUploadCard;
   }
 
-  if (!primaryBisqueCard && bestBisqueFindAssetsCard) {
-    const findAssetsCard = bestBisqueFindAssetsCard as ToolResultCard;
-    if (mergedBisqueSearchCard) {
-      const mergedRows = mergeBisqueResourceRows(
-        findAssetsCard.resourceRows,
-        mergedBisqueSearchCard.resourceRows
-      );
-      const existingMetrics = new Map(
-        findAssetsCard.metrics.map((metric) => [metric.label, metric.value] as const)
-      );
-      const existingMatchCount = Number.parseInt(existingMetrics.get("Matches") ?? "0", 10);
-      const mergedMatchCount = Math.max(
-        Number.isFinite(existingMatchCount) ? existingMatchCount : 0,
-        mergedBisqueSearchMatchCount,
-        mergedRows.length
-      );
-      primaryBisqueCard = {
-        ...findAssetsCard,
-        subtitle: findAssetsCard.subtitle ?? mergedBisqueSearchCard.subtitle,
-        metrics: findAssetsCard.metrics.map((metric) => {
-          if (metric.label === "Matches") {
-            return { ...metric, value: `${mergedMatchCount}` };
-          }
-          if (metric.label === "Shown") {
-            return { ...metric, value: `${mergedRows.length}` };
-          }
-          return metric;
-        }),
-        images:
-          findAssetsCard.images.length > 0
-            ? findAssetsCard.images
-            : toolCardImagesFromBisqueResourceRows(mergedRows, 1),
-        resourceRows: mergedRows,
-      };
-    } else {
-      primaryBisqueCard = findAssetsCard;
-    }
-  } else if (mergedBisqueSearchCard && !primaryBisqueCard) {
+  if (mergedBisqueSearchCard && !primaryBisqueCard) {
     primaryBisqueCard = mergedBisqueSearchCard;
   }
 
@@ -6083,223 +3849,18 @@ const buildToolResultCards = (
   return cards;
 };
 
-const mergeBisqueResourceRows = (rows: ToolResourceRow[]): ToolResourceRow[] => {
-  const merged = new Map<string, ToolResourceRow>();
-  rows.forEach((row) => {
-    const key =
-      row.resourceUri?.toLowerCase() ||
-      row.clientViewUrl?.toLowerCase() ||
-      row.uri?.toLowerCase() ||
-      row.name.toLowerCase();
-    if (!merged.has(key)) {
-      merged.set(key, row);
-    }
-  });
-  return Array.from(merged.values());
-};
-
 const extractSearchResourceRowsFromMessage = (message: UiMessage): ToolResourceRow[] => {
   const cards = buildToolResultCards(message.progressEvents ?? [], message.runArtifacts ?? []);
-  return mergeBisqueResourceRows(
+  return dedupeBisqueResourceRows(
     cards
-      .filter((card) =>
-        card.tool === "search_bisque_resources" ||
-        card.tool === "bisque_advanced_search" ||
-        card.tool === "bisque_find_assets"
-      )
+      .filter((card) => card.tool === "search_bisque_resources")
       .flatMap((card) => card.resourceRows)
       .filter((row) => Boolean(row.resourceUri))
   );
 };
 
 const extractResolvedBisqueRowsFromMessage = (message: UiMessage): ToolResourceRow[] =>
-  mergeBisqueResourceRows(message.resolvedBisqueResources ?? []);
-
-const extractArtifactHandlesFromResponseMetadata = (
-  responseMetadata: Record<string, unknown> | null | undefined
-): Record<string, string[]> => {
-  const metadata = toRecord(responseMetadata);
-  const researchProgram = toRecord(metadata?.research_program);
-  const proMode = toRecord(metadata?.pro_mode);
-  const proModeResearchProgram = toRecord(proMode?.research_program);
-  return toArtifactHandleMap(
-    researchProgram?.handles ?? proModeResearchProgram?.handles ?? {}
-  );
-};
-
-const mergeSelectionContexts = (
-  primary: SelectionContext | null,
-  secondary: SelectionContext | null
-): SelectionContext | null => {
-  if (!primary) {
-    return secondary;
-  }
-  if (!secondary) {
-    return primary;
-  }
-  return {
-    context_id: primary.context_id ?? secondary.context_id ?? makeId(),
-    source: primary.source ?? secondary.source ?? null,
-    focused_file_ids: uniqueFileIds([
-      ...(primary.focused_file_ids ?? []),
-      ...(secondary.focused_file_ids ?? []),
-    ]),
-    resource_uris: Array.from(
-      new Set([...(primary.resource_uris ?? []), ...(secondary.resource_uris ?? [])])
-    ),
-    dataset_uris: Array.from(
-      new Set([...(primary.dataset_uris ?? []), ...(secondary.dataset_uris ?? [])])
-    ),
-    artifact_handles: {
-      ...toArtifactHandleMap(secondary.artifact_handles),
-      ...toArtifactHandleMap(primary.artifact_handles),
-    },
-    originating_message_id:
-      primary.originating_message_id ?? secondary.originating_message_id ?? null,
-    originating_user_text:
-      primary.originating_user_text ?? secondary.originating_user_text ?? null,
-    suggested_domain: primary.suggested_domain ?? secondary.suggested_domain ?? null,
-    suggested_tool_names: Array.from(
-      new Set([...(primary.suggested_tool_names ?? []), ...(secondary.suggested_tool_names ?? [])])
-    ),
-  };
-};
-
-const deriveBisqueSelectionContextFromResponseMetadata = ({
-  responseMetadata,
-  source,
-  originatingUserText,
-  suggestedDomain,
-}: {
-  responseMetadata: Record<string, unknown> | null | undefined;
-  source: SelectionContext["source"];
-  originatingUserText: string;
-  suggestedDomain?: SelectionContext["suggested_domain"];
-}): {
-  selectionContext: SelectionContext | null;
-  resolvedRows: ToolResourceRow[];
-  clearsSelection: boolean;
-} => {
-  const metadata = toRecord(responseMetadata);
-  const artifactHandles = extractArtifactHandlesFromResponseMetadata(responseMetadata);
-  const toolInvocations = Array.isArray(metadata?.tool_invocations)
-    ? metadata.tool_invocations
-    : [];
-  // No BisQue deletion tool exists, so a turn can never clear the selection.
-  const clearsSelection = false;
-  const resolvedRows = mergeBisqueResourceRows(
-    toolInvocations.flatMap((entry) => {
-      const record = toRecord(entry);
-      if (!record) {
-        return [];
-      }
-      const summaryRows = toToolResourceRows((record.output_summary as Record<string, unknown> | undefined)?.rows);
-      if (summaryRows.length > 0) {
-        return summaryRows;
-      }
-
-      const envelope = toRecord(record.output_envelope);
-      if (!envelope) {
-        return [];
-      }
-
-      const rowsFromEnvelope = toToolResourceRows(envelope.rows);
-      if (rowsFromEnvelope.length > 0) {
-        return rowsFromEnvelope;
-      }
-
-      const resultRows = Array.isArray(envelope.results)
-        ? envelope.results
-            .map((item) => toRecord(item))
-            .filter((item): item is Record<string, unknown> => item !== null)
-            .map((item) => ({
-              name:
-                String(item.file ?? item.name ?? "").trim() ||
-                String(record.tool ?? "resource").trim() ||
-                "resource",
-              resource_uri: String(item.resource_uri ?? "").trim() || undefined,
-              client_view_url: String(item.client_view_url ?? "").trim() || undefined,
-              image_service_url: String(item.image_service_url ?? "").trim() || undefined,
-              uri:
-                String(item.client_view_url ?? item.resource_uri ?? "").trim() || undefined,
-            }))
-        : [];
-      if (resultRows.length > 0) {
-        return toToolResourceRows(resultRows);
-      }
-
-      const resourceUri = String(
-        envelope.resource_uri ?? envelope.deleted_uri ?? envelope.uri ?? ""
-      ).trim();
-      const clientViewUrl = String(
-        envelope.client_view_url ?? envelope.deleted_client_view_url ?? ""
-      ).trim() || toBisqueClientViewUrl(resourceUri) || "";
-      const datasetUri = String(envelope.dataset_uri ?? "").trim();
-      const datasetClientViewUrl =
-        String(envelope.dataset_client_view_url ?? "").trim() || toBisqueClientViewUrl(datasetUri) || "";
-      const directRows: Array<Record<string, unknown>> = [];
-      if (resourceUri) {
-        directRows.push({
-          name:
-            String(envelope.resource_name ?? envelope.name ?? "").trim() ||
-            String(record.tool ?? "resource").trim() ||
-          "resource",
-          resource_uri: resourceUri,
-          client_view_url: clientViewUrl || undefined,
-          uri: clientViewUrl || resourceUri,
-        });
-      }
-      if (datasetUri) {
-        directRows.push({
-          name:
-            String(envelope.dataset_name ?? "").trim() ||
-            "dataset",
-          resource_uri: datasetUri,
-          client_view_url: datasetClientViewUrl || undefined,
-          uri: datasetClientViewUrl || datasetUri,
-          resource_type: "dataset",
-        });
-      }
-      return toToolResourceRows(directRows);
-    })
-  );
-
-  if (resolvedRows.length === 0) {
-    if (Object.keys(artifactHandles).length > 0) {
-      return {
-        selectionContext: buildBisqueSelectionContext({
-          source,
-          artifactHandles,
-          originatingUserText,
-          suggestedDomain,
-          suggestedToolNames: [],
-        }),
-        resolvedRows,
-        clearsSelection,
-      };
-    }
-    return {
-      selectionContext: null,
-      resolvedRows,
-      clearsSelection,
-    };
-  }
-
-  const partitioned = partitionBisqueRowsByUri(resolvedRows);
-  return {
-    selectionContext: buildBisqueSelectionContext({
-      source,
-      resourceUris: partitioned.resourceUris,
-      datasetUris: partitioned.datasetUris,
-      artifactHandles,
-      originatingUserText,
-      suggestedDomain,
-      suggestedToolNames: [],
-    }),
-    resolvedRows,
-    clearsSelection,
-  };
-};
+  dedupeBisqueResourceRows(message.resolvedBisqueResources ?? []);
 
 const bisqueNumberWords: Record<string, number> = {
   one: 1,
@@ -6563,7 +4124,7 @@ const deriveBisqueSelectionContextFromToolCards = ({
 } => {
   // No BisQue deletion tool exists, so a turn can never clear the selection.
   const clearsSelection = false;
-  const resolvedRows = mergeBisqueResourceRows(
+  const resolvedRows = dedupeBisqueResourceRows(
     toolResultCards
       .flatMap((card) => card.resourceRows)
       .filter((row) => Boolean(row.resourceUri))
@@ -6726,83 +4287,11 @@ const thinkingBarTextForRunEvents = (
   runEvents: RunEvent[],
   isStreaming: boolean
 ): string | null => {
-  if (!isStreaming) {
-    return null;
-  }
-  for (let index = runEvents.length - 1; index >= 0; index -= 1) {
-    const event = runEvents[index];
-    const payload = toRecord(event.payload);
-    if (!payload) {
-      continue;
-    }
-    const eventType = String(event.event_type || "").trim().toLowerCase();
-    const phase = String(payload.phase || "").trim().toLowerCase();
-    const status = String(payload.status || "").trim().toLowerCase();
-    if (eventType === "memory.retrieved" || phase === "memory") {
-      return getPhaseThinkingText("memory") ?? DEFAULT_THINKING_TEXT;
-    }
-    if (eventType === "knowledge.retrieved" || phase === "knowledge") {
-      return getPhaseThinkingText("knowledge") ?? DEFAULT_THINKING_TEXT;
-    }
-    if (eventType === "learning.promoted" || eventType === "learning.skipped" || phase === "learning") {
-      return getPhaseThinkingText("learning") ?? DEFAULT_THINKING_TEXT;
-    }
-    if (
-      eventType === "tool_event" ||
-      eventType === "pro_mode.tool_requested" ||
-      eventType === "pro_mode.tool_completed"
-    ) {
-      const toolStatus =
-        status ||
-        (eventType === "pro_mode.tool_requested"
-          ? "started"
-          : eventType === "pro_mode.tool_completed"
-            ? "completed"
-            : "");
-      return getToolStatusThinkingText(toolStatus) ?? DEFAULT_THINKING_TEXT;
-    }
-    if (
-      eventType !== "graph_event" &&
-      eventType !== "pro_mode.phase_started" &&
-      eventType !== "pro_mode.phase_completed" &&
-      eventType !== "pro_mode.convergence_updated" &&
-      eventType !== "pro_mode.verifier_result"
-    ) {
-      continue;
-    }
-    const phaseThinkingText = getPhaseThinkingText(phase);
-    if (phaseThinkingText) {
-      return phaseThinkingText;
-    }
-  }
+  // The per-phase copy branches this used to key on (memory/knowledge/learning/
+  // tool_event/pro_mode/graph_event) matched event kinds no deployed backend has
+  // ever emitted; ChatRunSteps owns the real per-step copy.
+  void runEvents;
   return isStreaming ? DEFAULT_THINKING_TEXT : null;
-};
-
-const summaryModeLabelForMessage = (message: UiMessage): string | null => {
-  const metadata = toRecord(message.responseMetadata);
-  const debug = metadata ? toRecord(metadata.debug) : null;
-  const proMode = metadata ? toRecord(metadata.pro_mode) : null;
-  const path = String(debug?.path || "").trim().toLowerCase();
-  return path === "pro_mode" || Boolean(proMode) ? "Pro Mode" : null;
-};
-
-const proModeDevConversationForMessage = (
-  message: UiMessage
-): Record<string, unknown> | null => {
-  if (!import.meta.env.DEV) {
-    return null;
-  }
-  const metadata = toRecord(message.responseMetadata);
-  if (!metadata) {
-    return null;
-  }
-  const debug = toRecord(metadata.debug);
-  if (String(debug?.path || "").trim().toLowerCase() !== "pro_mode") {
-    return null;
-  }
-  const proMode = toRecord(metadata.pro_mode);
-  const conversation = toRecord(proMode?.dev_conversation);
-  return conversation;
 };
 
 // Compact elapsed-time label for the assistant metadata line, e.g. "8s",
@@ -6919,9 +4408,6 @@ const uploadedPreviewArtifactFromPath = (
     linkedFileId: matchedUpload.file_id,
   } satisfies RunImageArtifact;
 };
-
-const pluralizeCount = (count: number, singular: string, plural?: string): string =>
-  `${count} ${count === 1 ? singular : plural ?? `${singular}s`}`;
 
 const normalizeBisqueServiceKind = (
   value: string | null | undefined
@@ -7186,161 +4672,26 @@ const buildYoloFigureCardsFromAnnotatedArtifacts = (
     .filter((item): item is YoloFigureCard => item !== null);
 };
 
-function PanelLoadingState({
-  title = "Loading panel...",
-  subtitle = "Preparing this workspace only when you open it keeps the chat shell lighter.",
-}: {
-  title?: string;
-  subtitle?: string;
-}) {
-  return (
-    <div className="hero-state">
-      <h2 className="hero-title">{title}</h2>
-      <p className="hero-subtitle">{subtitle}</p>
-    </div>
-  );
-}
+const resourceToUploadedFile = (resource: ResourceRecord): UploadedFileRecord => ({
+  file_id: resource.file_id,
+  original_name: resource.original_name,
+  content_type: resource.content_type ?? null,
+  size_bytes: Math.max(0, Number(resource.size_bytes) || 0),
+  sha256: resource.sha256,
+  created_at: resource.created_at,
+});
 
-const getAccountDisplayName = (
-  authUser: string | null,
-  authMode: AuthMode | null
-): string => {
-  const trimmedUser = String(authUser ?? "").trim();
-  if (trimmedUser) {
-    return trimmedUser;
+const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null => {
+  const clientViewUrl = String(resource.client_view_url ?? "").trim();
+  if (!clientViewUrl) {
+    return null;
   }
-  if (authMode === "guest") {
-    return "Guest";
-  }
-  if (authMode === "workos") {
-    return "Researcher";
-  }
-  return "BisQue user";
+  return {
+    clientViewUrl,
+    resourceUri: resource.source_uri ?? null,
+    imageServiceUrl: resource.image_service_url ?? null,
+  };
 };
-
-const getAccountSubtitle = (
-  authMode: AuthMode | null,
-  authIsAdmin: boolean
-): string => {
-  if (authMode === "guest") {
-    return "Guest access";
-  }
-  if (authMode === "workos") {
-    return authIsAdmin ? "Administrator" : "Researcher";
-  }
-  if (authIsAdmin) {
-    return "Admin account";
-  }
-  return "BisQue account";
-};
-
-const getAccountInitials = (displayName: string): string => {
-  const normalized = displayName.replace(/@.*$/, "").trim();
-  const parts = normalized.split(/[\s._-]+/).filter(Boolean);
-  const source =
-    parts.length >= 2
-      ? `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}`
-      : normalized.slice(0, 2);
-  return source.trim().toUpperCase() || "BU";
-};
-
-type SidebarAccountSettingsButtonProps = {
-  authUser: string | null;
-  authMode: AuthMode | null;
-  authIsAdmin: boolean;
-  themePreference: ThemePreference;
-  onThemePreferenceChange: (value: ThemePreference) => void;
-  onOpenSettings: () => void;
-  onLogout: () => Promise<void>;
-};
-
-function SidebarAccountSettingsButton({
-  authUser,
-  authMode,
-  authIsAdmin,
-  themePreference,
-  onThemePreferenceChange,
-  onOpenSettings,
-  onLogout,
-}: SidebarAccountSettingsButtonProps) {
-  const accountName = getAccountDisplayName(authUser, authMode);
-  const accountSubtitle = getAccountSubtitle(authMode, authIsAdmin);
-  const initials = getAccountInitials(accountName);
-
-  return (
-    <div className="app-sidebar-user-menu">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            className="app-sidebar-account-button"
-            aria-label="Open account menu"
-            {...mobileSidebarKeepOpenProps}
-          >
-            <Avatar className="app-sidebar-account-avatar">
-              <AvatarFallback>{initials}</AvatarFallback>
-            </Avatar>
-            <span className="app-sidebar-account-copy">
-              <span className="app-sidebar-account-name">{accountName}</span>
-              <span className="app-sidebar-account-subtitle">{accountSubtitle}</span>
-            </span>
-            <Settings data-icon="inline-end" aria-hidden="true" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          side="top"
-          align="start"
-          sideOffset={8}
-          className="app-sidebar-account-menu"
-        >
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("system")}>
-            <Laptop data-icon="inline-start" aria-hidden="true" />
-            <span>System</span>
-            {themePreference === "system" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("light")}>
-            <Sun data-icon="inline-start" aria-hidden="true" />
-            <span>Light</span>
-            {themePreference === "light" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("dark")}>
-            <Moon data-icon="inline-start" aria-hidden="true" />
-            <span>Dark</span>
-            {themePreference === "dark" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onOpenSettings} {...mobileSidebarCloseProps}>
-            <Settings data-icon="inline-start" aria-hidden="true" />
-            <span>Settings</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => void onLogout()}>
-            <LogOut data-icon="inline-start" aria-hidden="true" />
-            <span>
-              {authUser
-                ? authMode === "guest"
-                  ? `Sign out (${authUser}, guest)`
-                  : `Sign out (${authUser})`
-                : "Sign out"}
-            </span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
-}
 
 export function App() {
   const apiBaseUrl = DEFAULT_API_BASE_URL;
@@ -7348,7 +4699,7 @@ export function App() {
     "bisque.frontend.themePreference",
     "system"
   );
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
+  const resolvedTheme = useThemePreference(themePreference);
   const [bisqueNavLinks, setBisqueNavLinks] = useState<BisqueNavLinks | null>(() => {
     const fallbackRoot = inferBisqueRootFromUrl(DEFAULT_BISQUE_BROWSER_URL);
     return fallbackRoot ? buildBisqueNavLinks(fallbackRoot) : null;
@@ -7378,16 +4729,6 @@ export function App() {
     },
     []
   );
-  const [blankChatTokenUsage, setBlankChatTokenUsage] =
-    useState<TokenUsageResponse | null>(null);
-  const [blankChatUsageLoading, setBlankChatUsageLoading] = useState(false);
-  const [blankChatUsageError, setBlankChatUsageError] = useState<string | null>(null);
-  const blankChatUsageRequestRef = useRef({
-    key: "",
-    inFlight: false,
-    loaded: false,
-    failed: false,
-  });
   const isPhoneView = useBreakpoint(641);
   // Phone-only: when the user scrolls up to read a long answer, collapse the
   // composer to reclaim reading space (expands on focus / at-bottom / sending).
@@ -7530,7 +4871,6 @@ export function App() {
     null
   );
   const [uiErrorBanner, setUiErrorBanner] = useState<string | null>(null);
-  const [pendingReusePrompt, setPendingReusePrompt] = useState<PendingReusePrompt | null>(null);
   // Set by "Retry" on a stopped/failed turn: after the stale pair is removed
   // (which triggers a re-render), an effect re-sends this prompt through the
   // normal submit pipeline. A ref avoids an extra render + cascading setState.
@@ -7539,12 +4879,6 @@ export function App() {
     Record<string, string>
   >(() => readComposerDraftsFromStorage());
 
-  const sidebarInsetRef = useRef<HTMLElement>(null);
-  const [sidebarInsetElement, setSidebarInsetElement] = useState<HTMLElement | null>(null);
-  const setSidebarInsetNode = useCallback((node: HTMLElement | null): void => {
-    sidebarInsetRef.current = node;
-    setSidebarInsetElement(node);
-  }, []);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeChatScrollElementRef = useRef<HTMLElement | null>(null);
   const conversationScrollMemoryRef = useRef<Record<string, ConversationScrollMemory>>({});
@@ -7554,10 +4888,27 @@ export function App() {
   const hydratingConversationIdsRef = useRef<Set<string>>(new Set());
   const activeChatAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const runStreamRecoveryControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const streamTokenDeliveriesRef = useRef<Map<string, true>>(new Map());
+  const [localActiveRunIds, setLocalActiveRunIds] = useState<Set<string>>(() => new Set());
   const stopRequestedConversationIdsRef = useRef<Set<string>>(new Set());
   const copyFeedbackTimeoutRef = useRef<number | null>(null);
-  const reuseDecisionResolverRef = useRef<((decision: ReuseDecision) => void) | null>(null);
   const runArtifactHydrationsRef = useRef<Set<string>>(new Set());
+  // Memoized shouldHydrateRunArtifacts verdicts keyed on the exact object
+  // identities the decision reads (all replaced-not-mutated), so never-hydratable
+  // messages stop rebuilding their tool cards on every conversations tick.
+  const runArtifactHydrationDecisionsRef = useRef(
+    new Map<
+      string,
+      {
+        progressEvents: unknown;
+        runArtifacts: unknown;
+        responseMetadata: unknown;
+        content: unknown;
+        uploadedFiles: unknown;
+        decision: boolean;
+      }
+    >()
+  );
   const [activeSlashWorkflowId, setActiveSlashWorkflowId] = useState<ComposerWorkflowId | null>(
     null
   );
@@ -7714,10 +5065,10 @@ export function App() {
       Object.fromEntries(
         items
           .filter((conversation) => conversation.hydrated)
-          .map((conversation) => {
-            const record = conversationToRecord(conversation);
-            return [conversation.id, JSON.stringify(record)];
-          })
+          .map((conversation) => [
+            conversation.id,
+            recordAndFingerprintFor(conversation).fingerprint,
+          ])
       ),
     []
   );
@@ -7781,23 +5132,16 @@ export function App() {
   ]);
 
   useEffect(() => {
-    return () => {
-      if (reuseDecisionResolverRef.current) {
-        reuseDecisionResolverRef.current("rerun");
-        reuseDecisionResolverRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     const activeChatAbortControllers = activeChatAbortControllersRef.current;
     const runStreamRecoveryControllers = runStreamRecoveryControllersRef.current;
+    const streamTokenDeliveries = streamTokenDeliveriesRef.current;
     const stopRequestedConversationIds = stopRequestedConversationIdsRef.current;
     return () => {
       activeChatAbortControllers.forEach((controller) => controller.abort());
       activeChatAbortControllers.clear();
       runStreamRecoveryControllers.forEach((controller) => controller.abort());
       runStreamRecoveryControllers.clear();
+      streamTokenDeliveries.clear();
       stopRequestedConversationIds.clear();
       if (copyFeedbackTimeoutRef.current) {
         window.clearTimeout(copyFeedbackTimeoutRef.current);
@@ -8075,16 +5419,17 @@ export function App() {
     if (authStatus !== "authenticated" || !conversationsHydrated) {
       return;
     }
-    const records = conversations
+    const entries = conversations
       .filter(shouldPersistConversationSnapshot)
-      .map(conversationToRecord);
+      .map(recordAndFingerprintFor);
     const previousHashes = persistedConversationHashesRef.current;
     const nextHashes: Record<string, string> = {};
-    const changedRecords = records.filter((record) => {
-      const fingerprint = JSON.stringify(record);
-      nextHashes[record.conversation_id] = fingerprint;
-      return previousHashes[record.conversation_id] !== fingerprint;
-    });
+    const changedRecords = entries
+      .filter(({ record, fingerprint }) => {
+        nextHashes[record.conversation_id] = fingerprint;
+        return previousHashes[record.conversation_id] !== fingerprint;
+      })
+      .map(({ record }) => record);
     persistedConversationHashesRef.current = nextHashes;
     if (changedRecords.length === 0) {
       return;
@@ -8187,19 +5532,17 @@ export function App() {
       });
     }
     let cancelled = false;
-    const activeQuery = debouncedResourceQuery.trim();
-    const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
-    const activeCollectionId = activeResourceCollection?.collection_id ?? "";
-    const activeResourceListKey = [
-      activeCollectionId ? `folder:${activeCollectionId}` : "library",
-      activeQuery,
-      resourceKindFilter,
-      resourceSourceFilter,
-      resourceSharingFilter,
-      resourceStatusFilter,
-      activeTagFilters.join("\u0001"),
-      String(resourceRefreshToken),
-    ].join("\u0000");
+    const resourceListParams: ResourceListRequestParams = {
+      collectionId: activeResourceCollection?.collection_id ?? "",
+      query: debouncedResourceQuery.trim(),
+      kind: resourceKindFilter,
+      source: resourceSourceFilter,
+      sharing: resourceSharingFilter,
+      status: resourceStatusFilter,
+      tags: parseResourceTagFilter(resourceTagFilter),
+      refreshToken: resourceRefreshToken,
+    };
+    const activeResourceListKey = buildResourceListKey(resourceListParams);
     resourceListKeyRef.current = activeResourceListKey;
     const cancelQueuedReset = queueEffectUpdate(() => {
       if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
@@ -8210,27 +5553,7 @@ export function App() {
       setResourcesError(null);
       setResources([]);
     });
-    const request = activeCollectionId
-      ? loadResourceFolderResources(apiClient, activeCollectionId, {
-          limit: RESOURCE_PAGE_SIZE,
-          offset: 0,
-          query: activeQuery || undefined,
-          kind: resourceKindFilter,
-          source: resourceSourceFilter,
-          sharing: resourceSharingFilter,
-          status: resourceStatusFilter,
-          tags: activeTagFilters,
-        })
-      : loadLibraryResources(apiClient, {
-          limit: RESOURCE_PAGE_SIZE,
-          offset: 0,
-          query: activeQuery || undefined,
-          kind: resourceKindFilter,
-          source: resourceSourceFilter,
-          sharing: resourceSharingFilter,
-          status: resourceStatusFilter,
-          tags: activeTagFilters,
-        });
+    const request = buildResourceListRequest(apiClient, resourceListParams, 0);
     void request
       .then((payload) => {
         if (cancelled || resourceListKeyRef.current !== activeResourceListKey) {
@@ -8974,17 +6297,12 @@ export function App() {
         return;
       }
       stopRequestedConversationIdsRef.current.add(normalizedConversationId);
-      if (reuseDecisionResolverRef.current) {
-        reuseDecisionResolverRef.current("rerun");
-        reuseDecisionResolverRef.current = null;
-      }
-      setPendingReusePrompt(null);
       const controller = activeChatAbortControllersRef.current.get(normalizedConversationId);
       if (controller && !controller.signal.aborted) {
         controller.abort();
       }
     },
-    [setPendingReusePrompt]
+    []
   );
 
   const deleteConversationFromHistory = async (
@@ -9556,7 +6874,6 @@ export function App() {
           clientViewUrl,
           resourceUri: item.resource_uri ?? null,
           imageServiceUrl: item.image_service_url ?? null,
-          inputUrl: item.input_url,
         } satisfies BisqueViewerLink;
         importedBisqueLinks[fileId] = link;
         importedLinkByResourceUri.set(resourceUri.toLowerCase(), link);
@@ -9762,41 +7079,6 @@ export function App() {
     };
   };
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    const applyTheme = (): void => {
-      const shouldUseDark =
-        themePreference === "dark" ||
-        (themePreference === "system" && mediaQuery.matches);
-      document.documentElement.classList.toggle("dark", shouldUseDark);
-      document.body.classList.toggle("dark", shouldUseDark);
-      document.documentElement.style.colorScheme = shouldUseDark ? "dark" : "light";
-      document.body.style.colorScheme = shouldUseDark ? "dark" : "light";
-      document.documentElement.setAttribute(
-        "data-theme",
-        shouldUseDark ? "dark" : "light"
-      );
-      document.body.setAttribute("data-theme", shouldUseDark ? "dark" : "light");
-      setResolvedTheme(shouldUseDark ? "dark" : "light");
-    };
-    applyTheme();
-    if (typeof mediaQuery.addEventListener === "function") {
-      mediaQuery.addEventListener("change", applyTheme);
-    } else {
-      mediaQuery.addListener(applyTheme);
-    }
-    return () => {
-      if (typeof mediaQuery.removeEventListener === "function") {
-        mediaQuery.removeEventListener("change", applyTheme);
-      } else {
-        mediaQuery.removeListener(applyTheme);
-      }
-    };
-  }, [themePreference]);
-
   const activeMessages = activeConversation?.messages ?? EMPTY_UI_MESSAGES;
   const activeConversationHydrated = activeConversation?.hydrated ?? true;
   const activePrompt =
@@ -9870,61 +7152,20 @@ export function App() {
     activeConversationHydrated &&
     activeMessages.length === 0;
   const blankChatUsageKey = `${authMode ?? ""}:${authUser ?? ""}`;
-  useEffect(() => {
-    blankChatUsageRequestRef.current = {
-      key: blankChatUsageKey,
-      inFlight: false,
-      loaded: false,
-      failed: false,
-    };
-    return queueEffectUpdate(() => {
-      setBlankChatTokenUsage(null);
-      setBlankChatUsageError(null);
-      setBlankChatUsageLoading(false);
-    });
-  }, [blankChatUsageKey]);
-  useEffect(() => {
-    const requestState = blankChatUsageRequestRef.current;
-    if (!shouldShowBlankChatUsage || requestState.key !== blankChatUsageKey) {
-      return;
-    }
-    if (requestState.inFlight || requestState.loaded || requestState.failed) {
-      return;
-    }
-    let cancelled = false;
-    requestState.inFlight = true;
-    const cancelQueuedLoading = queueEffectUpdate(() => {
-      if (cancelled) {
-        return;
-      }
-      setBlankChatUsageLoading(true);
-      setBlankChatUsageError(null);
-    });
-    void loadCurrentUserTokenUsage(365)
-      .then((response) => {
-        if (!cancelled) {
-          requestState.loaded = true;
-          setBlankChatTokenUsage(response);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          requestState.failed = true;
-          setBlankChatUsageError(normalizeApiError(error));
-        }
-      })
-      .finally(() => {
-        requestState.inFlight = false;
-        if (!cancelled) {
-          setBlankChatUsageLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-      requestState.inFlight = false;
-      cancelQueuedLoading();
-    };
-  }, [blankChatUsageKey, loadCurrentUserTokenUsage, shouldShowBlankChatUsage]);
+  const loadBlankChatUsage = useCallback(
+    () => loadCurrentUserTokenUsage(365),
+    [loadCurrentUserTokenUsage]
+  );
+  const {
+    usage: blankChatTokenUsage,
+    loading: blankChatUsageLoading,
+    error: blankChatUsageError,
+  } = useBlankChatTokenUsage({
+    enabled: shouldShowBlankChatUsage,
+    key: blankChatUsageKey,
+    load: loadBlankChatUsage,
+    normalizeError: normalizeApiError,
+  });
   const requestChatScrollToBottom = useCallback((): void => {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
@@ -9976,6 +7217,15 @@ export function App() {
       if (isTabHidden()) {
         return;
       }
+      // A live SSE/resume stream registered for this conversation is the primary
+      // runEvents writer (it delivers every durable event from its cursor). The poll
+      // is purely the no-stream fallback: skipping while a controller is registered
+      // removes the duplicate fetch/state-write path and the wholesale runEvents
+      // replacement that races the SSE append. Cursor state stays untouched, so the
+      // first un-gated tick still rebuilds the full authoritative snapshot.
+      if (activeChatAbortControllersRef.current.has(conversationId)) {
+        return;
+      }
       try {
         const response = await listRunEvents(apiClient, runId, 200, { afterSequence });
         if (cancelled || response.events.length === 0) {
@@ -9994,7 +7244,24 @@ export function App() {
         if (fresh.length === 0) {
           return;
         }
-        collectedEvents = [...collectedEvents, ...fresh];
+        // Coalesce reasoning deltas: every consumer renders only the LATEST
+        // trace.reasoning.delta, so the accumulator keeps at most one (replaced in
+        // place to preserve step order). Without this the periodic wholesale replace
+        // below would re-inflate message.runEvents with the full delta history and
+        // defeat the live path's appendRunEventCoalescing.
+        const next = [...collectedEvents];
+        fresh.forEach((event) => {
+          if (isReasoningDeltaRunEvent(event)) {
+            for (let index = next.length - 1; index >= 0; index -= 1) {
+              if (isReasoningDeltaRunEvent(next[index])) {
+                next[index] = event;
+                return;
+              }
+            }
+          }
+          next.push(event);
+        });
+        collectedEvents = next;
         const snapshot = collectedEvents;
         updateConversation(conversationId, (current) => ({
           ...current,
@@ -10748,41 +8015,19 @@ export function App() {
       return;
     }
     const offset = resources.length;
-    const activeQuery = debouncedResourceQuery.trim();
-    const activeTagFilters = parseResourceTagFilter(resourceTagFilter);
-    const activeCollectionId = activeResourceCollection?.collection_id ?? "";
-    const activeResourceListKey = [
-      activeCollectionId ? `folder:${activeCollectionId}` : "library",
-      activeQuery,
-      resourceKindFilter,
-      resourceSourceFilter,
-      resourceSharingFilter,
-      resourceStatusFilter,
-      activeTagFilters.join("\u0001"),
-      String(resourceRefreshToken),
-    ].join("\u0000");
+    const resourceListParams: ResourceListRequestParams = {
+      collectionId: activeResourceCollection?.collection_id ?? "",
+      query: debouncedResourceQuery.trim(),
+      kind: resourceKindFilter,
+      source: resourceSourceFilter,
+      sharing: resourceSharingFilter,
+      status: resourceStatusFilter,
+      tags: parseResourceTagFilter(resourceTagFilter),
+      refreshToken: resourceRefreshToken,
+    };
+    const activeResourceListKey = buildResourceListKey(resourceListParams);
     setResourcesLoadingMore(true);
-    const request = activeCollectionId
-      ? loadResourceFolderResources(apiClient, activeCollectionId, {
-          limit: RESOURCE_PAGE_SIZE,
-          offset,
-          query: activeQuery || undefined,
-          kind: resourceKindFilter,
-          source: resourceSourceFilter,
-          sharing: resourceSharingFilter,
-          status: resourceStatusFilter,
-          tags: activeTagFilters,
-        })
-      : loadLibraryResources(apiClient, {
-          limit: RESOURCE_PAGE_SIZE,
-          offset,
-          query: activeQuery || undefined,
-          kind: resourceKindFilter,
-          source: resourceSourceFilter,
-          sharing: resourceSharingFilter,
-          status: resourceStatusFilter,
-          tags: activeTagFilters,
-        });
+    const request = buildResourceListRequest(apiClient, resourceListParams, offset);
     void request
       .then((payload) => {
         if (resourceListKeyRef.current !== activeResourceListKey) {
@@ -11005,28 +8250,6 @@ export function App() {
     }
   };
 
-  const resourceToUploadedFile = (resource: ResourceRecord): UploadedFileRecord => ({
-    file_id: resource.file_id,
-    original_name: resource.original_name,
-    content_type: resource.content_type ?? null,
-    size_bytes: Math.max(0, Number(resource.size_bytes) || 0),
-    sha256: resource.sha256,
-    created_at: resource.created_at,
-  });
-
-  const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null => {
-    const clientViewUrl = String(resource.client_view_url ?? "").trim();
-    if (!clientViewUrl) {
-      return null;
-    }
-    return {
-      clientViewUrl,
-      resourceUri: resource.source_uri ?? null,
-      imageServiceUrl: resource.image_service_url ?? null,
-      inputUrl: resource.source_uri ?? undefined,
-    };
-  };
-
   const openUploadedFilesInViewer = useCallback((
     selectedFiles: UploadedFileRecord[],
     selectedLinksByFileId: Record<string, BisqueViewerLink>
@@ -11109,8 +8332,7 @@ export function App() {
 
   // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
   // Always fetches fresh by id (cheap, only on navigation) so it doesn't depend on the
-  // in-memory list and stays referentially stable. Mirrors resourceToUploadedFile /
-  // resourceToBisqueLink.
+  // in-memory list and stays referentially stable.
   const restoreViewerContextForFileIds = useCallback(
     async (fileIds: string[]): Promise<void> => {
       const ids = uniqueFileIds(fileIds);
@@ -11122,26 +8344,12 @@ export function App() {
       if (found.length === 0) {
         return;
       }
-      const uploadedFiles = uniqueByFileId(
-        found.map((record) => ({
-          file_id: record.file_id,
-          original_name: record.original_name,
-          content_type: record.content_type ?? null,
-          size_bytes: Math.max(0, Number(record.size_bytes) || 0),
-          sha256: record.sha256,
-          created_at: record.created_at,
-        }))
-      );
+      const uploadedFiles = uniqueByFileId(found.map(resourceToUploadedFile));
       const bisqueLinksByFileId: Record<string, BisqueViewerLink> = {};
       for (const record of found) {
-        const clientViewUrl = String(record.client_view_url ?? "").trim();
-        if (clientViewUrl) {
-          bisqueLinksByFileId[record.file_id] = {
-            clientViewUrl,
-            resourceUri: record.source_uri ?? null,
-            imageServiceUrl: record.image_service_url ?? null,
-            inputUrl: record.source_uri ?? undefined,
-          };
+        const bisqueLink = resourceToBisqueLink(record);
+        if (bisqueLink) {
+          bisqueLinksByFileId[record.file_id] = bisqueLink;
         }
       }
       setResourceViewerContext({ uploadedFiles, bisqueLinksByFileId });
@@ -11451,10 +8659,7 @@ export function App() {
       const currentIndex = composerResources.findIndex(
         (resource) => resource.file_id === resolvedActiveComposerResourceId
       );
-      const nextIndex =
-        currentIndex < 0
-          ? 0
-          : (currentIndex + direction + composerResources.length) % composerResources.length;
+      const nextIndex = cycleListIndex(currentIndex, direction, composerResources.length);
       setActiveComposerResourceId(composerResources[nextIndex]?.file_id ?? null);
       return;
     }
@@ -11846,152 +9051,6 @@ export function App() {
     );
   };
 
-  const resolveReuseDecision = (decision: ReuseDecision): void => {
-    const resolver = reuseDecisionResolverRef.current;
-    reuseDecisionResolverRef.current = null;
-    setPendingReusePrompt(null);
-    resolver?.(decision);
-  };
-
-  const promptReuseDecision = (
-    suggestions: ResourceComputationSuggestion[],
-    candidate: ReuseCandidateRun
-  ): Promise<ReuseDecision> => {
-    if (suggestions.length === 0) {
-      return Promise.resolve("rerun");
-    }
-    if (reuseDecisionResolverRef.current) {
-      reuseDecisionResolverRef.current("rerun");
-      reuseDecisionResolverRef.current = null;
-    }
-    return new Promise((resolve) => {
-      reuseDecisionResolverRef.current = resolve;
-      setPendingReusePrompt({ suggestions, candidate });
-    });
-  };
-
-  const loadPriorRunIntoConversation = async ({
-    conversationId,
-    assistantMessageId,
-    candidate,
-    consumedUploadFileIds,
-  }: {
-    conversationId: string;
-    assistantMessageId: string;
-    candidate: ReuseCandidateRun;
-    consumedUploadFileIds: Set<string>;
-  }): Promise<void> => {
-    const toolLabels = candidate.toolNames
-      .map((toolName) => reuseToolLabel(toolName))
-      .filter((label) => label.length > 0);
-    const toolLabel =
-      toolLabels.length <= 1
-        ? toolLabels[0] || "analysis"
-        : `${toolLabels[0]} +${toolLabels.length - 1} more`;
-    const requestedFileNames = Array.from(
-      new Set(
-        candidate.suggestions
-          .map((item) => String(item.requested_file_name || "").trim())
-          .filter((name) => name.length > 0)
-      )
-    );
-    const fileLabel =
-      requestedFileNames.length <= 1
-        ? requestedFileNames[0] || "this file"
-        : `${requestedFileNames[0]} +${requestedFileNames.length - 1} more`;
-    const sourceConversation = String(candidate.conversationTitle || "").trim();
-    const sourceLabel = sourceConversation
-      ? `from "${sourceConversation}"`
-      : `from run ${candidate.runId.slice(0, 8)}`;
-    const sourceUpdatedAt = formatReuseTimestamp(candidate.conversationUpdatedAt);
-    const sourceSuffix = sourceUpdatedAt ? ` (${sourceUpdatedAt})` : "";
-    const reuseLead = `Loaded previous ${toolLabel} results for ${fileLabel} ${sourceLabel}${sourceSuffix}.`;
-
-    updateConversation(conversationId, (conversation) => ({
-      ...conversation,
-      updatedAt: Date.now(),
-      chatError: null,
-      sending: true,
-      streamingMessageId: null,
-      stagedUploadFileIds:
-        consumedUploadFileIds.size > 0
-          ? conversation.stagedUploadFileIds.filter(
-              (fileId) => !consumedUploadFileIds.has(fileId)
-            )
-          : conversation.stagedUploadFileIds,
-      messages: [
-        ...conversation.messages,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "Loading previous results…",
-          createdAt: Date.now(),
-          runId: candidate.runId,
-          progressEvents: [],
-        },
-      ],
-    }));
-
-    try {
-      const payload = await apiClient.getRunResult(candidate.runId);
-      if (payload.status !== "succeeded" || !payload.result) {
-        throw new Error(
-          `Cached run ${candidate.runId.slice(0, 8)} is ${payload.status}.`
-        );
-      }
-      const recoveredText = payload.result.response_text?.trim() || "No response text returned.";
-      const runId = String(payload.result.run_id || "").trim() || candidate.runId;
-      const cachedSelection = deriveBisqueSelectionContextFromResponseMetadata({
-        responseMetadata: payload.result?.metadata ?? null,
-        source: "tool_result",
-        originatingUserText: recoveredText,
-      }).selectionContext;
-      updateConversation(conversationId, (conversation) => ({
-        ...conversation,
-        updatedAt: Date.now(),
-        sending: false,
-        streamingMessageId: null,
-        chatError: null,
-        activeSelectionContext: mergeSelectionContexts(
-          cachedSelection,
-          conversation.activeSelectionContext ?? null
-        ),
-        messages: conversation.messages.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: `${reuseLead}\n\n${recoveredText}`,
-                runId,
-                durationSeconds: payload.result?.duration_seconds ?? item.durationSeconds,
-                progressEvents: payload.result?.progress_events ?? item.progressEvents ?? [],
-                responseMetadata: payload.result?.metadata ?? item.responseMetadata ?? null,
-                liveStream: undefined,
-              }
-            : item
-        ),
-      }));
-      hydrateRunDetails(conversationId, assistantMessageId, runId);
-    } catch (error) {
-      const message = normalizeApiError(error);
-      updateConversation(conversationId, (conversation) => ({
-        ...conversation,
-        updatedAt: Date.now(),
-        sending: false,
-        streamingMessageId: null,
-        chatError: null,
-        messages: conversation.messages.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: `Unable to load cached results (${message}). Choose Run again to compute a fresh result.`,
-                liveStream: undefined,
-              }
-            : item
-        ),
-      }));
-    }
-  };
-
   const hydrateRunArtifacts = useCallback(async (
     conversationId: string,
     assistantMessageId: string,
@@ -11999,31 +9058,6 @@ export function App() {
   ): Promise<void> => {
     try {
       const artifactResponse = await listRunArtifacts(apiClient, runId, 2000);
-      const megasegSummaryArtifacts = artifactResponse.artifacts.filter((artifact) =>
-        /megaseg_summary\.json$/i.test(String(artifact.path ?? ""))
-      );
-      const megasegFileSummaries = (
-        await Promise.all(
-          megasegSummaryArtifacts.slice(0, 12).map(async (artifact) => {
-            try {
-              const response = await fetch(
-                apiClient.artifactDownloadUrl(runId, artifact.path),
-                {
-                  method: "GET",
-                  credentials: "include",
-                }
-              );
-              if (!response.ok) {
-                return null;
-              }
-              const payload = await response.json();
-              return toRecord(payload);
-            } catch {
-              return null;
-            }
-          })
-        )
-      ).filter((row): row is Record<string, unknown> => row !== null);
       const durableArtifacts = artifactResponse.artifacts.filter(
         (artifact) =>
           Math.max(0, Number(artifact.size_bytes) || 0) > 0 &&
@@ -12067,16 +9101,6 @@ export function App() {
             item.id === assistantMessageId
               ? {
                   ...item,
-                  responseMetadata:
-                    megasegFileSummaries.length > 0
-                      ? {
-                          ...(toRecord(item.responseMetadata) ?? {}),
-                          ui_hydrated: {
-                            ...(toRecord(toRecord(item.responseMetadata)?.ui_hydrated) ?? {}),
-                            megaseg_file_summaries: megasegFileSummaries,
-                          },
-                        }
-                      : item.responseMetadata,
                   runArtifacts: selected.map((artifact) => {
                     const canInlinePreview = isInlineImageArtifact(
                       artifact.path,
@@ -12180,21 +9204,51 @@ export function App() {
         if (runArtifactHydrationsRef.current.has(hydrationKey)) {
           return;
         }
-        const cards = buildToolResultCards(
-          message.progressEvents ?? [],
-          message.runArtifacts ?? [],
-          conversation.uploadedFiles,
-          (fileId) => apiClient.uploadPreviewUrl(fileId),
-          {
+        // No hydrated artifacts yet: shouldHydrateRunArtifacts returns true
+        // unconditionally, so skip the expensive card build entirely.
+        if ((message.runArtifacts ?? []).length === 0) {
+          targets.push({
+            conversationId: conversation.id,
+            messageId: message.id,
             runId: message.runId,
-            buildArtifactDownloadUrl: (runId, path) =>
-              apiClient.artifactDownloadUrl(runId, path),
-            responseMetadata: message.responseMetadata ?? null,
-          }
-        );
-        if (!shouldHydrateRunArtifacts(message, cards)) {
+            key: hydrationKey,
+          });
           return;
         }
+        const decisionCache = runArtifactHydrationDecisionsRef.current;
+        const cached = decisionCache.get(hydrationKey);
+        let decision: boolean;
+        if (
+          cached &&
+          cached.progressEvents === message.progressEvents &&
+          cached.runArtifacts === message.runArtifacts &&
+          cached.responseMetadata === message.responseMetadata &&
+          cached.content === message.content &&
+          cached.uploadedFiles === conversation.uploadedFiles
+        ) {
+          decision = cached.decision;
+        } else {
+          const cards = buildToolResultCards(
+            message.progressEvents ?? [],
+            message.runArtifacts ?? [],
+            conversation.uploadedFiles,
+            (fileId) => apiClient.uploadPreviewUrl(fileId)
+          );
+          decision = shouldHydrateRunArtifacts(message, cards);
+          decisionCache.set(hydrationKey, {
+            progressEvents: message.progressEvents,
+            runArtifacts: message.runArtifacts,
+            responseMetadata: message.responseMetadata,
+            content: message.content,
+            uploadedFiles: conversation.uploadedFiles,
+            decision,
+          });
+        }
+        if (!decision) {
+          return;
+        }
+        // Drop the memo for enqueued targets so post-hydration state re-evaluates.
+        decisionCache.delete(hydrationKey);
         targets.push({
           conversationId: conversation.id,
           messageId: message.id,
@@ -12243,13 +9297,21 @@ export function App() {
       key: string;
     }> = [];
     conversations.forEach((conversation) => {
-      const candidate = [...conversation.messages]
-        .reverse()
-        .find((message) =>
+      let candidate: UiMessage | null = null;
+      for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+        const message = conversation.messages[index];
+        if (
           shouldRecoverRunResultMessage(message, {
             isStreamingMessage: conversation.streamingMessageId === message.id,
+            isLocalRunActive: message.runId
+              ? localActiveRunIds.has(message.runId)
+              : false,
           })
-        );
+        ) {
+          candidate = message;
+          break;
+        }
+      }
       if (!candidate?.runId) {
         return;
       }
@@ -12263,7 +9325,7 @@ export function App() {
       });
     });
     return targets;
-  }, [authStatus, conversations, conversationsHydrated]);
+  }, [authStatus, conversations, conversationsHydrated, localActiveRunIds]);
 
   useEffect(() => {
     if (runRecoveryTargets.length === 0) {
@@ -12341,13 +9403,23 @@ export function App() {
                       message.id === target.messageId
                         ? {
                             ...message,
-                            runEvents: appendUniqueRunEvent(message.runEvents ?? [], runEvent),
+                            runEvents: appendRunEventCoalescing(message.runEvents ?? [], runEvent),
                           }
                         : message
                     ),
                   }));
                 },
-                onToken: (delta) => {
+                onToken: (delta, event) => {
+                  if (
+                    !shouldApplyStreamToken(
+                      streamTokenDeliveriesRef.current,
+                      target.conversationId,
+                      target.messageId,
+                      event
+                    )
+                  ) {
+                    return;
+                  }
                   pendingResumeText += delta;
                   if (typeof requestAnimationFrame !== "function") {
                     flushResumeText();
@@ -12416,6 +9488,11 @@ export function App() {
                 if (activeChatAbortControllersRef.current.get(target.conversationId) === controller) {
                   activeChatAbortControllersRef.current.delete(target.conversationId);
                 }
+                clearStreamTokenDeliveries(
+                  streamTokenDeliveriesRef.current,
+                  target.conversationId,
+                  target.messageId
+                );
               });
             continue;
           }
@@ -12624,7 +9701,6 @@ export function App() {
       onStopConversation: stopActiveConversation,
       onStreamingRenderComplete: handleStreamingRenderComplete,
       onCopy: handleCopy,
-      onPromptBisqueAuthentication: promptBisqueAuthentication,
       onOpenConversationFilesInViewer: openConversationFilesInViewer,
       onImportBisqueResourcesIntoConversation: importBisqueResourcesIntoConversation,
       onCopyBisqueResourceUri: copyBisqueResourceUri,
@@ -12639,7 +9715,6 @@ export function App() {
       handleStreamingRenderComplete,
       importBisqueResourcesIntoConversation,
       openConversationFilesInViewer,
-      promptBisqueAuthentication,
       retryAssistantResponse,
       setActivePromptValue,
       stopActiveConversation,
@@ -12738,7 +9813,6 @@ export function App() {
             clientViewUrl,
             resourceUri: item.resource_uri ?? null,
             imageServiceUrl: item.image_service_url ?? null,
-            inputUrl: item.input_url,
           };
         });
         importErrorMessage = (() => {
@@ -12774,8 +9848,6 @@ export function App() {
             suggestedDomain: conversation.activeSelectionContext?.suggested_domain ?? null,
             suggestedToolNames: [],
           });
-        } else if (failedImports.length > 0) {
-          promptForModel = text;
         }
 
         updateConversation(conversation.id, (current) => {
@@ -12967,6 +10039,7 @@ export function App() {
     let consumedUploadFileIds = new Set<string>();
     let chatRequestForRetry: Parameters<ApiClient["chat"]>[0] | null = null;
     let allUploadsForTurn: UploadedFileRecord[] = [];
+    let activeLocalRunId: string | null = null;
 
     try {
       const uploadResult = await uploadPendingFiles(
@@ -13008,73 +10081,6 @@ export function App() {
       const currentUploads = currentUploadFileIds
         .map((fileId) => uploadById.get(fileId))
         .filter((file): file is UploadedFileRecord => Boolean(file));
-
-      const imageUploadsForReuse = currentUploads.filter((file) => isImageLikeUploadedFile(file));
-      const requestedReuseTools = inferReuseToolNames();
-      const hasFreshImageUploadsForTurn = uploadResult.newlyUploadedFiles.some((file) =>
-        isImageLikeUploadedFile(file)
-      );
-      const shouldAttemptReuseLookup =
-        imageUploadsForReuse.length > 0 &&
-        requestedReuseTools.length > 0 &&
-        !promptRequestsFreshReuseComputation(promptForModel) &&
-        (!hasFreshImageUploadsForTurn || promptExplicitlyRequestsReuseLoad(promptForModel));
-      if (shouldAttemptReuseLookup) {
-        try {
-          const lookup = await apiClient.lookupResourceReuse({
-            file_ids: imageUploadsForReuse.map((file) => file.file_id),
-            tool_names: requestedReuseTools,
-            prompt: promptForModel,
-            limit_per_file_tool: 1,
-          });
-          const reuseCandidate = selectReuseCandidateRun(lookup.suggestions, promptForModel);
-          if (reuseCandidate) {
-            updateConversation(conversationId, (current) =>
-              current.sending
-                ? {
-                    ...current,
-                    sending: false,
-                    streamingMessageId: null,
-                  }
-                : current
-            );
-            if (shouldAutoLoadReuseCandidate(promptForModel, reuseCandidate)) {
-              const cachedAssistantMessageId = makeId();
-              assistantMessageId = cachedAssistantMessageId;
-              await loadPriorRunIntoConversation({
-                conversationId,
-                assistantMessageId: cachedAssistantMessageId,
-                candidate: reuseCandidate,
-                consumedUploadFileIds,
-              });
-              return;
-            }
-            const decision = await promptReuseDecision(lookup.suggestions, reuseCandidate);
-            if (isChatStopRequested(conversationId)) {
-              finalizeStoppedConversation({ conversationId, assistantMessageId, streamedText });
-              return;
-            }
-            if (decision === "load") {
-              const cachedAssistantMessageId = makeId();
-              assistantMessageId = cachedAssistantMessageId;
-              await loadPriorRunIntoConversation({
-                conversationId,
-                assistantMessageId: cachedAssistantMessageId,
-                candidate: reuseCandidate,
-                consumedUploadFileIds,
-              });
-              return;
-            }
-            updateConversation(conversationId, (current) => ({
-              ...current,
-              sending: true,
-              chatError: null,
-            }));
-          }
-        } catch {
-          // Non-blocking: if reuse lookup fails, continue with normal run execution.
-        }
-      }
 
       if (isChatStopRequested(conversationId)) {
         finalizeStoppedConversation({ conversationId, assistantMessageId, streamedText });
@@ -13132,9 +10138,6 @@ export function App() {
         selection_context: selectionContextForTurn,
         workflow_hint: composerWorkflowPreset?.workflowHint ?? null,
         reasoning_mode: "deep" as const,
-        debug:
-          Boolean(import.meta.env.DEV) &&
-          composerWorkflowPreset?.workflowHint?.id === "pro_mode",
         idempotency_key: runIdempotencyKey,
       };
       chatRequestForRetry = chatRequest;
@@ -13145,6 +10148,15 @@ export function App() {
           if (!assistantMessageId || !runId) {
             return;
           }
+          activeLocalRunId = runId;
+          setLocalActiveRunIds((current) => {
+            if (current.has(runId)) {
+              return current;
+            }
+            const next = new Set(current);
+            next.add(runId);
+            return next;
+          });
           updateConversation(conversationId, (current) => ({
             ...current,
             messages: current.messages.map((item) =>
@@ -13167,13 +10179,24 @@ export function App() {
               item.id === assistantMessageId
                 ? {
                     ...item,
-                    runEvents: appendUniqueRunEvent(item.runEvents ?? [], runEvent),
+                    runEvents: appendRunEventCoalescing(item.runEvents ?? [], runEvent),
                   }
                 : item
             ),
           }));
         },
-        onToken: (delta) => {
+        onToken: (delta, event) => {
+          if (
+            assistantMessageId &&
+            !shouldApplyStreamToken(
+              streamTokenDeliveriesRef.current,
+              conversationId,
+              assistantMessageId,
+              event
+            )
+          ) {
+            return;
+          }
           streamedText += delta;
           streamController?.push(delta);
         },
@@ -13189,13 +10212,7 @@ export function App() {
         response.progress_events ?? [],
         [],
         allUploadsForTurn,
-        (fileId) => apiClient.uploadPreviewUrl(fileId),
-        {
-          runId: response.run_id,
-          buildArtifactDownloadUrl: (runId, path) =>
-            apiClient.artifactDownloadUrl(runId, path),
-          responseMetadata: response.metadata ?? null,
-        }
+        (fileId) => apiClient.uploadPreviewUrl(fileId)
       );
       const responseBisqueSelection = deriveBisqueSelectionContextFromToolCards({
         toolResultCards: responseToolResultCards,
@@ -13203,22 +10220,8 @@ export function App() {
         originatingUserText: promptForModel,
         suggestedDomain: selectionContextForTurn?.suggested_domain ?? null,
       });
-      const responseMetadataBisqueSelection = deriveBisqueSelectionContextFromResponseMetadata({
-        responseMetadata: response.metadata ?? null,
-        source: "tool_result",
-        originatingUserText: promptForModel,
-        suggestedDomain: selectionContextForTurn?.suggested_domain ?? null,
-      });
-      const mergedResponseBisqueRows = mergeBisqueResourceRows([
-        ...responseBisqueSelection.resolvedRows,
-        ...responseMetadataBisqueSelection.resolvedRows,
-      ]);
-      const mergedResponseBisqueSelectionContext = mergeSelectionContexts(
-        responseBisqueSelection.selectionContext,
-        responseMetadataBisqueSelection.selectionContext
-      );
-      const clearsBisqueSelection =
-        responseBisqueSelection.clearsSelection || responseMetadataBisqueSelection.clearsSelection;
+      const mergedResponseBisqueRows = responseBisqueSelection.resolvedRows;
+      const mergedResponseBisqueSelectionContext = responseBisqueSelection.selectionContext;
 
       if (assistantMessageId) {
         const messageId = assistantMessageId;
@@ -13236,9 +10239,8 @@ export function App() {
                   (fileId) => !consumedUploadFileIds.has(fileId)
                 )
               : current.stagedUploadFileIds,
-          activeSelectionContext: clearsBisqueSelection
-            ? null
-            : mergedResponseBisqueSelectionContext ?? current.activeSelectionContext,
+          activeSelectionContext:
+            mergedResponseBisqueSelectionContext ?? current.activeSelectionContext,
           messages: current.messages.map((item) =>
             item.id === assistantMessageId
               ? {
@@ -13255,7 +10257,7 @@ export function App() {
                 runEvents: item.runEvents ?? [],
                 responseMetadata: response.metadata ?? item.responseMetadata ?? null,
                 liveStream: undefined,
-                resolvedBisqueResources: mergeBisqueResourceRows([
+                resolvedBisqueResources: dedupeBisqueResourceRows([
                   ...(item.resolvedBisqueResources ?? []),
                   ...mergedResponseBisqueRows,
                 ]),
@@ -13293,13 +10295,7 @@ export function App() {
             fallbackResponse.progress_events ?? [],
             [],
             allUploadsForTurn,
-            (fileId) => apiClient.uploadPreviewUrl(fileId),
-            {
-              runId: fallbackResponse.run_id,
-              buildArtifactDownloadUrl: (runId, path) =>
-                apiClient.artifactDownloadUrl(runId, path),
-              responseMetadata: fallbackResponse.metadata ?? null,
-            }
+            (fileId) => apiClient.uploadPreviewUrl(fileId)
           );
           const fallbackBisqueSelection = deriveBisqueSelectionContextFromToolCards({
             toolResultCards: fallbackToolResultCards,
@@ -13307,22 +10303,8 @@ export function App() {
             originatingUserText: promptForModel,
             suggestedDomain: selectionContextForTurn?.suggested_domain ?? null,
           });
-          const fallbackMetadataBisqueSelection = deriveBisqueSelectionContextFromResponseMetadata({
-            responseMetadata: fallbackResponse.metadata ?? null,
-            source: "tool_result",
-            originatingUserText: promptForModel,
-            suggestedDomain: selectionContextForTurn?.suggested_domain ?? null,
-          });
-          const mergedFallbackBisqueRows = mergeBisqueResourceRows([
-            ...fallbackBisqueSelection.resolvedRows,
-            ...fallbackMetadataBisqueSelection.resolvedRows,
-          ]);
-          const mergedFallbackBisqueSelectionContext = mergeSelectionContexts(
-            fallbackBisqueSelection.selectionContext,
-            fallbackMetadataBisqueSelection.selectionContext
-          );
-          const fallbackClearsBisqueSelection =
-            fallbackBisqueSelection.clearsSelection || fallbackMetadataBisqueSelection.clearsSelection;
+          const mergedFallbackBisqueRows = fallbackBisqueSelection.resolvedRows;
+          const mergedFallbackBisqueSelectionContext = fallbackBisqueSelection.selectionContext;
 
           if (assistantMessageId) {
             const messageId = assistantMessageId;
@@ -13338,9 +10320,8 @@ export function App() {
                       (fileId) => !consumedUploadFileIds.has(fileId)
                     )
                   : current.stagedUploadFileIds,
-              activeSelectionContext: fallbackClearsBisqueSelection
-                ? null
-                : mergedFallbackBisqueSelectionContext ?? current.activeSelectionContext,
+              activeSelectionContext:
+                mergedFallbackBisqueSelectionContext ?? current.activeSelectionContext,
               messages: current.messages.map((item) =>
                 item.id === assistantMessageId
                   ? {
@@ -13352,7 +10333,7 @@ export function App() {
                       progressEvents: fallbackResponse.progress_events ?? [],
                       responseMetadata:
                         fallbackResponse.metadata ?? item.responseMetadata ?? null,
-                      resolvedBisqueResources: mergeBisqueResourceRows([
+                      resolvedBisqueResources: dedupeBisqueResourceRows([
                         ...(item.resolvedBisqueResources ?? []),
                         ...mergedFallbackBisqueRows,
                       ]),
@@ -13411,9 +10392,8 @@ export function App() {
         return;
       }
       updateConversation(conversationId, (current) => {
-        const withoutStreamingMessage = assistantMessageId
-          ? current.messages.filter((item) => item.id !== assistantMessageId)
-          : current.messages;
+        // assistantMessageId is always null here: the truthy case returned above.
+        const withoutStreamingMessage = current.messages;
         return {
           ...current,
           updatedAt: Date.now(),
@@ -13434,6 +10414,24 @@ export function App() {
         };
       });
     } finally {
+      if (assistantMessageId) {
+        clearStreamTokenDeliveries(
+          streamTokenDeliveriesRef.current,
+          conversationId,
+          assistantMessageId
+        );
+      }
+      if (activeLocalRunId) {
+        const completedRunId = activeLocalRunId;
+        setLocalActiveRunIds((current) => {
+          if (!current.has(completedRunId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(completedRunId);
+          return next;
+        });
+      }
       if (
         chatAbortController &&
         activeChatAbortControllersRef.current.get(conversationId) === chatAbortController
@@ -13546,30 +10544,6 @@ export function App() {
                 activeConversation.messages.some((message) => message.role === "user")
               ? activeConversation.title
               : "BisQue Ultra";
-  const pendingReuseCandidate = pendingReusePrompt?.candidate ?? null;
-  const pendingReuseToolLabels = pendingReuseCandidate
-    ? pendingReuseCandidate.toolNames
-        .map((toolName) => reuseToolLabel(toolName))
-        .filter((label) => label.length > 0)
-    : [];
-  const pendingReuseFileNames = pendingReuseCandidate
-    ? Array.from(
-        new Set(
-          pendingReuseCandidate.suggestions
-            .map((row) => String(row.requested_file_name || "").trim())
-            .filter((name) => name.length > 0)
-        )
-      )
-    : [];
-  const pendingReuseSourceUpdatedAt = formatReuseTimestamp(
-    pendingReuseCandidate?.conversationUpdatedAt ?? null
-  );
-  const pendingReuseMatchTypeLabel = pendingReuseCandidate
-    ? pendingReuseCandidate.matchType === "sha256"
-      ? "Exact file hash match"
-      : "Filename match"
-    : null;
-  const pendingReuseMatchCount = pendingReuseCandidate?.suggestions.length ?? 0;
   const showAppShellBanner = shouldShowAppShellBanner(activePanel, uiErrorBanner);
 
   if (authStatus !== "authenticated") {
@@ -13975,7 +10949,7 @@ export function App() {
         </Suspense>
       ) : null}
 
-      <SidebarInset ref={setSidebarInsetNode}>
+      <SidebarInset>
         <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="app-mobile-shell-bar md:hidden">
             <SidebarTrigger
@@ -14364,16 +11338,14 @@ export function App() {
                           ) {
                             event.preventDefault();
                             const direction = event.key === "ArrowDown" ? 1 : -1;
-	                            const currentIndex = filteredSlashWorkflows.findIndex(
-	                              (workflow) => workflow.id === resolvedActiveSlashWorkflowId
-	                            );
-                            const nextIndex =
-                              currentIndex < 0
-                                ? 0
-                                : (currentIndex +
-                                    direction +
-                                    filteredSlashWorkflows.length) %
-                                  filteredSlashWorkflows.length;
+                            const currentIndex = filteredSlashWorkflows.findIndex(
+                              (workflow) => workflow.id === resolvedActiveSlashWorkflowId
+                            );
+                            const nextIndex = cycleListIndex(
+                              currentIndex,
+                              direction,
+                              filteredSlashWorkflows.length
+                            );
                             setActiveSlashWorkflowId(
                               filteredSlashWorkflows[nextIndex]?.id ?? null
                             );
@@ -14741,72 +11713,6 @@ export function App() {
             />
           </Suspense>
         ) : null}
-        <AlertDialog
-          open={Boolean(pendingReusePrompt)}
-          onOpenChange={(open) => {
-            if (!open) {
-              resolveReuseDecision("rerun");
-            }
-          }}
-        >
-          <AlertDialogContent
-            size="default"
-            portalContainer={sidebarInsetElement}
-            overlayClassName="absolute inset-0"
-            className="!absolute !left-1/2 !top-1/2 z-50 max-h-[calc(100%-1rem)] w-[min(calc(var(--user-chat-width)+2rem),calc(100%-1.5rem))] max-w-[calc(100%-1.5rem)] min-w-0 !-translate-x-1/2 !-translate-y-1/2 gap-5 overflow-y-auto overflow-x-hidden"
-          >
-            <div className="min-w-0 space-y-4">
-              <div className="flex items-start gap-4">
-                <AlertDialogMedia className="bg-primary/12 text-primary mb-0 shrink-0">
-                  <Database className="size-7" />
-                </AlertDialogMedia>
-                <div className="min-w-0 space-y-2">
-                  <AlertDialogTitle className="text-left">Reuse previous analysis?</AlertDialogTitle>
-                  <AlertDialogDescription className="text-left break-words [overflow-wrap:anywhere]">
-                    {pendingReuseCandidate
-                      ? `Found a ${pendingReuseMatchTypeLabel?.toLowerCase()} for ${pendingReuseFileNames[0] ?? "this upload"}.`
-                      : "Found a prior run for this upload."}
-                  </AlertDialogDescription>
-                </div>
-              </div>
-              {pendingReuseCandidate ? (
-                <div className="w-full min-w-0 break-words [overflow-wrap:anywhere] rounded-md border border-border/70 bg-muted/30 px-3 py-3 text-left text-sm leading-relaxed">
-                  <p className="text-foreground font-medium">{pendingReuseMatchTypeLabel}</p>
-                  <p className="text-muted-foreground">{`Matched records: ${pendingReuseMatchCount}`}</p>
-                  <p className="text-muted-foreground break-all">{`Matched file(s): ${pendingReuseFileNames.join(", ") || "unknown"}`}</p>
-                  <p className="text-muted-foreground">{`Tools in prior run: ${pendingReuseToolLabels.join(", ") || "analysis"}`}</p>
-                  <p className="text-muted-foreground break-all">{`Run ID: ${pendingReuseCandidate.runId}`}</p>
-                  {pendingReuseCandidate.conversationTitle ? (
-                    <p className="text-muted-foreground break-words [overflow-wrap:anywhere]">{`Conversation: ${pendingReuseCandidate.conversationTitle}`}</p>
-                  ) : null}
-                  {pendingReuseSourceUpdatedAt ? (
-                    <p className="text-muted-foreground">{`Last updated: ${pendingReuseSourceUpdatedAt}`}</p>
-                  ) : null}
-                  <p className="text-muted-foreground pt-1">
-                    Load existing outputs to continue quickly, or run again to generate fresh results.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-            <div className="flex w-full flex-wrap items-center justify-center gap-2">
-              <AlertDialogCancel
-                onClick={() => {
-                  resolveReuseDecision("rerun");
-                }}
-              >
-                Run again
-              </AlertDialogCancel>
-              <AlertDialogAction
-                disabled={!pendingReuseCandidate}
-                onClick={() => {
-                  resolveReuseDecision("load");
-                }}
-              >
-                Load results
-              </AlertDialogAction>
-            </div>
-          </AlertDialogContent>
-        </AlertDialog>
         <AlertDialog
           open={Boolean(pendingConversationDelete)}
           onOpenChange={(open) => {

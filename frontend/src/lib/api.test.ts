@@ -117,6 +117,167 @@ describe("ApiClient browser auth hardening", () => {
   });
 });
 
+describe("ApiClient HDF5 viewer endpoints", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const jsonFetchMock = (payload: unknown) =>
+    vi.fn(async () =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+
+  it("builds hdf5 slice preview URLs through the V2 upload API", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    expect(
+      client.hdf5SlicePreviewUrl("file-123", {
+        datasetPath: "/DataContainers/ImageDataContainer/CellData/FeatureIds",
+        axis: "z",
+        index: 4,
+        component: 0,
+      })
+    ).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/slice?dataset_path=%2FDataContainers%2FImageDataContainer%2FCellData%2FFeatureIds&axis=z&index=4&component=0"
+    );
+  });
+
+  it("builds hdf5 atlas preview URLs through the V2 upload API", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    expect(
+      client.hdf5AtlasPreviewUrl("file-123", {
+        datasetPath: "/volume",
+        enhancement: "d",
+        fusionMethod: "max",
+        negative: false,
+        channels: [0, 2],
+      })
+    ).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/atlas?dataset_path=%2Fvolume&enhancement=d&fusion_method=max&negative=false&channels=0%2C2"
+    );
+  });
+
+  it("fetches hdf5 dataset summaries through the V2 upload API", async () => {
+    const fetchMock = jsonFetchMock({ path: "/volume", kind: "dataset" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await client.getHdf5DatasetSummary("file-123", "/volume");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/dataset?dataset_path=%2Fvolume"
+    );
+    expect(init.credentials).toBe("include");
+  });
+
+  it("fetches the hdf5 materials dashboard through the V2 upload API", async () => {
+    const fetchMock = jsonFetchMock({ available: false });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await client.getHdf5MaterialsDashboard("file-123");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/materials/dashboard"
+    );
+    expect(init.credentials).toBe("include");
+  });
+
+  it("fetches hdf5 scalar volumes through the V2 upload API and reads x-volume headers", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint8Array([1, 2, 3, 4]).buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "x-volume-width": "2",
+          "x-volume-height": "1",
+          "x-volume-depth": "2",
+          "x-volume-dtype": "uint8",
+          "x-volume-bytes-per-voxel": "1",
+          "x-volume-raw-min": "1",
+          "x-volume-raw-max": "4",
+        },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const volume = await client.getHdf5ScalarVolume("file-123", {
+      datasetPath: "/volume",
+      channel: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/scalar-volume?dataset_path=%2Fvolume&channel=1"
+    );
+    expect(init.credentials).toBe("include");
+    expect(volume).toMatchObject({
+      width: 2,
+      height: 1,
+      depth: 2,
+      dtype: "uint8",
+      bytesPerVoxel: 1,
+      rawMin: 1,
+      rawMax: 4,
+      channel: null,
+    });
+    expect(volume.data.byteLength).toBe(4);
+  });
+
+  it("fetches hdf5 dataset histograms through the V2 upload API", async () => {
+    const fetchMock = jsonFetchMock({ bins: [], counts: [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await client.getHdf5DatasetHistogram("file-123", "/volume", { component: 0, bins: 64 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(String(url)).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/histogram?dataset_path=%2Fvolume&component=0&bins=64"
+    );
+  });
+
+  it("fetches hdf5 table previews through the V2 upload API", async () => {
+    const fetchMock = jsonFetchMock({ columns: [], rows: [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    await client.getHdf5DatasetTablePreview("file-123", "/table", { offset: 10, limit: 50 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(String(url)).toBe(
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/table?dataset_path=%2Ftable&offset=10&limit=50"
+    );
+  });
+
+  it("never emits legacy /v1/ paths from the hdf5 URL builders", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const urls = [
+      client.hdf5SlicePreviewUrl("file-123", { datasetPath: "/volume" }),
+      client.hdf5AtlasPreviewUrl("file-123", { datasetPath: "/volume" }),
+    ];
+
+    urls.forEach((value) => {
+      expect(value.includes("/v1/")).toBe(false);
+      expect(value.startsWith("https://ultra.example.org/v2/uploads/file-123/hdf5/")).toBe(true);
+    });
+  });
+});
+
 describe("ApiClient V2 chat bridge", () => {
   const createMemoryStorage = (): Storage => {
     const values = new Map<string, string>();
@@ -311,15 +472,20 @@ describe("ApiClient V2 chat bridge", () => {
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
     const tokens: string[] = [];
+    const tokenSequences: Array<number | undefined> = [];
     const eventSequences: Array<unknown> = [];
     const response = await client.resumeRunStream("run_resume", {
       afterSequence: 7,
-      onToken: (delta) => tokens.push(delta),
+      onToken: (delta, event) => {
+        tokens.push(delta);
+        tokenSequences.push(event?.sequence);
+      },
       onRunEvent: (event) => eventSequences.push(event.payload?.sequence),
     });
 
     expect(response.response_text).toBe("done more");
     expect(tokens).toEqual([" more"]);
+    expect(tokenSequences).toEqual([8]);
     // The message.delta at sequence 8 drives the token stream (above) but is gated out of
     // onRunEvent; only the structural run.completed at sequence 9 reaches onRunEvent.
     expect(eventSequences).toEqual([9]);
@@ -425,6 +591,48 @@ describe("ApiClient V2 chat bridge", () => {
 
     expect(tokens).toEqual([" more", " text"]);
     expect(response.response_text).toBe("done more text");
+  });
+
+  it("dedupes mixed legacy token and V2 message delta frames for the same event", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/runs/run_mixed/events?stream=true&after_sequence=0") {
+        const body = [
+          'event: token\ndata: {"run_id":"run_mixed","event_id":"evt_delta_1","sequence":5,"delta":"Hello"}\n\n',
+          'event: run_event\ndata: {"run_id":"run_mixed","event_id":"evt_delta_1","event_kind":"message.delta","sequence":5,"payload":{"text":"Hello"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_mixed","event_id":"evt_delta_2","event_kind":"message.delta","sequence":6,"payload":{"text":" world"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_mixed","event_kind":"run.completed","sequence":7,"payload":{"response_text":"Hello world"}}\n\n',
+        ].join("");
+        return new Response(encoder.encode(body), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_mixed") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_mixed",
+            status: "succeeded",
+            response_text: "Hello world",
+            updated_at: "2026-05-31T00:00:01Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const tokens: string[] = [];
+    const response = await client.resumeRunStream("run_mixed", {
+      onToken: (delta) => tokens.push(delta),
+    });
+
+    expect(tokens).toEqual(["Hello", " world"]);
+    expect(response.response_text).toBe("Hello world");
   });
 
   it("fetches run events incrementally from a caller-provided sequence cursor", async () => {
@@ -551,24 +759,6 @@ describe("ApiClient V2 chat bridge", () => {
       "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=0",
       "https://ultra.example.org/v2/runs/run_live",
     ]);
-  });
-
-  it("returns only a temporary local title without calling legacy V1 title endpoints", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const response = await client.chatTitle({
-      messages: [{ role: "user", content: "create a matplotlib y = x^2 plot" }],
-      max_words: 4,
-    });
-
-    expect(response).toEqual({
-      title: "Matplotlib Y X 2",
-      model: "frontend-local",
-      strategy: "fallback",
-    });
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sends a stable idempotency key to V2 run creation", async () => {
@@ -4698,57 +4888,6 @@ describe("ApiClient V2 chat bridge", () => {
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
-      if (url === "https://ultra.example.org/v2/data-agent/jobs/data_agent_job_nph_caption/status") {
-        expect(init?.method).toBe("PATCH");
-        expect(JSON.parse(String(init?.body))).toMatchObject({
-          status: "running",
-          progress_completed: 1,
-          progress_total: 2,
-          message: "Captioned first resource",
-        });
-        return new Response(
-          JSON.stringify({
-            job: {
-              job_id: "data_agent_job_nph_caption",
-              owner_user_id: "nph-user",
-              owner_org_id: "nph-org",
-              project_id: "nph-study",
-              job_type: "caption_resources",
-              status: "running",
-              resource_count: 2,
-              progress_completed: 1,
-              progress_total: 2,
-              created_by_user_id: "nph-user",
-              created_at: "2026-06-08T00:00:00Z",
-              updated_at: "2026-06-08T00:01:00Z",
-              started_at: "2026-06-08T00:01:00Z",
-              input_selector: { mode: "short_caption", label: "NPH" },
-              output_summary: {},
-              metadata: { requested_from: "resources_page" },
-            },
-            events: [
-              {
-                event_id: "data_agent_job_event_created",
-                job_id: "data_agent_job_nph_caption",
-                sequence: 1,
-                event_type: "data_agent.job.created",
-                ts: "2026-06-08T00:00:00Z",
-                metadata: { resource_count: 2 },
-              },
-              {
-                event_id: "data_agent_job_event_progressed",
-                job_id: "data_agent_job_nph_caption",
-                sequence: 2,
-                event_type: "data_agent.job.progressed",
-                ts: "2026-06-08T00:01:00Z",
-                message: "Captioned first resource",
-                metadata: { resource_id: "file_a" },
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
       if (url === "https://ultra.example.org/v2/data-agent/jobs/data_agent_job_nph_caption/control") {
         expect(init?.method).toBe("POST");
         const body = JSON.parse(String(init?.body));
@@ -4843,13 +4982,6 @@ describe("ApiClient V2 chat bridge", () => {
       jobType: "caption_resources",
     });
     const loaded = await client.getDataAgentJob(created.job.job_id);
-    const progressed = await client.updateDataAgentJobStatus(created.job.job_id, {
-      status: "running",
-      progress_completed: 1,
-      progress_total: 2,
-      message: "Captioned first resource",
-      event_metadata: { resource_id: "file_a" },
-    });
     const canceled = await client.controlDataAgentJob(created.job.job_id, {
       action: "cancel",
       reason: "User paused the field upload.",
@@ -4863,8 +4995,6 @@ describe("ApiClient V2 chat bridge", () => {
     expect(created.events[0].event_type).toBe("data_agent.job.created");
     expect(listed.jobs[0].job_id).toBe("data_agent_job_nph_caption");
     expect(loaded.job.resource_count).toBe(2);
-    expect(progressed.job.status).toBe("running");
-    expect(progressed.events[1].event_type).toBe("data_agent.job.progressed");
     expect(canceled.job.status).toBe("canceled");
     expect(retried.job.status).toBe("queued");
   });
@@ -5981,62 +6111,6 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
-  it("searches conversations from V2 threads without probing legacy search routes", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      void init;
-      const url = String(input);
-      if (url === "https://ultra.example.org/v2/threads?limit=50&offset=0") {
-        return new Response(
-          JSON.stringify({
-            count: 2,
-            threads: [
-              {
-                thread_id: "thread_pca",
-                title: "Iris PCA analysis",
-                created_at: "2026-05-31T11:16:00Z",
-                updated_at: "2026-05-31T11:17:00Z",
-                metadata: {
-                  conversation_id: "conversation-pca",
-                  preview: "Create a PCA plot and table",
-                },
-              },
-              {
-                thread_id: "thread_sort",
-                title: "Bubble sort visualization",
-                created_at: "2026-05-31T11:18:00Z",
-                updated_at: "2026-05-31T11:19:00Z",
-                metadata: {
-                  conversation_id: "conversation-sort",
-                  preview: "Show how bubble sort works",
-                },
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const response = await client.searchConversations("pca", 50);
-
-    expect(response).toMatchObject({
-      query: "pca",
-      count: 1,
-      matches: [
-        {
-          conversation_id: "conversation-pca",
-          title: "Iris PCA analysis",
-        },
-      ],
-    });
-    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
-      "https://ultra.example.org/v2/threads?limit=50&offset=0",
-    ]);
-  });
-
   it("gets run results from V2 run records without probing legacy run result routes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
@@ -6112,16 +6186,10 @@ describe("ApiClient V2 chat bridge", () => {
     expect(JSON.parse(browserStorage().getItem("bisque-ultra:v2-chat-thread-map") ?? "{}")).toEqual({});
   });
 
-  it("uses V2 health, config, and local auth endpoints", async () => {
+  it("uses V2 config and local auth endpoints", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = String(input);
-      if (url === "https://ultra.example.org/v2/health") {
-        return new Response(JSON.stringify({ status: "ok", ts: "2026-05-31T00:00:00Z" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
       if (url === "https://ultra.example.org/v2/config/public") {
         return new Response(JSON.stringify({ app_name: "BisQue Ultra", features: {} }), {
           status: 200,
@@ -6163,7 +6231,6 @@ describe("ApiClient V2 chat bridge", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    await client.health();
     await client.getPublicConfig();
     await client.getBisqueSession();
     await client.requestAccount({
@@ -6187,20 +6254,6 @@ describe("ApiClient V2 chat bridge", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = String(input);
-      if (url === "https://ultra.example.org/v2/runs/run-1") {
-        return new Response(
-          JSON.stringify({
-            run_id: "run-1",
-            goal: "plot",
-            status: "succeeded",
-            created_at: "2026-05-31T00:00:00Z",
-            updated_at: "2026-05-31T00:00:01Z",
-            workflow_kind: "deep_agents",
-            mode: "durable",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
       if (url === "https://ultra.example.org/v2/runs/missing/events?limit=2&after_sequence=0") {
         return new Response(JSON.stringify({ error: "not found" }), {
           status: 404,
@@ -6218,7 +6271,6 @@ describe("ApiClient V2 chat bridge", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    await expect(client.getRun("run-1")).resolves.toMatchObject({ run_id: "run-1" });
     await expect(client.getRunEvents("missing", 2)).rejects.toMatchObject({ status: 404 });
     await expect(client.listArtifacts("missing", 2)).rejects.toMatchObject({ status: 404 });
     expect(client.artifactDownloadUrl("run-1", "reports/output.json")).toBe(
@@ -6274,33 +6326,6 @@ describe("ApiClient V2 chat bridge", () => {
     expect(viewer.service_urls?.histogram).toBe("/v2/uploads/file-1/histogram");
     const urls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(urls).toEqual(["https://ultra.example.org/v2/uploads/file-1/viewer"]);
-    expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
-  });
-
-  it("loads upload captions from V2", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      void init;
-      const url = String(input);
-      if (url === "https://ultra.example.org/v2/uploads/file-1/caption") {
-        return new Response(
-          JSON.stringify({
-            file_id: "file-1",
-            caption: "Uploaded image prairie.png.",
-            source: "fallback",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const caption = await client.getUploadCaption("file-1");
-
-    expect(caption.caption).toContain("prairie.png");
-    const urls = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(urls).toEqual(["https://ultra.example.org/v2/uploads/file-1/caption"]);
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
   });
 
@@ -6451,57 +6476,6 @@ describe("ApiClient V2 chat bridge", () => {
 
     expect(response.count).toBe(1);
     expect(response.results[0]?.name).toBe("EnrNE_recent.png");
-  });
-
-  it("downloads and uploads BisQue resources through V2", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url === "https://ultra.example.org/v2/bisque/download") {
-        expect(JSON.parse(String(init?.body))).toEqual({
-          resources: ["https://bisque.example.org/data_service/image/1"],
-        });
-        return new Response(
-          JSON.stringify({ file_count: 1, uploaded: [], imports: [] }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (url === "https://ultra.example.org/v2/bisque/upload") {
-        expect(JSON.parse(String(init?.body))).toEqual({
-          file_ids: ["file_1"],
-          artifact_ids: ["artifact_1"],
-        });
-        return new Response(
-          JSON.stringify({
-            count: 1,
-            uploads: [
-              {
-                file_id: "file_1",
-                artifact_id: "artifact_1",
-                resource_uri: "https://bisque.example.org/data_service/file/2",
-                name: "report.md",
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const download = await client.downloadBisqueResources([
-      "https://bisque.example.org/data_service/image/1",
-    ]);
-    const upload = await client.uploadBisqueOutputs({
-      fileIds: ["file_1"],
-      artifactIds: ["artifact_1"],
-    });
-
-    expect(download.file_count).toBe(1);
-    expect(upload.count).toBe(1);
-    expect(upload.uploads[0]?.resource_uri).toContain("/data_service/file/2");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("loads admin read models from V2 instead of legacy admin routes", async () => {

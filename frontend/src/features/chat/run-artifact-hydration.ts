@@ -27,21 +27,10 @@ type HydrationCardImage = {
   downloadUrl?: string;
 };
 
-type HydrationCardFigure = {
-  url?: string;
-  downloadUrl?: string;
-};
-
 type HydrationToolCard = {
   tool?: string;
   images?: HydrationCardImage[];
   yoloFigureAvailability?: { missingAnnotatedFigure?: boolean } | null;
-  megasegInsights?:
-    | {
-        heroFigure?: HydrationCardFigure | null;
-        secondaryFigures?: HydrationCardFigure[];
-      }
-    | null;
 };
 
 type HydrationMessage = {
@@ -259,10 +248,7 @@ export const shouldHydrateRunArtifacts = (
     if (VISUAL_TOOL_NAMES.has(visualToolName(card.tool))) {
       return true;
     }
-    if ((card.images?.length ?? 0) > 0) {
-      return true;
-    }
-    return Boolean(card.megasegInsights);
+    return (card.images?.length ?? 0) > 0;
   });
   const hasVisualSignal = hasVisualToolCard || messageHasVisualToolSignal(message);
   if (!hasVisualSignal) {
@@ -281,23 +267,6 @@ export const shouldHydrateRunArtifacts = (
   toolCards.forEach((card) => {
     (card.images ?? []).forEach((image) => {
       [image?.url, image?.downloadUrl].forEach((value) => {
-        const token = String(value || "").trim();
-        if (token) {
-          candidateUrls.add(token);
-        }
-      });
-    });
-    const heroFigure = card.megasegInsights?.heroFigure;
-    if (heroFigure) {
-      [heroFigure.url, heroFigure.downloadUrl].forEach((value) => {
-        const token = String(value || "").trim();
-        if (token) {
-          candidateUrls.add(token);
-        }
-      });
-    }
-    (card.megasegInsights?.secondaryFigures ?? []).forEach((figure) => {
-      [figure.url, figure.downloadUrl].forEach((value) => {
         const token = String(value || "").trim();
         if (token) {
           candidateUrls.add(token);

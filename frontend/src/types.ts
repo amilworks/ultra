@@ -101,53 +101,6 @@ export type ChatRequest = {
   idempotency_key?: string | null;
 };
 
-export type ChatTitleRequest = {
-  messages: ChatMessage[];
-  max_words?: number;
-};
-
-export type ChatTitleResponse = {
-  title: string;
-  model: string;
-  strategy: "llm" | "fallback";
-};
-
-export type ConfidenceBlock = {
-  level: "low" | "medium" | "high";
-  why: string[];
-};
-
-export type EvidenceItem = {
-  source: string;
-  run_id?: string | null;
-  artifact?: string | null;
-  summary?: string | null;
-};
-
-export type MeasurementItem = {
-  name: string;
-  value: number | string;
-  unit?: string | null;
-  ci95?: [number, number] | null;
-};
-
-export type NextStepAction = {
-  action: string;
-  workflow?: string | null;
-  args?: Record<string, unknown>;
-};
-
-export type AssistantContract = {
-  result: string;
-  evidence: EvidenceItem[];
-  measurements: MeasurementItem[];
-  statistical_analysis: Array<Record<string, unknown>>;
-  confidence: ConfidenceBlock;
-  qc_warnings: string[];
-  limitations: string[];
-  next_steps: NextStepAction[];
-};
-
 export type ProgressEvent = {
   event: string;
   level?: string;
@@ -172,55 +125,6 @@ export type RunResultResponse = {
   run_id: string;
   status: "pending" | "running" | "succeeded" | "failed" | "canceled";
   result?: ChatResponse | null;
-};
-
-export type AnalysisRunSummary = {
-  run_id: string;
-  conversation_id?: string | null;
-  goal: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "canceled";
-  created_at: string;
-  updated_at: string;
-  error?: string | null;
-  tools: string[];
-  file_names: string[];
-  duration_seconds?: number | null;
-};
-
-export type AnalysisHistoryResponse = {
-  count: number;
-  analyses: AnalysisRunSummary[];
-};
-
-export type ContractAuditRequest = {
-  run_ids?: string[];
-  limit?: number;
-};
-
-export type ContractAuditRecord = {
-  run_id: string;
-  status: string;
-  passed: boolean;
-  checks: Record<string, boolean>;
-  missing_fields: string[];
-  evidence_count: number;
-  measurement_count: number;
-  limitation_count: number;
-  next_step_count: number;
-  confidence_level?: string | null;
-  confidence_why_count: number;
-  research_score: number;
-  research_max_score: number;
-  research_summary: string;
-  recommendations: string[];
-};
-
-export type ContractAuditResponse = {
-  count: number;
-  passed: number;
-  failed: number;
-  average_research_score: number;
-  records: ContractAuditRecord[];
 };
 
 export type ArtifactRecord = {
@@ -321,8 +225,6 @@ export type RunResponse = {
   trace_group_id?: string | null;
 };
 
-export type TrainingDatasetSplit = "train" | "val" | "test";
-export type TrainingDatasetRole = "image" | "mask" | "annotation";
 export type TrainingJobType = "training" | "inference";
 export type TrainingJobStatus =
   | "queued"
@@ -353,72 +255,6 @@ export type TrainingModelRecord = {
 export type TrainingModelsResponse = {
   count: number;
   models: TrainingModelRecord[];
-};
-
-export type TrainingDatasetCreateRequest = {
-  name: string;
-  description?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type TrainingDatasetItemAssignment = {
-  file_id: string;
-  split: TrainingDatasetSplit;
-  role: TrainingDatasetRole;
-  sample_id?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type TrainingDatasetItemsRequest = {
-  items: TrainingDatasetItemAssignment[];
-  replace?: boolean;
-};
-
-export type TrainingDatasetRecord = {
-  dataset_id: string;
-  user_id: string;
-  name: string;
-  description?: string | null;
-  item_count: number;
-  split_counts: Record<string, number>;
-  created_at: string;
-  updated_at: string;
-};
-
-export type TrainingDatasetResponse = {
-  dataset: TrainingDatasetRecord;
-  manifest: Record<string, unknown>;
-};
-
-export type TrainingDatasetListResponse = {
-  count: number;
-  datasets: TrainingDatasetRecord[];
-};
-
-export type TrainingJobCreateRequest = {
-  dataset_id: string;
-  model_key: string;
-  config?: Record<string, unknown>;
-  confirm_launch?: boolean;
-  initial_checkpoint_path?: string | null;
-};
-
-export type TrainingPreflightRequest = {
-  dataset_id: string;
-  model_key: string;
-  config?: Record<string, unknown>;
-};
-
-export type TrainingPreflightResponse = {
-  dataset_id: string;
-  model_key: string;
-  config: Record<string, unknown>;
-  recommended_launch: boolean;
-  report: Record<string, unknown>;
-};
-
-export type TrainingJobControlRequest = {
-  action: "pause" | "resume" | "cancel" | "restart";
 };
 
 export type InferenceJobCreateRequest = {
@@ -455,56 +291,9 @@ export type TrainingJobResponse = {
   job: TrainingJobRecord;
 };
 
-export type ModelHealthRecord = {
-  model_key: string;
-  model_version: string;
-  status: ModelHealthStatus;
-  recommendation: string;
-  rationale: string[];
-  metrics: Record<string, unknown>;
-  training_runs: number;
-  inference_runs: number;
-  user_id?: string | null;
-};
-
-export type ModelHealthResponse = {
-  count: number;
-  models: ModelHealthRecord[];
-};
-
 export type TrainingDomainOwnerScope = "shared" | "private";
 export type TrainingLineageScope = "shared" | "fork";
 export type TrainingVersionStatus = "candidate" | "canary" | "active" | "retired";
-export type TrainingProposalStatus =
-  | "pending_approval"
-  | "approved"
-  | "running"
-  | "evaluating"
-  | "ready_to_promote"
-  | "promoted"
-  | "rejected"
-  | "failed";
-export type TrainingMergeStatus =
-  | "open"
-  | "evaluating"
-  | "approved"
-  | "rejected"
-  | "executed"
-  | "failed";
-export type TrainingTriggerReason =
-  | "data_threshold"
-  | "schedule"
-  | "health"
-  | "manual"
-  | "merge"
-  | "none";
-
-export type TrainingDomainCreateRequest = {
-  name: string;
-  description?: string | null;
-  owner_scope?: TrainingDomainOwnerScope;
-  metadata?: Record<string, unknown>;
-};
 
 export type TrainingDomainRecord = {
   domain_id: string;
@@ -540,11 +329,6 @@ export type TrainingLineageListResponse = {
   lineages: TrainingLineageRecord[];
 };
 
-export type TrainingForkLineageRequest = {
-  model_key?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
 export type TrainingModelVersionRecord = {
   version_id: string;
   lineage_id: string;
@@ -562,60 +346,6 @@ export type TrainingModelVersionListResponse = {
   versions: TrainingModelVersionRecord[];
 };
 
-export type TrainingUpdateProposalRecord = {
-  proposal_id: string;
-  lineage_id: string;
-  trigger_reason: TrainingTriggerReason | string;
-  trigger_snapshot: Record<string, unknown>;
-  dataset_snapshot: Record<string, unknown>;
-  config: Record<string, unknown>;
-  status: TrainingProposalStatus | string;
-  idempotency_key?: string | null;
-  approved_by?: string | null;
-  rejected_by?: string | null;
-  linked_job_id?: string | null;
-  candidate_version_id?: string | null;
-  error?: string | null;
-  created_at: string;
-  updated_at: string;
-  approved_at?: string | null;
-  rejected_at?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-};
-
-export type TrainingUpdateProposalListResponse = {
-  count: number;
-  proposals: TrainingUpdateProposalRecord[];
-};
-
-export type TrainingUpdateProposalPreviewRequest = {
-  lineage_id: string;
-  dataset_id: string;
-  approved_new_samples?: number | null;
-  class_counts?: Record<string, number>;
-  health_status?: ModelHealthStatus | null;
-  config?: Record<string, unknown>;
-  trigger_reason_override?: TrainingTriggerReason | null;
-  idempotency_key?: string | null;
-  persist?: boolean;
-};
-
-export type TrainingUpdateProposalPreviewResponse = {
-  trigger: Record<string, unknown>;
-  preview: Record<string, unknown>;
-  proposal?: TrainingUpdateProposalRecord | null;
-};
-
-export type TrainingUpdateProposalDecisionRequest = {
-  note?: string | null;
-  confirm_launch?: boolean;
-};
-
-export type TrainingUpdateProposalResponse = {
-  proposal: TrainingUpdateProposalRecord;
-};
-
 export type TrainingVersionPromoteRequest = {
   note?: string | null;
 };
@@ -628,44 +358,6 @@ export type TrainingVersionRollbackRequest = {
 export type TrainingModelVersionResponse = {
   version: TrainingModelVersionRecord;
   lineage: TrainingLineageRecord;
-};
-
-export type TrainingMergeRequestCreateRequest = {
-  source_lineage_id: string;
-  target_lineage_id: string;
-  candidate_version_id: string;
-  notes?: string | null;
-};
-
-export type TrainingMergeRequestDecisionRequest = {
-  notes?: string | null;
-};
-
-export type TrainingMergeRequestRecord = {
-  merge_id: string;
-  source_lineage_id: string;
-  target_lineage_id: string;
-  candidate_version_id: string;
-  requested_by: string;
-  status: TrainingMergeStatus | string;
-  decision_by?: string | null;
-  notes?: string | null;
-  evaluation: Record<string, unknown>;
-  linked_proposal_id?: string | null;
-  error?: string | null;
-  created_at: string;
-  updated_at: string;
-  decided_at?: string | null;
-  executed_at?: string | null;
-};
-
-export type TrainingMergeRequestResponse = {
-  merge_request: TrainingMergeRequestRecord;
-};
-
-export type TrainingMergeRequestListResponse = {
-  count: number;
-  merge_requests: TrainingMergeRequestRecord[];
 };
 
 export type PrairieSyncResponse = {
@@ -742,28 +434,6 @@ export type PrairieBenchmarkRunResponse = {
 
 export type PrairieBenchmarkRunRequest = {
   mode?: "canonical_only" | "promotion_packet";
-};
-
-export type ReproReportRequest = {
-  run_id?: string | null;
-  title?: string | null;
-  result_summary?: string | null;
-  measurements?: Array<Record<string, unknown>>;
-  statistical_analysis?: Array<Record<string, unknown>> | Record<string, unknown> | null;
-  qc_warnings?: string[];
-  limitations?: string[];
-  provenance?: Record<string, unknown>;
-  next_steps?: Array<Record<string, unknown> | string>;
-  output_dir?: string | null;
-};
-
-export type ReproReportResponse = {
-  success: boolean;
-  run_id?: string | null;
-  report_markdown_path: string;
-  report_json_path: string;
-  report_sha256: string;
-  report_bundle_sha256: string;
 };
 
 export type UploadedFileRecord = {
@@ -1302,17 +972,6 @@ export type DataAgentJobCreateRequest = {
   metadata?: Record<string, unknown> | null;
 };
 
-export type DataAgentJobStatusUpdateRequest = {
-  status: "queued" | "running" | "succeeded" | "failed" | "canceled" | string;
-  progress_completed?: number;
-  progress_total?: number;
-  error?: string | null;
-  message?: string | null;
-  output_summary?: Record<string, unknown> | null;
-  metadata?: Record<string, unknown> | null;
-  event_metadata?: Record<string, unknown> | null;
-};
-
 export type DataAgentJobControlRequest = {
   action: "cancel" | "retry" | string;
   reason?: string | null;
@@ -1327,66 +986,6 @@ export type DataAgentJobResponse = {
 export type DataAgentJobListResponse = {
   count: number;
   jobs: DataAgentJobRecord[];
-};
-
-export type ResourceComputationLookupRequest = {
-  file_ids: string[];
-  tool_names?: string[];
-  prompt?: string | null;
-  limit_per_file_tool?: number;
-};
-
-export type ResourceComputationSuggestion = {
-  requested_file_id: string;
-  requested_file_name: string;
-  requested_file_sha256: string;
-  tool_name: "yolo_detect" | "estimate_depth_pro" | string;
-  run_id: string;
-  run_status: string;
-  run_goal?: string | null;
-  run_updated_at: string;
-  conversation_id?: string | null;
-  conversation_title?: string | null;
-  conversation_updated_at?: string | null;
-  match_type: "sha256" | "filename";
-};
-
-export type ResourceComputationLookupResponse = {
-  count: number;
-  suggestions: ResourceComputationSuggestion[];
-};
-
-export type ResumableUploadInitRequest = {
-  file_name: string;
-  size_bytes: number;
-  content_type?: string | null;
-  fingerprint: string;
-  chunk_size_bytes?: number;
-};
-
-export type ResumableUploadSessionResponse = {
-  upload_id: string;
-  file_name: string;
-  size_bytes: number;
-  content_type?: string | null;
-  chunk_size_bytes: number;
-  bytes_received: number;
-  status: "active" | "completed" | "failed";
-  uploaded?: UploadedFileRecord | null;
-  error?: string | null;
-};
-
-export type ResumableUploadChunkResponse = {
-  upload_id: string;
-  bytes_received: number;
-  size_bytes: number;
-  complete: boolean;
-  status: "active" | "completed" | "failed";
-};
-
-export type ResumableUploadCompleteResponse = {
-  upload_id: string;
-  uploaded: UploadedFileRecord;
 };
 
 export type ConversationRecord = {
@@ -1408,12 +1007,6 @@ export type ConversationListResponse = {
   offset: number;
   has_more: boolean;
   conversations: ConversationRecord[];
-};
-
-export type ConversationSearchResponse = {
-  query: string;
-  count: number;
-  matches: Array<Record<string, unknown>>;
 };
 
 export type AdminPlatformKpis = {
@@ -1839,27 +1432,6 @@ export type AdminMetricsResponse = {
   cost: AdminMetricCost;
 };
 
-export type SantaBarbaraWeatherResponse = {
-  success: boolean;
-  location: string;
-  micro_location?: string | null;
-  observed_at?: string | null;
-  temperature_f?: number | null;
-  apparent_temperature_f?: number | null;
-  weather_code?: number | null;
-  weather_label?: string | null;
-  wind_speed_mph?: number | null;
-  daily_high_f?: number | null;
-  daily_low_f?: number | null;
-  precipitation_probability_percent?: number | null;
-  wave_height_ft?: number | null;
-  swell_wave_height_ft?: number | null;
-  wave_period_seconds?: number | null;
-  blip?: string | null;
-  summary: string;
-  source: string;
-};
-
 export type BisqueImportItem = {
   input_url: string;
   resource_uri?: string | null;
@@ -1914,11 +1486,6 @@ export type BisqueUploadRecord = {
   name?: string | null;
   resource_uniq?: string | null;
   client_view_url?: string | null;
-};
-
-export type BisqueUploadResponse = {
-  count: number;
-  uploads: BisqueUploadRecord[];
 };
 
 export type BisqueDatasetRecord = {
@@ -2506,12 +2073,6 @@ export type UploadViewerHistogramResponse = {
   };
 };
 
-export type UploadCaptionResponse = {
-  file_id: string;
-  caption: string;
-  source: "llm" | "fallback" | "cache";
-};
-
 export type PublicConfigResponse = {
   app_name?: string | null;
   app_version?: string | null;
@@ -2570,7 +2131,3 @@ export type AccountRequestPayload = {
 };
 
 export type AccountRequestResponse = BisqueAuthSessionResponse;
-
-export type BisqueGuestAuthRequest = AccountRequestPayload;
-
-export * from "./types-v2";

@@ -1,7 +1,6 @@
 type PhaseDisplayCopy = {
   label: string;
   detail?: string;
-  thinking?: string;
 };
 
 const DEFAULT_THINKING_TEXT = "Working through your request";
@@ -181,12 +180,6 @@ const PHASE_DISPLAY_COPY: Record<string, PhaseDisplayCopy> = {
   },
 };
 
-const TOOL_STATUS_COPY: Record<string, string> = {
-  completed: "Integrating the latest results",
-  failed: "Recovering and moving forward",
-  started: "Running focused support work",
-};
-
 const normalizeToken = (value: string): string => value.trim().toLowerCase();
 
 const getPhaseDisplayCopy = (phase: string): PhaseDisplayCopy | null => {
@@ -199,15 +192,5 @@ export const getPhaseLabel = (phase: string): string | null =>
 
 export const getPhaseDetail = (phase: string): string | null =>
   getPhaseDisplayCopy(phase)?.detail ?? null;
-
-export const getPhaseThinkingText = (phase: string): string | null => {
-  const copy = getPhaseDisplayCopy(phase);
-  return copy?.thinking ?? copy?.label ?? null;
-};
-
-export const getToolStatusThinkingText = (status: string): string | null => {
-  const normalized = normalizeToken(status);
-  return normalized ? TOOL_STATUS_COPY[normalized] ?? null : null;
-};
 
 export { DEFAULT_THINKING_TEXT };

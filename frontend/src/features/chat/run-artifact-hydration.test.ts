@@ -43,36 +43,6 @@ describe("isHydratableRunArtifactVisual", () => {
 });
 
 describe("shouldHydrateRunArtifacts", () => {
-  it("rehydrates megaseg runs that still point figures at local filesystem paths", () => {
-    const shouldHydrate = shouldHydrateRunArtifacts(
-      {
-        role: "assistant",
-        runId: "run_123",
-        runArtifacts: [],
-        responseMetadata: {
-          tool_invocations: [
-            {
-              tool: "segment_image_megaseg",
-            },
-          ],
-        },
-      },
-      [
-        {
-          tool: "segment_image_megaseg",
-          megasegInsights: {
-            heroFigure: {
-              url: "/srv/ultra/shared/science/megaseg_results/example_overlay_mip.png",
-            },
-            secondaryFigures: [],
-          },
-        },
-      ]
-    );
-
-    expect(shouldHydrate).toBe(true);
-  });
-
   it("skips hydration when figure urls are already artifact-backed", () => {
     const shouldHydrate = shouldHydrateRunArtifacts(
       {
@@ -97,12 +67,6 @@ describe("shouldHydrateRunArtifacts", () => {
       [
         {
           tool: "segment_image_megaseg",
-          megasegInsights: {
-            heroFigure: {
-              url: "https://example.invalid/v1/artifacts/run_123/download?path=tool_outputs%2Fexample_overlay_mip.png",
-            },
-            secondaryFigures: [],
-          },
         },
       ]
     );

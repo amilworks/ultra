@@ -18,27 +18,19 @@ import type {
   AdminUserAccount,
   AdminUserStatus,
   AdminUserListResponse,
-  AnalysisHistoryResponse,
   ArtifactRecord,
   ArtifactListResponse,
   BisqueAuthLoginRequest,
   BisqueAuthSessionResponse,
-  BisqueGuestAuthRequest,
   BisqueImportResponse,
   BisquePushRequest,
   BisquePushResponse,
   BisqueSearchRequest,
   BisqueSearchResponse,
-  BisqueUploadResponse,
   ChatRequest,
   ChatResponse,
-  ChatTitleRequest,
-  ChatTitleResponse,
-  ContractAuditRequest,
-  ContractAuditResponse,
   ConversationListResponse,
   ConversationRecord,
-  ConversationSearchResponse,
   Hdf5DatasetHistogramResponse,
   Hdf5MaterialsDashboardResponse,
   Hdf5DatasetSummary,
@@ -55,7 +47,6 @@ import type {
   DataAgentJobCreateRequest,
   DataAgentJobListResponse,
   DataAgentJobResponse,
-  DataAgentJobStatusUpdateRequest,
   DatasetSnapshotCreateRequest,
   DatasetSnapshotEventListResponse,
   DatasetSnapshotListResponse,
@@ -80,56 +71,23 @@ import type {
   ResourceResponse,
   ResourceTextHead,
   ResourceCsvRows,
-  ResourceComputationLookupRequest,
-  ResourceComputationLookupResponse,
   ResourceShareGrantCreateRequest,
   ResourceShareGrantListResponse,
   ResourceShareGrantResponse,
   ResourceShareGrantsCreateRequest,
   ResourceShareGrantsCreateResponse,
-  ResumableUploadChunkResponse,
-  ResumableUploadCompleteResponse,
-  ResumableUploadInitRequest,
-  ResumableUploadSessionResponse,
-  ReproReportRequest,
-  ReproReportResponse,
   InferenceJobCreateRequest,
-  ModelHealthResponse,
-  TrainingDomainCreateRequest,
   TrainingDomainListResponse,
-  TrainingDomainRecord,
-  TrainingForkLineageRequest,
   TrainingLineageListResponse,
-  TrainingLineageRecord,
-  TrainingMergeRequestCreateRequest,
-  TrainingMergeRequestDecisionRequest,
-  TrainingMergeRequestListResponse,
-  TrainingMergeRequestResponse,
   TrainingModelVersionListResponse,
   TrainingModelVersionResponse,
-  TrainingUpdateProposalDecisionRequest,
-  TrainingUpdateProposalListResponse,
-  TrainingUpdateProposalPreviewRequest,
-  TrainingUpdateProposalPreviewResponse,
-  TrainingUpdateProposalResponse,
   TrainingVersionPromoteRequest,
   TrainingVersionRollbackRequest,
   RunResultResponse,
   RunEventsResponse,
   RunEvent,
-  RunResponse,
-  SantaBarbaraWeatherResponse,
-  TrainingDatasetCreateRequest,
-  TrainingDatasetItemsRequest,
-  TrainingDatasetListResponse,
-  TrainingDatasetResponse,
-  TrainingJobControlRequest,
-  TrainingJobCreateRequest,
-  TrainingPreflightRequest,
-  TrainingPreflightResponse,
   TrainingJobResponse,
   TrainingModelsResponse,
-  UploadCaptionResponse,
   UploadViewerHistogramResponse,
   UploadViewerInfo,
   UploadChunkResponse,
@@ -148,8 +106,15 @@ export type ApiClientOptions = {
   apiKey?: string;
 };
 
+export type StreamTokenEvent = {
+  sequence?: number;
+  eventId?: string;
+  runId?: string;
+  eventKind?: string;
+};
+
 export type ChatStreamHandlers = {
-  onToken?: (delta: string) => void;
+  onToken?: (delta: string, event?: StreamTokenEvent) => void;
   onDone?: (payload: ChatResponse) => void;
   onRunStarted?: (payload: { runId: string; model?: string | null }) => void;
   onRunEvent?: (payload: RunEvent) => void;
@@ -575,22 +540,6 @@ const chatTitleFromRequest = (request: ChatRequest): string => {
   const raw = asTrimmedString(request.goal) || lastUserMessageContent(request) || "New conversation";
   const title = fallbackConversationTitleFromSeed(raw);
   return title.length > 80 ? `${title.slice(0, 77).trimEnd()}...` : title;
-};
-
-const chatTitleFromMessages = (request: ChatTitleRequest): string => {
-  const maxWords =
-    Number.isFinite(Number(request.max_words)) && Number(request.max_words) > 0
-      ? Math.floor(Number(request.max_words))
-      : 4;
-  let raw = "";
-  for (let idx = request.messages.length - 1; idx >= 0; idx -= 1) {
-    const message = request.messages[idx];
-    if (message.role === "user") {
-      raw = asTrimmedString(message.content);
-      break;
-    }
-  }
-  return fallbackConversationTitleFromSeed(raw, maxWords);
 };
 
 const stateMessagesFromState = (state: Record<string, unknown>): Array<Record<string, unknown>> =>
@@ -1504,18 +1453,6 @@ export class ApiClient {
     }
   }
 
-  async health(): Promise<{ status: string; ts: string }> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/health"), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as { status: string; ts: string };
-  }
-
   async getPublicConfig(): Promise<PublicConfigResponse> {
     const response = await fetch(buildUrl(this.baseUrl, "/v2/config/public"), {
       method: "GET",
@@ -1526,18 +1463,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as PublicConfigResponse;
-  }
-
-  async getSantaBarbaraWeather(): Promise<SantaBarbaraWeatherResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/fun/weather/santa-barbara"), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as SantaBarbaraWeatherResponse;
   }
 
   async getCurrentUser(): Promise<CurrentUserResponse> {
@@ -1925,140 +1850,6 @@ export class ApiClient {
     return (await response.json()) as PrairieRetrainListResponse;
   }
 
-  async createTrainingDataset(
-    request: TrainingDatasetCreateRequest
-  ): Promise<TrainingDatasetResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/datasets"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingDatasetResponse;
-  }
-
-  async listTrainingDatasets(options?: { limit?: number }): Promise<TrainingDatasetListResponse> {
-    const params: Record<string, string> = {};
-    if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
-      params.limit = String(Math.max(1, Math.floor(options.limit)));
-    }
-    const response = await fetch(
-      buildUrl(
-        this.baseUrl,
-        "/v2/training/datasets",
-        Object.keys(params).length > 0 ? params : undefined
-      ),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingDatasetListResponse;
-  }
-
-  async getTrainingDataset(datasetId: string): Promise<TrainingDatasetResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/datasets/${encodeURIComponent(datasetId)}`),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingDatasetResponse;
-  }
-
-  async assignTrainingDatasetItems(
-    datasetId: string,
-    request: TrainingDatasetItemsRequest
-  ): Promise<TrainingDatasetResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/datasets/${encodeURIComponent(datasetId)}/items`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingDatasetResponse;
-  }
-
-  async createTrainingJob(request: TrainingJobCreateRequest): Promise<TrainingJobResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/jobs"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingJobResponse;
-  }
-
-  async previewTrainingJob(
-    request: TrainingPreflightRequest
-  ): Promise<TrainingPreflightResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/preflight"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingPreflightResponse;
-  }
-
-  async getTrainingJob(jobId: string): Promise<TrainingJobResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/jobs/${encodeURIComponent(jobId)}`),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingJobResponse;
-  }
-
-  async controlTrainingJob(
-    jobId: string,
-    request: TrainingJobControlRequest
-  ): Promise<TrainingJobResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/jobs/${encodeURIComponent(jobId)}/control`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingJobResponse;
-  }
-
   async createInferenceJob(request: InferenceJobCreateRequest): Promise<TrainingJobResponse> {
     const response = await fetch(buildUrl(this.baseUrl, "/v2/inference/jobs"), {
       method: "POST",
@@ -2085,45 +1876,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as TrainingJobResponse;
-  }
-
-  async getModelHealth(): Promise<ModelHealthResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/model-health"), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ModelHealthResponse;
-  }
-
-  async getAdminModelHealth(): Promise<ModelHealthResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/admin/model-health"), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ModelHealthResponse;
-  }
-
-  async createTrainingDomain(
-    request: TrainingDomainCreateRequest
-  ): Promise<TrainingDomainRecord> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/domains"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingDomainRecord;
   }
 
   async listTrainingDomains(limit = 200): Promise<TrainingDomainListResponse> {
@@ -2167,25 +1919,6 @@ export class ApiClient {
     return (await response.json()) as TrainingLineageListResponse;
   }
 
-  async forkTrainingLineage(
-    lineageId: string,
-    request: TrainingForkLineageRequest
-  ): Promise<TrainingLineageRecord> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/lineages/${encodeURIComponent(lineageId)}/fork`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingLineageRecord;
-  }
-
   async listLineageVersions(
     lineageId: string,
     options?: { limit?: number }
@@ -2210,92 +1943,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as TrainingModelVersionListResponse;
-  }
-
-  async previewTrainingUpdateProposal(
-    request: TrainingUpdateProposalPreviewRequest
-  ): Promise<TrainingUpdateProposalPreviewResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/update-proposals/preview"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingUpdateProposalPreviewResponse;
-  }
-
-  async listTrainingUpdateProposals(options?: {
-    lineageId?: string;
-    status?: string;
-    limit?: number;
-  }): Promise<TrainingUpdateProposalListResponse> {
-    const params: Record<string, string> = {};
-    if (options?.lineageId) {
-      params.lineage_id = options.lineageId;
-    }
-    if (options?.status) {
-      params.status = options.status;
-    }
-    if (options?.limit != null) {
-      params.limit = String(options.limit);
-    }
-    const response = await fetch(
-      buildUrl(
-        this.baseUrl,
-        "/v2/training/update-proposals",
-        Object.keys(params).length > 0 ? params : undefined
-      ),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingUpdateProposalListResponse;
-  }
-
-  async approveTrainingUpdateProposal(
-    proposalId: string,
-    request: TrainingUpdateProposalDecisionRequest
-  ): Promise<TrainingUpdateProposalResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/update-proposals/${encodeURIComponent(proposalId)}/approve`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingUpdateProposalResponse;
-  }
-
-  async rejectTrainingUpdateProposal(
-    proposalId: string,
-    request: TrainingUpdateProposalDecisionRequest
-  ): Promise<TrainingUpdateProposalResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/update-proposals/${encodeURIComponent(proposalId)}/reject`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingUpdateProposalResponse;
   }
 
   async promoteTrainingModelVersion(
@@ -2334,88 +1981,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as TrainingModelVersionResponse;
-  }
-
-  async createTrainingMergeRequest(
-    request: TrainingMergeRequestCreateRequest
-  ): Promise<TrainingMergeRequestResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/merge-requests"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingMergeRequestResponse;
-  }
-
-  async approveTrainingMergeRequest(
-    mergeId: string,
-    request: TrainingMergeRequestDecisionRequest
-  ): Promise<TrainingMergeRequestResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/merge-requests/${encodeURIComponent(mergeId)}/approve`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingMergeRequestResponse;
-  }
-
-  async rejectTrainingMergeRequest(
-    mergeId: string,
-    request: TrainingMergeRequestDecisionRequest
-  ): Promise<TrainingMergeRequestResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/training/merge-requests/${encodeURIComponent(mergeId)}/reject`),
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingMergeRequestResponse;
-  }
-
-  async listTrainingMergeRequests(options?: {
-    status?: string;
-    limit?: number;
-  }): Promise<TrainingMergeRequestListResponse> {
-    const params: Record<string, string> = {};
-    if (options?.status) {
-      params.status = options.status;
-    }
-    if (options?.limit != null) {
-      params.limit = String(options.limit);
-    }
-    const response = await fetch(
-      buildUrl(
-        this.baseUrl,
-        "/v2/training/merge-requests",
-        Object.keys(params).length > 0 ? params : undefined
-      ),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as TrainingMergeRequestListResponse;
   }
 
   async getBisqueSession(): Promise<BisqueAuthSessionResponse> {
@@ -2493,29 +2058,8 @@ export class ApiClient {
     return (await response.json()) as AccountRequestResponse;
   }
 
-  async continueAsGuest(payload: BisqueGuestAuthRequest): Promise<BisqueAuthSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/auth/guest"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(payload),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as BisqueAuthSessionResponse;
-  }
-
   async chat(request: ChatRequest): Promise<ChatResponse> {
     return this.chatStream(request);
-  }
-
-  async chatTitle(request: ChatTitleRequest): Promise<ChatTitleResponse> {
-    return {
-      title: chatTitleFromMessages(request),
-      model: "frontend-local",
-      strategy: "fallback",
-    };
   }
 
   async chatStream(request: ChatRequest, options?: ChatStreamOptions): Promise<ChatResponse> {
@@ -2592,6 +2136,32 @@ export class ApiClient {
     let terminalDetail: unknown = null;
     let terminalResponseText = "";
     let lastRunEventSequence = afterSequence;
+    const seenTokenDeliveryKeys = new Set<string>();
+
+    const tokenDeliveryKey = (event: StreamTokenEvent): string | null => {
+      const eventID = asTrimmedString(event.eventId);
+      if (eventID) {
+        return `event_id:${eventID}`;
+      }
+      const sequence = Math.floor(Number(event.sequence ?? 0));
+      if (!Number.isFinite(sequence) || sequence <= 0) {
+        return null;
+      }
+      const tokenRunID = asTrimmedString(event.runId) || runId;
+      return `sequence:${tokenRunID}:${sequence}`;
+    };
+
+    const emitTokenOnce = (delta: string, event: StreamTokenEvent): void => {
+      const key = tokenDeliveryKey(event);
+      if (key) {
+        if (seenTokenDeliveryKeys.has(key)) {
+          return;
+        }
+        seenTokenDeliveryKeys.add(key);
+      }
+      streamedText += delta;
+      options?.onToken?.(delta, event);
+    };
 
     const handleStreamEvent = (eventName: string, payload: unknown): void => {
       if (eventName === "heartbeat") {
@@ -2600,8 +2170,13 @@ export class ApiClient {
       if (eventName === "token" && isRecord(payload)) {
         const delta = asPlainString(payload.delta);
         if (delta) {
-          streamedText += delta;
-          options?.onToken?.(delta);
+          const sequence = Math.floor(asFiniteNumber(payload.sequence, 0));
+          emitTokenOnce(delta, {
+            sequence: sequence > 0 ? sequence : undefined,
+            eventId: asTrimmedString(payload.event_id ?? payload.eventId) || undefined,
+            runId: asTrimmedString(payload.run_id) || runId,
+            eventKind: "token",
+          });
         }
         return;
       }
@@ -2637,8 +2212,14 @@ export class ApiClient {
       if (eventKind === "message.delta") {
         const delta = v2DeltaFromRunEvent(payload);
         if (delta) {
-          streamedText += delta;
-          options?.onToken?.(delta);
+          const eventID = asTrimmedString(payload.event_id);
+          const tokenEvent: StreamTokenEvent = {
+            sequence: eventSequence > 0 ? eventSequence : undefined,
+            eventId: eventID || undefined,
+            runId: asTrimmedString(payload.run_id) || undefined,
+            eventKind,
+          };
+          emitTokenOnce(delta, tokenEvent);
         }
         return;
       }
@@ -2654,7 +2235,13 @@ export class ApiClient {
       }
 
       const normalized = normalizeV2RunEvent(payload);
-      progressEvents.push(progressEventFromV2RunEvent(payload));
+      // Reasoning deltas are cumulative live-thinking snapshots: onRunEvent coalesces
+      // them into a single runEvents slot, and no progress-event consumer renders
+      // them, so keeping them out of progressEvents stops the array (and every
+      // persisted snapshot of it) growing by one entry per ~0.4s for the whole run.
+      if (eventKind !== "trace.reasoning.delta") {
+        progressEvents.push(progressEventFromV2RunEvent(payload));
+      }
       options?.onRunEvent?.(normalized);
 
       if (!isV2TerminalEventKind(eventKind)) {
@@ -3482,75 +3069,6 @@ export class ApiClient {
     return hexDigest(digest);
   }
 
-  private async initResumableUpload(
-    payload: ResumableUploadInitRequest
-  ): Promise<ResumableUploadSessionResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/uploads/resumable/init"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(payload),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ResumableUploadSessionResponse;
-  }
-
-  private async uploadResumableChunk(
-    uploadId: string,
-    offset: number,
-    chunk: Blob
-  ): Promise<ResumableUploadChunkResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/uploads/resumable/${encodeURIComponent(uploadId)}/chunk`, {
-        offset: String(Math.max(0, Math.floor(offset))),
-      }),
-      {
-        method: "PUT",
-        headers: this.headers({ "Content-Type": "application/octet-stream" }),
-        body: chunk,
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ResumableUploadChunkResponse;
-  }
-
-  private async getResumableUploadStatus(uploadId: string): Promise<ResumableUploadSessionResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/uploads/resumable/${encodeURIComponent(uploadId)}`),
-      {
-        method: "GET",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ResumableUploadSessionResponse;
-  }
-
-  private async completeResumableUpload(
-    uploadId: string
-  ): Promise<ResumableUploadCompleteResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/uploads/resumable/${encodeURIComponent(uploadId)}/complete`),
-      {
-        method: "POST",
-        headers: this.headers(),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ResumableUploadCompleteResponse;
-  }
-
   private isRecoverableResumableUploadError(error: unknown): boolean {
     if (!(error instanceof ApiError)) {
       return false;
@@ -3565,80 +3083,6 @@ export class ApiClient {
       detail.includes("missing uploaded file") ||
       detail.includes("Upload session was stale and has been reset")
     );
-  }
-
-  private async uploadFileResumable(file: File): Promise<UploadFilesResponse["uploaded"][number]> {
-    const fingerprint = await this.fileFingerprint(file);
-    const runAttempt = async (allowRetry: boolean): Promise<UploadFilesResponse["uploaded"][number]> => {
-      const init = await this.initResumableUpload({
-        file_name: file.name,
-        size_bytes: file.size,
-        content_type: file.type || "application/octet-stream",
-        fingerprint,
-      });
-
-      if (init.status === "completed" && init.uploaded) {
-        return init.uploaded;
-      }
-      if (init.status === "failed") {
-        throw new ApiError(
-          `Upload session failed for ${file.name}`,
-          409,
-          init.error || "Upload session failed",
-        );
-      }
-
-      const uploadId = init.upload_id;
-      const chunkSize = Math.max(256 * 1024, Number(init.chunk_size_bytes) || 5 * 1024 * 1024);
-      let offset = Math.max(0, Number(init.bytes_received) || 0);
-      let offsetMismatchRetries = 0;
-
-      while (offset < file.size) {
-        const end = Math.min(offset + chunkSize, file.size);
-        const chunk = file.slice(offset, end);
-        try {
-          const chunkResponse = await this.uploadResumableChunk(uploadId, offset, chunk);
-          offset = Math.max(offset, Number(chunkResponse.bytes_received) || end);
-          offsetMismatchRetries = 0;
-        } catch (error) {
-          if (error instanceof ApiError && error.status === 409) {
-            const detail = error.detail;
-            const expectedOffset =
-              detail && typeof detail === "object"
-                ? (detail as Record<string, unknown>).expected_offset
-                : null;
-            if (typeof expectedOffset === "number" && Number.isFinite(expectedOffset)) {
-              offset = Math.max(0, Math.floor(expectedOffset));
-              offsetMismatchRetries += 1;
-              if (offsetMismatchRetries <= 5) {
-                continue;
-              }
-            }
-            const statusPayload = await this.getResumableUploadStatus(uploadId);
-            offset = Math.max(0, Number(statusPayload.bytes_received) || offset);
-            if (statusPayload.status === "active" && offset < file.size) {
-              offsetMismatchRetries += 1;
-              if (offsetMismatchRetries <= 5) {
-                continue;
-              }
-            }
-          }
-          throw error;
-        }
-      }
-
-      try {
-        const complete = await this.completeResumableUpload(uploadId);
-        return complete.uploaded;
-      } catch (error) {
-        if (allowRetry && this.isRecoverableResumableUploadError(error)) {
-          return runAttempt(false);
-        }
-        throw error;
-      }
-    };
-
-    return runAttempt(true);
   }
 
   async importBisqueResources(resources: string[]): Promise<BisqueImportResponse> {
@@ -3682,38 +3126,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as BisqueSearchResponse;
-  }
-
-  async downloadBisqueResources(resources: string[]): Promise<BisqueImportResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/download"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ resources }),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as BisqueImportResponse;
-  }
-
-  async uploadBisqueOutputs(options: {
-    fileIds?: string[];
-    artifactIds?: string[];
-  }): Promise<BisqueUploadResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/bisque/upload"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        file_ids: options.fileIds ?? [],
-        artifact_ids: options.artifactIds ?? [],
-      }),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as BisqueUploadResponse;
   }
 
   async pushResourcesToBisque(options: BisquePushRequest): Promise<BisquePushResponse> {
@@ -4518,25 +3930,6 @@ export class ApiClient {
     return (await response.json()) as DataAgentJobResponse;
   }
 
-  async updateDataAgentJobStatus(
-    jobId: string,
-    request: DataAgentJobStatusUpdateRequest
-  ): Promise<DataAgentJobResponse> {
-    const response = await fetch(
-      buildUrl(this.baseUrl, `/v2/data-agent/jobs/${encodeURIComponent(jobId)}/status`),
-      {
-        method: "PATCH",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(request),
-        credentials: "include",
-      }
-    );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as DataAgentJobResponse;
-  }
-
   async controlDataAgentJob(
     jobId: string,
     request: DataAgentJobControlRequest
@@ -4554,21 +3947,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as DataAgentJobResponse;
-  }
-
-  async lookupResourceReuse(
-    request: ResourceComputationLookupRequest
-  ): Promise<ResourceComputationLookupResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/resources/reuse-suggestions"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(request),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ResourceComputationLookupResponse;
   }
 
   // Fetch a single resource by id (GET /v2/resources/{file_id}). Used to restore a
@@ -4612,13 +3990,6 @@ export class ApiClient {
   resourceDownloadUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
     return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`);
-  }
-
-  // resourceRawUrl is the "open raw" link: the download endpoint asked to serve
-  // inline (text-like types only — the server refuses inline for active content).
-  resourceRawUrl(fileId: string): string {
-    const safeFileId = encodeURIComponent(fileId);
-    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`, { disposition: "inline" });
   }
 
   // resourceTextHead fetches a bounded, UTF-8-safe window of a text/data resource
@@ -5028,7 +4399,7 @@ export class ApiClient {
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let response: Response;
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/dataset`, params), {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/dataset`, params), {
         method: "GET",
         headers: this.headers(),
         signal: controller.signal,
@@ -5054,7 +4425,7 @@ export class ApiClient {
     const timeoutId = window.setTimeout(() => controller.abort(), 20000);
     let response: Response;
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/materials/dashboard`), {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/materials/dashboard`), {
         method: "GET",
         headers: this.headers(),
         signal: controller.signal,
@@ -5096,7 +4467,7 @@ export class ApiClient {
     if (typeof config.component === "number" && Number.isFinite(config.component)) {
       params.component = String(Math.max(0, Math.floor(config.component)));
     }
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/slice`, params);
+    return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/slice`, params);
   }
 
   hdf5AtlasPreviewUrl(
@@ -5128,7 +4499,7 @@ export class ApiClient {
         .map((value) => String(Math.max(0, Math.floor(value))))
         .join(",");
     }
-    return buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/atlas`, params);
+    return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/atlas`, params);
   }
 
   async getHdf5ScalarVolume(
@@ -5143,7 +4514,7 @@ export class ApiClient {
       params.channel = String(Math.max(0, Math.floor(config.channel)));
     }
     const response = await fetch(
-      buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/scalar-volume`, params),
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/scalar-volume`, params),
       {
         method: "GET",
         headers: this.headers(),
@@ -5189,7 +4560,7 @@ export class ApiClient {
     let response: Response;
     try {
       response = await fetch(
-        buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/histogram`, params),
+        buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/histogram`, params),
         {
           method: "GET",
           headers: this.headers(),
@@ -5230,7 +4601,7 @@ export class ApiClient {
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let response: Response;
     try {
-      response = await fetch(buildUrl(this.baseUrl, `/v1/uploads/${safeFileId}/hdf5/preview/table`, params), {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/table`, params), {
         method: "GET",
         headers: this.headers(),
         signal: controller.signal,
@@ -5248,44 +4619,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as Hdf5DatasetTablePreviewResponse;
-  }
-
-  async getUploadCaption(fileId: string): Promise<UploadCaptionResponse> {
-    const safeFileId = encodeURIComponent(fileId);
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 18000);
-    let response: Response;
-    try {
-      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/caption`), {
-        method: "GET",
-        headers: this.headers(),
-        signal: controller.signal,
-        credentials: "include",
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ApiError("Caption request timed out", 504, null);
-      }
-      throw error;
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as UploadCaptionResponse;
-  }
-
-  async getRun(runId: string): Promise<RunResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, `/v2/runs/${runId}`), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as RunResponse;
   }
 
   async getRunResult(runId: string): Promise<RunResultResponse> {
@@ -5311,38 +4644,6 @@ export class ApiClient {
     };
   }
 
-  async getAnalysisHistory(limit = 5, query?: string): Promise<AnalysisHistoryResponse> {
-    const params: Record<string, string> = { limit: String(limit) };
-    if (query && query.trim()) {
-      params.q = query.trim();
-    }
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/history/analyses", params), {
-      method: "GET",
-      headers: this.headers(),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as AnalysisHistoryResponse;
-  }
-
-  async evaluateContractHealth(request: ContractAuditRequest): Promise<ContractAuditResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/evals/contracts"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        run_ids: request.run_ids ?? [],
-        limit: request.limit ?? 25,
-      }),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ContractAuditResponse;
-  }
-
   async listConversations(
     limit = 25,
     offset = 0,
@@ -5364,31 +4665,6 @@ export class ApiClient {
 
   async deleteConversation(conversationId: string): Promise<{ deleted: boolean; conversation_id: string }> {
     return this.deleteV2Conversation(conversationId);
-  }
-
-  async searchConversations(query: string, limit = 50): Promise<ConversationSearchResponse> {
-    const normalizedQuery = asTrimmedString(query);
-    const needle = normalizedQuery.toLowerCase();
-    const conversations = await this.listV2Conversations(limit, 0, true);
-    const matches = conversations.conversations.filter((conversation) => {
-      if (!needle) {
-        return true;
-      }
-      const searchable = [
-        conversation.title,
-        conversation.preview,
-        conversation.conversation_id,
-        JSON.stringify(conversation.state ?? {}),
-      ]
-        .join("\n")
-        .toLowerCase();
-      return searchable.includes(needle);
-    });
-    return {
-      query: normalizedQuery,
-      count: matches.length,
-      matches,
-    };
   }
 
   async getRunEvents(
@@ -5499,19 +4775,4 @@ export class ApiClient {
     );
   }
 
-  async createReproReport(req: ReproReportRequest): Promise<ReproReportResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v1/workflows/repro-report"), {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(req),
-      credentials: "include",
-    });
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as ReproReportResponse;
-  }
-
 }
-
-export * from "./api-v2";

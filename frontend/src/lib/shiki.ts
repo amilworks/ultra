@@ -53,7 +53,19 @@ type Highlighter = Awaited<ReturnType<typeof createAppHighlighter>>;
 
 let highlighterPromise: Promise<Highlighter> | null = null;
 
-const preferredLanguageIds = Object.keys(languageLoaders) as SupportedLanguageId[];
+const loadedLanguagePromises = new Map<SupportedLanguageId, Promise<void>>();
+
+const ensureLanguage = (
+  highlighter: Highlighter,
+  lang: SupportedLanguageId
+): Promise<void> => {
+  let p = loadedLanguagePromises.get(lang);
+  if (!p) {
+    p = highlighter.loadLanguage(lang).then(() => undefined);
+    loadedLanguagePromises.set(lang, p);
+  }
+  return p;
+};
 
 const resolveLanguage = (language: string): SupportedLanguageId | "text" => {
   const normalized = language.trim().toLowerCase();
@@ -70,9 +82,13 @@ const getHighlighter = async (): Promise<Highlighter> => {
   if (highlighterPromise) {
     return highlighterPromise;
   }
+  // NOTE: languageAliases is intentionally NOT passed as `langAlias` here.
+  // resolveLanguage() maps user-facing ids to canonical grammar ids before any
+  // shiki call, and passing our alias map to shiki creates circular aliases
+  // with the grammars' own registered aliases (e.g. our `shellscript -> bash`
+  // vs the grammar's `bash -> shellscript`), which throws at tokenize time.
   highlighterPromise = createAppHighlighter({
-    langAlias: languageAliases,
-    langs: preferredLanguageIds,
+    langs: [],
     themes: ["github-light", "github-dark"],
   });
   return highlighterPromise;
@@ -92,8 +108,12 @@ export const codeToHtml = async ({
   if (!source) {
     return "<pre><code></code></pre>";
   }
+  const resolved = resolveLanguage(lang);
+  if (resolved !== "text") {
+    await ensureLanguage(highlighter, resolved);
+  }
   return highlighter.codeToHtml(source, {
-    lang: resolveLanguage(lang),
+    lang: resolved,
     theme,
   });
 };

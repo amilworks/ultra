@@ -106,10 +106,6 @@ export function classifyTextResource(file: ClassifiableResource | null | undefin
   return null;
 }
 
-export function isTextResource(file: ClassifiableResource | null | undefined): boolean {
-  return classifyTextResource(file) !== null;
-}
-
 const FORMAT_CHIP_LABELS: Record<TextResourceKind, string> = {
   csv: "CSV",
   json: "JSON",

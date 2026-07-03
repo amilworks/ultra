@@ -87,5 +87,3 @@ export function MarkdownResponseStream({
     </Suspense>
   );
 }
-
-export { normalizeStreamingMarkdown };

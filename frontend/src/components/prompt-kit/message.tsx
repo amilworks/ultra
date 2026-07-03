@@ -1,4 +1,3 @@
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   Tooltip,
   TooltipContent,
@@ -24,29 +23,6 @@ export function Message({
     <div className={cn("pk-message flex gap-3", className)} {...props}>
       {children}
     </div>
-  );
-}
-
-export type MessageAvatarProps = {
-  src?: string;
-  alt?: string;
-  fallback?: string;
-  delayMs?: number;
-  className?: string;
-};
-
-export function MessageAvatar({
-  src,
-  alt,
-  fallback,
-  delayMs,
-  className,
-}: MessageAvatarProps) {
-  return (
-    <Avatar className={cn("pk-message-avatar h-8 w-8 shrink-0", className)}>
-      <AvatarImage src={src} alt={alt} />
-      {fallback ? <AvatarFallback delayMs={delayMs}>{fallback}</AvatarFallback> : null}
-    </Avatar>
   );
 }
 

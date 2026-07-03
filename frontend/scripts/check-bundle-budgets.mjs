@@ -23,7 +23,6 @@ const budgets = [
   },
   { label: "tool-result-cards", pattern: /^ToolResultCards-.*\.js$/, maxBytes: 32_000 },
   { label: "tool-image-carousel", pattern: /^ToolImageCarousel-.*\.js$/, maxBytes: 16_000 },
-  { label: "pro-mode-dev-trace", pattern: /^ProModeDevTrace-.*\.js$/, maxBytes: 12_000 },
   { label: "upload-viewer", pattern: /^UploadViewerSheet-.*\.js$/, maxBytes: 120_000 },
   { label: "vendor-ui", pattern: /^vendor-ui-.*\.js$/, maxBytes: 250_000 },
   { label: "route-charts", pattern: /^chart-.*\.js$/, maxBytes: 380_000 },

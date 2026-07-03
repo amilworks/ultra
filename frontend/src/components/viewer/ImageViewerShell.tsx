@@ -2140,7 +2140,7 @@ export function ImageViewerShell({
                   title={`${axis}-plane`}
                   className="viewer-canvas-root viewer-mpr-canvas"
                   orientationLabels={getPlaneOrientationLabels(viewerInfo, axis)}
-                  crosshair={getPlaneCursor(viewerInfo, axis, clampedIndices)}
+                  crosshair={getPlaneCursor(axis, clampedIndices)}
                   measurement={measurementsByAxis[axis] ?? null}
                   onSelectPoint={(point) => handlePlaneSelect(axis, point)}
                   onMeasurePoint={(point) => handlePlaneMeasure(axis, point)}

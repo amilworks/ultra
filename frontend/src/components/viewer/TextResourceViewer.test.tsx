@@ -39,7 +39,6 @@ function file(overrides: Partial<UploadedFileRecord>): UploadedFileRecord {
 function fakeClient(overrides: Partial<ApiClient>): ApiClient {
   return {
     resourceDownloadUrl: (id: string) => `/v2/resources/${id}/download`,
-    resourceRawUrl: (id: string) => `/v2/resources/${id}/download?disposition=inline`,
     ...overrides,
   } as unknown as ApiClient;
 }

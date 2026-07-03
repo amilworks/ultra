@@ -17,7 +17,11 @@ def test_build_chat_model_uses_openai_compatible_base_url():
     assert model.openai_api_base == "http://127.0.0.1:8003/v1"
     assert model.model_name == "deepseek_v4"
     assert model.openai_api_key.get_secret_value() == "EMPTY"
-    assert model.request_timeout == 42.0
+    # timeout is now an httpx.Timeout: connect/write/pool are bounded (fail fast on a
+    # degraded resolver / slow connect so max_retries can re-dispatch), while read
+    # carries the configured request timeout for the (streamed) response body.
+    assert model.request_timeout.read == 42.0
+    assert model.request_timeout.connect == 10.0
     assert model.stream_chunk_timeout == 42.0
     assert model.max_retries == 0
 
@@ -31,7 +35,10 @@ def test_build_chat_model_disables_request_timeout_when_setting_is_zero():
 
     model = build_chat_model(settings)
 
-    assert model.request_timeout is None
+    # read is unbounded (0 = no request cap → long streams), but connect stays bounded
+    # so a slow DNS/TCP/TLS setup never silently becomes time-to-first-token.
+    assert model.request_timeout.read is None
+    assert model.request_timeout.connect == 10.0
     assert model.stream_chunk_timeout is None
 
 

@@ -57,6 +57,26 @@ def _chunk_reasoning_text(chunk: dict) -> str:
     return ""
 
 
+_CONNECT_TIMEOUT_SECONDS = 10.0
+
+
+def _client_timeout(read_timeout: float | None):
+    """Bound connect/write/pool so a slow DNS/TCP/TLS setup FAILS FAST (and lets
+    ``max_retries`` re-dispatch) instead of silently becoming time-to-first-token.
+
+    A degraded host resolver (systemd-resolved retry ladder) was measured stalling
+    a run's first outbound connection ~60s — and with a bare ``timeout=None`` the
+    client had no connect bound, so it waited instead of retrying. ``read`` stays
+    unbounded for long token streams: the mid-stream idle watchdog
+    (``stream_chunk_timeout``) and the run wall-clock cover stalls after the first
+    byte. Returns an ``httpx.Timeout``; the OpenAI client accepts it directly."""
+    import httpx  # transitive dep of openai/langchain_openai; worker-only module
+
+    return httpx.Timeout(
+        connect=_CONNECT_TIMEOUT_SECONDS, read=read_timeout, write=30.0, pool=30.0
+    )
+
+
 def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
     request_timeout = (
         settings.request_timeout_seconds if settings.request_timeout_seconds > 0 else None
@@ -66,7 +86,7 @@ def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         model=settings.openai_model,
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
-        timeout=request_timeout,
+        timeout=_client_timeout(request_timeout),
         stream_chunk_timeout=stream_chunk_timeout,
         max_retries=settings.max_retries,
         # Ask the OpenAI-compatible endpoint to report token usage on the
@@ -106,7 +126,7 @@ def build_vision_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         model=settings.qwen_vlm_model,
         base_url=settings.qwen_vlm_base_url,
         api_key=settings.qwen_vlm_api_key,
-        timeout=timeout,
+        timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
         stream_usage=True,
@@ -142,7 +162,7 @@ def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
         model=settings.builder_model,
         base_url=settings.builder_base_url,
         api_key=settings.builder_api_key,
-        timeout=timeout,
+        timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
         stream_usage=True,
@@ -177,7 +197,7 @@ def build_builder_worker_model(settings: RuntimeSettings) -> ChatOpenAI:
         model=settings.builder_worker_model,
         base_url=settings.builder_worker_base_url,
         api_key=settings.builder_worker_api_key,
-        timeout=timeout,
+        timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
         stream_usage=True,

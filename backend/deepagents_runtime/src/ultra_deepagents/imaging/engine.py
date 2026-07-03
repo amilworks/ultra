@@ -288,25 +288,105 @@ class LibBioImageEngine:
         return windows
 
     def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
+        try:
+            if colors:
+                return self._render_fused(
+                    path,
+                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    colors,
+                    windows,
+                )
+            if not self._is_display_photo(path):
+                # Scalar/scientific: apply ONE global window to every tile (per-tile
+                # data-range would checkerboard the image).
+                return self._render_windowed(
+                    path,
+                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    self._display_global_windows(path, channels),
+                )
+            return self._render(
+                path,
+                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
+            )
+        except ValueError as exc:
+            # Level-0 fallback for planar multi-page SubIFD pyramids (LIF -> bioio ->
+            # OME-TIFF -> imgcnv): the engine's embedded -tile AND -tile-roi readers
+            # both return an empty (0,0,0) region for the BASE level of that layout
+            # (sub-levels read fine), while native full-plane reads work — verified
+            # against the real engine on the affected prod pyramids. Serve the tile by
+            # decoding the native plane and cropping. Genuine out-of-grid tiles and
+            # non-level-0 errors keep the original empty-region error.
+            if level != 0 or "empty region" not in str(exc):
+                raise
+            return self._tile_base_fallback(
+                path, col=col, row=row, tile_size=tile_size,
+                channels=channels, colors=colors, windows=windows, original=exc,
+            )
+
+    # Full-plane decode is only sane for stack-sized planes (the planar-SubIFD class the
+    # fallback exists for: microscopy z/c stacks, a few thousand px per side). A gigapixel
+    # base that unexpectedly reads empty must keep its honest error, never a 9GB decode.
+    _TILE_FALLBACK_MAX_PIXELS = 64 * 1024 * 1024  # 64 MP (e.g. 8k x 8k)
+
+    def _tile_base_fallback(self, path, *, col, row, tile_size, channels, colors, windows, original) -> bytes:
+        """Serve a level-0 tile by reading the NATIVE full plane and cropping.
+
+        Mirrors the three tile() render branches so pixels match what a working
+        embedded-tile read would produce: the scalar branch's global window is
+        per-whole-image (crop-then-window == window-then-crop); the fused branch
+        auto-percentiles over the crop — the SAME pixel set an embedded tile read
+        returns, so its per-tile windowing is unchanged; the photo branch's
+        full-range depth is extent-independent. The full-plane decode is amortized
+        across a viewport's tiles by the engine's per-worker read cache. Raises the
+        ORIGINAL empty-region error for out-of-grid coordinates, missing geometry,
+        or an over-budget plane, so real edge tiles stay 422."""
+        np = self._np
+        try:
+            meta = self._bim.meta(path, self._cache)
+            width = int(meta.get("image_num_x") or 0)
+            height = int(meta.get("image_num_y") or 0)
+            num_c = int(meta.get("image_num_c") or 1)
+        except Exception:  # noqa: BLE001 - no geometry -> keep the honest original error
+            raise original
+        x1, y1 = col * tile_size, row * tile_size
+        if width <= 0 or height <= 0 or x1 >= width or y1 >= height:
+            raise original  # genuinely out of the tile grid
+        # Channel-aware budget: the plane decodes as float32 x C in the worst branch,
+        # so bound SAMPLES (w*h*C), not just pixels — a 64MP 7-channel plane would
+        # otherwise allocate ~1.8GB per request under concurrent load.
+        if width * height * max(1, num_c) > self._TILE_FALLBACK_MAX_PIXELS:
+            raise original
+        x2, y2 = min(x1 + tile_size, width), min(y1 + tile_size, height)
+
+        def _plane(out_depth: str):
+            arr = self._bim.read(
+                path,
+                pipelines.slice_plane(out_depth=out_depth, channels=channels),
+                self._cache,
+            )
+            if 0 in getattr(arr, "shape", ()):
+                raise original  # native plane ALSO empty: nothing more we can do
+            crop = np.ascontiguousarray(arr[..., y1:y2, x1:x2])
+            if 0 in crop.shape:
+                raise original  # meta overstated the geometry: keep the honest 422
+            return crop
+
         if colors:
-            return self._render_fused(
-                path,
-                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
-                colors,
-                windows,
+            rgb = fusion.composite_channels(
+                _plane(pipelines.DEPTH_SCALAR_F32), colors, np=np, windows=windows
             )
+            buf = io.BytesIO()
+            self._Image.fromarray(rgb).save(buf, format="PNG")
+            return buf.getvalue()
         if not self._is_display_photo(path):
-            # Scalar/scientific: apply ONE global window to every tile (per-tile
-            # data-range would checkerboard the image).
-            return self._render_windowed(
-                path,
-                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
-                self._display_global_windows(path, channels),
+            return self._encode_png(
+                _window_to_uint8(
+                    _plane(pipelines.DEPTH_SCALAR_F32),
+                    self._display_global_windows(path, channels),
+                    np,
+                )
             )
-        return self._render(
-            path,
-            pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
-        )
+        return self._encode_png(_plane(self._display_out_depth(path)))
 
     def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
         if colors:
@@ -690,6 +770,11 @@ class LibBioImageEngine:
         # -depth 32,D,F) and additively composite them with their LUT colors,
         # each channel windowed on its own robust percentile range.
         arr = self._bim.read(path, pipeline, self._cache)
+        # Same empty-region guard as _encode_png: surfaces the (catchable, 422-mapped)
+        # ValueError instead of a cryptic fusion/Pillow error — and lets tile()'s
+        # level-0 base fallback engage for fused reads too.
+        if 0 in getattr(arr, "shape", ()):
+            raise ValueError(f"engine returned an empty region (shape {getattr(arr, 'shape', None)})")
         rgb = fusion.composite_channels(arr, colors, np=self._np, windows=windows)
         buf = io.BytesIO()
         self._Image.fromarray(rgb).save(buf, format="PNG")

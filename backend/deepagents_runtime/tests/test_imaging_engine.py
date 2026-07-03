@@ -404,3 +404,124 @@ def test_tile_uses_full_range_depth_for_photo():
     engine._render = types.MethodType(fake_render, engine)
     engine.tile("/x.tif", level=0, col=93, row=89, tile_size=512)
     assert "8,F,U" in seen["pipeline"] and "-tile 512,93,89,0" in seen["pipeline"]
+
+
+# --- Level-0 base fallback for planar multi-page SubIFD pyramids --------------------
+# On that layout (LIF -> bioio -> OME-TIFF -> imgcnv) the engine's embedded -tile AND
+# -tile-roi readers return an empty (0,0,0) region for the BASE level while sub-levels
+# and native full-plane reads work (verified on the real engine against the affected
+# prod pyramids). tile() must serve level 0 by decoding the native plane and cropping —
+# and must NOT engage for genuine out-of-grid tiles, other levels, or huge planes.
+
+
+def _fallback_engine(*, width, height, plane, is_photo=True, windows=None):
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+
+    meta = {"image_num_x": width, "image_num_y": height}
+
+    class FakeBim:
+        def meta(self, path, cache):
+            return meta
+
+        def read(self, path, pipeline, cache):
+            if "-tile " in pipeline:
+                return np.empty((0, 0, 0), dtype="uint8")  # the broken embedded-tile read
+            return plane  # the native full-plane read (slice_plane pipeline)
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+    engine._np = np
+    engine._Image = Image
+    engine._is_display_photo = types.MethodType(lambda self, p: is_photo, engine)
+    engine._display_out_depth = types.MethodType(lambda self, p: "8,F,U", engine)
+    if windows is not None:
+        engine._display_global_windows = types.MethodType(
+            lambda self, p, channels=None: windows, engine
+        )
+    return engine
+
+
+def test_tile_level0_empty_falls_back_to_native_plane_crop():
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+    import io as _io
+
+    # 1000x1200 gradient plane; tile (col=1,row=1) -> crop x 512:1000, y 512:1024
+    plane = (np.arange(1200 * 1000, dtype="uint32").reshape(1200, 1000) % 251).astype("uint8")
+    engine = _fallback_engine(width=1000, height=1200, plane=plane)
+
+    png = engine.tile("/planar.tif", level=0, col=1, row=1, tile_size=512)
+
+    img = Image.open(_io.BytesIO(png))
+    assert img.size == (488, 512)  # (width, height): x-edge tile is partial
+    assert (np.asarray(img) == plane[512:1024, 512:1000]).all()
+
+
+def test_tile_level0_fallback_windowed_scalar_branch():
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+    import io as _io
+
+    plane = np.linspace(0.0, 1000.0, 600 * 600, dtype="float32").reshape(600, 600)
+    engine = _fallback_engine(
+        width=600, height=600, plane=plane, is_photo=False, windows=[(0.0, 1000.0)]
+    )
+
+    png = engine.tile("/scalar.tif", level=0, col=0, row=0, tile_size=512)
+
+    img = Image.open(_io.BytesIO(png))
+    assert img.size == (512, 512)
+    # global window (0..1000) applied AFTER crop == applied before crop: spot-check corners
+    arr = np.asarray(img)
+    assert arr[0, 0] == 0
+    assert arr.max() > 0
+
+
+def test_tile_level0_out_of_grid_keeps_empty_region_error():
+    np = pytest.importorskip("numpy")
+    plane = np.zeros((600, 600), dtype="uint8")
+    engine = _fallback_engine(width=600, height=600, plane=plane)
+    with pytest.raises(ValueError, match="empty region"):
+        engine.tile("/planar.tif", level=0, col=2, row=0, tile_size=512)  # x1=1024 >= 600
+
+
+def test_tile_nonzero_level_empty_region_is_not_fallback():
+    np = pytest.importorskip("numpy")
+    plane = np.zeros((600, 600), dtype="uint8")
+    engine = _fallback_engine(width=600, height=600, plane=plane)
+    with pytest.raises(ValueError, match="empty region"):
+        engine.tile("/planar.tif", level=1, col=0, row=0, tile_size=512)
+
+
+def test_tile_level0_fallback_respects_pixel_budget():
+    np = pytest.importorskip("numpy")
+    plane = np.zeros((4, 4), dtype="uint8")  # would "work", but the plane claims gigapixel
+    engine = _fallback_engine(width=100_000, height=100_000, plane=plane)
+    with pytest.raises(ValueError, match="empty region"):
+        engine.tile("/giga.tif", level=0, col=0, row=0, tile_size=512)
+
+
+def test_tile_level0_fallback_fused_branch_composites_crop():
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+    import io as _io
+
+    # (C,H,W) float plane: 2 channels; fused branch must crop then composite
+    plane = np.stack(
+        [
+            np.full((600, 600), 100.0, dtype="float32"),
+            np.full((600, 600), 200.0, dtype="float32"),
+        ]
+    )
+    engine = _fallback_engine(width=600, height=600, plane=plane)
+
+    png = engine.tile(
+        "/planar.tif", level=0, col=0, row=0, tile_size=512,
+        channels=[1, 2], colors=[(255, 0, 0), (0, 255, 0)],
+    )
+
+    img = Image.open(_io.BytesIO(png))
+    assert img.size == (512, 512)
+    assert img.mode == "RGB"

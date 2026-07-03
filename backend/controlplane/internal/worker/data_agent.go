@@ -26,6 +26,7 @@ type DataAgentWorkerStore interface {
 	RenewDataAgentJobLease(context.Context, domain.RenewDataAgentJobLeaseInput) (domain.DataAgentJobLeaseRecord, error)
 	ReleaseDataAgentJobLease(context.Context, domain.ReleaseDataAgentJobLeaseInput) error
 	UpdateDataAgentJob(context.Context, domain.UpdateDataAgentJobInput) (domain.DataAgentJobRecord, domain.DataAgentJobEventRecord, error)
+	AppendDataAgentJobEvent(context.Context, domain.AppendDataAgentJobEventInput) (domain.DataAgentJobEventRecord, error)
 	GetResourceForUser(context.Context, string, string, string) (domain.ResourceRecord, error)
 	ListResourcesForUser(context.Context, domain.ResourceListInput) (domain.ResourceListPage, error)
 	ListResourcesForCollectionForUser(context.Context, domain.ResourceCollectionResourceListInput) (domain.ResourceListPage, error)
@@ -135,7 +136,7 @@ func (w *DataAgentWorker) RunJob(ctx context.Context, envelope eventbus.DataAgen
 		return err
 	}
 	if dataAgentJobTerminal(current.Status) {
-		return nil
+		return w.skipTerminalDataAgentDelivery(ctx, envelope, current)
 	}
 	lease, leasedJob, _, err := w.store.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
 		JobID:       jobID,
@@ -148,7 +149,7 @@ func (w *DataAgentWorker) RunJob(ctx context.Context, envelope eventbus.DataAgen
 	if errors.Is(err, store.ErrConflict) {
 		latest, latestErr := w.store.GetDataAgentJobForUser(ctx, jobID, ownerUserID, ownerOrgID)
 		if latestErr == nil && dataAgentJobTerminal(latest.Status) {
-			return nil
+			return w.skipTerminalDataAgentDelivery(ctx, envelope, latest)
 		}
 		return ErrDataAgentJobLeaseConflict
 	}
@@ -230,6 +231,65 @@ func (w *DataAgentWorker) RunJob(ctx context.Context, envelope eventbus.DataAgen
 		return err
 	}
 	return nil
+}
+
+func (w *DataAgentWorker) skipTerminalDataAgentDelivery(ctx context.Context, envelope eventbus.DataAgentJob, job domain.DataAgentJobRecord) error {
+	jobType := strings.TrimSpace(envelope.JobType)
+	if jobType == "" {
+		jobType = job.JobType
+	}
+	_, err := w.store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+		EventID:     dataAgentWorkerSkipEventID(envelope, job),
+		JobID:       job.JobID,
+		EventType:   "data_agent.job.skipped",
+		ActorUserID: w.workerID,
+		ActorOrgID:  job.OwnerOrgID,
+		TS:          w.now(),
+		Message:     "Data Agent job delivery skipped before worker lease.",
+		Metadata: domain.JSONMap{
+			"control_status":  job.Status,
+			"delivery_action": "skip",
+			"dispatch_id":     strings.TrimSpace(envelope.DispatchID),
+			"job_type":        jobType,
+			"stage":           "initial_status_check",
+			"worker_id":       w.workerID,
+		},
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return nil
+	}
+	return err
+}
+
+func dataAgentWorkerSkipEventID(envelope eventbus.DataAgentJob, job domain.DataAgentJobRecord) string {
+	jobID := strings.TrimSpace(job.JobID)
+	if jobID == "" {
+		jobID = envelope.JobID
+	}
+	return "data_agent_job_event_" +
+		dataAgentWorkerEventIDPart(jobID, "job_unknown") +
+		"_" +
+		dataAgentWorkerEventIDPart(envelope.DispatchID, "dispatch_unknown") +
+		"_skipped_initial_status"
+}
+
+func dataAgentWorkerEventIDPart(value string, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	var builder strings.Builder
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			builder.WriteRune(ch)
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('_')
+		}
+	}
+	part := strings.Trim(builder.String(), "_")
+	if part == "" {
+		part = fallback
+	}
+	return part
 }
 
 func (w *DataAgentWorker) processBatchTagResources(

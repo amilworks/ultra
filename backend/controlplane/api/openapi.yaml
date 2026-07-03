@@ -944,6 +944,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2DataAgentJobResponse"
+  /v2/data-agent/jobs/{job_id}/events:
+    post:
+      operationId: appendV2DataAgentJobEvent
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2DataAgentJobAppendEventRequest"
+      responses:
+        "200":
+          description: Data Agent job append-only audit event result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2DataAgentJobResponse"
   /v2/data-agent/jobs/{job_id}/status:
     patch:
       operationId: updateV2DataAgentJobStatus
@@ -1334,6 +1355,221 @@ paths:
                 required: [error]
                 properties:
                   error: { type: string }
+  /v2/uploads/{file_id}/hdf5/dataset:
+    get:
+      operationId: getUploadHdf5Dataset
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          description: Absolute HDF5-internal dataset path (e.g. /DataContainers/SyntheticVolume/CellData/EulerAngles).
+          schema: { type: string }
+      responses:
+        "200":
+          description: HDF5 dataset summary (frozen frontend contract Hdf5DatasetSummary).
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/materials/dashboard:
+    get:
+      operationId: getUploadHdf5MaterialsDashboard
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: DREAM3D materials dashboard payload (frozen frontend contract Hdf5MaterialsDashboardResponse).
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/preview/slice:
+    get:
+      operationId: getUploadHdf5SlicePreview
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: axis
+          in: query
+          description: Slice orientation (z, y, or x). Defaults to z.
+          schema: { type: string }
+        - name: index
+          in: query
+          description: Slice index along the selected axis. Defaults to the middle slice; out-of-range values are clamped.
+          schema: { type: integer, minimum: 0 }
+        - name: component
+          in: query
+          description: Component index for vector datasets rendered as a scalar map.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Rendered HDF5 dataset slice (PNG)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/preview/atlas:
+    get:
+      operationId: getUploadHdf5AtlasPreview
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: enhancement
+          in: query
+          schema: { type: string }
+        - name: fusion_method
+          in: query
+          schema: { type: string }
+        - name: negative
+          in: query
+          schema: { type: boolean }
+        - name: channels
+          in: query
+          description: Comma-separated channel indices.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Row-major Z-slice atlas mosaic (PNG) matching the dataset summary's atlas_scheme.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/preview/scalar-volume:
+    get:
+      operationId: getUploadHdf5ScalarVolume
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: channel
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Raw little-endian voxel buffer (x-fastest ordering) for the HDF5 dataset preview volume.
+          headers:
+            x-volume-width:
+              schema: { type: integer }
+            x-volume-height:
+              schema: { type: integer }
+            x-volume-depth:
+              schema: { type: integer }
+            x-volume-dtype:
+              schema: { type: string }
+            x-volume-bytes-per-voxel:
+              schema: { type: integer }
+            x-volume-raw-min:
+              schema: { type: number }
+            x-volume-raw-max:
+              schema: { type: number }
+            x-volume-channel:
+              schema: { type: integer }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/preview/histogram:
+    get:
+      operationId: getUploadHdf5Histogram
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: component
+          in: query
+          description: Component index for vector datasets.
+          schema: { type: integer, minimum: 0 }
+        - name: bins
+          in: query
+          description: Number of histogram bins. Values are clamped by the image service.
+          schema: { type: integer, minimum: 8 }
+      responses:
+        "200":
+          description: Sampled HDF5 dataset distribution (frozen frontend contract Hdf5DatasetHistogramResponse).
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/preview/table:
+    get:
+      operationId: getUploadHdf5TablePreview
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: dataset_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: offset
+          in: query
+          description: First row of the window. Echoed (clamped) in the response.
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          description: Maximum rows in the window. Echoed (clamped) in the response.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Bounded HDF5 row window (frozen frontend contract Hdf5DatasetTablePreviewResponse).
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/uploads/{file_id}/caption:
     get:
       operationId: getUploadCaption
@@ -4794,6 +5030,18 @@ components:
         event_metadata:
           type: object
           additionalProperties: true
+    V2DataAgentJobAppendEventRequest:
+      type: object
+      required: [event_type]
+      properties:
+        event_id: { type: string, nullable: true }
+        event_type:
+          type: string
+          enum: [data_agent.job.skipped]
+        message: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
     V2DataAgentJobControlRequest:
       type: object
       required: [action]
@@ -4940,6 +5188,8 @@ components:
       required: [run_id, event_kind, payload]
       properties:
         event_id: { type: string, nullable: true }
+        sequence: { type: integer, format: int64, nullable: true }
+        source_sequence: { type: integer, format: int64, nullable: true }
         run_id: { type: string }
         thread_id: { type: string, nullable: true }
         event_kind: { type: string }

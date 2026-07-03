@@ -108,21 +108,22 @@ type RunHistoryHit struct {
 }
 
 type RunEventRecord struct {
-	EventID      string    `json:"event_id,omitempty"`
-	Sequence     int64     `json:"sequence,omitempty"`
-	RunID        string    `json:"run_id"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	EventKind    string    `json:"event_kind"`
-	EventType    string    `json:"event_type,omitempty"`
-	NodeName     string    `json:"node_name,omitempty"`
-	TaskID       string    `json:"task_id,omitempty"`
-	CheckpointID string    `json:"checkpoint_id,omitempty"`
-	ScopeID      string    `json:"scope_id,omitempty"`
-	AgentRole    string    `json:"agent_role,omitempty"`
-	Level        string    `json:"level,omitempty"`
-	TS           time.Time `json:"ts,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	Payload      JSONMap   `json:"payload"`
+	EventID        string    `json:"event_id,omitempty"`
+	Sequence       int64     `json:"sequence,omitempty"`
+	SourceSequence int64     `json:"source_sequence,omitempty"`
+	RunID          string    `json:"run_id"`
+	ThreadID       string    `json:"thread_id,omitempty"`
+	EventKind      string    `json:"event_kind"`
+	EventType      string    `json:"event_type,omitempty"`
+	NodeName       string    `json:"node_name,omitempty"`
+	TaskID         string    `json:"task_id,omitempty"`
+	CheckpointID   string    `json:"checkpoint_id,omitempty"`
+	ScopeID        string    `json:"scope_id,omitempty"`
+	AgentRole      string    `json:"agent_role,omitempty"`
+	Level          string    `json:"level,omitempty"`
+	TS             time.Time `json:"ts,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	Payload        JSONMap   `json:"payload"`
 }
 
 type ArtifactRecord struct {
@@ -1442,20 +1443,21 @@ type CompleteRunInput struct {
 }
 
 type AppendRunEventInput struct {
-	EventID      string    `json:"event_id,omitempty"`
-	RunID        string    `json:"run_id"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	EventKind    string    `json:"event_kind"`
-	EventType    string    `json:"event_type,omitempty"`
-	NodeName     string    `json:"node_name,omitempty"`
-	TaskID       string    `json:"task_id,omitempty"`
-	CheckpointID string    `json:"checkpoint_id,omitempty"`
-	ScopeID      string    `json:"scope_id,omitempty"`
-	AgentRole    string    `json:"agent_role,omitempty"`
-	Level        string    `json:"level,omitempty"`
-	TS           time.Time `json:"ts,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	Payload      JSONMap   `json:"payload"`
+	EventID        string    `json:"event_id,omitempty"`
+	SourceSequence int64     `json:"sequence,omitempty"`
+	RunID          string    `json:"run_id"`
+	ThreadID       string    `json:"thread_id,omitempty"`
+	EventKind      string    `json:"event_kind"`
+	EventType      string    `json:"event_type,omitempty"`
+	NodeName       string    `json:"node_name,omitempty"`
+	TaskID         string    `json:"task_id,omitempty"`
+	CheckpointID   string    `json:"checkpoint_id,omitempty"`
+	ScopeID        string    `json:"scope_id,omitempty"`
+	AgentRole      string    `json:"agent_role,omitempty"`
+	Level          string    `json:"level,omitempty"`
+	TS             time.Time `json:"ts,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	Payload        JSONMap   `json:"payload"`
 }
 
 type CreateArtifactInput struct {

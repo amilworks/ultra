@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ type fakeNATSStreamManager struct {
 	addErr      error
 	infoErr     error
 	updateErr   error
+	info        *nats.StreamInfo
+	updated     *nats.StreamConfig
 	infoCalls   int
 	updateCalls int
 }
@@ -28,11 +32,17 @@ func (m *fakeNATSStreamManager) AddStream(*nats.StreamConfig, ...nats.JSOpt) (*n
 
 func (m *fakeNATSStreamManager) StreamInfo(stream string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
 	m.infoCalls++
+	if m.info != nil {
+		return m.info, m.infoErr
+	}
 	return &nats.StreamInfo{Config: nats.StreamConfig{Name: stream}}, m.infoErr
 }
 
-func (m *fakeNATSStreamManager) UpdateStream(*nats.StreamConfig, ...nats.JSOpt) (*nats.StreamInfo, error) {
+func (m *fakeNATSStreamManager) UpdateStream(config *nats.StreamConfig, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
 	m.updateCalls++
+	copied := *config
+	copied.Subjects = append([]string(nil), config.Subjects...)
+	m.updated = &copied
 	return nil, m.updateErr
 }
 
@@ -267,7 +277,7 @@ func TestNATSMessageIDForCancelUsesRunIDAndReason(t *testing.T) {
 func TestNATSStreamConfigUsesLongDuplicateWindow(t *testing.T) {
 	t.Parallel()
 
-	stream := natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs", "ultra.test.events"})
+	stream := natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs", "ultra.test.events"}, 0, 0)
 
 	if stream.Duplicates < 24*time.Hour {
 		t.Fatalf("duplicate window = %s, want at least 24h for long-run publish retries", stream.Duplicates)
@@ -290,6 +300,137 @@ func TestNATSStreamSubjectsDoNotInventDataAgentSubject(t *testing.T) {
 	}
 }
 
+func TestQueueConsumerDiagnosticsMarksIdlePullConsumerMissing(t *testing.T) {
+	t.Parallel()
+
+	diagnostics := queueConsumerDiagnosticsFromInfo(
+		QueueConsumerTarget{Name: "ultra-deepagents-worker", Role: "deepagents", Subject: "ultra.runs.jobs"},
+		&nats.ConsumerInfo{
+			Name: "ultra-deepagents-worker",
+			Config: nats.ConsumerConfig{
+				Durable:        "ultra-deepagents-worker",
+				FilterSubject:  "ultra.runs.jobs",
+				AckPolicy:      nats.AckExplicitPolicy,
+				AckWait:        10 * time.Minute,
+				MaxDeliver:     5,
+				MaxAckPending:  4,
+				DeliverSubject: "",
+			},
+			NumPending:     7,
+			NumWaiting:     0,
+			NumAckPending:  0,
+			NumRedelivered: 2,
+		},
+	)
+
+	if diagnostics.Active {
+		t.Fatalf("active = true for idle pull consumer with no waiting pulls or in-flight messages: %+v", diagnostics)
+	}
+	if diagnostics.PendingMessages != 7 || diagnostics.RedeliveredMessages != 2 {
+		t.Fatalf("diagnostics = %+v, want pending/redelivery counters preserved", diagnostics)
+	}
+}
+
+func TestQueueConsumerDiagnosticsMarksPullConsumerActiveWhenPollingOrInFlight(t *testing.T) {
+	t.Parallel()
+
+	for name, info := range map[string]*nats.ConsumerInfo{
+		"waiting pull request": {
+			Name:       "ultra-deepagents-worker",
+			Config:     nats.ConsumerConfig{Durable: "ultra-deepagents-worker", FilterSubject: "ultra.runs.jobs"},
+			NumWaiting: 1,
+		},
+		"in-flight work": {
+			Name:          "ultra-deepagents-worker",
+			Config:        nats.ConsumerConfig{Durable: "ultra-deepagents-worker", FilterSubject: "ultra.runs.jobs"},
+			NumAckPending: 2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			diagnostics := queueConsumerDiagnosticsFromInfo(
+				QueueConsumerTarget{Name: "ultra-deepagents-worker", Role: "deepagents", Subject: "ultra.runs.jobs"},
+				info,
+			)
+			if !diagnostics.Active {
+				t.Fatalf("active = false for pull consumer with %s: %+v", name, diagnostics)
+			}
+		})
+	}
+}
+
+func TestQueueConsumerDiagnosticsUsesPushBoundForPushConsumers(t *testing.T) {
+	t.Parallel()
+
+	baseInfo := nats.ConsumerInfo{
+		Name: "ultra-control-event-ingest",
+		Config: nats.ConsumerConfig{
+			Durable:        "ultra-control-event-ingest",
+			DeliverSubject: "ultra.runs.events.deliver.ultra-control-event-ingest",
+			DeliverGroup:   "ultra-control-event-ingest",
+			FilterSubject:  "ultra.runs.events",
+			AckPolicy:      nats.AckExplicitPolicy,
+		},
+	}
+
+	missing := baseInfo
+	missing.PushBound = false
+	missingDiagnostics := queueConsumerDiagnosticsFromInfo(
+		QueueConsumerTarget{Name: "ultra-control-event-ingest", Role: "event_ingest", Subject: "ultra.runs.events"},
+		&missing,
+	)
+	if missingDiagnostics.Active {
+		t.Fatalf("active = true for unbound push consumer: %+v", missingDiagnostics)
+	}
+
+	bound := baseInfo
+	bound.PushBound = true
+	boundDiagnostics := queueConsumerDiagnosticsFromInfo(
+		QueueConsumerTarget{Name: "ultra-control-event-ingest", Role: "event_ingest", Subject: "ultra.runs.events"},
+		&bound,
+	)
+	if !boundDiagnostics.Active {
+		t.Fatalf("active = false for push-bound consumer: %+v", boundDiagnostics)
+	}
+}
+
+func TestNATSBusQueueConsumerTargetsIncludesRunEventPartitions(t *testing.T) {
+	t.Parallel()
+
+	bus := &NATSBus{cfg: NATSConfig{
+		Stream:          "ULTRA_TEST",
+		EventsSubject:   "ultra.test.events",
+		EventConsumer:   "ultra-test-event-ingest",
+		EventPartitions: 3,
+		ConsumerTargets: []QueueConsumerTarget{
+			{Name: "ultra-test-worker", Role: "deepagents", Subject: "ultra.test.jobs"},
+			{Name: "ultra-test-event-ingest", Role: "event_ingest", Subject: "ultra.test.events"},
+		},
+	}}
+
+	targets := bus.queueConsumerTargets()
+
+	wantNames := []string{
+		"ultra-test-worker",
+		"ultra-test-event-ingest",
+		"ultra-test-event-ingest-p-0",
+		"ultra-test-event-ingest-p-1",
+		"ultra-test-event-ingest-p-2",
+	}
+	if len(targets) != len(wantNames) {
+		t.Fatalf("targets = %+v, want %d targets", targets, len(wantNames))
+	}
+	for index, want := range wantNames {
+		if targets[index].Name != want {
+			t.Fatalf("target %d name = %q, want %q (targets=%+v)", index, targets[index].Name, want, targets)
+		}
+	}
+	if targets[2].Role != "event_ingest_partition" || targets[2].Subject != "ultra.test.events.p.0" {
+		t.Fatalf("partition target = %+v, want partition role and subject", targets[2])
+	}
+}
+
 func TestEnsureNATSStreamReturnsExistingStreamUpdateFailure(t *testing.T) {
 	t.Parallel()
 
@@ -299,7 +440,7 @@ func TestEnsureNATSStreamReturnsExistingStreamUpdateFailure(t *testing.T) {
 		updateErr: updateErr,
 	}
 
-	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}))
+	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 0, 0))
 	if !errors.Is(err, updateErr) {
 		t.Fatalf("ensureNATSStream error = %v, want update error %v", err, updateErr)
 	}
@@ -315,7 +456,7 @@ func TestEnsureNATSStreamUpdatesSameStreamOnSubjectOverlap(t *testing.T) {
 		addErr: fmt.Errorf("nats: subjects overlap with an existing stream"),
 	}
 
-	if err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"})); err != nil {
+	if err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 0, 0)); err != nil {
 		t.Fatalf("ensureNATSStream: %v", err)
 	}
 	if manager.infoCalls != 1 {
@@ -323,6 +464,50 @@ func TestEnsureNATSStreamUpdatesSameStreamOnSubjectOverlap(t *testing.T) {
 	}
 	if manager.updateCalls != 1 {
 		t.Fatalf("update calls = %d, want 1", manager.updateCalls)
+	}
+}
+
+func TestEnsureNATSStreamPreservesExistingSubjectsWhenUpdatingStream(t *testing.T) {
+	t.Parallel()
+
+	manager := fakeNATSStreamManager{
+		addErr: nats.ErrStreamNameAlreadyInUse,
+		info: &nats.StreamInfo{Config: nats.StreamConfig{
+			Name:        "ULTRA_TEST",
+			Description: "operator-managed stream",
+			Subjects:    []string{"ultra.test.jobs", "ultra.test.events", "ultra.test.cancel", "ultra.test.data_agent.jobs"},
+			MaxAge:      2 * time.Hour,
+			MaxMsgs:     10_000,
+			Storage:     nats.MemoryStorage,
+			Duplicates:  2 * time.Minute,
+		}},
+	}
+
+	if err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{
+		"ultra.test.jobs",
+		"ultra.test.events",
+		"ultra.test.cancel",
+	}, 0, 0)); err != nil {
+		t.Fatalf("ensureNATSStream: %v", err)
+	}
+	if manager.updated == nil {
+		t.Fatalf("updated stream config = nil, want merged subjects")
+	}
+	want := []string{"ultra.test.jobs", "ultra.test.events", "ultra.test.cancel", "ultra.test.data_agent.jobs"}
+	if got := manager.updated.Subjects; !stringSlicesEqual(got, want) {
+		t.Fatalf("updated subjects = %v, want %v", got, want)
+	}
+	if manager.updated.Description != "operator-managed stream" {
+		t.Fatalf("updated description = %q, want existing stream description preserved", manager.updated.Description)
+	}
+	if manager.updated.MaxAge != 2*time.Hour || manager.updated.MaxMsgs != 10_000 {
+		t.Fatalf("updated limits MaxAge=%s MaxMsgs=%d, want existing retention limits preserved", manager.updated.MaxAge, manager.updated.MaxMsgs)
+	}
+	if manager.updated.Storage != nats.MemoryStorage {
+		t.Fatalf("updated storage = %s, want existing storage preserved", manager.updated.Storage)
+	}
+	if manager.updated.Duplicates < natsDuplicateWindow {
+		t.Fatalf("updated duplicate window = %s, want at least %s", manager.updated.Duplicates, natsDuplicateWindow)
 	}
 }
 
@@ -335,7 +520,7 @@ func TestEnsureNATSStreamDoesNotHideForeignSubjectOverlap(t *testing.T) {
 		infoErr: nats.ErrStreamNotFound,
 	}
 
-	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}))
+	err := ensureNATSStream(context.Background(), &manager, natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 0, 0))
 	if !errors.Is(err, addErr) {
 		t.Fatalf("ensureNATSStream error = %v, want add error %v", err, addErr)
 	}
@@ -382,6 +567,60 @@ func TestNATSBusPublishesJobAndRunEvent(t *testing.T) {
 	}
 	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{RunID: "run-1", EventKind: "run.accepted", Payload: domain.JSONMap{"ok": true}}); err != nil {
 		t.Fatalf("PublishRunEvent: %v", err)
+	}
+}
+
+func TestNATSBusPreservesExistingStreamSubjectsWhenSecondaryProducerOmitsDataAgentSubject(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_SUBJECT_UNION_" + suffix
+	jobsSubject := "ultra.test." + suffix + ".jobs"
+	eventsSubject := "ultra.test." + suffix + ".events"
+	cancelSubject := "ultra.test." + suffix + ".cancel"
+	dataAgentJobsSubject := "ultra.test." + suffix + ".data_agent.jobs"
+	fullBus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          jobsSubject,
+		EventsSubject:        eventsSubject,
+		CancelSubject:        cancelSubject,
+		DataAgentJobsSubject: dataAgentJobsSubject,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus full: %v", err)
+	}
+	defer fullBus.Close()
+	defer func() {
+		_ = fullBus.js.DeleteStream(stream)
+	}()
+
+	secondaryBus, err := NewNATSBus(ctx, NATSConfig{
+		URL:           url,
+		Stream:        stream,
+		JobsSubject:   jobsSubject,
+		EventsSubject: eventsSubject,
+		CancelSubject: cancelSubject,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus secondary: %v", err)
+	}
+	defer secondaryBus.Close()
+
+	info, err := fullBus.js.StreamInfo(stream, nats.Context(ctx))
+	if err != nil {
+		t.Fatalf("StreamInfo: %v", err)
+	}
+	if !containsString(info.Config.Subjects, dataAgentJobsSubject) {
+		t.Fatalf("stream subjects = %v, want preserved data-agent subject %q", info.Config.Subjects, dataAgentJobsSubject)
+	}
+	if err := fullBus.PublishDataAgentJob(ctx, DataAgentJob{JobID: "data-agent-job-preserved"}); err != nil {
+		t.Fatalf("PublishDataAgentJob after secondary bus startup: %v", err)
 	}
 }
 
@@ -700,6 +939,129 @@ func TestNATSRunEventConsumerSupportsMultipleControlPlaneSubscribers(t *testing.
 	}
 }
 
+func TestNATSRunEventConsumerPreservesSameRunOrderAcrossControlPlaneSubscribers(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_EVENT_CROSS_REPLICA_ORDER_" + suffix
+	eventsSubject := "ultra.test." + suffix + ".events"
+	consumer := "ultra-test-event-cross-replica-order-" + suffix
+	cfg := NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        eventsSubject,
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        consumer,
+	}
+	busA, err := NewNATSBus(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewNATSBus A: %v", err)
+	}
+	defer busA.Close()
+	defer func() {
+		_ = busA.js.DeleteStream(stream)
+	}()
+	busB, err := NewNATSBus(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewNATSBus B: %v", err)
+	}
+	defer busB.Close()
+
+	subCtx, stopSub := context.WithCancel(ctx)
+	defer stopSub()
+	runID := "run-cross-replica-order-" + suffix
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	handledLater := make(chan int, 1)
+	var firstOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	if err := busA.SubscribeAllRunEvents(subCtx, func(handlerCtx context.Context, input domain.AppendRunEventInput) error {
+		if input.RunID != runID {
+			return nil
+		}
+		if input.SourceSequence == 1 {
+			firstOnce.Do(func() { close(firstStarted) })
+			select {
+			case <-releaseFirst:
+			case <-handlerCtx.Done():
+			}
+			return nil
+		}
+		select {
+		case handledLater <- int(input.SourceSequence):
+		default:
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("SubscribeAllRunEvents A: %v", err)
+	}
+	defer release()
+
+	if err := busA.PublishRunEvent(ctx, domain.RunEventRecord{
+		EventID:   "evt-" + suffix + "-1",
+		Sequence:  1,
+		RunID:     runID,
+		ThreadID:  "thread-" + suffix,
+		EventKind: "message.delta",
+		Message:   "first",
+	}); err != nil {
+		t.Fatalf("PublishRunEvent first: %v", err)
+	}
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("first run event was not being handled before timeout")
+	}
+
+	if err := busB.SubscribeAllRunEvents(subCtx, func(_ context.Context, input domain.AppendRunEventInput) error {
+		if input.RunID != runID || input.SourceSequence <= 1 {
+			return nil
+		}
+		select {
+		case handledLater <- int(input.SourceSequence):
+		default:
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("SubscribeAllRunEvents B: %v", err)
+	}
+	for sequence := 2; sequence <= 129; sequence++ {
+		if err := busA.PublishRunEvent(ctx, domain.RunEventRecord{
+			EventID:   fmt.Sprintf("evt-%s-%d", suffix, sequence),
+			Sequence:  int64(sequence),
+			RunID:     runID,
+			ThreadID:  "thread-" + suffix,
+			EventKind: "message.delta",
+			Message:   fmt.Sprintf("event-%d", sequence),
+		}); err != nil {
+			t.Fatalf("PublishRunEvent %d: %v", sequence, err)
+		}
+	}
+
+	select {
+	case sequence := <-handledLater:
+		t.Fatalf("same-run source sequence %d was handled before source sequence 1 completed", sequence)
+	case <-time.After(500 * time.Millisecond):
+	}
+	release()
+	select {
+	case sequence := <-handledLater:
+		if sequence <= 1 {
+			t.Fatalf("handled source sequence %d after release, want a later event", sequence)
+		}
+	case <-ctx.Done():
+		t.Fatal("no later same-run event was handled after source sequence 1 completed")
+	}
+}
+
 func assertNATSStreamMessages(t *testing.T, ctx context.Context, bus *NATSBus, want uint64) {
 	t.Helper()
 	info, err := bus.js.StreamInfo(bus.cfg.Stream, nats.Context(ctx))
@@ -709,6 +1071,27 @@ func assertNATSStreamMessages(t *testing.T, ctx context.Context, bus *NATSBus, w
 	if info.State.Msgs != want {
 		t.Fatalf("stream messages = %d, want %d", info.State.Msgs, want)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSlicesEqual(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestMemoryBusSubscribersReceiveIndependentRunEventStreams(t *testing.T) {
@@ -998,5 +1381,692 @@ func TestNATSBusPartitionedIngestPreservesPerRunOrder(t *testing.T) {
 				t.Fatalf("run %s event %d arrived at position %d; per-run order must be preserved (got %v)", runID, index, position, indexes)
 			}
 		}
+	}
+}
+
+func TestNATSBusRunEventIngestPreservesProducerSequence(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_EVENT_SOURCE_SEQUENCE_" + suffix
+	consumer := "ultra-test-event-source-sequence-" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() {
+		_ = bus.js.DeleteStream(stream)
+	}()
+
+	handled := make(chan domain.AppendRunEventInput, 1)
+	if err := bus.SubscribeAllRunEvents(ctx, func(_ context.Context, input domain.AppendRunEventInput) error {
+		handled <- input
+		return nil
+	}); err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{
+		EventID:   "evt-source-sequence-7",
+		Sequence:  7,
+		RunID:     "run-source-sequence-" + suffix,
+		ThreadID:  "thread-source-sequence",
+		EventKind: "message.delta",
+	}); err != nil {
+		t.Fatalf("PublishRunEvent: %v", err)
+	}
+
+	select {
+	case input := <-handled:
+		if input.SourceSequence != 7 {
+			t.Fatalf("source sequence = %d, want producer sequence 7", input.SourceSequence)
+		}
+	case <-ctx.Done():
+		t.Fatal("handler was not called before timeout")
+	}
+}
+
+func TestNATSRunEventConsumerDoesNotLetFullHotPartitionBlockColdRun(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_EVENT_FAIRNESS_" + suffix
+	consumer := "ultra-test-event-fairness-" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        consumer,
+		EventPartitions:      2,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() {
+		_ = bus.js.DeleteStream(stream)
+	}()
+
+	hotRunID := "run-hot-" + suffix
+	hotPartition := runEventIngestPartition(hotRunID, 2)
+	coldRunID := ""
+	for index := 0; index < 128; index++ {
+		candidate := fmt.Sprintf("run-cold-%s-%d", suffix, index)
+		if runEventIngestPartition(candidate, 2) != hotPartition {
+			coldRunID = candidate
+			break
+		}
+	}
+	if coldRunID == "" {
+		t.Fatal("could not find a cold run ID on a different ingest partition")
+	}
+
+	hotStarted := make(chan struct{})
+	releaseHot := make(chan struct{})
+	coldHandled := make(chan struct{})
+	hotLaterHandled := make(chan struct{}, 1)
+	var hotOnce sync.Once
+	var coldOnce sync.Once
+	if err := bus.SubscribeAllRunEvents(ctx, func(handlerCtx context.Context, input domain.AppendRunEventInput) error {
+		switch input.RunID {
+		case hotRunID:
+			if input.SourceSequence > 1 {
+				select {
+				case hotLaterHandled <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+			hotOnce.Do(func() { close(hotStarted) })
+			select {
+			case <-releaseHot:
+			case <-handlerCtx.Done():
+			}
+		case coldRunID:
+			coldOnce.Do(func() { close(coldHandled) })
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+	defer close(releaseHot)
+
+	publish := func(runID string, index int) {
+		t.Helper()
+		if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{
+			EventID:   fmt.Sprintf("evt-%s-%s-%d", suffix, runID, index),
+			Sequence:  int64(index + 1),
+			RunID:     runID,
+			ThreadID:  "thread-" + suffix,
+			EventKind: "message.delta",
+			Message:   fmt.Sprintf("%d", index),
+		}); err != nil {
+			t.Fatalf("PublishRunEvent(%s, %d): %v", runID, index, err)
+		}
+	}
+
+	publish(hotRunID, 0)
+	select {
+	case <-hotStarted:
+	case <-ctx.Done():
+		t.Fatal("hot run handler did not start before timeout")
+	}
+
+	publish(hotRunID, 1)
+	select {
+	case <-hotLaterHandled:
+		t.Fatal("later hot-run event was handled while the same broker partition was blocked")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	start := time.Now()
+	publish(coldRunID, 0)
+	select {
+	case <-coldHandled:
+		t.Logf("cold run on partition %d handled while hot run on partition %d was saturated after %s", runEventIngestPartition(coldRunID, 2), hotPartition, time.Since(start))
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatalf("cold run event on partition %d was blocked behind saturated hot partition %d", runEventIngestPartition(coldRunID, 2), hotPartition)
+	}
+}
+
+func BenchmarkNATSPartitionedRunEventIngestColdRunsWhileHotPartitionBlocked(b *testing.B) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		b.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	for iteration := 0; iteration < b.N; iteration++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		suffix := fmt.Sprintf("%d-%d", time.Now().UnixNano(), iteration)
+		stream := "ULTRA_BENCH_EVENT_PARTITION_" + suffix
+		consumer := "ultra-bench-event-partition-" + suffix
+		const partitions = 16
+		cfg := NATSConfig{
+			URL:                  url,
+			Stream:               stream,
+			JobsSubject:          "ultra.bench." + suffix + ".jobs",
+			EventsSubject:        "ultra.bench." + suffix + ".events",
+			CancelSubject:        "ultra.bench." + suffix + ".cancel",
+			DataAgentJobsSubject: "ultra.bench." + suffix + ".data_agent.jobs",
+			EventConsumer:        consumer,
+			EventPartitions:      partitions,
+		}
+		busA, err := NewNATSBus(ctx, cfg)
+		if err != nil {
+			cancel()
+			b.Fatalf("NewNATSBus A: %v", err)
+		}
+		busB, err := NewNATSBus(ctx, cfg)
+		if err != nil {
+			busA.Close()
+			cancel()
+			b.Fatalf("NewNATSBus B: %v", err)
+		}
+
+		hotRunID := "run-hot-" + suffix
+		hotPartition := runEventIngestPartition(hotRunID, partitions)
+		coldRuns := make([]string, 0, 32)
+		for candidate := 0; len(coldRuns) < cap(coldRuns) && candidate < 4096; candidate++ {
+			runID := fmt.Sprintf("run-cold-%s-%d", suffix, candidate)
+			if runEventIngestPartition(runID, partitions) != hotPartition {
+				coldRuns = append(coldRuns, runID)
+			}
+		}
+		if len(coldRuns) != cap(coldRuns) {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("found %d cold runs, want %d", len(coldRuns), cap(coldRuns))
+		}
+
+		var mu sync.Mutex
+		publishedAt := map[string]time.Time{}
+		latencies := make([]time.Duration, 0, len(coldRuns)*32)
+		receivedCold := 0
+		coldDone := make(chan struct{})
+		hotStarted := make(chan struct{})
+		releaseHot := make(chan struct{})
+		var hotOnce sync.Once
+		handler := func(handlerCtx context.Context, input domain.AppendRunEventInput) error {
+			if input.RunID == hotRunID {
+				hotOnce.Do(func() { close(hotStarted) })
+				select {
+				case <-releaseHot:
+				case <-handlerCtx.Done():
+				}
+				return nil
+			}
+			mu.Lock()
+			if sentAt, ok := publishedAt[input.EventID]; ok {
+				latencies = append(latencies, time.Since(sentAt))
+			}
+			receivedCold++
+			if receivedCold == cap(coldRuns)*32 {
+				close(coldDone)
+			}
+			mu.Unlock()
+			return nil
+		}
+		if err := busA.SubscribeAllRunEvents(ctx, handler); err != nil {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("SubscribeAllRunEvents A: %v", err)
+		}
+		if err := busB.SubscribeAllRunEvents(ctx, handler); err != nil {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("SubscribeAllRunEvents B: %v", err)
+		}
+
+		if err := busA.PublishRunEvent(ctx, domain.RunEventRecord{
+			EventID:   "evt-" + suffix + "-hot-1",
+			Sequence:  1,
+			RunID:     hotRunID,
+			ThreadID:  "thread-" + suffix,
+			EventKind: "message.delta",
+		}); err != nil {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("PublishRunEvent hot: %v", err)
+		}
+		select {
+		case <-hotStarted:
+		case <-ctx.Done():
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatal("hot run did not start before timeout")
+		}
+
+		start := time.Now()
+		for _, runID := range coldRuns {
+			for sequence := 1; sequence <= 32; sequence++ {
+				eventID := fmt.Sprintf("evt-%s-%s-%d", suffix, runID, sequence)
+				mu.Lock()
+				publishedAt[eventID] = time.Now()
+				mu.Unlock()
+				if err := busA.PublishRunEvent(ctx, domain.RunEventRecord{
+					EventID:   eventID,
+					Sequence:  int64(sequence),
+					RunID:     runID,
+					ThreadID:  "thread-" + suffix,
+					EventKind: "message.delta",
+				}); err != nil {
+					busB.Close()
+					busA.Close()
+					cancel()
+					b.Fatalf("PublishRunEvent cold: %v", err)
+				}
+			}
+		}
+		select {
+		case <-coldDone:
+		case <-ctx.Done():
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("received %d/%d cold events before timeout", receivedCold, cap(coldRuns)*32)
+		}
+		drain := time.Since(start)
+		close(releaseHot)
+		info, err := busA.js.ConsumerInfo(stream, runEventPartitionConsumerName(consumer, hotPartition), nats.Context(ctx))
+		if err != nil {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("ConsumerInfo hot partition: %v", err)
+		}
+		if info.NumRedelivered != 0 {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("hot partition redelivered %d messages during ordered benchmark", info.NumRedelivered)
+		}
+		mu.Lock()
+		latencySnapshot := append([]time.Duration(nil), latencies...)
+		mu.Unlock()
+		sort.Slice(latencySnapshot, func(i, j int) bool { return latencySnapshot[i] < latencySnapshot[j] })
+		if len(latencySnapshot) > 0 {
+			b.ReportMetric(float64(percentileDuration(latencySnapshot, 0.95).Microseconds())/1000, "p95_ms")
+			b.ReportMetric(float64(percentileDuration(latencySnapshot, 0.99).Microseconds())/1000, "p99_ms")
+		}
+		b.ReportMetric(float64(drain.Milliseconds()), "cold_drain_ms")
+		b.ReportMetric(float64(cap(coldRuns)*32)/drain.Seconds(), "cold_events_per_sec")
+		if drain > 5*time.Second {
+			busB.Close()
+			busA.Close()
+			cancel()
+			b.Fatalf("cold events drained in %s, want <= 5s while hot partition is blocked", drain)
+		}
+		busB.Close()
+		busA.Close()
+		_ = busA.js.DeleteStream(stream)
+		cancel()
+	}
+}
+
+func percentileDuration(values []time.Duration, percentile float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	index := int(float64(len(values)-1) * percentile)
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(values) {
+		index = len(values) - 1
+	}
+	return values[index]
+}
+
+// Fix #1: a persistently-failing ("poison") event must not wedge its partition
+// forever. After the bounded InProgress retries, the worker Term()s it, freeing
+// the MaxAckPending=1 slot so the next same-partition event is still ingested.
+func TestNATSBusPartitionResumesAfterPoisonEvent(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	// Shrink the retry budget so the test finishes quickly.
+	origDelay, origBounded, origUnknown := runEventIngestNakDelay, runEventIngestBoundedRetries, runEventIngestUnknownRetries
+	runEventIngestNakDelay = 10 * time.Millisecond
+	runEventIngestBoundedRetries = 3
+	runEventIngestUnknownRetries = 3
+	defer func() {
+		runEventIngestNakDelay = origDelay
+		runEventIngestBoundedRetries = origBounded
+		runEventIngestUnknownRetries = origUnknown
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_POISON_" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        "ingest-" + suffix,
+		EventPartitions:      4,
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() { _ = bus.js.DeleteStream(stream) }()
+
+	goodReceived := make(chan struct{}, 1)
+	var poisonAttempts int32
+	err = bus.SubscribeAllRunEvents(ctx, func(_ context.Context, input domain.AppendRunEventInput) error {
+		switch input.EventID {
+		case "poison":
+			atomic.AddInt32(&poisonAttempts, 1)
+			return errors.New("permanent ingest failure")
+		case "good":
+			select {
+			case goodReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+
+	// Same run_id => same partition: the good event is delivered only after the
+	// poison event's slot is freed (MaxAckPending=1).
+	runID := "run-poison-" + suffix
+	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{EventID: "poison", RunID: runID, EventKind: "message.delta"}); err != nil {
+		t.Fatalf("publish poison: %v", err)
+	}
+	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{EventID: "good", RunID: runID, EventKind: "message.delta"}); err != nil {
+		t.Fatalf("publish good: %v", err)
+	}
+
+	select {
+	case <-goodReceived:
+		// Partition resumed after the poison event was terminated.
+	case <-ctx.Done():
+		t.Fatalf("good event never ingested; partition wedged by poison (poison attempts=%d)", atomic.LoadInt32(&poisonAttempts))
+	}
+	if got := atomic.LoadInt32(&poisonAttempts); got < 3 {
+		t.Fatalf("poison attempts=%d, want >=3 (bounded retries before Term)", got)
+	}
+}
+
+// A3: retention limits must propagate to EXISTING streams (the merge starts
+// from the server's config, so without explicit handling MaxAge/MaxBytes
+// added to natsStreamConfig would be silently dropped), and must be
+// tighten-only (never loosen an operator-tuned limit).
+func TestEnsureNATSStreamAppliesRetentionToExistingUnlimitedStream(t *testing.T) {
+	t.Parallel()
+	manager := fakeNATSStreamManager{
+		addErr: nats.ErrStreamNameAlreadyInUse,
+		info: &nats.StreamInfo{Config: nats.StreamConfig{
+			Name:     "ULTRA_TEST",
+			Subjects: []string{"ultra.test.jobs"},
+			// Existing stream: unlimited (the live-production shape).
+			MaxAge:   0,
+			MaxBytes: 0,
+		}},
+	}
+	desired := natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 72*time.Hour, 8<<30)
+	if err := ensureNATSStream(context.Background(), &manager, desired); err != nil {
+		t.Fatalf("ensureNATSStream: %v", err)
+	}
+	if manager.updated == nil {
+		t.Fatal("expected UpdateStream to be called")
+	}
+	if manager.updated.MaxAge != 72*time.Hour {
+		t.Fatalf("merged MaxAge = %v, want 72h applied to unlimited stream", manager.updated.MaxAge)
+	}
+	if manager.updated.MaxBytes != 8<<30 {
+		t.Fatalf("merged MaxBytes = %d, want 8GiB applied to unlimited stream", manager.updated.MaxBytes)
+	}
+}
+
+func TestEnsureNATSStreamNeverLoosensOperatorTightenedRetention(t *testing.T) {
+	t.Parallel()
+	manager := fakeNATSStreamManager{
+		addErr: nats.ErrStreamNameAlreadyInUse,
+		info: &nats.StreamInfo{Config: nats.StreamConfig{
+			Name:     "ULTRA_TEST",
+			Subjects: []string{"ultra.test.jobs"},
+			// Operator tuned tighter than our defaults.
+			MaxAge:   36 * time.Hour,
+			MaxBytes: 1 << 30,
+		}},
+	}
+	desired := natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 72*time.Hour, 8<<30)
+	if err := ensureNATSStream(context.Background(), &manager, desired); err != nil {
+		t.Fatalf("ensureNATSStream: %v", err)
+	}
+	if manager.updated.MaxAge != 36*time.Hour {
+		t.Fatalf("merged MaxAge = %v, want operator's tighter 36h preserved", manager.updated.MaxAge)
+	}
+	if manager.updated.MaxBytes != 1<<30 {
+		t.Fatalf("merged MaxBytes = %d, want operator's tighter 1GiB preserved", manager.updated.MaxBytes)
+	}
+}
+
+// MaxAge below the 24h duplicate-tracking window would be rejected by the
+// server and brick startup; the constructor must clamp it.
+func TestNATSStreamConfigClampsMaxAgeToDuplicateWindow(t *testing.T) {
+	t.Parallel()
+	stream := natsStreamConfig("ULTRA_TEST", []string{"ultra.test.jobs"}, 2*time.Hour, 0)
+	if stream.MaxAge != natsDuplicateWindow {
+		t.Fatalf("MaxAge = %v, want clamped to duplicate window %v", stream.MaxAge, natsDuplicateWindow)
+	}
+	if stream.MaxBytes != defaultStreamMaxBytes {
+		t.Fatalf("MaxBytes = %d, want default %d", stream.MaxBytes, defaultStreamMaxBytes)
+	}
+}
+
+// A1: transient (store-outage-class) errors must retry indefinitely and never
+// Term — a Postgres restart must not destroy real events. The handler fails
+// well past every bounded budget, then heals; the event must still ingest.
+func TestNATSBusTransientIngestErrorNeverTerminates(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	origDelay, origBounded, origUnknown := runEventIngestNakDelay, runEventIngestBoundedRetries, runEventIngestUnknownRetries
+	runEventIngestNakDelay = 5 * time.Millisecond
+	runEventIngestBoundedRetries = 3
+	runEventIngestUnknownRetries = 6
+	defer func() {
+		runEventIngestNakDelay = origDelay
+		runEventIngestBoundedRetries = origBounded
+		runEventIngestUnknownRetries = origUnknown
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_TRANSIENT_" + suffix
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        "ingest-" + suffix,
+		EventPartitions:      2,
+		IngestErrorClassifier: func(error) IngestErrorClass {
+			return IngestErrorTransient
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() { _ = bus.js.DeleteStream(stream) }()
+
+	var attempts int32
+	ingested := make(chan struct{}, 1)
+	// Fail for 20 attempts (>> both budgets of 3 and 6), then heal.
+	err = bus.SubscribeAllRunEvents(ctx, func(_ context.Context, input domain.AppendRunEventInput) error {
+		if atomic.AddInt32(&attempts, 1) <= 20 {
+			return errors.New("store is down")
+		}
+		select {
+		case ingested <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{EventID: "evt-transient", RunID: "run-transient-" + suffix, EventKind: "message.delta"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-ingested:
+		// Survived the outage without Term.
+	case <-ctx.Done():
+		t.Fatalf("event was never ingested after heal (attempts=%d) — transient error must not Term", atomic.LoadInt32(&attempts))
+	}
+	if got := atomic.LoadInt32(&attempts); got < 21 {
+		t.Fatalf("attempts = %d, want > 20 (retried past every bounded budget)", got)
+	}
+}
+
+// A1: after the predecessor-pending budget is exhausted, the worker must
+// BYPASS the ordering gate (handler sees the bypass ctx flag) and the event
+// must be ingested — never terminated.
+func TestNATSBusPredecessorPendingBypassesGateAfterBudget(t *testing.T) {
+	url := os.Getenv("ULTRA_CONTROL_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("ULTRA_CONTROL_TEST_NATS_URL is not set")
+	}
+	origDelay, origBounded := runEventIngestNakDelay, runEventIngestBoundedRetries
+	runEventIngestNakDelay = 5 * time.Millisecond
+	runEventIngestBoundedRetries = 3
+	defer func() {
+		runEventIngestNakDelay = origDelay
+		runEventIngestBoundedRetries = origBounded
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	stream := "ULTRA_TEST_BYPASS_" + suffix
+	pendingErr := errors.New("predecessor pending")
+	bus, err := NewNATSBus(ctx, NATSConfig{
+		URL:                  url,
+		Stream:               stream,
+		JobsSubject:          "ultra.test." + suffix + ".jobs",
+		EventsSubject:        "ultra.test." + suffix + ".events",
+		CancelSubject:        "ultra.test." + suffix + ".cancel",
+		DataAgentJobsSubject: "ultra.test." + suffix + ".data_agent.jobs",
+		EventConsumer:        "ingest-" + suffix,
+		EventPartitions:      2,
+		IngestErrorClassifier: func(err error) IngestErrorClass {
+			if errors.Is(err, pendingErr) {
+				return IngestErrorPredecessorPending
+			}
+			return IngestErrorUnknown
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewNATSBus: %v", err)
+	}
+	defer bus.Close()
+	defer func() { _ = bus.js.DeleteStream(stream) }()
+
+	var gateChecks int32
+	bypassed := make(chan struct{}, 1)
+	err = bus.SubscribeAllRunEvents(ctx, func(handlerCtx context.Context, input domain.AppendRunEventInput) error {
+		if domain.RunEventGateBypassed(handlerCtx) {
+			select {
+			case bypassed <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		atomic.AddInt32(&gateChecks, 1)
+		return pendingErr
+	})
+	if err != nil {
+		t.Fatalf("SubscribeAllRunEvents: %v", err)
+	}
+	if err := bus.PublishRunEvent(ctx, domain.RunEventRecord{EventID: "evt-gap-successor", RunID: "run-bypass-" + suffix, EventKind: "message.delta"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-bypassed:
+		// Gate bypassed and event ingested instead of terminated.
+	case <-ctx.Done():
+		t.Fatalf("bypass never happened (gate checks=%d)", atomic.LoadInt32(&gateChecks))
+	}
+	if got := atomic.LoadInt32(&gateChecks); got < 3 {
+		t.Fatalf("gate checks = %d, want >= 3 bounded waits before bypass", got)
+	}
+}
+
+func TestRunEventPredecessorPendingWaitElapsedUsesEventAge(t *testing.T) {
+	origDelay, origBounded := runEventIngestNakDelay, runEventIngestBoundedRetries
+	runEventIngestNakDelay = 5 * time.Second
+	runEventIngestBoundedRetries = 24
+	defer func() {
+		runEventIngestNakDelay = origDelay
+		runEventIngestBoundedRetries = origBounded
+	}()
+
+	now := time.Date(2026, 7, 2, 1, 55, 0, 0, time.UTC)
+	aged := queuedRunEventMessage{
+		attempts: 1,
+		input: domain.AppendRunEventInput{
+			EventID:        "evt-aged-gap-successor",
+			RunID:          "run-aged-gap",
+			SourceSequence: 42,
+			TS:             now.Add(-3 * time.Minute),
+		},
+	}
+	if !runEventPredecessorPendingWaitElapsed(aged, now) {
+		t.Fatal("aged predecessor-pending event should bypass without spending the full retry budget again")
+	}
+
+	fresh := aged
+	fresh.input.TS = now.Add(-30 * time.Second)
+	if runEventPredecessorPendingWaitElapsed(fresh, now) {
+		t.Fatal("fresh predecessor-pending event should wait for the bounded retry budget")
+	}
+
+	noTimestamp := aged
+	noTimestamp.input.TS = time.Time{}
+	noTimestamp.attempts = runEventIngestBoundedRetries
+	if !runEventPredecessorPendingWaitElapsed(noTimestamp, now) {
+		t.Fatal("events without timestamps should still bypass after the bounded retry budget")
 	}
 }

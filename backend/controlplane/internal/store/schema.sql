@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS control_run_event_sequences (
 CREATE TABLE IF NOT EXISTS control_run_events (
   event_id text PRIMARY KEY,
   sequence_number bigint NOT NULL,
+  source_sequence bigint,
   run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
   thread_id text,
   event_kind text NOT NULL,
@@ -146,6 +147,24 @@ CREATE TABLE IF NOT EXISTS control_run_events (
   payload jsonb NOT NULL DEFAULT '{}',
   UNIQUE(run_id, sequence_number)
 );
+
+-- Backfill source_sequence exactly once. schema.sql is re-applied on every
+-- `migrate`, and an unconditional `UPDATE ... WHERE source_sequence IS NULL`
+-- would full-table-scan control_run_events every time (no index can find NULLs
+-- under the partial unique index). Gate the one-time column-add + backfill on
+-- the column being absent: fresh databases already declare it in CREATE TABLE
+-- above (so this is skipped), and databases predating the column pay the
+-- rewrite once. After that the column exists and this block is a no-op.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'control_run_events' AND column_name = 'source_sequence'
+  ) THEN
+    ALTER TABLE control_run_events ADD COLUMN source_sequence bigint;
+    UPDATE control_run_events SET source_sequence = sequence_number;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS control_run_leases (
   run_id text PRIMARY KEY REFERENCES control_runs(run_id) ON DELETE CASCADE,
@@ -547,6 +566,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
 -- just these rows instead of scanning the whole events table.
 CREATE INDEX IF NOT EXISTS control_run_events_admin_activity_idx ON control_run_events(event_kind, ts)
   WHERE event_kind IN ('tool_call.started', 'artifact.created');
+CREATE UNIQUE INDEX IF NOT EXISTS control_run_events_run_source_sequence_idx
+  ON control_run_events(run_id, source_sequence)
+  WHERE source_sequence IS NOT NULL;
 CREATE INDEX IF NOT EXISTS control_run_leases_expires_idx ON control_run_leases(lease_expires_at);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_worker_heartbeats(worker_kind, status, last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);

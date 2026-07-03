@@ -468,6 +468,63 @@ func TestPostgresStoreResourceCatalogFiltersSoftDeletesAndRestores(t *testing.T)
 	}
 }
 
+func TestPostgresStoreListResourcesPastRetentionIncludesStorageURI(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+	suffix := domain.NewID("resource")
+	resourceID := "file_expired_" + suffix
+	storageURI := "file:///srv/ultra/shared/uploads/" + resourceID + "__cells.ome.tiff"
+	storagePath := resourceID + "__cells.ome.tiff"
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   resourceID,
+		OwnerUserID:  "alice-" + suffix,
+		OwnerOrgID:   "org-a",
+		OriginalName: "cells.ome.tiff",
+		ContentType:  "image/tiff",
+		SizeBytes:    128,
+		StorageURI:   storageURI,
+		StoragePath:  storagePath,
+		SourceType:   "upload",
+		ResourceKind: "image",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	if _, err := store.SoftDeleteResourceForUser(ctx, resourceID, "alice-"+suffix, "org-a", time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatalf("SoftDeleteResourceForUser: %v", err)
+	}
+
+	expired, err := store.ListResourcesPastRetention(ctx, time.Now(), 10000)
+	if err != nil {
+		t.Fatalf("ListResourcesPastRetention: %v", err)
+	}
+	for _, resource := range expired {
+		if resource.ResourceID != resourceID {
+			continue
+		}
+		if resource.StorageURI != storageURI {
+			t.Fatalf("expired StorageURI = %q, want %q", resource.StorageURI, storageURI)
+		}
+		if resource.StoragePath != storagePath {
+			t.Fatalf("expired StoragePath = %q, want %q", resource.StoragePath, storagePath)
+		}
+		return
+	}
+	t.Fatalf("expired resources missing %s: %+v", resourceID, expired)
+}
+
 func TestPostgresStoreListResourceEventsForUserScopesAndFilters(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -2425,6 +2482,123 @@ func TestPostgresStoreDataAgentJobLifecycleRecordsEvents(t *testing.T) {
 	}
 	if len(events) != 4 || events[0].EventType != "data_agent.job.created" || events[1].EventType != "data_agent.job.progressed" || events[3].EventType != "data_agent.job.retried" {
 		t.Fatalf("events = %+v, want ordered lifecycle events", events)
+	}
+}
+
+func TestPostgresStoreRecoversDispatchFailedDataAgentJobWithoutLease(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+
+	store := NewPostgresStore(pool)
+	suffix := strings.ReplaceAll(domain.NewID("data_agent_retry"), "-", "_")
+	userID := "agent-user-" + suffix
+	orgID := "agent-org-" + suffix
+	now := domain.Now()
+	resourceID := "file_agent_retry_" + suffix
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   resourceID,
+		OriginalName: "retry.nii.gz",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		SizeBytes:    42,
+		OwnerUserID:  userID,
+		OwnerOrgID:   orgID,
+		ProjectID:    "agent-project-" + suffix,
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := store.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_retry_" + suffix,
+		OwnerUserID:     userID,
+		OwnerOrgID:      orgID,
+		ProjectID:       "agent-project-" + suffix,
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{resourceID},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{resourceID}},
+		CreatedByUserID: userID,
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+	if _, err := store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		EventType:   "data_agent.job.dispatch_failed",
+		ActorUserID: userID,
+		ActorOrgID:  orgID,
+		TS:          now.Add(2 * time.Second),
+		Message:     "Data Agent job dispatch failed.",
+		Metadata:    domain.JSONMap{"error": "nats publish unavailable"},
+	}); err != nil {
+		t.Fatalf("AppendDataAgentJobEvent dispatch_failed: %v", err)
+	}
+
+	result, err := store.RecoverExpiredDataAgentJobLeases(ctx, domain.RecoverExpiredDataAgentJobLeasesInput{
+		Now:    now.Add(3 * time.Second),
+		Reason: "automatic expired data-agent lease recovery",
+		Limit:  1000,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredDataAgentJobLeases: %v", err)
+	}
+	found := false
+	for _, recovered := range result.RequeuedJobs {
+		if recovered.JobID != job.JobID {
+			continue
+		}
+		found = true
+		if recovered.Status != "queued" || recovered.OwnerUserID != userID || recovered.OwnerOrgID != orgID {
+			t.Fatalf("recovered retry job = %+v, want queued owner-scoped job", recovered)
+		}
+	}
+	if !found {
+		t.Fatalf("recovery result = %+v, want dispatch-failed job %s", result, job.JobID)
+	}
+	events, err := store.ListDataAgentJobEvents(ctx, job.JobID, userID, orgID, 10)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents: %v", err)
+	}
+	if got := events[len(events)-1].EventType; got != "data_agent.job.dispatch_failed" {
+		t.Fatalf("last event after store retry lookup = %s, want dispatch_failed until app publishes", got)
+	}
+
+	if _, err := store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+		JobID:       job.JobID,
+		EventType:   "data_agent.job.dispatched",
+		ActorUserID: userID,
+		ActorOrgID:  orgID,
+		TS:          now.Add(4 * time.Second),
+		Message:     "Data Agent job dispatched after retry.",
+		Metadata:    domain.JSONMap{"dispatch_id": "dispatch_retry_success"},
+	}); err != nil {
+		t.Fatalf("AppendDataAgentJobEvent dispatched: %v", err)
+	}
+	result, err = store.RecoverExpiredDataAgentJobLeases(ctx, domain.RecoverExpiredDataAgentJobLeasesInput{
+		Now:    now.Add(5 * time.Second),
+		Reason: "automatic expired data-agent lease recovery",
+		Limit:  1000,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredDataAgentJobLeases after dispatched: %v", err)
+	}
+	for _, recovered := range result.RequeuedJobs {
+		if recovered.JobID == job.JobID {
+			t.Fatalf("recovery result after dispatched = %+v, want job excluded once latest event is dispatched", result)
+		}
 	}
 }
 

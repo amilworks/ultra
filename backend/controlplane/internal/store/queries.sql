@@ -93,10 +93,10 @@ SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence FROM control_run_e
 
 -- name: AppendRunEvent :one
 INSERT INTO control_run_events (
-  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
   node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 RETURNING *;
 
 -- name: GetRunEvent :one
@@ -138,6 +138,10 @@ WHERE e.run_id = $1
   AND e.sequence_number > $3
 ORDER BY e.sequence_number ASC
 LIMIT $4;
+
+-- name: GetRunEventBySourceSequence :one
+SELECT * FROM control_run_events
+WHERE run_id = $1 AND source_sequence = $2;
 
 -- name: CreateArtifact :one
 INSERT INTO control_artifacts (

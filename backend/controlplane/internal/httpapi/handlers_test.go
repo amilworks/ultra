@@ -2081,6 +2081,112 @@ func TestV2WorkerTokenBypassesWorkOSGateForWorkerEndpoints(t *testing.T) {
 	}
 }
 
+func TestV2WorkerTokenBypassesWorkOSGateForDataAgentCallbacks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Store:       mem,
+		WorkerToken: "data-agent-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+	now := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file-agent-workos",
+		OriginalName: "workos-worker.nii.gz",
+		ContentType:  "application/gzip",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		SizeBytes:    128,
+		SHA256:       "sha-workos-worker",
+		OwnerUserID:  "agent-user",
+		OwnerOrgID:   "agent-org",
+		ProjectID:    "agent-study",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := mem.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_workos_worker",
+		OwnerUserID:     "agent-user",
+		OwnerOrgID:      "agent-org",
+		ProjectID:       "agent-study",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file-agent-workos"},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{"file-agent-workos"}},
+		CreatedByUserID: "agent-user",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+
+	anonymous := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs/"+job.JobID, nil)
+	anonymous.Header.Set("X-Ultra-User-Id", "agent-user")
+	anonymous.Header.Set("X-Ultra-Org-Id", "agent-org")
+	anonymousRec := httptest.NewRecorder()
+	router.ServeHTTP(anonymousRec, anonymous)
+	if anonymousRec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous data-agent callback under workos = %d, want 401", anonymousRec.Code)
+	}
+
+	addWorkerHeaders := func(req *http.Request) {
+		req.Header.Set("X-Ultra-Worker-Token", "data-agent-worker-secret")
+		req.Header.Set("X-Ultra-User-Id", "agent-user")
+		req.Header.Set("X-Ultra-Org-Id", "agent-org")
+	}
+
+	status := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs/"+job.JobID, nil)
+	addWorkerHeaders(status)
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, status)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("worker token data-agent status under workos = %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+
+	wrongOwner := httptest.NewRequest(http.MethodGet, "/v2/data-agent/jobs/"+job.JobID, nil)
+	wrongOwner.Header.Set("X-Ultra-Worker-Token", "data-agent-worker-secret")
+	wrongOwner.Header.Set("X-Ultra-User-Id", "other-user")
+	wrongOwner.Header.Set("X-Ultra-Org-Id", "agent-org")
+	wrongOwnerRec := httptest.NewRecorder()
+	router.ServeHTTP(wrongOwnerRec, wrongOwner)
+	if wrongOwnerRec.Code != http.StatusNotFound {
+		t.Fatalf("wrong-owner worker token data-agent status = %d body=%s, want 404", wrongOwnerRec.Code, wrongOwnerRec.Body.String())
+	}
+
+	claim := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs/"+job.JobID+"/lease", strings.NewReader(`{"worker_id":"data-agent-worker-a","ttl_seconds":60}`))
+	claim.Header.Set("Content-Type", "application/json")
+	addWorkerHeaders(claim)
+	claimRec := httptest.NewRecorder()
+	router.ServeHTTP(claimRec, claim)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("worker token data-agent lease under workos = %d body=%s", claimRec.Code, claimRec.Body.String())
+	}
+
+	progress := httptest.NewRequest(http.MethodPatch, "/v2/data-agent/jobs/"+job.JobID+"/status", strings.NewReader(`{"status":"running","progress_completed":1,"progress_total":1,"message":"Worker progress","event_metadata":{"stage":"workos-worker-token-test"}}`))
+	progress.Header.Set("Content-Type", "application/json")
+	addWorkerHeaders(progress)
+	progressRec := httptest.NewRecorder()
+	router.ServeHTTP(progressRec, progress)
+	if progressRec.Code != http.StatusOK {
+		t.Fatalf("worker token data-agent status update under workos = %d body=%s", progressRec.Code, progressRec.Body.String())
+	}
+
+	skipped := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs/"+job.JobID+"/events", strings.NewReader(`{"event_id":"data_agent_job_event_workos_worker_skip","event_type":"data_agent.job.skipped","message":"Skipped stale delivery.","metadata":{"stage":"workos_worker_token_test"}}`))
+	skipped.Header.Set("Content-Type", "application/json")
+	addWorkerHeaders(skipped)
+	skippedRec := httptest.NewRecorder()
+	router.ServeHTTP(skippedRec, skipped)
+	if skippedRec.Code != http.StatusOK {
+		t.Fatalf("worker token data-agent skipped event under workos = %d body=%s", skippedRec.Code, skippedRec.Body.String())
+	}
+}
+
 func TestV2WorkerTokenReadsRunOwnerProfile(t *testing.T) {
 	t.Parallel()
 
@@ -9407,6 +9513,132 @@ func TestV2DataAgentJobRetryDispatchesFreshQueueEnvelope(t *testing.T) {
 	}
 	if retried.Events[len(retried.Events)-1].Metadata["dispatch_id"] != retryDispatch.DispatchID {
 		t.Fatalf("retry dispatch event metadata = %#v, want dispatch_id %q", retried.Events[len(retried.Events)-1].Metadata, retryDispatch.DispatchID)
+	}
+}
+
+func TestV2DataAgentJobAppendSkippedEventDoesNotMutateTerminalJob(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	seedDataAgentHTTPResources(t, mem)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/data-agent/jobs", strings.NewReader(`{
+		"job_type":"extract_metadata",
+		"resource_ids":["file_agent_http_a"],
+		"project_id":"agent-study",
+		"input_selector":{"format":"nifti"}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	createReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("create data-agent job status = %d body=%s, want 202", createRec.Code, createRec.Body.String())
+	}
+	var created dataAgentJobResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created data-agent job: %v", err)
+	}
+
+	statusReq := httptest.NewRequest(
+		http.MethodPatch,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/status",
+		strings.NewReader(`{"status":"succeeded","progress_completed":1,"progress_total":1,"message":"Data Agent job completed."}`),
+	)
+	statusReq.Header.Set("Content-Type", "application/json")
+	statusReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	statusReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("complete data-agent job status = %d body=%s, want 200", statusRec.Code, statusRec.Body.String())
+	}
+	var completed dataAgentJobResponse
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &completed); err != nil {
+		t.Fatalf("decode completed data-agent job: %v", err)
+	}
+	completedAt := completed.Job.CompletedAt
+	if completed.Job.Status != "succeeded" || completedAt.IsZero() {
+		t.Fatalf("completed job = %+v, want succeeded terminal job", completed.Job)
+	}
+
+	skipEventID := "data_agent_job_event_" + created.Job.JobID + "_dispatch_1_skipped_initial_status"
+	skipEventBody := fmt.Sprintf(`{
+			"event_id":%q,
+			"event_type":"data_agent.job.skipped",
+			"message":"Data Agent job delivery skipped before worker lease.",
+			"metadata":{
+				"ack_action":"ack",
+				"control_status":"succeeded",
+				"dispatch_id":"dispatch-1",
+				"stage":"initial_status_check",
+				"worker_id":"data-agent-worker-a"
+			}
+		}`, skipEventID)
+	eventReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/events",
+		strings.NewReader(skipEventBody),
+	)
+	eventReq.Header.Set("Content-Type", "application/json")
+	eventReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	eventReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	eventRec := httptest.NewRecorder()
+	router.ServeHTTP(eventRec, eventReq)
+	if eventRec.Code != http.StatusOK {
+		t.Fatalf("append skipped event status = %d body=%s, want 200", eventRec.Code, eventRec.Body.String())
+	}
+	var skipped dataAgentJobResponse
+	if err := json.Unmarshal(eventRec.Body.Bytes(), &skipped); err != nil {
+		t.Fatalf("decode skipped data-agent event response: %v", err)
+	}
+	if skipped.Job.Status != "succeeded" || !skipped.Job.CompletedAt.Equal(completedAt) {
+		t.Fatalf("skipped event mutated job = %+v, want original succeeded terminal state", skipped.Job)
+	}
+	if len(skipped.Events) != 3 {
+		t.Fatalf("skipped events = %+v, want created/completed/skipped", skipped.Events)
+	}
+	last := skipped.Events[len(skipped.Events)-1]
+	if last.EventType != "data_agent.job.skipped" || last.Message != "Data Agent job delivery skipped before worker lease." {
+		t.Fatalf("last skipped event = %+v, want skipped audit", last)
+	}
+	if last.EventID != skipEventID {
+		t.Fatalf("last skipped event id = %q, want %q", last.EventID, skipEventID)
+	}
+	if last.ActorUserID != "agent-user" || last.ActorOrgID != "agent-org" {
+		t.Fatalf("last skipped actor = %s/%s, want worker principal", last.ActorUserID, last.ActorOrgID)
+	}
+	if last.Metadata["control_status"] != "succeeded" || last.Metadata["ack_action"] != "ack" || last.Metadata["worker_id"] != "data-agent-worker-a" {
+		t.Fatalf("last skipped metadata = %#v, want durable skip context", last.Metadata)
+	}
+
+	duplicateEventReq := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/data-agent/jobs/"+created.Job.JobID+"/events",
+		strings.NewReader(skipEventBody),
+	)
+	duplicateEventReq.Header.Set("Content-Type", "application/json")
+	duplicateEventReq.Header.Set("X-Ultra-User-Id", "agent-user")
+	duplicateEventReq.Header.Set("X-Ultra-Org-Id", "agent-org")
+	duplicateEventRec := httptest.NewRecorder()
+	router.ServeHTTP(duplicateEventRec, duplicateEventReq)
+	if duplicateEventRec.Code != http.StatusOK {
+		t.Fatalf("duplicate skipped event status = %d body=%s, want 200 idempotent replay", duplicateEventRec.Code, duplicateEventRec.Body.String())
+	}
+	var duplicateSkipped dataAgentJobResponse
+	if err := json.Unmarshal(duplicateEventRec.Body.Bytes(), &duplicateSkipped); err != nil {
+		t.Fatalf("decode duplicate skipped response: %v", err)
+	}
+	if len(duplicateSkipped.Events) != 3 {
+		t.Fatalf("duplicate skipped events = %+v, want no duplicate append", duplicateSkipped.Events)
 	}
 }
 

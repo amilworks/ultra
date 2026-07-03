@@ -13,16 +13,17 @@ import (
 
 const appendRunEvent = `-- name: AppendRunEvent :one
 INSERT INTO control_run_events (
-  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
   node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+RETURNING event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 `
 
 type AppendRunEventParams struct {
 	EventID        string             `json:"event_id"`
 	SequenceNumber int64              `json:"sequence_number"`
+	SourceSequence pgtype.Int8        `json:"source_sequence"`
 	RunID          string             `json:"run_id"`
 	ThreadID       pgtype.Text        `json:"thread_id"`
 	EventKind      string             `json:"event_kind"`
@@ -42,6 +43,7 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 	row := q.db.QueryRow(ctx, appendRunEvent,
 		arg.EventID,
 		arg.SequenceNumber,
+		arg.SourceSequence,
 		arg.RunID,
 		arg.ThreadID,
 		arg.EventKind,
@@ -60,6 +62,7 @@ func (q *Queries) AppendRunEvent(ctx context.Context, arg AppendRunEventParams) 
 	err := row.Scan(
 		&i.EventID,
 		&i.SequenceNumber,
+		&i.SourceSequence,
 		&i.RunID,
 		&i.ThreadID,
 		&i.EventKind,
@@ -1038,7 +1041,7 @@ func (q *Queries) GetRun(ctx context.Context, runID string) (ControlRun, error) 
 }
 
 const getRunEvent = `-- name: GetRunEvent :one
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE event_id = $1
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE event_id = $1
 `
 
 func (q *Queries) GetRunEvent(ctx context.Context, eventID string) (ControlRunEvent, error) {
@@ -1047,6 +1050,41 @@ func (q *Queries) GetRunEvent(ctx context.Context, eventID string) (ControlRunEv
 	err := row.Scan(
 		&i.EventID,
 		&i.SequenceNumber,
+		&i.SourceSequence,
+		&i.RunID,
+		&i.ThreadID,
+		&i.EventKind,
+		&i.EventType,
+		&i.NodeName,
+		&i.TaskID,
+		&i.CheckpointID,
+		&i.ScopeID,
+		&i.AgentRole,
+		&i.Level,
+		&i.Ts,
+		&i.Message,
+		&i.Payload,
+	)
+	return i, err
+}
+
+const getRunEventBySourceSequence = `-- name: GetRunEventBySourceSequence :one
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events
+WHERE run_id = $1 AND source_sequence = $2
+`
+
+type GetRunEventBySourceSequenceParams struct {
+	RunID          string      `json:"run_id"`
+	SourceSequence pgtype.Int8 `json:"source_sequence"`
+}
+
+func (q *Queries) GetRunEventBySourceSequence(ctx context.Context, arg GetRunEventBySourceSequenceParams) (ControlRunEvent, error) {
+	row := q.db.QueryRow(ctx, getRunEventBySourceSequence, arg.RunID, arg.SourceSequence)
+	var i ControlRunEvent
+	err := row.Scan(
+		&i.EventID,
+		&i.SequenceNumber,
+		&i.SourceSequence,
 		&i.RunID,
 		&i.ThreadID,
 		&i.EventKind,
@@ -1983,9 +2021,9 @@ func (q *Queries) ListRunArtifactsForUser(ctx context.Context, arg ListRunArtifa
 }
 
 const listRunEvents = `-- name: ListRunEvents :many
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM (
-  SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE run_id = $1 ORDER BY sequence_number DESC LIMIT $2
+  SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE run_id = $1 ORDER BY sequence_number DESC LIMIT $2
 ) recent_events
 ORDER BY sequence_number ASC
 `
@@ -2007,6 +2045,7 @@ func (q *Queries) ListRunEvents(ctx context.Context, arg ListRunEventsParams) ([
 		if err := rows.Scan(
 			&i.EventID,
 			&i.SequenceNumber,
+			&i.SourceSequence,
 			&i.RunID,
 			&i.ThreadID,
 			&i.EventKind,
@@ -2032,7 +2071,7 @@ func (q *Queries) ListRunEvents(ctx context.Context, arg ListRunEventsParams) ([
 }
 
 const listRunEventsAfter = `-- name: ListRunEventsAfter :many
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM control_run_events
 WHERE run_id = $1 AND sequence_number > $2
 ORDER BY sequence_number ASC
@@ -2057,6 +2096,7 @@ func (q *Queries) ListRunEventsAfter(ctx context.Context, arg ListRunEventsAfter
 		if err := rows.Scan(
 			&i.EventID,
 			&i.SequenceNumber,
+			&i.SourceSequence,
 			&i.RunID,
 			&i.ThreadID,
 			&i.EventKind,
@@ -2082,7 +2122,7 @@ func (q *Queries) ListRunEventsAfter(ctx context.Context, arg ListRunEventsAfter
 }
 
 const listRunEventsAfterForUser = `-- name: ListRunEventsAfterForUser :many
-SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+SELECT e.event_id, e.sequence_number, e.source_sequence, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
 FROM control_run_events e
 JOIN control_runs r ON r.run_id = e.run_id
 WHERE e.run_id = $1
@@ -2116,6 +2156,7 @@ func (q *Queries) ListRunEventsAfterForUser(ctx context.Context, arg ListRunEven
 		if err := rows.Scan(
 			&i.EventID,
 			&i.SequenceNumber,
+			&i.SourceSequence,
 			&i.RunID,
 			&i.ThreadID,
 			&i.EventKind,
@@ -2141,9 +2182,9 @@ func (q *Queries) ListRunEventsAfterForUser(ctx context.Context, arg ListRunEven
 }
 
 const listRunEventsForUser = `-- name: ListRunEventsForUser :many
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM (
-  SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+  SELECT e.event_id, e.sequence_number, e.source_sequence, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
   FROM control_run_events e
   JOIN control_runs r ON r.run_id = e.run_id
   WHERE e.run_id = $1
@@ -2172,6 +2213,7 @@ func (q *Queries) ListRunEventsForUser(ctx context.Context, arg ListRunEventsFor
 		if err := rows.Scan(
 			&i.EventID,
 			&i.SequenceNumber,
+			&i.SourceSequence,
 			&i.RunID,
 			&i.ThreadID,
 			&i.EventKind,

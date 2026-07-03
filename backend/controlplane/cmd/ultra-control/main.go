@@ -17,6 +17,11 @@ import (
 func main() {
 	cfg := config.Load()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Route library logs (e.g. the NATS connection lifecycle handlers, which use
+	// the package-level slog) through the same JSON handler and stdout as the
+	// rest of the control plane, so an incident's disconnect/reconnect lines are
+	// structured and land in the same stream.
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,20 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type flakyDataAgentJobPublisher struct {
+	failures  int
+	published []eventbus.DataAgentJob
+}
+
+func (p *flakyDataAgentJobPublisher) PublishDataAgentJob(_ context.Context, job eventbus.DataAgentJob) error {
+	if p.failures > 0 {
+		p.failures--
+		return errors.New("nats publish unavailable")
+	}
+	p.published = append(p.published, job)
+	return nil
+}
 
 func TestNewAppServesHealth(t *testing.T) {
 	t.Parallel()
@@ -118,18 +134,64 @@ func TestApplyStatementTimeout(t *testing.T) {
 	}
 }
 
+func TestNATSBusConfigClassifiesPredecessorPending(t *testing.T) {
+	t.Parallel()
+
+	cfg := natsBusConfig(config.Config{
+		NATSURL:                    "nats://127.0.0.1:4222",
+		NATSStream:                 "ULTRA_TEST",
+		NATSJobsSubject:            "ultra.test.jobs",
+		NATSDataAgentJobsSubject:   "ultra.test.data_agent.jobs",
+		NATSEventsSubject:          "ultra.test.events",
+		NATSCancelSubject:          "ultra.test.cancel",
+		NATSEventConsumer:          "ultra-test-event-ingest",
+		NATSWorkerDurable:          "ultra-test-worker",
+		NATSDataAgentWorkerDurable: "ultra-test-data-agent-worker",
+	})
+
+	if cfg.IngestErrorClassifier == nil {
+		t.Fatal("IngestErrorClassifier is nil; predecessor-pending gaps will be retried as unknown errors")
+	}
+	if got := cfg.IngestErrorClassifier(runcontrol.ErrRunEventPredecessorPending); got != eventbus.IngestErrorPredecessorPending {
+		t.Fatalf("predecessor-pending class = %v, want %v", got, eventbus.IngestErrorPredecessorPending)
+	}
+}
+
+func TestRetentionGCUploadRootResolvesRelativePath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+
+	got, err := retentionGCUploadRoot("data/uploads/../uploads")
+	if err != nil {
+		t.Fatalf("retentionGCUploadRoot: %v", err)
+	}
+	want := filepath.Join(tmp, "data", "uploads")
+	if got != want {
+		t.Fatalf("root = %q, want %q", got, want)
+	}
+
+	got, err = retentionGCUploadRoot(" ")
+	if err != nil {
+		t.Fatalf("retentionGCUploadRoot default: %v", err)
+	}
+	if got != want {
+		t.Fatalf("default root = %q, want %q", got, want)
+	}
+}
+
 func TestAppStartRecoversExpiredRunLeases(t *testing.T) {
 	t.Parallel()
 	application, err := New(config.Config{
-		AppVersion:            "test-version",
-		RunRecoveryEnabled:    true,
-		RunRecoveryInterval:   10 * time.Millisecond,
-		RunRecoveryBatchLimit: 10,
-		NATSJobsSubject:       "ultra.runs.jobs",
-		NATSEventsSubject:     "ultra.runs.events",
-		NATSCancelSubject:     "ultra.runs.cancel",
-		NATSEventConsumer:     "ultra-control-event-ingest",
-		NATSWorkerDurable:     "ultra-deepagents-worker",
+		AppVersion:                "test-version",
+		RunRecoveryEnabled:        true,
+		RunRecoveryInterval:       10 * time.Millisecond,
+		RunRecoveryFirstPassDelay: time.Millisecond,
+		RunRecoveryBatchLimit:     10,
+		NATSJobsSubject:           "ultra.runs.jobs",
+		NATSEventsSubject:         "ultra.runs.events",
+		NATSCancelSubject:         "ultra.runs.cancel",
+		NATSEventConsumer:         "ultra-control-event-ingest",
+		NATSWorkerDurable:         "ultra-deepagents-worker",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -273,6 +335,83 @@ func TestAppStartRecoversExpiredDataAgentJobLeases(t *testing.T) {
 	}
 	if loaded.Status != "queued" || loaded.ProgressCompleted != 0 {
 		t.Fatalf("loaded job after recovery = %+v, want queued for worker retry", loaded)
+	}
+}
+
+func TestRecoverExpiredDataAgentJobLeasesRetriesDispatchAfterPublishFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	now := time.Now().UTC()
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_app_data_agent_retry",
+		OriginalName: "retry.nii.gz",
+		ContentType:  "application/x-nifti",
+		SizeBytes:    512,
+		SHA256:       "sha-app-data-agent-retry",
+		ResourceKind: "file",
+		SourceType:   "upload",
+		ProjectID:    "nph-study",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	job, err := mem.CreateDataAgentJob(ctx, domain.CreateDataAgentJobInput{
+		JobID:           "data_agent_job_app_recover_retry",
+		OwnerUserID:     "alice",
+		OwnerOrgID:      "org-a",
+		ProjectID:       "nph-study",
+		JobType:         "extract_metadata",
+		ResourceIDs:     []string{"file_app_data_agent_retry"},
+		InputSelector:   domain.JSONMap{"resource_ids": []any{"file_app_data_agent_retry"}},
+		CreatedByUserID: "alice",
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateDataAgentJob: %v", err)
+	}
+	if _, _, _, err := mem.AcquireDataAgentJobLease(ctx, domain.AcquireDataAgentJobLeaseInput{
+		JobID:       job.JobID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		WorkerID:    "data-agent-worker-expired",
+		TTL:         time.Minute,
+		Now:         now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AcquireDataAgentJobLease: %v", err)
+	}
+	publisher := &flakyDataAgentJobPublisher{failures: 1}
+
+	recoverExpiredDataAgentJobLeases(ctx, mem, publisher, 10)
+	if len(publisher.published) != 0 {
+		t.Fatalf("published after failing publish = %+v, want none", publisher.published)
+	}
+	events, err := mem.ListDataAgentJobEvents(ctx, job.JobID, "alice", "org-a", 20)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents after failure: %v", err)
+	}
+	if got := events[len(events)-1].EventType; got != "data_agent.job.dispatch_failed" {
+		t.Fatalf("last event after failed publish = %s, want data_agent.job.dispatch_failed", got)
+	}
+
+	recoverExpiredDataAgentJobLeases(ctx, mem, publisher, 10)
+	if len(publisher.published) != 1 {
+		t.Fatalf("published jobs after retry = %+v, want one recovered dispatch", publisher.published)
+	}
+	recovered := publisher.published[0]
+	if recovered.JobID != job.JobID || recovered.DispatchID == "" || recovered.OwnerUserID != "alice" || recovered.OwnerOrgID != "org-a" {
+		t.Fatalf("recovered data-agent job = %+v, want fresh dispatch for %s", recovered, job.JobID)
+	}
+	events, err = mem.ListDataAgentJobEvents(ctx, job.JobID, "alice", "org-a", 20)
+	if err != nil {
+		t.Fatalf("ListDataAgentJobEvents after retry: %v", err)
+	}
+	if got := events[len(events)-1].EventType; got != "data_agent.job.dispatched" {
+		t.Fatalf("last event after retry = %s, want data_agent.job.dispatched", got)
 	}
 }
 

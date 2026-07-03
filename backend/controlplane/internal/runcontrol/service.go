@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,17 @@ type runDispatchMarker interface {
 type activeRunEventAppender interface {
 	AppendRunEventIfRunActive(context.Context, domain.AppendRunEventInput) (domain.RunEventRecord, store.RunEventAppendOutcome, error)
 }
+
+type runEventSourceSequenceReader interface {
+	GetRunEventBySourceSequence(context.Context, string, int64) (domain.RunEventRecord, bool, error)
+}
+
+var ErrRunEventPredecessorPending = errors.New("run event predecessor pending")
+
+// ErrRunEventFanoutUnavailable wraps a failure to publish an already-stored
+// event to the local fanout bus. The event is durably in the store, so the
+// retry is cheap (dedup replays it) and the failure is transient by nature.
+var ErrRunEventFanoutUnavailable = errors.New("run event fanout unavailable")
 
 type workerHeartbeatReader interface {
 	GetWorkerHeartbeat(context.Context, string) (domain.WorkerHeartbeatRecord, bool, error)
@@ -168,6 +180,13 @@ const defaultRedispatchQueuedAfter = 2 * time.Minute
 // control-plane lease TTL so crashed workers do not pin runs for ten minutes.
 const defaultWorkerHeartbeatStaleAfter = 2 * time.Minute
 
+// zombieRunRequeueAfter is how long a running/waiting run may exist WITHOUT a
+// lease before recovery reclaims it. Generous on purpose: it must exceed the
+// job redelivery horizon (worker ack_wait 300s plus several delayed naks), and
+// the recent-progress guard already vetoes any run whose worker is emitting.
+// Too-short a grace double-executes expensive GPU runs.
+const zombieRunRequeueAfter = 15 * time.Minute
+
 type RecoverExpiredRunLeasesResult struct {
 	Checked      int
 	RequeuedRuns []domain.RunRecord
@@ -183,6 +202,10 @@ type RenewRunLeaseRequest struct {
 	RunID      string
 	LeaseToken string
 	TTL        time.Duration
+	// Now overrides the clock for lease-expiry evaluation. Zero uses the
+	// store's real clock. Threaded (like AcquireRunLease) so lease renewal is
+	// deterministically testable.
+	Now time.Time
 }
 
 type ReleaseRunLeaseRequest struct {
@@ -483,15 +506,6 @@ func (s *Service) CancelRun(ctx context.Context, req CancelRunRequest) (domain.R
 	if isTerminalRunStatus(existing.Status) {
 		return existing, nil
 	}
-	if err := s.bus.PublishCancel(ctx, eventbus.CancelSignal{
-		RunID:    existing.RunID,
-		ThreadID: existing.ThreadID,
-		UserID:   existing.UserID,
-		Reason:   req.Reason,
-		Metadata: cloneMap(req.Metadata),
-	}); err != nil {
-		return existing, fmt.Errorf("publish cancel signal: %w", err)
-	}
 
 	cancelEventInput := domain.AppendRunEventInput{
 		EventID:   canceledRunEventID(existing.RunID),
@@ -520,9 +534,14 @@ func (s *Service) CancelRun(ctx context.Context, req CancelRunRequest) (domain.R
 	if err != nil {
 		return domain.RunRecord{}, err
 	}
-	if err := s.bus.PublishRunEvent(ctx, event); err != nil {
-		return domain.RunRecord{}, err
-	}
+	_ = s.bus.PublishRunEvent(ctx, event)
+	_ = s.bus.PublishCancel(ctx, eventbus.CancelSignal{
+		RunID:    existing.RunID,
+		ThreadID: existing.ThreadID,
+		UserID:   existing.UserID,
+		Reason:   req.Reason,
+		Metadata: cloneMap(req.Metadata),
+	})
 	return run, nil
 }
 
@@ -622,12 +641,40 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 			return result, err
 		}
 		if !found {
+			if run.Status != domain.RunStatusQueued {
+				// Zombie check: a running/waiting run with NO lease is
+				// invisible to the other recovery branches (they all require
+				// a lease row), so a worker that died after releasing or
+				// never re-acquiring its lease would leave the run stuck
+				// forever. Reclaim it only after a generous grace since
+				// dispatch AND with no recent worker-progress events —
+				// long silent GPU phases keep emitting heartbeat events, so
+				// live runs are vetoed by the progress guard.
+				dispatchedAt := runJobDispatchedAt(run)
+				if dispatchedAt.IsZero() || now.Sub(dispatchedAt) < zombieRunRequeueAfter {
+					continue
+				}
+				if s.runHasRecentWorkerProgress(ctx, run.RunID, domain.WorkerHeartbeatRecord{}, now, workerHeartbeatStaleAfter) {
+					continue
+				}
+				requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
+					RunID:  run.RunID,
+					Reason: reason,
+					Metadata: domain.JSONMap{
+						"recovery":           "leaseless_run_without_progress",
+						"last_dispatched_at": dispatchedAt.UTC().Format(time.RFC3339Nano),
+						"run_status":         string(run.Status),
+					},
+				})
+				if err != nil {
+					return result, err
+				}
+				result.RequeuedRuns = append(result.RequeuedRuns, requeued)
+				continue
+			}
 			// A queued run with no lease and a stale dispatch means its job
 			// was lost (consumed and dropped, or never delivered). Without
 			// re-dispatch the run would stay queued forever.
-			if run.Status != domain.RunStatusQueued {
-				continue
-			}
 			dispatchedAt := runJobDispatchedAt(run)
 			if dispatchedAt.IsZero() || now.Sub(dispatchedAt) < redispatchQueuedAfter {
 				continue
@@ -663,23 +710,38 @@ func (s *Service) RecoverExpiredRunLeases(ctx context.Context, req RecoverExpire
 			if !stale {
 				continue
 			}
+			if s.runHasRecentWorkerProgress(ctx, run.RunID, heartbeat, now, workerHeartbeatStaleAfter) {
+				continue
+			}
+			metadata := domain.JSONMap{
+				"recovery":         "stale_run_lease_worker_heartbeat",
+				"lease_worker_id":  lease.WorkerID,
+				"lease_expires_at": lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+				"lease_updated_at": lease.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			}
+			if heartbeat.LastHeartbeatAt.IsZero() {
+				metadata["worker_heartbeat_missing"] = true
+			} else {
+				metadata["worker_last_heartbeat_at"] = heartbeat.LastHeartbeatAt.UTC().Format(time.RFC3339Nano)
+				metadata["worker_status"] = heartbeat.Status
+				metadata["worker_current_run_id"] = heartbeat.CurrentRunID
+			}
 			requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
-				RunID:  run.RunID,
-				Reason: reason,
-				Metadata: domain.JSONMap{
-					"recovery":                 "stale_run_lease_worker_heartbeat",
-					"lease_worker_id":          lease.WorkerID,
-					"lease_expires_at":         lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
-					"lease_updated_at":         lease.UpdatedAt.UTC().Format(time.RFC3339Nano),
-					"worker_last_heartbeat_at": heartbeat.LastHeartbeatAt.UTC().Format(time.RFC3339Nano),
-					"worker_status":            heartbeat.Status,
-					"worker_current_run_id":    heartbeat.CurrentRunID,
-				},
+				RunID:    run.RunID,
+				Reason:   reason,
+				Metadata: metadata,
 			})
 			if err != nil {
 				return result, err
 			}
 			result.RequeuedRuns = append(result.RequeuedRuns, requeued)
+			continue
+		}
+		// An expired lease alone does not prove the worker is dead: it may be
+		// mid-renewal against a briefly unreachable control plane while its
+		// events still flow. Fresh worker-progress events veto the requeue;
+		// a truly dead worker stops emitting and is requeued next pass.
+		if s.runHasRecentWorkerProgress(ctx, run.RunID, domain.WorkerHeartbeatRecord{}, now, workerHeartbeatStaleAfter) {
 			continue
 		}
 		requeued, err := s.RequeueRun(ctx, RequeueRunRequest{
@@ -716,6 +778,42 @@ func (s *Service) listRecoverableRuns(ctx context.Context, limit int) ([]domain.
 	return runs, nil
 }
 
+func (s *Service) runHasRecentWorkerProgress(ctx context.Context, runID string, heartbeat domain.WorkerHeartbeatRecord, now time.Time, staleAfter time.Duration) bool {
+	if staleAfter <= 0 {
+		return false
+	}
+	events, err := s.store.ListRunEvents(ctx, runID, 32)
+	if err != nil {
+		return false
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if !isWorkerProgressRunEvent(event.EventKind) {
+			continue
+		}
+		if event.TS.IsZero() {
+			continue
+		}
+		eventTS := event.TS.UTC()
+		if !heartbeat.LastHeartbeatAt.IsZero() && !eventTS.After(heartbeat.LastHeartbeatAt.UTC()) {
+			continue
+		}
+		if now.Sub(eventTS) <= staleAfter {
+			return true
+		}
+	}
+	return false
+}
+
+func isWorkerProgressRunEvent(eventKind string) bool {
+	switch strings.TrimSpace(eventKind) {
+	case "", "run.accepted", "run.requeued", "run.completed", "run.failed", "run.canceled":
+		return false
+	default:
+		return true
+	}
+}
+
 func staleRunLeaseOwnerHeartbeat(
 	ctx context.Context,
 	reader workerHeartbeatReader,
@@ -734,7 +832,7 @@ func staleRunLeaseOwnerHeartbeat(
 		return domain.WorkerHeartbeatRecord{}, false, err
 	}
 	if !found {
-		return domain.WorkerHeartbeatRecord{}, false, nil
+		return domain.WorkerHeartbeatRecord{}, true, nil
 	}
 	if now.Sub(heartbeat.LastHeartbeatAt) < staleAfter {
 		return heartbeat, false, nil
@@ -817,6 +915,7 @@ func (s *Service) RenewRunLease(ctx context.Context, req RenewRunLeaseRequest) (
 		RunID:      strings.TrimSpace(req.RunID),
 		LeaseToken: strings.TrimSpace(req.LeaseToken),
 		TTL:        req.TTL,
+		Now:        req.Now,
 	})
 }
 
@@ -828,10 +927,60 @@ func (s *Service) ReleaseRunLease(ctx context.Context, req ReleaseRunLeaseReques
 }
 
 func (s *Service) IngestRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	if err := s.ensureRunEventSourcePredecessor(ctx, input); err != nil {
+		return domain.RunEventRecord{}, err
+	}
 	if appender, ok := s.store.(activeRunEventAppender); ok {
 		return s.ingestRunEventFast(ctx, appender, input)
 	}
 	return s.ingestRunEventLegacy(ctx, input)
+}
+
+func (s *Service) ensureRunEventSourcePredecessor(ctx context.Context, input domain.AppendRunEventInput) error {
+	// The ingest worker sets the bypass after a bounded wait proves the
+	// predecessor is a permanent producer-side gap: storing this event with a
+	// gap beats losing it (readers order by sequence_number).
+	if domain.RunEventGateBypassed(ctx) {
+		return nil
+	}
+	if input.SourceSequence <= 1 || strings.TrimSpace(input.RunID) == "" {
+		return nil
+	}
+	if input.EventID != "" {
+		if _, found, err := s.store.GetRunEvent(ctx, input.EventID); err != nil {
+			return err
+		} else if found {
+			return nil
+		}
+	}
+	reader, ok := s.store.(runEventSourceSequenceReader)
+	if !ok {
+		return nil
+	}
+	_, found, err := reader.GetRunEventBySourceSequence(ctx, input.RunID, input.SourceSequence-1)
+	if err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	// The predecessor is absent. Only make the caller wait (retry) for it while
+	// the run is still live: a terminal or missing run will never receive the
+	// predecessor, so returning ErrRunEventPredecessorPending would wedge the
+	// strict partition forever. Fall through so the normal ingest path drops
+	// this late event instead. GetRun runs only on this rare miss, not the
+	// happy path.
+	run, err := s.store.GetRun(ctx, input.RunID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if isTerminalRunStatus(run.Status) {
+		return nil
+	}
+	return ErrRunEventPredecessorPending
 }
 
 // ingestRunEventFast is one store round trip on the happy path: the append
@@ -848,21 +997,11 @@ func (s *Service) ingestRunEventFast(ctx context.Context, appender activeRunEven
 	}
 	event, outcome, err := appender.AppendRunEventIfRunActive(ctx, input)
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) && input.EventID != "" {
-			// Lost a cross-replica race on the event-id primary key: the
-			// event now exists, so degrade to the duplicate path.
-			existing, found, getErr := s.store.GetRunEvent(ctx, input.EventID)
-			if getErr != nil {
-				return domain.RunEventRecord{}, getErr
-			}
-			if found {
-				event, outcome = existing, store.RunEventAppendOutcomeDuplicate
-			} else {
-				return domain.RunEventRecord{}, err
-			}
-		} else {
-			return domain.RunEventRecord{}, err
+		resolved, resolvedOutcome, resolveErr := s.resolveIngestConflict(ctx, input, err)
+		if resolveErr != nil {
+			return domain.RunEventRecord{}, resolveErr
 		}
+		event, outcome = resolved, resolvedOutcome
 	}
 	switch outcome {
 	case store.RunEventAppendOutcomeAppended:
@@ -877,9 +1016,50 @@ func (s *Service) ingestRunEventFast(ctx context.Context, appender activeRunEven
 		return droppedRunEvent(input), nil
 	}
 	if err := s.bus.PublishRunEvent(ctx, event); err != nil {
-		return domain.RunEventRecord{}, err
+		return domain.RunEventRecord{}, fmt.Errorf("%w: %v", ErrRunEventFanoutUnavailable, err)
 	}
 	return event, nil
+}
+
+// resolveIngestConflict turns a conflicting append into a definite outcome so
+// the caller never has to retry a conflict forever (which, on a MaxAckPending=1
+// partition, would wedge every run on that partition).
+//   - event_id primary-key conflict (cross-replica race): the event now exists;
+//     replay it as a duplicate so its side effects and fanout still run.
+//   - source_sequence unique conflict: a DIFFERENT event already claimed this
+//     (run_id, source_sequence) slot (e.g. an uncoordinated producer counter).
+//     This event cannot be stored, so drop it (ack) rather than stall. The
+//     producer-side coordination fix prevents the collision at the source; this
+//     is the defensive backstop.
+//   - anything else: propagate so the caller retries (now bounded).
+func (s *Service) resolveIngestConflict(ctx context.Context, input domain.AppendRunEventInput, cause error) (domain.RunEventRecord, store.RunEventAppendOutcome, error) {
+	if !errors.Is(cause, store.ErrConflict) {
+		return domain.RunEventRecord{}, store.RunEventAppendOutcomeDropped, cause
+	}
+	if input.EventID != "" {
+		existing, found, err := s.store.GetRunEvent(ctx, input.EventID)
+		if err != nil {
+			return domain.RunEventRecord{}, store.RunEventAppendOutcomeDropped, err
+		}
+		if found {
+			return existing, store.RunEventAppendOutcomeDuplicate, nil
+		}
+	}
+	if reader, ok := s.store.(runEventSourceSequenceReader); ok && input.SourceSequence > 0 {
+		existing, found, err := reader.GetRunEventBySourceSequence(ctx, input.RunID, input.SourceSequence)
+		if err != nil {
+			return domain.RunEventRecord{}, store.RunEventAppendOutcomeDropped, err
+		}
+		if found {
+			slog.Warn("dropping run event whose source_sequence is already claimed by a different event",
+				"run_id", input.RunID,
+				"event_id", input.EventID,
+				"source_sequence", input.SourceSequence,
+				"stored_event_id", existing.EventID)
+			return domain.RunEventRecord{}, store.RunEventAppendOutcomeDropped, nil
+		}
+	}
+	return domain.RunEventRecord{}, store.RunEventAppendOutcomeDropped, cause
 }
 
 func (s *Service) ingestRunEventLegacy(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
@@ -1139,20 +1319,21 @@ func (s *Service) reconcileStoredTerminalEvent(ctx context.Context, run domain.R
 
 func appendInputFromEventRecord(event domain.RunEventRecord) domain.AppendRunEventInput {
 	return domain.AppendRunEventInput{
-		EventID:      event.EventID,
-		RunID:        event.RunID,
-		ThreadID:     event.ThreadID,
-		EventKind:    event.EventKind,
-		EventType:    event.EventType,
-		NodeName:     event.NodeName,
-		TaskID:       event.TaskID,
-		CheckpointID: event.CheckpointID,
-		ScopeID:      event.ScopeID,
-		AgentRole:    event.AgentRole,
-		Level:        event.Level,
-		TS:           event.TS,
-		Message:      event.Message,
-		Payload:      cloneMap(event.Payload),
+		EventID:        event.EventID,
+		SourceSequence: event.SourceSequence,
+		RunID:          event.RunID,
+		ThreadID:       event.ThreadID,
+		EventKind:      event.EventKind,
+		EventType:      event.EventType,
+		NodeName:       event.NodeName,
+		TaskID:         event.TaskID,
+		CheckpointID:   event.CheckpointID,
+		ScopeID:        event.ScopeID,
+		AgentRole:      event.AgentRole,
+		Level:          event.Level,
+		TS:             event.TS,
+		Message:        event.Message,
+		Payload:        cloneMap(event.Payload),
 	}
 }
 
@@ -1166,20 +1347,21 @@ func droppedRunEvent(input domain.AppendRunEventInput) domain.RunEventRecord {
 		eventID = domain.NewID("event")
 	}
 	return domain.RunEventRecord{
-		EventID:      eventID,
-		RunID:        input.RunID,
-		ThreadID:     input.ThreadID,
-		EventKind:    input.EventKind,
-		EventType:    input.EventType,
-		NodeName:     input.NodeName,
-		TaskID:       input.TaskID,
-		CheckpointID: input.CheckpointID,
-		ScopeID:      input.ScopeID,
-		AgentRole:    input.AgentRole,
-		Level:        input.Level,
-		TS:           ts,
-		Message:      input.Message,
-		Payload:      cloneMap(input.Payload),
+		EventID:        eventID,
+		SourceSequence: input.SourceSequence,
+		RunID:          input.RunID,
+		ThreadID:       input.ThreadID,
+		EventKind:      input.EventKind,
+		EventType:      input.EventType,
+		NodeName:       input.NodeName,
+		TaskID:         input.TaskID,
+		CheckpointID:   input.CheckpointID,
+		ScopeID:        input.ScopeID,
+		AgentRole:      input.AgentRole,
+		Level:          input.Level,
+		TS:             ts,
+		Message:        input.Message,
+		Payload:        cloneMap(input.Payload),
 	}
 }
 

@@ -101,6 +101,11 @@ var (
 	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
 	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
 	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
+	workerDataAgentJobPattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
+	workerDataAgentLeasePattern  = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
+	workerDataAgentStatusPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
+	workerDataAgentEventsPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
+	workerDataAgentOutputPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -151,6 +156,8 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case workerLeasePathPattern.MatchString(path):
 		return true
+	case isWorkerDataAgentEndpoint(r):
+		return true
 	case r.Method == http.MethodPost && (path == "/v1/workers/heartbeat" || path == "/v2/workers/heartbeat"):
 		return true
 	case r.Method == http.MethodPost && isWorkerBisqueEndpointPath(path):
@@ -158,6 +165,23 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		// session header is validated against that run's metadata before any
 		// linked credentials are used.
 		return strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id")) != ""
+	}
+	return false
+}
+
+func isWorkerDataAgentEndpoint(r *http.Request) bool {
+	path := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet && workerDataAgentJobPattern.MatchString(path):
+		return true
+	case workerDataAgentLeasePattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPatch && workerDataAgentStatusPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerDataAgentEventsPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerDataAgentOutputPattern.MatchString(path):
+		return true
 	}
 	return false
 }
@@ -575,6 +599,13 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
 			r.Post("/uploads/{file_id}/derive-pyramid", deps.handleDeriveUploadPyramid)
 			r.Get("/uploads/{file_id}/caption", deps.handleGetUploadCaption)
+			r.Get("/uploads/{file_id}/hdf5/dataset", deps.handleGetUploadHdf5Dataset)
+			r.Get("/uploads/{file_id}/hdf5/materials/dashboard", deps.handleGetUploadHdf5MaterialsDashboard)
+			r.Get("/uploads/{file_id}/hdf5/preview/slice", deps.handleServeUploadHdf5Slice)
+			r.Get("/uploads/{file_id}/hdf5/preview/atlas", deps.handleServeUploadHdf5Atlas)
+			r.Get("/uploads/{file_id}/hdf5/preview/scalar-volume", deps.handleGetUploadHdf5ScalarVolume)
+			r.Get("/uploads/{file_id}/hdf5/preview/histogram", deps.handleGetUploadHdf5Histogram)
+			r.Get("/uploads/{file_id}/hdf5/preview/table", deps.handleGetUploadHdf5Table)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
 			r.Post("/bisque/module-run", deps.handleBisqueModuleRun)
@@ -622,6 +653,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/data-agent/jobs", deps.handleCreateDataAgentJob)
 			r.Get("/data-agent/jobs", deps.handleListDataAgentJobs)
 			r.Get("/data-agent/jobs/{job_id}", deps.handleGetDataAgentJob)
+			r.Post("/data-agent/jobs/{job_id}/events", deps.handleAppendDataAgentJobEvent)
 			r.Patch("/data-agent/jobs/{job_id}/status", deps.handleUpdateDataAgentJobStatus)
 			r.Post("/data-agent/jobs/{job_id}/control", deps.handleControlDataAgentJob)
 			r.Post("/data-agent/jobs/{job_id}/lease", deps.handleAcquireDataAgentJobLease)
@@ -1648,6 +1680,9 @@ func (deps ServerDeps) principalFromRequest(r *http.Request, fallbackUserID stri
 	if principal, ok := deps.workerRunPrincipal(r); ok {
 		return principal
 	}
+	if principal, ok := deps.workerDataAgentPrincipal(r); ok {
+		return principal
+	}
 	if deps.WorkOS.Enabled() {
 		if principal, ok := deps.WorkOS.principalFromRequest(r); ok {
 			return principal
@@ -1694,6 +1729,19 @@ func (deps ServerDeps) workerRunPrincipal(r *http.Request) (requestPrincipal, bo
 	orgID := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")), "local-org")
 	role := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Role")), "researcher")
 	return requestPrincipal{UserID: strings.TrimSpace(run.UserID), OrgID: orgID, Role: role}, true
+}
+
+func (deps ServerDeps) workerDataAgentPrincipal(r *http.Request) (requestPrincipal, bool) {
+	if deps.workerRequestAuth(r) != workerAuthValid || !isWorkerDataAgentEndpoint(r) {
+		return requestPrincipal{}, false
+	}
+	userID := strings.TrimSpace(r.Header.Get("X-Ultra-User-Id"))
+	if userID == "" {
+		return requestPrincipal{}, false
+	}
+	orgID := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")), "local-org")
+	role := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Role")), "researcher")
+	return requestPrincipal{UserID: userID, OrgID: orgID, Role: role}, true
 }
 
 func (deps ServerDeps) devCookiePrincipalUserID(r *http.Request) (string, bool) {
@@ -2228,6 +2276,13 @@ type updateDataAgentJobStatusRequest struct {
 	OutputSummary     domain.JSONMap `json:"output_summary"`
 	Metadata          domain.JSONMap `json:"metadata"`
 	EventMetadata     domain.JSONMap `json:"event_metadata"`
+}
+
+type appendDataAgentJobEventRequest struct {
+	EventID   string         `json:"event_id"`
+	EventType string         `json:"event_type"`
+	Message   string         `json:"message"`
+	Metadata  domain.JSONMap `json:"metadata"`
 }
 
 type controlDataAgentJobRequest struct {
@@ -5856,6 +5911,60 @@ func (deps ServerDeps) handleUpdateDataAgentJobStatus(w http.ResponseWriter, r *
 	writeJSON(w, http.StatusOK, dataAgentJobResponse{Job: job, Events: events})
 }
 
+func (deps ServerDeps) handleAppendDataAgentJobEvent(w http.ResponseWriter, r *http.Request) {
+	jobs, ok := deps.dataAgentJobStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "data agent jobs are not configured"})
+		return
+	}
+	var req appendDataAgentJobEventRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	eventType, err := normalizeDataAgentJobAppendEventType(req.EventType)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	job, err := jobs.GetDataAgentJobForUser(r.Context(), chi.URLParam(r, "job_id"), principal.UserID, principal.OrgID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	eventID := strings.TrimSpace(req.EventID)
+	if _, err := jobs.AppendDataAgentJobEvent(r.Context(), domain.AppendDataAgentJobEventInput{
+		EventID:     eventID,
+		JobID:       job.JobID,
+		EventType:   eventType,
+		ActorUserID: principal.UserID,
+		ActorOrgID:  principal.OrgID,
+		TS:          domain.Now(),
+		Message:     strings.TrimSpace(req.Message),
+		Metadata:    mapOrEmptyJSON(req.Metadata),
+	}); err != nil {
+		if errors.Is(err, store.ErrConflict) && eventID != "" {
+			events, listErr := jobs.ListDataAgentJobEvents(r.Context(), job.JobID, principal.UserID, principal.OrgID, parseLimit(r, 200))
+			if listErr != nil {
+				writeStoreError(w, listErr)
+				return
+			}
+			if dataAgentJobEventsContain(events, eventID, eventType) {
+				writeJSON(w, http.StatusOK, dataAgentJobResponse{Job: job, Events: events})
+				return
+			}
+		}
+		writeStoreError(w, err)
+		return
+	}
+	events, err := jobs.ListDataAgentJobEvents(r.Context(), job.JobID, principal.UserID, principal.OrgID, parseLimit(r, 200))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, dataAgentJobResponse{Job: job, Events: events})
+}
+
 func (deps ServerDeps) handleControlDataAgentJob(w http.ResponseWriter, r *http.Request) {
 	jobs, ok := deps.dataAgentJobStore()
 	if !ok {
@@ -6076,6 +6185,27 @@ func normalizeDataAgentJobStatus(value string) (string, error) {
 	default:
 		return "", errors.New("status must be queued, running, succeeded, failed, or canceled")
 	}
+}
+
+func normalizeDataAgentJobAppendEventType(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "data_agent.job.skipped":
+		return value, nil
+	default:
+		return "", errors.New("event_type must be data_agent.job.skipped")
+	}
+}
+
+func dataAgentJobEventsContain(events []domain.DataAgentJobEventRecord, eventID string, eventType string) bool {
+	eventID = strings.TrimSpace(eventID)
+	eventType = strings.TrimSpace(eventType)
+	for _, event := range events {
+		if event.EventID == eventID && event.EventType == eventType {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeDataAgentJobControlAction(value string) (string, error) {

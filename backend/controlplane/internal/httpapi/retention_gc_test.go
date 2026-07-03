@@ -107,6 +107,209 @@ func TestReclaimExpiredResources(t *testing.T) {
 	}
 }
 
+func TestReclaimExpiredResourcesDeletesCatalogFileStorageURI(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	outsideRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	ctx := context.Background()
+	const user, org = "u", "o"
+
+	source := filepath.Join(root, "file_catalog__cells.ome.tiff")
+	sourceBytes := []byte("catalog source bytes")
+	if err := os.WriteFile(source, sourceBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_catalog",
+		OriginalName: "cells.ome.tiff",
+		SizeBytes:    int64(len(sourceBytes)),
+		StorageURI:   fileStorageURI(source),
+		StoragePath:  filepath.Base(source),
+		OwnerUserID:  user,
+		OwnerOrgID:   org,
+		Status:       "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_catalog", user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideSource := filepath.Join(outsideRoot, "file_outside__secret.tif")
+	if err := os.WriteFile(outsideSource, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_outside",
+		OriginalName: "secret.tif",
+		StorageURI:   fileStorageURI(outsideSource),
+		StoragePath:  filepath.Base(outsideSource),
+		OwnerUserID:  user,
+		OwnerOrgID:   org,
+		Status:       "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_outside", user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	reclaimed, bytes, err := ReclaimExpiredResources(ctx, mem, root, 100)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed != 2 {
+		t.Fatalf("reclaimed %d resources, want both expired rows purged", reclaimed)
+	}
+	if bytes != int64(len(sourceBytes)) {
+		t.Fatalf("reclaimed bytes = %d, want catalog source size %d", bytes, len(sourceBytes))
+	}
+	if _, statErr := os.Stat(source); !os.IsNotExist(statErr) {
+		t.Fatalf("catalog source was not deleted, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(outsideSource); statErr != nil {
+		t.Fatalf("GC deleted file:// storage outside upload root: %v", statErr)
+	}
+}
+
+func TestReclaimExpiredResourcesDeletesRelativeStoragePathUnderRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mem := store.NewMemoryStore()
+	ctx := context.Background()
+	const user, org = "u", "o"
+
+	source := filepath.Join(root, "file_relative__legacy.tif")
+	sourceBytes := []byte("legacy relative source")
+	if err := os.WriteFile(source, sourceBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_relative",
+		OriginalName: "legacy.tif",
+		SizeBytes:    int64(len(sourceBytes)),
+		StoragePath:  filepath.Base(source),
+		OwnerUserID:  user,
+		OwnerOrgID:   org,
+		Status:       "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_relative", user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	reclaimed, bytes, err := ReclaimExpiredResources(ctx, mem, root, 100)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed != 1 || bytes != int64(len(sourceBytes)) {
+		t.Fatalf("reclaimed = %d/%d, want 1/%d", reclaimed, bytes, len(sourceBytes))
+	}
+	if _, statErr := os.Stat(source); !os.IsNotExist(statErr) {
+		t.Fatalf("relative storage source was not deleted, stat err = %v", statErr)
+	}
+}
+
+func TestReclaimExpiredResourcesDoesNotPurgeWhenArtifactRemovalFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mem := store.NewMemoryStore()
+	ctx := context.Background()
+	const user, org = "u", "o"
+
+	source := filepath.Join(root, "file_blocked__directory")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "child.txt"), []byte("not removable by os.Remove"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_blocked",
+		OriginalName: "directory",
+		StorageURI:   fileStorageURI(source),
+		StoragePath:  filepath.Base(source),
+		OwnerUserID:  user,
+		OwnerOrgID:   org,
+		Status:       "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_blocked", user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	reclaimed, bytes, err := ReclaimExpiredResources(ctx, mem, root, 100)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed != 0 || bytes != 0 {
+		t.Fatalf("reclaimed = %d/%d, want 0/0 when artifact deletion fails", reclaimed, bytes)
+	}
+	if _, statErr := os.Stat(filepath.Join(source, "child.txt")); statErr != nil {
+		t.Fatalf("source child changed after failed delete: %v", statErr)
+	}
+	expired, err := mem.ListResourcesPastRetention(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListResourcesPastRetention: %v", err)
+	}
+	if len(expired) != 1 || expired[0].ResourceID != "file_blocked" {
+		t.Fatalf("expired resources = %+v, want failed resource retained for retry", expired)
+	}
+}
+
+func TestReclaimExpiredResourcesDeletesOwnedBundleDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mem := store.NewMemoryStore()
+	ctx := context.Background()
+	const user, org = "u", "o"
+
+	source := filepath.Join(root, bundlesDirName, "file_bundle", "scan.ome.zarr")
+	if err := os.MkdirAll(filepath.Join(source, "0", "0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".zgroup"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "0", "0", "0"), []byte("chunk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_bundle",
+		OriginalName: "scan.ome.zarr",
+		StorageURI:   fileStorageURI(source),
+		StoragePath:  filepath.Base(source),
+		OwnerUserID:  user,
+		OwnerOrgID:   org,
+		Status:       "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.SoftDeleteResourceForUser(ctx, "file_bundle", user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	reclaimed, bytes, err := ReclaimExpiredResources(ctx, mem, root, 100)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed != 1 {
+		t.Fatalf("reclaimed %d resources, want bundle row purged", reclaimed)
+	}
+	if bytes != int64(len("{}")+len("chunk")) {
+		t.Fatalf("reclaimed bytes = %d, want bundle file bytes", bytes)
+	}
+	if _, statErr := os.Stat(source); !os.IsNotExist(statErr) {
+		t.Fatalf("bundle directory was not deleted, stat err = %v", statErr)
+	}
+	if expired, err := mem.ListResourcesPastRetention(ctx, time.Now(), 100); err != nil || len(expired) != 0 {
+		t.Fatalf("expired resources after bundle reclaim = %+v err=%v, want none", expired, err)
+	}
+}
+
 // TestResourceUsageAggregatesScopeAndExcludeDeleted verifies the quota aggregates count
 // only ACTIVE resources for the requested owner/project — so deleting frees quota and a
 // quota check never mis-counts another user's data.

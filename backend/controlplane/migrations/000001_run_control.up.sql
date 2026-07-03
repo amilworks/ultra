@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS control_runs (
 CREATE TABLE IF NOT EXISTS control_run_events (
   event_id text PRIMARY KEY,
   sequence_number bigint NOT NULL,
+  source_sequence bigint,
   run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
   thread_id text,
   event_kind text NOT NULL,
@@ -476,6 +477,9 @@ CREATE INDEX IF NOT EXISTS control_runs_thread_status_updated_idx ON control_run
 CREATE UNIQUE INDEX IF NOT EXISTS control_runs_idempotency_unique_idx
   ON control_runs(thread_id, user_id, (metadata->>'idempotency_key'))
   WHERE COALESCE(metadata->>'idempotency_key', '') <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS control_run_events_run_source_sequence_idx
+  ON control_run_events(run_id, source_sequence)
+  WHERE source_sequence IS NOT NULL;
 CREATE INDEX IF NOT EXISTS control_run_leases_expires_idx ON control_run_leases(lease_expires_at);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_kind_status_idx ON control_worker_heartbeats(worker_kind, status, last_heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS control_worker_heartbeats_last_seen_idx ON control_worker_heartbeats(last_heartbeat_at DESC);

@@ -311,6 +311,7 @@ type ControlRun struct {
 type ControlRunEvent struct {
 	EventID        string             `json:"event_id"`
 	SequenceNumber int64              `json:"sequence_number"`
+	SourceSequence pgtype.Int8        `json:"source_sequence"`
 	RunID          string             `json:"run_id"`
 	ThreadID       pgtype.Text        `json:"thread_id"`
 	EventKind      string             `json:"event_kind"`

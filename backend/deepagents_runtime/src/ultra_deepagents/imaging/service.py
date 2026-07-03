@@ -16,6 +16,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import time
 from typing import Any
 
 __all__ = ["create_app"]
@@ -94,7 +95,15 @@ def localize_pyramid(path: str) -> str:
     try:
         if os.path.exists(local):
             try:
-                os.utime(local, None)  # LRU touch
+                # LRU touch: bump atime for recency but PRESERVE mtime. The viewer-info
+                # sidecar cache keys on (path, size, mtime_ns); bumping mtime here (the
+                # old ``os.utime(local, None)`` set BOTH to now) changed that key on every
+                # request, so a locally-cached pyramid's /viewerinfo missed its sidecar
+                # every time and re-ran the ~300ms multichannel signal-score decode (and
+                # accumulated an orphaned sidecar per hit). Keeping mtime stable lets the
+                # sidecar hit after the first compute.
+                st_local = os.stat(local)
+                os.utime(local, (time.time(), st_local.st_mtime))  # (atime=now, mtime=unchanged)
             except OSError:
                 pass
             return local
@@ -106,6 +115,17 @@ def localize_pyramid(path: str) -> str:
         return local
     except OSError:
         return path  # degrade to the NFS path; never hard-fail
+
+
+async def _localize_pyramid_async(path: str) -> str:
+    """``localize_pyramid`` off the event loop. A cold populate copies a multi-GB
+    pyramid over NFS (~60s at the measured ~21MB/s barrel read rate); done inline
+    in an ``async def`` handler that blocks this worker's entire event loop, so
+    every other request routed to the process freezes for the duration. The warm
+    path is a couple of stats — the threadpool hop costs microseconds."""
+    from starlette.concurrency import run_in_threadpool  # lazy: service-only dep
+
+    return await run_in_threadpool(localize_pyramid, path)
 
 
 def _parse_fusion_request(channels: str | None, channel_colors: str | None):
@@ -189,14 +209,14 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/meta")
     async def meta(path: str) -> dict[str, Any]:
-        return await runner.call("meta", localize_pyramid(path))
+        return await runner.call("meta", await _localize_pyramid_async(path))
 
     @app.get("/tile")
     async def tile(
         path: str, level: int = 0, col: int = 0, row: int = 0, size: int = 512,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "tile", path, level=level, col=col, row=row, tile_size=size,
@@ -209,7 +229,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, x1: int, y1: int, x2: int, y2: int, scale: float | None = None,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "region", path, x1=x1, y1=y1, x2=x2, y2=y2, region_scale=scale,
@@ -223,7 +243,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         channels: str | None = None, channel_colors: str | None = None,
         full_resolution: bool = True,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         # full_resolution=False (transient z-scrub frame) lets the engine pick a
         # bounded pyramid level; the settled view (True) reads the native plane so
@@ -239,7 +259,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, max_size: int = 256, z: int | None = None, level: int | None = None,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "thumbnail", path, max_size=max_size, z=z, level=level,
@@ -252,7 +272,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, grid_rows: int | None = None, grid_cols: int | None = None, level: int | None = None,
         scale: float | None = None, channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         if getattr(runner, "workers", 1) > 1:
             # Multiple worker processes: fan the per-plane reads out across the pool
@@ -272,11 +292,11 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/histogram")
     async def histogram(path: str, bins: int = 256) -> dict[str, Any]:
-        return await runner.call("histogram", localize_pyramid(path), bins=bins)
+        return await runner.call("histogram", await _localize_pyramid_async(path), bins=bins)
 
     @app.get("/viewerinfo")
     async def viewerinfo(path: str) -> dict[str, Any]:
-        return await runner.call("viewer_info", localize_pyramid(path))
+        return await runner.call("viewer_info", await _localize_pyramid_async(path))
 
     @app.get("/video-poster")
     async def video_poster(path: str, t: float = 1.0, max_size: int = 512):
@@ -300,7 +320,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/scalar-volume")
     async def scalar_volume(path: str, channel: int = 0, t: int = 0):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         if getattr(runner, "workers", 1) > 1:
             from ultra_deepagents.imaging.atlas import assemble_scalar_volume
 

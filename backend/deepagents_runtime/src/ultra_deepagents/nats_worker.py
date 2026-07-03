@@ -25,7 +25,7 @@ from nats.js.api import AckPolicy, ConsumerConfig
 
 from ultra_deepagents.code_execution.cleanup import reap_orphaned_sandbox_containers
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.runner import run_job
+from ultra_deepagents.runner import RunEventSequencer, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
 logger = logging.getLogger(__name__)
@@ -470,7 +470,10 @@ async def renew_control_plane_run_lease(
         payload,
         settings,
     )
-    return renewed or lease
+    # A failed renewal must be visible (None), never masked by returning the
+    # stale lease: masking silently extends trust in a lease the control
+    # plane may already have handed to another worker.
+    return renewed
 
 
 async def release_control_plane_run_lease(
@@ -790,6 +793,7 @@ class NATSDeepAgentsWorker:
         subjects = [
             self.settings.nats_jobs_subject,
             self.settings.nats_events_subject,
+            _partitioned_events_wildcard(self.settings.nats_events_subject),
             self.settings.nats_cancel_subject,
         ]
         try:
@@ -826,17 +830,31 @@ class NATSDeepAgentsWorker:
                 str(job.user_id or "").strip() or None
             )
 
-            last_published_sequence = 0
+            # One sequencer for the whole run. Streamed events (via run_job) and
+            # worker lifecycle events (heartbeats, terminal events, skips) all
+            # allocate their source_sequence from this single counter, so two
+            # different events can never claim the same (run_id, source_sequence)
+            # and the per-run sequence stays gapless. Created below before any
+            # event is emitted.
+            run_sequencer: RunEventSequencer | None = None
             terminal_event_published = False
             publish_lock = asyncio.Lock()
 
             async def publish_event(event: dict[str, Any]) -> None:
-                nonlocal last_published_sequence, terminal_event_published
+                nonlocal terminal_event_published
                 async with publish_lock:
                     await self._publish_event(js, event)
-                    event_sequence = _event_sequence(event)
-                    if event_sequence is not None:
-                        last_published_sequence = max(last_published_sequence, event_sequence)
+                    # Keep the shared sequencer at or above every published
+                    # sequence so a subsequent worker-side lifecycle event never
+                    # reuses a number an already-published event took. Normal
+                    # streamed events come from sequencer.stamp(), so this is a
+                    # no-op for them; it only matters if some path publishes an
+                    # explicit sequence. Both reads/writes are await-free, so
+                    # this is atomic against concurrent next_sequence() calls.
+                    if run_sequencer is not None:
+                        event_sequence = _event_sequence(event)
+                        if event_sequence is not None and event_sequence > run_sequencer.sequence:
+                            run_sequencer.sequence = event_sequence
                     event_kind = str(event.get("event_kind") or event.get("event_type") or "").strip()
                     if event_kind in WORKER_TERMINAL_EVENT_KINDS:
                         terminal_event_published = True
@@ -846,7 +864,7 @@ class NATSDeepAgentsWorker:
             lease_validity_deadline = float("inf")
 
             async def publish_worker_heartbeat() -> None:
-                nonlocal heartbeat_index, last_published_sequence, control_lease
+                nonlocal heartbeat_index, control_lease
                 nonlocal lease_validity_deadline
                 async with publish_lock:
                     if terminal_event_published:
@@ -858,14 +876,16 @@ class NATSDeepAgentsWorker:
                             # Another worker owns the run now: stop immediately.
                             raise
                         except RunLeaseUnavailable:
-                            # The control plane is unreachable but the stored
-                            # lease is still valid. Keep computing and retry on
-                            # the next heartbeat; only give up once the lease
-                            # itself can no longer be alive.
-                            if time.monotonic() >= lease_validity_deadline:
-                                raise
+                            # The control plane is unreachable. GPU work in
+                            # flight is expensive; keep computing and retry the
+                            # renewal on every heartbeat. The control plane's
+                            # token-matched renewal revives even an expired
+                            # lease after it heals, and if it requeued the run
+                            # meanwhile the next renewal gets an authoritative
+                            # 409 (RunLeaseConflict) which stops this worker
+                            # within one heartbeat interval.
                             logger.warning(
-                                "Control-plane lease renewal unavailable; retrying while the lease is still valid.",
+                                "Control-plane lease renewal unavailable; continuing compute and retrying.",
                                 extra={"run_id": job.run_id},
                             )
                             renewed = None
@@ -875,7 +895,7 @@ class NATSDeepAgentsWorker:
                                 time.monotonic() + control_lease_validity_window(self.settings)
                             )
                     heartbeat_index += 1
-                    sequence = last_published_sequence + 1
+                    sequence = run_sequencer.next_sequence()
                     await self._publish_event(
                         js,
                         {
@@ -897,7 +917,6 @@ class NATSDeepAgentsWorker:
                             },
                         },
                     )
-                    last_published_sequence = sequence
                 await self._post_worker_heartbeat(
                     "busy",
                     current_run_id=job.run_id,
@@ -906,12 +925,29 @@ class NATSDeepAgentsWorker:
 
             current_task = asyncio.current_task()
             run_lock: RunLock | None = None
+            # Seed with a fresh floor (0); re-seeded to the resume floor below
+            # before compute starts. Skip/cancel paths only ever emit a single
+            # terminal event, and a terminal run drops late events, so their
+            # low sequence never matters.
+            run_sequencer = RunEventSequencer(job.run_id)
             control_status = await self._safe_run_status(job.run_id)
             if control_status in SKIP_CONTROL_PLANE_RUN_STATUSES:
                 logger.info(
                     "Skipping Deep Agents job because control plane run is not runnable.",
                     extra={"run_id": job.run_id, "status": control_status},
                 )
+                try:
+                    await self._publish_skipped_event(
+                        js,
+                        job,
+                        control_status=control_status,
+                        stage="initial_status_check",
+                        sequence=run_sequencer.next_sequence(),
+                    )
+                except EventPublishError:
+                    logger.exception("Deep Agents skip event publish failed; redelivering job.")
+                    await _nak_message(message)
+                    return
                 await _ack_message(message)
                 return
             existing_task = self._active_tasks.get(job.run_id)
@@ -999,13 +1035,20 @@ class NATSDeepAgentsWorker:
                             "Skipping Deep Agents job because control plane run became non-runnable before compute.",
                             extra={"run_id": job.run_id, "status": control_status},
                         )
+                        await self._publish_skipped_event(
+                            js,
+                            job,
+                            control_status=control_status,
+                            stage="pre_compute_recheck",
+                            sequence=run_sequencer.next_sequence(),
+                        )
                         return
                     if job.run_id in self._canceled_run_reasons:
                         await self._publish_canceled_event(
                             js,
                             job,
                             reason=self._canceled_run_reasons[job.run_id],
-                            sequence=last_published_sequence + 1,
+                            sequence=run_sequencer.next_sequence(),
                         )
                         return
                     status_monitor_task = _start_control_status_monitor_task(
@@ -1015,22 +1058,25 @@ class NATSDeepAgentsWorker:
                         current_task,
                         on_terminal_status=mark_control_terminal_status,
                     )
+                    resume_kwargs: dict[str, Any] = {}
+                    checkpointer = await self._ensure_checkpointer()
+                    if checkpointer is not None:
+                        resume_kwargs["checkpointer"] = checkpointer
+                        # Seed the shared sequencer above the run's already-
+                        # persisted events BEFORE starting the heartbeat, so a
+                        # resumed run's events — streamed and heartbeat alike —
+                        # never reuse a source_sequence the original partial run
+                        # already used (which the control plane would dedup or,
+                        # under strict partition ingest, stall on).
+                        resume_floor = await self._run_event_sequence_floor(job.run_id)
+                        if resume_floor > run_sequencer.sequence:
+                            run_sequencer.sequence = resume_floor
                     heartbeat_task = _start_run_heartbeat_task(
                         publish_worker_heartbeat,
                         interval_seconds=job_ack_extension_interval(self.settings),
                         worker_task=current_task,
                         on_lease_lost=mark_control_lease_lost,
                     )
-                    resume_kwargs: dict[str, Any] = {}
-                    checkpointer = await self._ensure_checkpointer()
-                    if checkpointer is not None:
-                        # Seed the floor above the run's already-persisted events
-                        # so a resumed run's event ids never collide with the
-                        # original partial run's (which would be deduped/dropped).
-                        resume_kwargs["checkpointer"] = checkpointer
-                        resume_kwargs["sequence_floor"] = (
-                            await self._run_event_sequence_floor(job.run_id)
-                        )
                     prior_usage = await self._run_token_usage_summary(job.run_id)
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
@@ -1042,6 +1088,7 @@ class NATSDeepAgentsWorker:
                             job,
                             self.settings,
                             publish_event=publish_event,
+                            sequencer=run_sequencer,
                             **resume_kwargs,
                         )
                     finally:
@@ -1052,9 +1099,24 @@ class NATSDeepAgentsWorker:
                             js,
                             job,
                             response_text=response_text,
-                            sequence=last_published_sequence + 1,
+                            sequence=run_sequencer.next_sequence(),
                         )
                 except asyncio.CancelledError:
+                    # Cancellation is otherwise handled silently below, which makes an
+                    # orphaned "running" run (terminal event never published) impossible to
+                    # diagnose. Record which branch fires and the deciding state so a stuck
+                    # run's cause is visible in the worker log (stderr).
+                    logger.warning(
+                        "Deep Agents run task cancelled; classifying for terminal handling.",
+                        extra={
+                            "run_id": job.run_id,
+                            "control_lease_lost": control_lease_lost,
+                            "shutting_down": self._shutting_down,
+                            "control_terminal_status": control_terminal_status,
+                            "explicitly_canceled": job.run_id in self._canceled_run_reasons,
+                            "terminal_event_published": terminal_event_published,
+                        },
+                    )
                     if control_lease_lost:
                         should_ack = False
                         await _nak_message(
@@ -1067,12 +1129,19 @@ class NATSDeepAgentsWorker:
                         await _nak_message(message)
                         return
                     if control_terminal_status in CONTROL_PLANE_STATUSES_WITH_AUTHORITATIVE_TERMINAL_EVENT:
+                        await self._publish_skipped_event(
+                            js,
+                            job,
+                            control_status=control_terminal_status,
+                            stage="status_monitor",
+                            sequence=run_sequencer.next_sequence(),
+                        )
                         return
                     await self._publish_canceled_event(
                         js,
                         job,
                         reason=self._canceled_run_reasons.get(job.run_id, "canceled"),
-                        sequence=last_published_sequence + 1,
+                        sequence=run_sequencer.next_sequence(),
                     )
                 except EventPublishError:
                     raise
@@ -1083,12 +1152,15 @@ class NATSDeepAgentsWorker:
                             js,
                             job,
                             exc,
-                            sequence=last_published_sequence + 1,
+                            sequence=run_sequencer.next_sequence(),
                         )
             except EventPublishError:
                 should_ack = False
                 logger.exception("Deep Agents event publish failed; redelivering job.")
-                await _nak_message(message)
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
             finally:
                 await _stop_run_heartbeat_task(heartbeat_task)
                 await _stop_control_status_monitor_task(status_monitor_task)
@@ -1287,7 +1359,7 @@ class NATSDeepAgentsWorker:
             headers["Nats-Msg-Id"] = message_id
         try:
             await js.publish(
-                self.settings.nats_events_subject,
+                _event_publish_subject(self.settings, event),
                 json.dumps(event, default=str).encode("utf-8"),
                 headers=headers or None,
             )
@@ -1348,6 +1420,38 @@ class NATSDeepAgentsWorker:
             },
         )
 
+    async def _publish_skipped_event(
+        self,
+        js: Any,
+        job: RunJobEnvelope,
+        *,
+        control_status: str,
+        stage: str,
+        sequence: int,
+    ) -> None:
+        await self._publish_event(
+            js,
+            {
+                "event_id": f"evt_{job.run_id}_worker_skipped",
+                "sequence": sequence,
+                "run_id": job.run_id,
+                "thread_id": job.thread_id,
+                "event_kind": "run.worker_skipped",
+                "event_type": "run",
+                "node_name": "worker",
+                "agent_role": "worker",
+                "level": "warning",
+                "message": "Worker skipped job because the control plane run is not runnable.",
+                "payload": {
+                    "ack_action": "ack",
+                    "control_status": control_status,
+                    "reason": "control_plane_not_runnable",
+                    "stage": stage,
+                    "worker_id": self.settings.worker_id,
+                },
+            },
+        )
+
     async def _publish_completed_event(
         self,
         js: Any,
@@ -1382,6 +1486,31 @@ def _event_sequence(event: dict[str, Any]) -> int | None:
     if sequence < 0:
         return None
     return sequence
+
+
+def _event_partition_count(settings: RuntimeSettings) -> int:
+    return min(256, max(1, int(settings.nats_event_partitions or 1)))
+
+
+def _fnv1a_32(value: str) -> int:
+    hash_value = 2166136261
+    for byte in value.encode("utf-8"):
+        hash_value ^= byte
+        hash_value = (hash_value * 16777619) & 0xFFFFFFFF
+    return hash_value
+
+
+def _partitioned_events_wildcard(events_subject: str) -> str:
+    return f"{str(events_subject or 'ultra.runs.events').strip() or 'ultra.runs.events'}.p.*"
+
+
+def _event_publish_subject(settings: RuntimeSettings, event: dict[str, Any]) -> str:
+    events_subject = str(settings.nats_events_subject or "ultra.runs.events").strip()
+    if not events_subject:
+        events_subject = "ultra.runs.events"
+    run_id = str(event.get("run_id") or "")
+    partition = _fnv1a_32(run_id) % _event_partition_count(settings)
+    return f"{events_subject}.p.{partition}"
 
 
 def _event_message_id(event: dict[str, Any]) -> str:
@@ -1419,10 +1548,15 @@ def _consumer_config_matches(existing_config: Any, desired_config: ConsumerConfi
         return False
     return (
         getattr(existing_config, "filter_subject", None) == desired_config.filter_subject
+        and _ack_policy_equal(getattr(existing_config, "ack_policy", None), desired_config.ack_policy)
         and _float_equal(getattr(existing_config, "ack_wait", None), desired_config.ack_wait)
         and getattr(existing_config, "max_deliver", None) == desired_config.max_deliver
         and getattr(existing_config, "max_ack_pending", None) == desired_config.max_ack_pending
     )
+
+
+def _ack_policy_equal(left: Any, right: Any) -> bool:
+    return getattr(left, "value", left) == getattr(right, "value", right)
 
 
 def _float_equal(left: Any, right: Any) -> bool:

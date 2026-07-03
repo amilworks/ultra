@@ -1,4 +1,5 @@
 import base64
+import io
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -176,15 +177,14 @@ def test_docker_sandbox_ignores_tool_timeout_when_admin_timeout_is_disabled(
     def fake_run(
         command: list[str],
         *,
-        capture_output: bool,
-        text: bool,
         timeout: int | None,
-        check: bool,
+        source_command: str,
+        progress_callback,
     ) -> subprocess.CompletedProcess[str]:
         captured["timeout"] = timeout
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",
         config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=0),
@@ -205,15 +205,14 @@ def test_docker_sandbox_admin_timeout_overrides_tool_timeout(
     def fake_run(
         command: list[str],
         *,
-        capture_output: bool,
-        text: bool,
         timeout: int | None,
-        check: bool,
+        source_command: str,
+        progress_callback,
     ) -> subprocess.CompletedProcess[str]:
         captured["timeout"] = timeout
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",
         config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=1800),
@@ -260,10 +259,10 @@ def test_sandbox_concurrency_cap_releases_slot_between_runs(
     monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_QUEUE_TIMEOUT_SECONDS", "1")
     docker._reset_sandbox_semaphore_for_tests()
 
-    def fake_run(command, *, capture_output, text, timeout, check):
+    def fake_run(command, *, timeout, source_command, progress_callback):
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",
         config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
@@ -277,6 +276,53 @@ def test_sandbox_concurrency_cap_releases_slot_between_runs(
 
     assert first.exit_code == 0
     assert second.exit_code == 0
+
+
+def test_docker_sandbox_streams_throttled_execute_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    progress_events: list[dict[str, object]] = []
+
+    class FakeProcess:
+        stdout = io.StringIO("condition 1 ok\ncondition 2 ok\ncondition 3 ok\n")
+        stderr = io.StringIO("")
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError("completed fake process must not be killed")
+
+    def fake_popen(command, *, stdout, stderr, text, bufsize):
+        assert stdout is subprocess.PIPE
+        assert stderr is subprocess.PIPE
+        assert text is True
+        assert bufsize == 1
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_SANDBOX_PROGRESS_INTERVAL_SECONDS", "999")
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=60),
+        progress_callback=progress_events.append,
+    )
+
+    result = backend.execute("python run_full_experiment.py")
+
+    assert result.exit_code == 0
+    assert result.output == "condition 1 ok\ncondition 2 ok\ncondition 3 ok\n"
+    assert len(progress_events) == 2
+    assert progress_events[0]["text"] == "condition 1 ok"
+    assert progress_events[0]["stream"] == "stdout"
+    assert progress_events[0]["progress_index"] == 1
+    assert progress_events[1]["text"] == "condition 3 ok"
+    assert progress_events[1]["suppressed_line_count"] == 1
+    assert progress_events[1]["progress_index"] == 2
 
 
 def test_unlimited_output_limit_does_not_truncate():
@@ -439,7 +485,7 @@ def test_armed_admin_default_bounds_a_hung_execute(monkeypatch, tmp_path: Path):
         seen["timeout"] = kw.get("timeout")
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"), output=b"", stderr=b"")
 
-    monkeypatch.setattr(docker.subprocess, "run", _fake_run)
+    monkeypatch.setattr(docker, "_run_command_with_progress", _fake_run)
 
     # the model passes timeout=7, but the admin ceiling (1800) governs AND bounds the hang
     resp = backend.execute("python train.py", timeout=7)

@@ -28,9 +28,53 @@ import tempfile
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from ultra_deepagents.imaging import fusion, pipelines, viewerinfo
+from ultra_deepagents.imaging import fusion, hdf5, pipelines, viewerinfo
 
 __all__ = ["ImageEngine", "LibBioImageEngine", "StubEngine", "EngineUnavailable", "build_engine"]
+
+
+class _Hdf5EngineMixin:
+    """HDF5 data-viewer operations, shared by both engines.
+
+    Unlike raster decode (libbioimage vs stub), an HDF5 file is opened directly with
+    :mod:`h5py`, so the implementation is identical regardless of engine backend. Each
+    op is a thin delegation to :mod:`ultra_deepagents.imaging.hdf5` and runs in the
+    process pool (via ``runner.call``) so a poison file is crash/timeout isolated. The
+    ``name`` hint lets the caller pass the upload's original filename when the on-disk
+    blob path has lost its extension (see :meth:`_maybe_hdf5_viewer_info`)."""
+
+    def _maybe_hdf5_viewer_info(self, path: str, name: str | None = None) -> dict[str, Any] | None:
+        basename = name or os.path.basename(path)
+        if hdf5.is_hdf5_data_file(basename):
+            return hdf5.build_hdf5_viewer_info(path, original_name=basename)
+        return None
+
+    def hdf5_viewer_info(self, path: str, *, file_id: str = "", name: str = "") -> dict[str, Any]:
+        return hdf5.build_hdf5_viewer_info(path, file_id=file_id, original_name=(name or os.path.basename(path)))
+
+    def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
+        return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
+
+    def hdf5_materials_dashboard(self, path: str, *, file_id: str = "") -> dict[str, Any]:
+        return hdf5.materials_dashboard(path, file_id=file_id)
+
+    def hdf5_slice_png(self, path: str, dataset_path: str, *, axis: str = "z",
+                       index: int | None = None, component: int = 0) -> bytes:
+        return hdf5.slice_png(path, dataset_path, axis=axis, index=index, component=component)
+
+    def hdf5_atlas_png(self, path: str, dataset_path: str, **kwargs: Any) -> bytes:
+        return hdf5.atlas_png(path, dataset_path, **kwargs)
+
+    def hdf5_scalar_volume(self, path: str, dataset_path: str, *, channel: int = 0) -> dict[str, Any]:
+        return hdf5.scalar_volume(path, dataset_path, channel=channel)
+
+    def hdf5_histogram(self, path: str, dataset_path: str, *, component: int = 0, bins: int = 24,
+                       file_id: str = "") -> dict[str, Any]:
+        return hdf5.dataset_histogram(path, dataset_path, component=component, bins=bins, file_id=file_id)
+
+    def hdf5_table(self, path: str, dataset_path: str, *, offset: int = 0, limit: int = 12,
+                   file_id: str = "") -> dict[str, Any]:
+        return hdf5.table_preview(path, dataset_path, offset=offset, limit=limit, file_id=file_id)
 
 
 def _engine_cache_entries() -> int:
@@ -179,8 +223,11 @@ class ImageEngine(Protocol):
         """Per-channel intensity histogram."""
         ...
 
-    def viewer_info(self, path: str) -> dict[str, Any]:
-        """Structured viewer metadata (axis_sizes, channels, spacing, tile_scheme)."""
+    def viewer_info(self, path: str, name: str | None = None) -> dict[str, Any]:
+        """Structured viewer metadata (axis_sizes, channels, spacing, tile_scheme).
+
+        ``name`` is the upload's original filename, used to detect HDF5-data files
+        when the on-disk blob path has lost its extension."""
         ...
 
     def scalar_volume(self, path: str, *, channel: int = 0, t: int = 0) -> dict[str, Any]:
@@ -188,7 +235,7 @@ class ImageEngine(Protocol):
         ...
 
 
-class LibBioImageEngine:
+class LibBioImageEngine(_Hdf5EngineMixin):
     """Real engine over the ``libbioimage`` binding.
 
     One instance per worker process. Construction fails with
@@ -645,7 +692,14 @@ class LibBioImageEngine:
             )
         return out
 
-    def viewer_info(self, path) -> dict[str, Any]:
+    def viewer_info(self, path, name=None) -> dict[str, Any]:
+        # HDF5-data files (.h5/.hdf5/.hdf/.dream3d) are a different viewer entirely —
+        # detect BEFORE the libbioimage decode path so a data file never enters the
+        # image pipeline. Gated by extension (never magic-byte sniffing) so .ims/.mat
+        # v7.3/NetCDF4 (HDF5-based but images/non-images) stay on their own routes.
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        if hdf5_info is not None:
+            return hdf5_info
         cached = read_viewerinfo_sidecar(path)
         if cached is not None:
             return cached
@@ -804,11 +858,13 @@ class LibBioImageEngine:
         return buf.getvalue()
 
 
-class StubEngine:
+class StubEngine(_Hdf5EngineMixin):
     """Deterministic Pillow-only backend for tests/CI without the native lib.
 
     Output is a pure function of the request, so callers can assert determinism
-    and content-type and the Go proxy can be tested end-to-end.
+    and content-type and the Go proxy can be tested end-to-end. HDF5 ops are NOT
+    stubbed — they read the real file with h5py (via :class:`_Hdf5EngineMixin`), so
+    the hdf5 endpoints are exercised end-to-end against synthetic fixtures in tests.
     """
 
     _FORMATS = ["ome-tiff", "tiff", "czi", "nd2", "dicom", "nifti", "svs", "ndpi", "png", "jpeg"]
@@ -856,7 +912,10 @@ class StubEngine:
         counts = [((seed + i * 2654435761) % 997) for i in range(bins)]
         return {"bins": bins, "channels": [{"index": 0, "counts": counts, "min": 0.0, "max": 65535.0}]}
 
-    def viewer_info(self, path) -> dict[str, Any]:
+    def viewer_info(self, path, name=None) -> dict[str, Any]:
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        if hdf5_info is not None:
+            return hdf5_info
         seed = _seed(path)
         # Deterministic meta WITH a pyramid so the tile path is exercisable in tests.
         meta = {

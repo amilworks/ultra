@@ -24,6 +24,7 @@ from langchain_core.tools import BaseTool
 
 from ultra_deepagents.async_delegation import UltraAsyncSubagentContextMiddleware
 from ultra_deepagents.bisque.tools import build_bisque_tools
+from ultra_deepagents.builder import BUILDER_DELEGATION_GUIDANCE, build_builder_subagent
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
@@ -37,6 +38,7 @@ from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
+from ultra_deepagents.progress_guard import read_attempt_ledger_digest
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
@@ -190,6 +192,10 @@ meaningful convergence checks, smaller smoke-test data, checkpoints, and resumab
 artifacts over arbitrary wall-clock caps.
 """
 
+LONG_COMPUTE_RUNTIME_GUIDANCE = """
+For long scientific/computational runs, do not launch the full grid, sweep, training job, or long integration as the first expensive command. First run a pilot timing pass on a tiny representative subset: one seed, one duration/window, one grid point, one batch, or about 1-5% of the data. Record elapsed seconds and extrapolate the estimated runtime for the full requested scope. Compare that estimate to the user/control-plane runtime budget when present, otherwise to the sandbox wall-clock cap from tool_capability_manifest. If the estimated runtime exceeds budget, shrink or chunk the grid: reduce seeds, durations, resolution, sample count, or batch size; run resumable chunks; and state the reduced scope explicitly. During execution, checkpoint durable progress under /outputs after each condition or batch, and at least every few minutes for long loops: metrics.jsonl/csv, partial tables, completed-batch manifests, model checkpoints, and enough parameters/seeds to resume. Keep scratch/temp files under /workspace, but progress evidence and final deliverables belong in /outputs.
+"""
+
 # Curated, decision-relevant subset of the sandbox image's preinstalled scientific
 # stack (deploy/docker/deepagents-sandbox.Dockerfile). Surfaced to the coordinator so
 # it reasons over what is actually importable in an offline container instead of
@@ -244,7 +250,8 @@ def build_sandbox_resources_guidance(settings: RuntimeSettings) -> str:
         "persist, and background processes (cmd &, nohup) do not survive a call, so "
         "checkpoint long runs to files. Write large temp/intermediate files under "
         "/workspace, not /tmp. Call tool_capability_manifest for the exact compute "
-        "envelope (cores, memory, shm, GPU, full package list)."
+        "envelope (cores, memory, shm, GPU, full package list). "
+        + LONG_COMPUTE_RUNTIME_GUIDANCE.strip()
     )
 
 TEXT_ONLY_ARTIFACT_GUIDANCE = """
@@ -494,7 +501,9 @@ SCOPED_DELEGATION_SUBAGENTS = [
             "/outputs when available. Preserve the user's requested compute scope: do not add "
             "longer durations, finer step sizes, more seeds, or broader convergence sweeps unless "
             "the subtask explicitly asks for them or a short smoke check reveals a material "
-            "uncertainty. Return a concise "
+            "uncertainty. "
+            + LONG_COMPUTE_RUNTIME_GUIDANCE.strip()
+            + " Return a concise "
             "final report with commands/scripts run, key numerical results, generated "
             "artifact paths, failures, and confidence. IMPORTANT: return only the distilled "
             "result — do NOT paste raw stdout, full tracebacks, or large tables into your "
@@ -533,7 +542,9 @@ QWEN_CODE_RUNNER = {
         "under /outputs when available. Preserve the user's requested compute scope: "
         "do not add longer durations, finer step sizes, more seeds, or broader "
         "convergence sweeps unless the subtask explicitly asks for them or a short "
-        "smoke check reveals material uncertainty. Return a concise final report with "
+        "smoke check reveals material uncertainty. "
+        + LONG_COMPUTE_RUNTIME_GUIDANCE.strip()
+        + " Return a concise final report with "
         "commands/scripts run, key numerical results, visual/artifact findings, "
         "generated artifact paths, failures, and confidence. Do not perform broad "
         "literature review, BisQue account operations, RareSpot inference, or "
@@ -1057,6 +1068,13 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
         sections.append(VISION_DELEGATION_GUIDANCE)
     if context is not None and _should_register_qwen_code_runner(context, settings):
         sections.append(QWEN_CODE_DELEGATION_GUIDANCE)
+    # Advertise the Builder's delegation discipline only when it is enabled (and thus
+    # registered): hand heavy/iterative coding to the Builder EARLY with the goal + data
+    # paths instead of debugging inline in the coordinator's own context. Two live traces
+    # motivated this: a 527K-token over-prep run, then a 6.7M-token livelock in which the
+    # coordinator drove 155 inline code-runner calls instead of delegating the loop.
+    if settings.builder_enabled:
+        sections.append(BUILDER_DELEGATION_GUIDANCE)
     if context is not None:
         brief = build_run_context_brief(context)
         if brief:
@@ -1094,6 +1112,10 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
             "timezone, product/deployment identity, and public URL. Do not infer "
             "current dates from model knowledge."
         )
+    runtime_budget_lines = _run_context_runtime_budget_lines(context)
+    if runtime_budget_lines:
+        lines.append("Runtime budgets:")
+        lines.extend(runtime_budget_lines)
     if context.selected_file_ids:
         file_ids = ", ".join(context.selected_file_ids)
         lines.append(f"- selected uploaded file ids: {file_ids} | use stage_uploaded_files_for_analysis")
@@ -1147,6 +1169,17 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
         if len(artifacts) > max_artifacts:
             lines.append(f"  - ... {len(artifacts) - max_artifacts} more; call artifact_manifest")
     return "\n".join(lines)
+
+
+def _run_context_runtime_budget_lines(context: AgentRunContext) -> list[str]:
+    lines: list[str] = []
+    for prefix, data in (("budget", context.budget), ("benchmark", context.benchmark)):
+        if not isinstance(data, dict):
+            continue
+        value = data.get("max_runtime_seconds")
+        if isinstance(value, int | float) and value > 0:
+            lines.append(f"- {prefix}.max_runtime_seconds: {value:g}")
+    return lines
 
 
 def build_runtime_prompt_suffix(
@@ -1242,6 +1275,76 @@ def build_runtime_prompt_middleware(settings: RuntimeSettings) -> Any:
     return UltraRunContextPromptMiddleware(settings)
 
 
+class UltraAttemptLedgerMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Append the durable attempt-ledger digest to the system message per model call.
+
+    The runner appends a JSONL entry whenever a sandbox execute FAILS or repeats
+    with unchanged output (progress_guard). This middleware re-derives a compact
+    digest from that file on every model call, so the memory of what already
+    failed survives SummarizationMiddleware compaction BY CONSTRUCTION: compaction
+    rewrites ``messages`` but never the per-request system prompt. Injecting into
+    ``messages`` instead would be self-defeating — the next compaction would erase
+    it, restarting the re-discovery → re-run loop this exists to break.
+
+    Advisory only, never a gate: a command that failed earlier may legitimately
+    succeed after the workspace changes, so nothing is blocked — the model is
+    reminded, not restricted. Healthy runs write no entries and pay nothing.
+    Shared across the coordinator and the coding subagents (one instance): the
+    ledger is per-run state, and the mtime-cached read is concurrency-safe.
+    """
+
+    def __init__(self, ledger_path: Path) -> None:
+        super().__init__()
+        self._ledger_path = ledger_path
+        self._cached_digest = ""
+        self._cached_mtime_ns = -1
+
+    def _digest(self) -> str:
+        try:
+            mtime_ns = self._ledger_path.stat().st_mtime_ns
+        except OSError:
+            return ""
+        if mtime_ns != self._cached_mtime_ns:
+            self._cached_digest = read_attempt_ledger_digest(self._ledger_path)
+            self._cached_mtime_ns = mtime_ns
+        return self._cached_digest
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        digest = self._digest()
+        if not digest:
+            return handler(request)
+        return handler(
+            request.override(
+                system_message=append_to_system_message(request.system_message, digest)
+            )
+        )
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        digest = self._digest()
+        if not digest:
+            return await handler(request)
+        return await handler(
+            request.override(
+                system_message=append_to_system_message(request.system_message, digest)
+            )
+        )
+
+
+def attempt_ledger_path(workspace_dir: Path) -> Path:
+    """Single source of truth for the per-run ledger location (runner writes it,
+    the middleware reads it). Lives under a dot-directory so the non-recursive
+    workspace artifact sweep can never promote it to a run deliverable."""
+    return workspace_dir / ".ultra" / "attempt_ledger.jsonl"
+
+
 def sandbox_compute_resources(settings: RuntimeSettings) -> dict[str, Any]:
     """Structured compute envelope of the code sandbox, for tool_capability_manifest.
 
@@ -1258,7 +1361,8 @@ def sandbox_compute_resources(settings: RuntimeSettings) -> dict[str, Any]:
             "Each execute() runs a FRESH, ephemeral container; only files under "
             "/workspace and /outputs persist between calls. In-memory state and "
             "background processes (cmd &, nohup) do NOT survive a call — there is no "
-            "long-lived daemon to poll. Checkpoint long work to /workspace files."
+            "long-lived daemon to poll. Checkpoint long work to durable /outputs files "
+            "after each condition or batch; keep scratch/temp files under /workspace."
         ),
         "cpus": (
             "all available host cores"
@@ -1545,8 +1649,45 @@ def build_research_agent(
         vision_tools=vision_tools,
         qwen_coding_model=qwen_coding_model,
     )
-    # Builder remains in the codebase for later development, but is intentionally not
-    # registered in the coordinator while we evaluate the simpler multi-agent coding path.
+    # Durable attempt-ledger digest -> system prompt, on the coordinator AND every
+    # coding delegate (in the 6.7M-token livelock, code-runner owned 69% of the
+    # spend — the amnesia has to be fixed where the loop actually runs). One shared
+    # instance: the ledger is per-run state and the read path is mtime-cached.
+    ledger_middleware: UltraAttemptLedgerMiddleware | None = None
+    if workspace_dir is not None:
+        ledger_middleware = UltraAttemptLedgerMiddleware(
+            attempt_ledger_path(Path(workspace_dir))
+        )
+        middleware.append(ledger_middleware)
+        coding_delegates = {*_SKILL_BEARING_SUBAGENTS, QWEN_CODE_RUNNER_NAME}
+        for subagent in subagents:
+            if subagent.get("name") in coding_delegates:
+                subagent.setdefault("middleware", []).append(ledger_middleware)
+    # The Builder: a model-agnostic autonomous-coding sub-coordinator (a full deep agent
+    # with its own GoalLoop + recursion cap) the coordinator delegates a verify-driven
+    # GOAL to, so iterative build/debug loops run in ITS isolated context instead of
+    # accumulating inline in the coordinator.
+    #
+    # CLEANUP CANDIDATE (2026-07-01): DISABLED by default (settings.builder_enabled=False)
+    # after a live A/B on the comp-bio task — it worked but concentrated ~92% of the run's
+    # tokens in its isolated context for little net gain over the plain coordinator +
+    # code-runner path (which the progress-stall guard already protects). This whole
+    # block, build_builder_subagent, BUILDER_DELEGATION_GUIDANCE, and the builder_*
+    # settings are removable if the Builder stays off. Returns None when disabled, so
+    # this is a no-op wire today; kept behind the flag for a future A/B.
+    builder_subagent = build_builder_subagent(
+        settings,
+        tools=resolved_tools,
+        backend=resolved_backend,
+        vision_tools=vision_tools,
+        # The Builder is a pre-compiled CompiledSubAgent, so deepagents does NOT inherit
+        # the coordinator's permissions onto it — pass the same memory denies explicitly
+        # so the Builder lead + its worker cannot write /policies, /skills, /memories.
+        permissions=resolve_memory_permissions(settings),
+        extra_middleware=[ledger_middleware] if ledger_middleware is not None else None,
+    )
+    if builder_subagent is not None:
+        subagents = [*subagents, builder_subagent]
     async_subagents = build_async_subagents(settings, context=context)
     if async_subagents:
         middleware.append(UltraAsyncSubagentContextMiddleware(async_subagents))

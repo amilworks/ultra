@@ -90,6 +90,26 @@ def normalize_tool_call(
     ).to_dict()
 
 
+def normalize_tool_call_progress(
+    context: AgentRunContext,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_payload = {"tool_name": "execute", "status": "progress"}
+    event_payload.update(_json_safe_payload(payload))
+    message = str(event_payload.get("text") or event_payload.get("output_preview") or "")
+    return RunEvent(
+        run_id=context.run_id,
+        thread_id=context.thread_id,
+        event_kind="tool_call.progress",
+        event_type="tool_call",
+        node_name="tool:execute",
+        agent_role="tool",
+        level="debug",
+        message=message,
+        payload=event_payload,
+    ).to_dict()
+
+
 def normalize_subagent_status(
     context: AgentRunContext,
     name: str,

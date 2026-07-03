@@ -28,6 +28,12 @@ imaging = [
     "lxml>=5.0.0,<6",
     "fastapi>=0.110.0,<1",
     "uvicorn>=0.29.0,<1",
+    # HDF5 data viewer (imaging/hdf5.py): h5py-backed dataset/materials/slice/atlas/
+    # scalar-volume/histogram/table endpoints + kind:"hdf5" viewerinfo detection. Ships
+    # a prebuilt manylinux/macos wheel bundling libhdf5, so no system HDF5 dev headers
+    # are needed at build time. 3.11+ has firm numpy-2 wheels (the imaging extra resolves
+    # numpy>=2 via bioio-lif).
+    "h5py>=3.11.0,<4",
     # bioio transcode fallback for formats libbioimage cannot decode: read via bioio ->
     # write OME-TIFF -> pyramid (imaging/transcode.py). Used ONLY in the batch convert
     # lane, never on the serving hot path.

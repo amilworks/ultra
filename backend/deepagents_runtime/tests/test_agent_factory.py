@@ -34,6 +34,23 @@ from ultra_deepagents.context_tools import (
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 
 
+@pytest.fixture(autouse=True)
+def _stub_builder_for_coordinator_contract_tests(request, monkeypatch):
+    """The Builder registers by default now (the livelock fix), and its inner
+    create_deep_agent is REAL — it cannot wrap the object() fakes these
+    coordinator-contract tests pass as tools/models. Stub it for every test
+    except the builder-behavior tests (named *builder*), which exercise the
+    real registration path on purpose."""
+    if "builder" in request.node.name:
+        yield
+        return
+    monkeypatch.setattr(
+        "ultra_deepagents.agent.build_builder_subagent",
+        lambda *args, **kwargs: None,
+    )
+    yield
+
+
 class ToolCallingFakeOpenAIModel(FakeMessagesListChatModel):
     bound_tool_names: list[list[str]] = Field(default_factory=list)
 
@@ -262,6 +279,8 @@ def test_tool_capability_manifest_surfaces_compute_resources():
     assert "NONE in-sandbox" in cr["gpu"]
     assert cr["wall_clock_cap_seconds"] == 21600
     assert "numpy" in cr["preinstalled_packages"]
+    assert "/outputs" in cr["execution_model"]
+    assert "checkpoint" in cr["execution_model"].lower()
 
 
 def test_sandbox_compute_resources_reports_gpu_when_enabled():
@@ -836,6 +855,11 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     assert "stage prior artifacts" in code_runner["system_prompt"].lower()
     assert "preserve the user's requested compute scope" in code_runner["system_prompt"].lower()
     assert "longer durations, finer step sizes, more seeds" in code_runner["system_prompt"].lower()
+    assert "pilot timing pass" in code_runner["system_prompt"]
+    assert "/outputs" in code_runner["system_prompt"]
+    assert "after each condition or batch" in code_runner["system_prompt"]
+    assert "shrink or chunk" in code_runner["system_prompt"]
+    assert "estimated runtime" in code_runner["system_prompt"]
     # code-runner absorbed the data-inspection role and carries an anti-bloat instruction.
     assert "data-inspection" in code_runner["system_prompt"].lower()
     assert "do not paste raw stdout" in code_runner["system_prompt"].lower()
@@ -929,6 +953,11 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
     assert "qwen" in by_name["qwen-code-runner"]["description"].lower()
     assert "multimodal" in by_name["qwen-code-runner"]["description"].lower()
     assert "visual artifacts" in by_name["qwen-code-runner"]["system_prompt"].lower()
+    assert "pilot timing pass" in by_name["qwen-code-runner"]["system_prompt"]
+    assert "/outputs" in by_name["qwen-code-runner"]["system_prompt"]
+    assert "after each condition or batch" in by_name["qwen-code-runner"]["system_prompt"]
+    assert "shrink or chunk" in by_name["qwen-code-runner"]["system_prompt"]
+    assert "estimated runtime" in by_name["qwen-code-runner"]["system_prompt"]
     assert all(
         not isinstance(item, TextOnlyMultimodalMiddleware)
         for item in by_name["qwen-code-runner"].get("middleware", [])
@@ -953,7 +982,11 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
     ]
 
 
-def test_builder_is_not_registered_even_when_setting_enabled(monkeypatch):
+def test_builder_registration_tracks_builder_enabled(monkeypatch):
+    """Re-enabled after the 6.7M-token livelock trace: when builder_enabled, the
+    factory registers the Builder (isolated-context loop owner) and hands it the
+    coordinator's tools/backend/permissions + the shared attempt-ledger middleware;
+    when disabled it must be absent everywhere."""
     captured = {}
     builder_calls = []
 
@@ -961,20 +994,22 @@ def test_builder_is_not_registered_even_when_setting_enabled(monkeypatch):
         captured.update(kwargs)
         return "compiled-agent"
 
-    def fake_build_builder_subagent(*args, **kwargs):
-        builder_calls.append((args, kwargs))
-        return {"name": "builder", "description": "should not be registered"}
+    def fake_build_builder_subagent(settings, **kwargs):
+        builder_calls.append(kwargs)
+        if not settings.builder_enabled:
+            return None
+        # CompiledSubAgent is a TypedDict — a real dict, exactly what the
+        # manifest descriptor builder consumes.
+        return {
+            "name": "builder",
+            "description": "autonomous coding sub-coordinator",
+            "runnable": object(),
+        }
 
     monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr(
         "ultra_deepagents.agent.build_builder_subagent",
         fake_build_builder_subagent,
-        raising=False,
-    )
-    settings = RuntimeSettings(
-        openai_base_url="http://127.0.0.1:8003/v1",
-        openai_model="deepseek_v4",
-        builder_enabled=True,
     )
     context = AgentRunContext(
         assistant_id="ultra-research-agent",
@@ -986,30 +1021,61 @@ def test_builder_is_not_registered_even_when_setting_enabled(monkeypatch):
         goal="Write and test a small simulation script.",
     )
 
-    build_research_agent(settings, model=object(), backend=object(), context=context)
-
-    assert builder_calls == []
-    assert "builder" not in {subagent["name"] for subagent in captured["subagents"]}
+    settings_on = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        builder_enabled=True,
+    )
+    build_research_agent(settings_on, model=object(), backend=object(), context=context)
+    registered = [subagent.get("name") for subagent in captured["subagents"]]
+    assert "builder" in registered
+    assert builder_calls, "factory must consult build_builder_subagent"
+    # The security-critical wiring: explicit permissions (CompiledSubAgent does not
+    # inherit the coordinator's denies) and the coordinator's resolved tools/backend.
+    assert "permissions" in builder_calls[-1]
+    assert "backend" in builder_calls[-1]
+    assert "tools" in builder_calls[-1]
+    # The Builder must be advertised to the model via the capability manifest.
     manifest_tool = next(
         tool
         for tool in captured["tools"]
         if getattr(tool, "name", "") == "tool_capability_manifest"
     )
     manifest = json.loads(manifest_tool.invoke({}))
-    assert "builder" not in {item["name"] for item in manifest["available_subagents"]}
+    assert "builder" in {item["name"] for item in manifest["available_subagents"]}
+
+    captured.clear()
+    builder_calls.clear()
+    settings_off = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        builder_enabled=False,
+    )
+    build_research_agent(settings_off, model=object(), backend=object(), context=context)
+    registered = [subagent.get("name") for subagent in captured["subagents"]]
+    assert "builder" not in registered
 
 
-def test_system_prompt_does_not_advertise_builder_when_setting_enabled():
-    prompt = build_system_prompt(
+def test_system_prompt_advertises_builder_exactly_when_enabled():
+    prompt_on = build_system_prompt(
         RuntimeSettings(
             openai_base_url="http://127.0.0.1:8003/v1",
             openai_model="deepseek_v4",
             builder_enabled=True,
         )
     )
+    prompt_off = build_system_prompt(
+        RuntimeSettings(
+            openai_base_url="http://127.0.0.1:8003/v1",
+            openai_model="deepseek_v4",
+            builder_enabled=False,
+        )
+    )
 
-    assert "builder" not in prompt.lower()
-    assert "autonomous coding sub-coordinator" not in prompt.lower()
+    assert "DELEGATE IT TO THE BUILDER EARLY" in prompt_on
+    assert "`builder` subagent" in prompt_on
+    assert "DELEGATE IT TO THE BUILDER EARLY" not in prompt_off
+    assert "`builder` subagent" not in prompt_off
 
 
 def test_text_only_system_prompt_guides_inline_plot_captions_and_updates():
@@ -1059,6 +1125,21 @@ def test_system_prompt_discourages_analysis_wall_clock_timeout_wrappers():
     assert "do not wrap sandbox commands with shell timeout" in prompt
     assert "execute timeout" in prompt
     assert "long-running analysis is allowed" in prompt
+
+
+def test_system_prompt_requires_long_compute_pilot_checkpoint_and_budget_gate():
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+
+    prompt = build_system_prompt(settings)
+
+    assert "pilot timing pass" in prompt
+    assert "/outputs" in prompt
+    assert "after each condition or batch" in prompt
+    assert "shrink or chunk" in prompt
+    assert "estimated runtime" in prompt
 
 
 def test_system_prompt_requires_delegation_for_complex_code_workflows():
@@ -1177,6 +1258,30 @@ def test_run_context_brief_surfaces_runtime_facts():
     assert "deployment_environment: production" in brief
     assert "public_url: https://ultra.example.edu" in brief
     assert "Use these runtime facts for today, tomorrow, yesterday" in prompt
+
+
+def test_run_context_brief_surfaces_runtime_budget_without_dumping_secrets():
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-budget",
+        goal="Run a bounded experiment.",
+        budget={"max_runtime_seconds": 1800, "api_key": "secret"},
+        benchmark={"max_runtime_seconds": 2400, "private_note": "do-not-show"},
+    )
+
+    brief = build_run_context_brief(context)
+
+    assert "Runtime budgets:" in brief
+    assert "budget.max_runtime_seconds: 1800" in brief
+    assert "benchmark.max_runtime_seconds: 2400" in brief
+    assert "api_key" not in brief
+    assert "secret" not in brief
+    assert "private_note" not in brief
+    assert "do-not-show" not in brief
 
 
 def test_research_agent_registers_prior_artifact_context_tools(monkeypatch):

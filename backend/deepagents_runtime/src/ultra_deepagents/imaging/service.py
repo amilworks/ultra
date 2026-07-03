@@ -295,8 +295,10 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         return await runner.call("histogram", await _localize_pyramid_async(path), bins=bins)
 
     @app.get("/viewerinfo")
-    async def viewerinfo(path: str) -> dict[str, Any]:
-        return await runner.call("viewer_info", await _localize_pyramid_async(path))
+    async def viewerinfo(path: str, name: str | None = None) -> dict[str, Any]:
+        # ``name`` (the upload's original filename) lets HDF5-data files be detected
+        # when the on-disk blob path has lost its extension; harmless for images.
+        return await runner.call("viewer_info", await _localize_pyramid_async(path), name=name)
 
     @app.get("/video-poster")
     async def video_poster(path: str, t: float = 1.0, max_size: int = 512):
@@ -338,5 +340,97 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             "x-volume-channel": str(vol["channel"]),
         }
         return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+
+    # --- HDF5 data viewer -------------------------------------------------------
+    # These serve the frontend HDF5 explorer (frontend/src/components/viewer/hdf5).
+    # The Go control plane resolves file_id -> path + forwards dataset_path (+ the
+    # per-endpoint params). Response shapes are the frozen FE wire contract
+    # (frontend/src/types.ts Hdf5* types). An unknown dataset -> 404; a non-numeric/
+    # non-tabular/unsupported dataset -> 422 (via the ValueError handler above; the
+    # reader raises messages carrying an "unsupported" marker). Heavy reads run in the
+    # pool (runner.call), bounded + downsampled inside imaging/hdf5.py.
+    from ultra_deepagents.imaging.hdf5 import Hdf5DatasetNotFound
+
+    def _not_found(exc: Exception):
+        return JSONResponse(status_code=404, content={"error": "dataset not found", "detail": str(exc)})
+
+    @app.get("/hdf5/viewerinfo")
+    async def hdf5_viewerinfo(path: str, file_id: str = "", name: str = "") -> dict[str, Any]:
+        # Always builds the kind:"hdf5" payload (the Go gate calls this for uploads whose
+        # OriginalName is an HDF5-data extension); never raises on a corrupt file.
+        return await runner.call("hdf5_viewer_info", path, file_id=file_id, name=name)
+
+    @app.get("/hdf5/dataset")
+    async def hdf5_dataset(path: str, dataset_path: str, file_id: str = ""):
+        try:
+            return await runner.call("hdf5_dataset_summary", path, dataset_path, file_id=file_id)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/materials/dashboard")
+    async def hdf5_materials_dashboard(path: str, file_id: str = ""):
+        try:
+            return await runner.call("hdf5_materials_dashboard", path, file_id=file_id)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/preview/slice")
+    async def hdf5_slice(
+        path: str, dataset_path: str, axis: str = "z", index: int | None = None, component: int = 0,
+    ):
+        try:
+            png = await runner.call(
+                "hdf5_slice_png", path, dataset_path, axis=axis, index=index, component=component,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/hdf5/preview/atlas")
+    async def hdf5_atlas(
+        path: str, dataset_path: str, enhancement: str | None = None, fusion_method: str | None = None,
+        negative: str | None = None, channels: str | None = None,
+    ):
+        try:
+            png = await runner.call("hdf5_atlas_png", path, dataset_path)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/hdf5/preview/scalar-volume")
+    async def hdf5_scalar_volume(path: str, dataset_path: str, channel: int = 0):
+        try:
+            vol = await runner.call("hdf5_scalar_volume", path, dataset_path, channel=channel)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        headers = {
+            "x-volume-width": str(vol["width"]),
+            "x-volume-height": str(vol["height"]),
+            "x-volume-depth": str(vol["depth"]),
+            "x-volume-dtype": str(vol["dtype"]),
+            "x-volume-bytes-per-voxel": str(vol["bytes_per_voxel"]),
+            "x-volume-raw-min": str(float(vol["raw_min"])),
+            "x-volume-raw-max": str(float(vol["raw_max"])),
+            "x-volume-channel": str(vol["channel"]),
+        }
+        return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+
+    @app.get("/hdf5/preview/histogram")
+    async def hdf5_histogram(path: str, dataset_path: str, component: int = 0, bins: int = 24, file_id: str = ""):
+        try:
+            return await runner.call(
+                "hdf5_histogram", path, dataset_path, component=component, bins=bins, file_id=file_id,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/preview/table")
+    async def hdf5_table(path: str, dataset_path: str, offset: int = 0, limit: int = 12, file_id: str = ""):
+        try:
+            return await runner.call(
+                "hdf5_table", path, dataset_path, offset=offset, limit=limit, file_id=file_id,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
 
     return app

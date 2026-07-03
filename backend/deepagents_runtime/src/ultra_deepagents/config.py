@@ -58,6 +58,19 @@ class RuntimeSettings:
     # that let a stalled vision call wedge a worker for 1h43m).
     model_stream_idle_timeout_seconds: float = 3600.0
     model_stream_idle_max_recoveries: int = 2
+    # Within-turn progress-stall guard (the anti-livelock complement to the idle
+    # watchdog above, which is a dead-transport detector and by design never trips
+    # on a BUSY loop). Counts consecutive sandbox executes that repeat an
+    # already-seen command with UNCHANGED output; any novel command, changed
+    # output, workspace mutation, or completed delegation resets it, so genuinely
+    # progressing long runs — including edit-and-rerun debugging and output-moving
+    # polling — never trip it. On threshold the TURN (not the run) ends and a
+    # corrective prompt is injected, capped at max_recoveries, after which the run
+    # finalizes honestly with its partial results. A live run measured 80% repeated
+    # executes per window while livelocked vs ~25% when healthy; 12 sits well above
+    # any healthy monotone repeat streak we have observed. 0 disables.
+    progress_stall_threshold: int = 12
+    progress_stall_max_recoveries: int = 2
     # Per-delegated-task (task tool) HARD wall-clock budget for BOUNDED subagents only
     # (vision-reasoner, literature-reviewer — see DEADLINE_BOUNDED_SUBAGENTS). Distinct from the
     # idle watchdog above (which resets on every event and is run-level at 3600s): a bounded
@@ -91,8 +104,20 @@ class RuntimeSettings:
     # --limit-mm-per-prompt image count (4); exceeding it is a hard 400 from the server.
     qwen_vlm_max_images_per_call: int = 4
     # The Builder: a model-agnostic autonomous-coding sub-coordinator the coordinator
-    # delegates a GOAL to. Points at ANY OpenAI-compatible endpoint (swap models freely).
-    # Off by default; when base_url/model are unset it falls back to the coordinator's model.
+    # delegates a GOAL to. Points at ANY OpenAI-compatible endpoint (swap models freely);
+    # when base_url/model are unset it falls back to the coordinator's model.
+    #
+    # CLEANUP CANDIDATE (2026-07-01): briefly enabled-by-default after the 6.7M-token
+    # livelock trace, then DISABLED again after a live A/B on the same comp-bio task.
+    # The Builder worked as designed (coordinator context 2.09M -> 145K, one early
+    # delegation, 100% distinct commands) but concentrated ~92% of the run's tokens in
+    # its isolated context for little net gain — the within-turn progress-stall guard
+    # (progress_guard.py) is the actual anti-livelock fix and protects the plain
+    # coordinator + code-runner path on its own, without the Builder's overhead. The
+    # registration wiring (agent.py) and implementation (builder.py) are LEFT IN PLACE
+    # behind this flag; if it stays off, remove the Builder subagent, its delegation
+    # guidance, its ledger plumbing, and the builder_* settings below. Set
+    # ULTRA_DEEPAGENTS_BUILDER_ENABLED=1 to re-enable for another A/B.
     builder_enabled: bool = False
     builder_base_url: str = ""
     builder_model: str = ""
@@ -153,6 +178,7 @@ class RuntimeSettings:
     nats_stream: str = "ULTRA_RUNS"
     nats_jobs_subject: str = "ultra.runs.jobs"
     nats_events_subject: str = "ultra.runs.events"
+    nats_event_partitions: int = 64
     nats_cancel_subject: str = "ultra.runs.cancel"
     nats_worker_durable: str = "ultra-deepagents-worker"
     data_agent_nats_url: str = "nats://127.0.0.1:4222"
@@ -251,6 +277,14 @@ class RuntimeSettings:
             model_stream_idle_max_recoveries=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", "2")),
+            ),
+            progress_stall_threshold=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_THRESHOLD", "12")),
+            ),
+            progress_stall_max_recoveries=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_MAX_RECOVERIES", "2")),
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
             qwen_vlm_enabled=_env_bool("QWEN_VLM_ENABLED", False),
@@ -369,6 +403,18 @@ class RuntimeSettings:
             nats_events_subject=os.getenv(
                 "ULTRA_NATS_EVENTS_SUBJECT",
                 os.getenv("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
+            ),
+            nats_event_partitions=min(
+                256,
+                max(
+                    1,
+                    int(
+                        os.getenv(
+                            "ULTRA_NATS_EVENT_PARTITIONS",
+                            os.getenv("ULTRA_CONTROL_NATS_EVENT_PARTITIONS", "64"),
+                        )
+                    ),
+                ),
             ),
             nats_cancel_subject=os.getenv(
                 "ULTRA_NATS_CANCEL_SUBJECT",

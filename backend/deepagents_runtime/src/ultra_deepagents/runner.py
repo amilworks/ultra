@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import mimetypes
 import re
 import shutil
@@ -16,6 +17,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from ultra_deepagents.agent import (
+    attempt_ledger_path,
     build_research_agent,
     is_rigor_intelligence,
     looks_quantitative_rigor_goal,
@@ -24,6 +26,11 @@ from ultra_deepagents.agent import (
 )
 from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
 from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
+from ultra_deepagents.code_execution.progress import (
+    ExecuteProgressEvent,
+    reset_execute_progress_sink,
+    set_execute_progress_sink,
+)
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import stage_uploaded_files
@@ -36,6 +43,7 @@ from ultra_deepagents.events import (
     normalize_subagent_message_delta,
     normalize_token_usage,
     normalize_tool_call,
+    normalize_tool_call_progress,
 )
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.papers.tools import (
@@ -43,6 +51,11 @@ from ultra_deepagents.papers.tools import (
     ingest_pdf_file,
     normalize_arxiv_id,
     paper_id_from_pdf_path,
+)
+from ultra_deepagents.progress_guard import (
+    AttemptLedger,
+    ProgressStallDetector,
+    ProgressStallVerdict,
 )
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
@@ -52,6 +65,7 @@ from ultra_deepagents.title_generation import (
 )
 
 PublishEvent = Callable[[dict[str, Any]], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 ASYNC_TASK_TOOL_NAMES = {
     "start_async_task",
@@ -64,6 +78,19 @@ ASYNC_FAILURE_STATUSES = {"error", "failed", "failure", "timeout", "interrupted"
 
 
 class RunEventSequencer:
+    """Single per-run monotonic source_sequence allocator.
+
+    Every event a run emits — streamed model output AND worker-side lifecycle
+    events (heartbeats, completed/failed/canceled/skipped) — must draw its
+    sequence from ONE of these so the control plane's per-run source_sequence
+    stays gapless and collision-free. Two separate counters would eventually
+    assign the same number to two different events, which the control plane's
+    UNIQUE(run_id, source_sequence) index rejects (and, under the strict
+    partition consumer, wedges ingest). ``next_sequence`` is safe to call from
+    concurrent coroutines because it never awaits: asyncio runs it to
+    completion atomically on the single event-loop thread.
+    """
+
     def __init__(self, run_id: str, *, start: int = 0) -> None:
         self.run_id = run_id
         # On resume the worker seeds ``start`` above the run's already-persisted
@@ -71,12 +98,117 @@ class RunEventSequencer:
         # against) the original partial run's events.
         self.sequence = max(0, int(start))
 
-    def stamp(self, event: dict[str, Any]) -> dict[str, Any]:
+    def next_sequence(self) -> int:
         self.sequence += 1
+        return self.sequence
+
+    def stamp(self, event: dict[str, Any]) -> dict[str, Any]:
+        seq = self.next_sequence()
         stamped = dict(event)
-        stamped.setdefault("sequence", self.sequence)
-        stamped.setdefault("event_id", f"evt_{self.run_id}_{self.sequence:06d}")
+        stamped.setdefault("sequence", seq)
+        stamped.setdefault("event_id", f"evt_{self.run_id}_{seq:06d}")
         return stamped
+
+
+class ExecuteProgressEventStreamer:
+    """Publishes sandbox stdout/stderr progress from execute worker threads.
+
+    Docker execution runs below LangGraph's tool stream, usually inside
+    ``asyncio.to_thread``. The backend can see partial stdout before the tool
+    completes, but durable run events must still be stamped and published on the
+    event loop that owns the run sequencer.
+    """
+
+    def __init__(self, *, context: Any, sequencer: RunEventSequencer, publish_event: PublishEvent) -> None:
+        self._context = context
+        self._sequencer = sequencer
+        self._publish_event = publish_event
+        self._loop = asyncio.get_running_loop()
+        self._closed = False
+        self._active_execute_payload: dict[str, Any] | None = None
+
+    def emit_sync(self, progress: ExecuteProgressEvent) -> None:
+        if self._closed:
+            return
+        future = asyncio.run_coroutine_threadsafe(self._publish(progress), self._loop)
+        try:
+            future.result(timeout=2)
+        except Exception:
+            logger.warning(
+                "Execute progress publish failed; continuing run without progress event.",
+                extra={"run_id": getattr(self._context, "run_id", "")},
+                exc_info=True,
+            )
+
+    async def aclose(self) -> None:
+        self._closed = True
+
+    def bind_tool_event(self, tool_event: dict[str, Any]) -> None:
+        payload = tool_event.get("payload")
+        if not isinstance(payload, dict):
+            return
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name != "execute":
+            return
+        status = str(payload.get("status") or "").strip().lower()
+        if status == "started":
+            self._active_execute_payload = {
+                "tool_call_id": payload.get("tool_call_id"),
+                "task_id": tool_event.get("task_id"),
+                "scope_id": tool_event.get("scope_id"),
+                "agent_role": tool_event.get("agent_role"),
+            }
+        elif status in {"completed", "failed", "error"}:
+            self._active_execute_payload = None
+
+    async def _publish(self, progress: ExecuteProgressEvent) -> None:
+        active_payload = self._active_execute_payload
+        if not active_payload:
+            return
+        payload = _execute_progress_payload(progress)
+        if active_payload.get("tool_call_id"):
+            payload["tool_call_id"] = active_payload["tool_call_id"]
+        event = normalize_tool_call_progress(self._context, payload)
+        if active_payload.get("task_id"):
+            event["task_id"] = active_payload["task_id"]
+        if active_payload.get("scope_id"):
+            event["scope_id"] = active_payload["scope_id"]
+        if active_payload.get("agent_role"):
+            event["agent_role"] = active_payload["agent_role"]
+        stamped = self._sequencer.stamp(event)
+        allocated_sequence = stamped.get("sequence")
+        try:
+            await self._publish_event(stamped)
+        except Exception:
+            if (
+                isinstance(allocated_sequence, int)
+                and self._sequencer.sequence == allocated_sequence
+            ):
+                self._sequencer.sequence = allocated_sequence - 1
+            raise
+
+
+async def _close_execute_progress_context(
+    streamer: ExecuteProgressEventStreamer,
+    token: Any,
+) -> None:
+    reset_execute_progress_sink(token)
+    await streamer.aclose()
+
+
+def _execute_progress_payload(progress: ExecuteProgressEvent) -> dict[str, Any]:
+    command_hash = hashlib.sha256(progress.command.encode("utf-8")).hexdigest()
+    return {
+        "command_preview": _payload_preview_text(progress.command),
+        "command_hash": f"sha256:{command_hash}",
+        "progress_kind": "output",
+        "stream": progress.stream,
+        "text": progress.text,
+        "elapsed_seconds": round(float(progress.elapsed_seconds), 3),
+        "output_size_chars": int(progress.output_size_chars),
+        "progress_index": int(progress.progress_index),
+        "suppressed_line_count": int(progress.suppressed_line_count),
+    }
 
 
 def _empty_token_usage() -> dict[str, int]:
@@ -100,6 +232,25 @@ class AgentStreamIdleTimeoutError(TimeoutError):
             "while waiting for the model."
         )
         self.timeout_seconds = timeout_seconds
+
+
+class AgentProgressStalledError(RuntimeError):
+    """Within-turn livelock: consecutive sandbox executes repeated already-seen
+    commands with unchanged output (see progress_guard). Carries the partial
+    attempt result so the recovery arm keeps everything produced so far — the
+    guard ends the TURN, never the run."""
+
+    def __init__(
+        self,
+        verdict: ProgressStallVerdict,
+        partial_result: AgentAttemptResult,
+    ) -> None:
+        super().__init__(
+            f"Deep Agents turn stalled: {verdict.stall_count} consecutive sandbox "
+            "executions repeated earlier commands with unchanged output."
+        )
+        self.verdict = verdict
+        self.partial_result = partial_result
 
 
 def _extract_arxiv_references(*, goal: str, messages: list[dict[str, Any]]) -> list[str]:
@@ -291,6 +442,7 @@ async def run_job(
     title_model_factory: Callable[[RuntimeSettings], Any] | None = None,
     checkpointer: Any | None = None,
     sequence_floor: int = 0,
+    sequencer: RunEventSequencer | None = None,
     user_profile: dict[str, Any] | None = None,
     prior_usage: dict[str, Any] | None = None,
 ) -> str:
@@ -313,7 +465,11 @@ async def run_job(
         artifact_root=str(artifact_dir),
         workspace_root=str(workspace_dir),
     )
-    sequencer = RunEventSequencer(context.run_id, start=sequence_floor)
+    # Reuse the worker-owned sequencer when provided so worker lifecycle events
+    # (heartbeats, terminal events) and streamed events share one counter; only
+    # fall back to a local one when run_job is driven directly (e.g. tests).
+    if sequencer is None:
+        sequencer = RunEventSequencer(context.run_id, start=sequence_floor)
     _write_workspace_lease(context, status="running")
     # Mirror the user's self-described profile into app-owned durable memory.
     # Best-effort: never fail a run because profile seeding could not write.
@@ -412,10 +568,20 @@ async def run_job(
         )
         completion_continuations_used = 0
         model_stream_recoveries_used = 0
+        progress_stall_recoveries_used = 0
+        previous_missing_kinds: set[str] | None = None
+        previous_artifact_signature: frozenset[tuple[str, str]] | None = None
         run_usage = _usage_from_prior_payload(prior_usage)
         run_usage_model = _first_nonempty_string(
             prior_usage.get("model") if isinstance(prior_usage, dict) else ""
         )
+        # Within-turn anti-livelock guard + durable attempt ledger (progress_guard).
+        # Job-scoped on purpose: seen-command/output state carries across recovery
+        # attempts, so a model that ignores the corrective prompt and resumes the
+        # same churn re-trips the guard after one fresh window, bounded overall by
+        # progress_stall_max_recoveries.
+        progress_detector = ProgressStallDetector(settings.progress_stall_threshold)
+        attempt_ledger = AttemptLedger(attempt_ledger_path(workspace_dir))
 
         while True:
             try:
@@ -429,6 +595,8 @@ async def run_job(
                     langgraph_recursion_limit=settings.langgraph_recursion_limit,
                     run_config=run_config,
                     resume_from_checkpoint=resume_from_checkpoint,
+                    progress_detector=progress_detector,
+                    attempt_ledger=attempt_ledger,
                 )
                 # Only the first attempt of a redelivered run resumes from the
                 # checkpoint; continuation passes feed fresh messages.
@@ -477,6 +645,84 @@ async def run_job(
                     messages.append({"role": "assistant", "content": current_response_text})
                 messages.append({"role": "user", "content": recovery_prompt})
                 continue
+            except AgentProgressStalledError as exc:
+                # Within-turn livelock (progress_guard): the model kept re-running
+                # already-seen commands whose output never changed. End the TURN with
+                # everything produced so far and either re-prompt (capped) or fall
+                # through to finalize honestly with the partial results — never fail
+                # the run for stalling.
+                attempt_result = exc.partial_result
+                resume_from_checkpoint = False
+                artifact_events = _collect_output_artifacts(
+                    context,
+                    workspace_dir,
+                    artifact_dir,
+                    reference_text=_artifact_reference_text(attempt_result, workspace_dir),
+                )
+                exhausted = (
+                    progress_stall_recoveries_used >= settings.progress_stall_max_recoveries
+                )
+                stall_notice = (
+                    _progress_stall_exhausted_notice(exc.verdict)
+                    if exhausted
+                    else _progress_stall_recovery_prompt(
+                        verdict=exc.verdict,
+                        artifact_events=artifact_events,
+                    )
+                )
+                await publish_event(
+                    sequencer.stamp(
+                        RunEvent(
+                            run_id=context.run_id,
+                            thread_id=context.thread_id,
+                            event_kind="trace.message.delta",
+                            event_type="trace",
+                            node_name="progress_stall_recovery",
+                            agent_role="progress_stall_recovery",
+                            level="warning",
+                            message=stall_notice,
+                            payload={
+                                "text": stall_notice,
+                                "reason": "progress_stall",
+                                "recovery_index": progress_stall_recoveries_used + 1,
+                                "recoveries_exhausted": exhausted,
+                                "stall_count": exc.verdict.stall_count,
+                                "scope": exc.verdict.scope,
+                                "repeated_commands": [
+                                    {"command": command, "repeats": repeats}
+                                    for command, repeats in exc.verdict.repeated_commands
+                                ],
+                            },
+                        ).to_dict()
+                    )
+                )
+                if exhausted:
+                    # Fall through: the code below folds this attempt's usage once,
+                    # collects artifacts, and runs the (bounded) completion guard so
+                    # the run still delivers what exists.
+                    pass
+                else:
+                    progress_stall_recoveries_used += 1
+                    # This attempt never reaches the fold below - account for it here.
+                    run_usage["input_tokens"] += int(attempt_result.usage.get("input_tokens", 0))
+                    run_usage["output_tokens"] += int(
+                        attempt_result.usage.get("output_tokens", 0)
+                    )
+                    run_usage["total_tokens"] += int(attempt_result.usage.get("total_tokens", 0))
+                    if attempt_result.model and not run_usage_model:
+                        run_usage_model = attempt_result.model
+                    current_response_text = _choose_response_text(
+                        final_response_text=attempt_result.final_response_text,
+                        streamed_response_text=attempt_result.streamed_response_text,
+                        post_tool_streamed_response_text=(
+                            attempt_result.post_tool_streamed_response_text
+                        ),
+                        artifact_events=artifact_events,
+                    )
+                    if current_response_text.strip():
+                        messages.append({"role": "assistant", "content": current_response_text})
+                    messages.append({"role": "user", "content": stall_notice})
+                    continue
 
             # Fold this attempt's token usage into the run-level total so the
             # terminal event reports the full spend across continuations.
@@ -505,6 +751,22 @@ async def run_job(
             ]
             if not missing_kinds or completion_continuations_used >= settings.completion_max_continuations:
                 break
+
+            # No-progress guard: if this continuation could not change the set of
+            # missing deliverables AND produced no new/changed artifact, re-prompting
+            # again cannot help — the model has already done what it can (e.g. it saved
+            # the plots but the presence check does not recognize the format). Stop
+            # rather than burn continuations re-sending an ever-growing context to
+            # re-issue an unsatisfiable demand (the PDF-figure completion-loop bug).
+            artifact_signature = _artifact_signature(artifact_events)
+            if (
+                previous_missing_kinds is not None
+                and set(missing_kinds) == previous_missing_kinds
+                and artifact_signature == previous_artifact_signature
+            ):
+                break
+            previous_missing_kinds = set(missing_kinds)
+            previous_artifact_signature = artifact_signature
 
             current_response_text = _choose_response_text(
                 final_response_text=attempt_result.final_response_text,
@@ -628,6 +890,8 @@ async def _stream_agent_attempt(
     langgraph_recursion_limit: int = 1000,
     run_config: dict[str, Any] | None = None,
     resume_from_checkpoint: bool = False,
+    progress_detector: ProgressStallDetector | None = None,
+    attempt_ledger: AttemptLedger | None = None,
 ) -> AgentAttemptResult:
     response_parts: list[str] = []
     post_tool_response_parts: list[str] = []
@@ -671,6 +935,12 @@ async def _stream_agent_attempt(
     delegation_evidence: dict[str, int] = {}
     usage_index = 0
     stream_iter = stream.__aiter__()
+    execute_progress_streamer = ExecuteProgressEventStreamer(
+        context=context,
+        sequencer=sequencer,
+        publish_event=publish_event,
+    )
+    execute_progress_token = set_execute_progress_sink(execute_progress_streamer.emit_sync)
     while True:
         try:
             # The idle watchdog must fire REGARDLESS of active_tool_calls. The previous
@@ -687,6 +957,13 @@ async def _stream_agent_attempt(
                         timeout=model_stream_idle_timeout_seconds,
                     )
                 except TimeoutError as exc:
+                    # Flush pending coalesced reasoning deltas so nothing streamed
+                    # before the stall is lost to the recovery arm.
+                    await reasoning_streamer.aclose()
+                    await _close_execute_progress_context(
+                        execute_progress_streamer,
+                        execute_progress_token,
+                    )
                     raise AgentStreamIdleTimeoutError(model_stream_idle_timeout_seconds) from exc
             else:
                 event = await stream_iter.__anext__()
@@ -738,9 +1015,48 @@ async def _stream_agent_attempt(
             tool_event = _annotate_task_delegation_failure(tool_event)
             _track_delegation_evidence(delegation_evidence, tool_event)
             await publish_event(sequencer.stamp(tool_event))
+            execute_progress_streamer.bind_tool_event(tool_event)
             _track_active_tool_call(active_tool_calls, tool_event)
             saw_tool_event = True
             post_tool_response_parts = []
+            if progress_detector is not None:
+                observation = progress_detector.observe(tool_event)
+                if observation is not None:
+                    if attempt_ledger is not None and (
+                        observation.stagnant_repeat or observation.error_preview
+                    ):
+                        attempt_ledger.record(
+                            scope=observation.scope,
+                            command_preview=observation.command_preview,
+                            kind=(
+                                "stagnant_repeat"
+                                if observation.stagnant_repeat
+                                else "error"
+                            ),
+                            detail=observation.error_preview,
+                        )
+                    if observation.verdict is not None:
+                        # Busy livelock: end the turn with everything produced so
+                        # far. Flush pending reasoning deltas first so the trace
+                        # stays ordered ahead of the recovery-arm warning event.
+                        await reasoning_streamer.aclose()
+                        await _close_execute_progress_context(
+                            execute_progress_streamer,
+                            execute_progress_token,
+                        )
+                        raise AgentProgressStalledError(
+                            observation.verdict,
+                            AgentAttemptResult(
+                                final_response_text=_response_text_from_final_state(
+                                    final_state
+                                ),
+                                streamed_response_text="".join(response_parts),
+                                post_tool_streamed_response_text="",
+                                usage=attempt_usage,
+                                model=attempt_model,
+                                delegation=delegation_evidence,
+                            ),
+                        )
             continue
         subagent_event = _subagent_message_event_from_stream_event(
             context,
@@ -767,6 +1083,10 @@ async def _stream_agent_attempt(
         post_tool_response_parts.append(text)
         await publish_event(sequencer.stamp(normalize_message_delta(context, text)))
 
+    await _close_execute_progress_context(
+        execute_progress_streamer,
+        execute_progress_token,
+    )
     await reasoning_streamer.aclose()
     return AgentAttemptResult(
         final_response_text=_response_text_from_final_state(final_state),
@@ -953,6 +1273,14 @@ _REPORT_SUFFIXES = {".md", ".txt", ".pdf", ".html"}
 _MODEL_SUFFIXES = {".pt", ".pth", ".ckpt", ".safetensors", ".onnx"}
 _MINIMUM_FIGURE_PPI = 300
 _DPI_CAPABLE_FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+# Vector graphics are figures too. .svg/.eps are unambiguous plots; a .pdf is
+# ambiguous (a matplotlib savefig OR a written report/memo), so it only counts as
+# a figure when the path itself looks plot-like — otherwise it stays a "report".
+# Without this, a run that saves its plots as PDF (common for publication-quality
+# vector output) has zero "figure" artifacts, so a requested "figure" is deemed
+# perpetually missing and the completion guard re-prompts until it hits the cap.
+_VECTOR_FIGURE_SUFFIXES = {".svg", ".eps"}
+_FIGURE_PATH_HINTS = ("fig", "plot", "chart", "diagram", "panel")
 _MIME_TYPES_BY_SUFFIX = {
     ".md": "text/markdown",
     ".txt": "text/plain",
@@ -1201,6 +1529,19 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _looks_like_figure_path(path: Path) -> bool:
+    """A .pdf/.svg saved plot vs a written report — decide by the path.
+
+    A matplotlib ``savefig("figures/fig3.pdf")`` is a figure; ``report.pdf`` or
+    ``research_memo.pdf`` is not. Match a figure-ish filename hint or a plot
+    directory so the disambiguation does not depend on MIME type alone.
+    """
+    name = path.name.lower()
+    if any(hint in name for hint in _FIGURE_PATH_HINTS):
+        return True
+    return any(part.lower() in ("figure", "figures", "figs", "plots") for part in path.parts)
+
+
 def _artifact_kind(path: Path, mime_type: str) -> str:
     suffix = path.suffix
     suffix_lower = suffix.lower()
@@ -1212,6 +1553,12 @@ def _artifact_kind(path: Path, mime_type: str) -> str:
         return "model"
     if suffix_lower in _TABLE_SUFFIXES:
         return "table"
+    # Vector graphics count as figures. .svg/.eps are unambiguous; a .pdf is a
+    # figure only when the path looks plot-like, so a report/memo PDF stays a report.
+    if suffix_lower in _VECTOR_FIGURE_SUFFIXES:
+        return "figure"
+    if suffix_lower == ".pdf" and _looks_like_figure_path(path):
+        return "figure"
     if suffix_lower in _REPORT_SUFFIXES:
         return "report"
     return "artifact"
@@ -1762,6 +2109,26 @@ def _present_artifact_kinds(artifact_events: list[dict[str, Any]]) -> set[str]:
     return present
 
 
+def _artifact_signature(
+    artifact_events: list[dict[str, Any]],
+) -> frozenset[tuple[str, str]]:
+    """Stable (path, kind) fingerprint of the produced artifacts.
+
+    Used by the completion guard to detect a no-progress continuation — same
+    missing kinds AND same artifacts as the prior round means re-prompting cannot
+    help, so it stops instead of looping to ``completion_max_continuations``.
+    """
+    signature: set[tuple[str, str]] = set()
+    for event in artifact_events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        path = str(payload.get("path") or payload.get("relative_path") or "")
+        kind = str(payload.get("kind") or "")
+        signature.add((path, kind))
+    return frozenset(signature)
+
+
 def _completion_continuation_prompt(
     *,
     missing_kinds: list[str],
@@ -1853,12 +2220,58 @@ def _model_stream_idle_recovery_prompt(
     return (
         "The previous Deep Agents model stream went idle after "
         f"{timeout_seconds:g}s with no new events while no tool call was active. "
-        "Continue autonomously in the same workspace. Inspect existing files or "
-        "outputs if needed, do not repeat completed tool work unless verification "
-        "shows it is necessary, and either finish the requested final answer or "
-        "continue the next missing step.\n"
+        "Continue autonomously in the same workspace. Read the existing files and "
+        "logs first — do NOT re-run a step whose output already exists. If an output "
+        "exists but is empty or invalid, treat that as a KNOWN failure to diagnose "
+        "differently: read its error/log, form a new hypothesis, and change your "
+        "approach — do not blindly re-run the command that produced it. For a "
+        "multi-step rebuild or debug loop, delegate the whole loop to a coding "
+        "subagent (task tool) with a concrete, checkable done-when rather than "
+        "re-running steps inline. Then either continue the next genuinely-new step "
+        "or, if no further distinct approach remains, finalize the requested answer "
+        "honestly with the current results and state clearly what did not converge.\n"
         "Current durable outputs detected:\n"
         f"{current_outputs_text}"
+    )
+
+
+def _progress_stall_recovery_prompt(
+    *,
+    verdict: ProgressStallVerdict,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    current_outputs = _current_output_summary(artifact_events)
+    current_outputs_text = "\n".join(current_outputs) if current_outputs else "- none yet"
+    scope_clause = f" (in {verdict.scope})" if verdict.scope else ""
+    repeated_lines = "\n".join(
+        f"- {repeats}x: {command}" for command, repeats in verdict.repeated_commands
+    ) or "- (commands unavailable)"
+    return (
+        f"Progress stall detected{scope_clause}: the last {verdict.stall_count} sandbox "
+        "executions repeated earlier commands whose output did not change. Repeated most:\n"
+        f"{repeated_lines}\n"
+        "Stop re-running these. Choose ONE different path now:\n"
+        "1. Diagnose differently - read the failing output/logs on disk, form a NEW "
+        "hypothesis, and CHANGE the code or inputs before any re-run.\n"
+        "2. If waiting on something, replace repeated polling with a single blocking "
+        "command that has a timeout.\n"
+        "3. Delegate the remaining build/debug loop to the builder subagent via task() "
+        "with a precise, checkable done-when.\n"
+        "4. If no further distinct approach remains, finalize the requested answer "
+        "honestly with the current results and state clearly what did not converge and why.\n"
+        "Do not re-run any repeated command unless you changed the code, inputs, or "
+        "environment first.\n"
+        "Current durable outputs detected:\n"
+        f"{current_outputs_text}"
+    )
+
+
+def _progress_stall_exhausted_notice(verdict: ProgressStallVerdict) -> str:
+    scope_clause = f" (in {verdict.scope})" if verdict.scope else ""
+    return (
+        f"Progress-stall guard{scope_clause}: corrective re-prompts are exhausted after "
+        "repeated non-progressing sandbox executions. Ending the working loop and "
+        "finalizing the run honestly with the results produced so far."
     )
 
 

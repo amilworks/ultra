@@ -116,3 +116,138 @@ def test_unexpected_value_error_still_500():
     with TestClient(app, raise_server_exceptions=False) as c:
         r = c.get("/thumbnail", params={"path": "/x.tif", "max_size": 512})
         assert r.status_code == 500
+
+
+# --- HDF5 data viewer routes -------------------------------------------------
+# Driven end-to-end through the StubEngine, whose hdf5_* ops read a REAL synthetic
+# file with h5py (the reader is engine-independent). Gated on h5py.
+
+h5py = pytest.importorskip("h5py")
+
+
+@pytest.fixture()
+def hdf5_path(tmp_path):
+    import numpy as np
+
+    path = str(tmp_path / "sample.h5")
+    rng = np.random.default_rng(7)
+    with h5py.File(path, "w") as f:
+        vol = f.create_group("volume")
+        vol.create_dataset("ct", data=(rng.random((12, 24, 30)) * 4000).astype("int16"))
+        vol.create_dataset("labels", data=rng.integers(0, 4, (12, 24, 30)).astype("uint8"))
+        f.create_dataset("series", data=rng.random(120).astype("float64"))
+    return path
+
+
+@pytest.fixture()
+def dream3d_path(tmp_path):
+    import numpy as np
+
+    path = str(tmp_path / "synthetic.dream3d")
+    rng = np.random.default_rng(8)
+    with h5py.File(path, "w") as f:
+        f.attrs["DREAM3D Version"] = "6.5.0"
+        cell = f.create_group("DataContainers").create_group("Vol").create_group("CellData")
+        cell.create_dataset("FeatureIds", data=rng.integers(0, 20, (10, 20, 25, 1)).astype("i4"))
+        cell.create_dataset("IPFColors", data=rng.integers(0, 255, (10, 20, 25, 3)).astype("u1"))
+    return path
+
+
+def test_hdf5_viewerinfo_route(client, hdf5_path):
+    r = client.get("/hdf5/viewerinfo", params={"path": hdf5_path, "file_id": "fid", "name": "sample.h5"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["kind"] == "hdf5"
+    assert body["hdf5"]["supported"] is True
+    assert "/volume/ct" in _all_paths(body["hdf5"]["tree"])
+
+
+def test_plain_viewerinfo_detects_hdf5_by_path_extension(client, hdf5_path):
+    # The generic /viewerinfo endpoint forks to the hdf5 payload when the path (or the
+    # optional name hint) is an HDF5-data file, so no image pipeline touches it.
+    r = client.get("/viewerinfo", params={"path": hdf5_path})
+    assert r.status_code == 200
+    assert r.json()["kind"] == "hdf5"
+
+
+def test_hdf5_dataset_route(client, hdf5_path):
+    r = client.get("/hdf5/dataset", params={"path": hdf5_path, "dataset_path": "/volume/ct", "file_id": "fid"})
+    assert r.status_code == 200
+    s = r.json()
+    assert s["preview_kind"] == "scalar_volume"
+    assert s["dimension_summary"] == {"z": 12, "y": 24, "x": 30}
+
+
+def test_hdf5_dataset_unknown_is_404(client, hdf5_path):
+    r = client.get("/hdf5/dataset", params={"path": hdf5_path, "dataset_path": "/nope"})
+    assert r.status_code == 404
+    assert "error" in r.json()
+
+
+def test_hdf5_slice_png(client, hdf5_path):
+    r = client.get("/hdf5/preview/slice", params={"path": hdf5_path, "dataset_path": "/volume/ct", "axis": "z", "index": 3})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_hdf5_slice_bad_index_type_is_422(client, hdf5_path):
+    # FastAPI query validation: a non-int index → 422 automatically.
+    r = client.get("/hdf5/preview/slice", params={"path": hdf5_path, "dataset_path": "/volume/ct", "index": "abc"})
+    assert r.status_code == 422
+
+
+def test_hdf5_atlas_png(client, hdf5_path):
+    r = client.get("/hdf5/preview/atlas", params={"path": hdf5_path, "dataset_path": "/volume/labels"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_hdf5_scalar_volume_headers(client, hdf5_path):
+    r = client.get("/hdf5/preview/scalar-volume", params={"path": hdf5_path, "dataset_path": "/volume/ct"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["x-volume-dtype"] == "float32"
+    w = int(r.headers["x-volume-width"]); h = int(r.headers["x-volume-height"]); d = int(r.headers["x-volume-depth"])
+    assert (w, h, d) == (30, 24, 12)
+    assert len(r.content) == w * h * d * 4
+    assert float(r.headers["x-volume-raw-max"]) > float(r.headers["x-volume-raw-min"])
+
+
+def test_hdf5_histogram_route(client, hdf5_path):
+    r = client.get("/hdf5/preview/histogram", params={"path": hdf5_path, "dataset_path": "/volume/ct", "bins": 24})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["discrete"] is False
+    assert len(body["bins"]) == 24
+
+
+def test_hdf5_table_route(client, hdf5_path):
+    r = client.get("/hdf5/preview/table", params={"path": hdf5_path, "dataset_path": "/series", "offset": 0, "limit": 5})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["preview_kind"] == "series"
+    assert body["offset"] == 0 and body["limit"] == 5
+    assert len(body["rows"]) == 5
+
+
+def test_hdf5_materials_dashboard_route(client, dream3d_path):
+    r = client.get("/hdf5/materials/dashboard", params={"path": dream3d_path, "file_id": "fid"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["schema"] == "dream3d"
+    assert any(m["dataset_path"].endswith("/IPFColors") for m in body["maps"])
+
+
+def test_hdf5_materials_dashboard_non_dream3d_is_404(client, hdf5_path):
+    r = client.get("/hdf5/materials/dashboard", params={"path": hdf5_path})
+    assert r.status_code == 404
+
+
+def _all_paths(tree):
+    out = []
+    for node in tree:
+        out.append(node["path"])
+        out.extend(_all_paths(node["children"]))
+    return out

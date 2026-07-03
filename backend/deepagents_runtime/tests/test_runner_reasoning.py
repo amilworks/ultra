@@ -6,9 +6,14 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
+from ultra_deepagents.code_execution.progress import ExecuteProgressEvent
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
-from ultra_deepagents.runner import RunEventSequencer, _stream_agent_attempt
+from ultra_deepagents.runner import (
+    ExecuteProgressEventStreamer,
+    RunEventSequencer,
+    _stream_agent_attempt,
+)
 
 
 def _context() -> AgentRunContext:
@@ -171,6 +176,60 @@ def test_streamer_swallows_publish_failures():
     asyncio.run(scenario())
 
     assert events_seen == 1
+
+
+def test_execute_progress_streamer_publishes_threaded_tool_progress():
+    published: list[dict[str, Any]] = []
+
+    async def publish_event(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    async def scenario() -> None:
+        streamer = ExecuteProgressEventStreamer(
+            context=_context(),
+            sequencer=RunEventSequencer("run_reasoning_test"),
+            publish_event=publish_event,
+        )
+        streamer.bind_tool_event(
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "execute",
+                    "status": "started",
+                    "tool_call_id": "call-exec-1",
+                },
+                "agent_role": "builder",
+                "scope_id": "builder:execute",
+            }
+        )
+        await asyncio.to_thread(
+            streamer.emit_sync,
+            ExecuteProgressEvent(
+                command="python run_full_experiment.py",
+                stream="stdout",
+                text="[17/192] condition ok",
+                elapsed_seconds=42.5,
+                output_size_chars=2048,
+                progress_index=3,
+                suppressed_line_count=2,
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    assert [event["event_kind"] for event in published] == ["tool_call.progress"]
+    event = published[0]
+    assert event["sequence"] == 1
+    assert event["payload"]["tool_name"] == "execute"
+    assert event["payload"]["status"] == "progress"
+    assert event["payload"]["tool_call_id"] == "call-exec-1"
+    assert event["payload"]["text"] == "[17/192] condition ok"
+    assert event["payload"]["stream"] == "stdout"
+    assert event["payload"]["command_preview"] == "python run_full_experiment.py"
+    assert event["payload"]["progress_index"] == 3
+    assert event["payload"]["suppressed_line_count"] == 2
+    assert event["agent_role"] == "builder"
+    assert event["scope_id"] == "builder:execute"
 
 
 class CallbackDrivingAgent:

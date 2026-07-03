@@ -216,7 +216,7 @@ body {
   content: "";
   position: absolute;
   inset: 0;
-  background-image: var(--auth-login-hero-image, url("/login-hero.png"));
+  background-image: var(--auth-login-hero-image, url("/login-hero.webp"));
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;

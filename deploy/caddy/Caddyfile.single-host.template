@@ -31,10 +31,25 @@ ${ULTRA_PUBLIC_HOST} {
     }
 
     # SPA: static files with history-API fallback (the app has no client router).
+    # Caching contract: hashed /assets/* are immutable forever; index.html (and
+    # any SPA-route fallback to it) is no-cache so a deploy takes effect on the
+    # next navigation (etag revalidation = cheap 304) — this also closes the
+    # stale-index → 404'd-hashed-assets white-page window after a release swap.
+    # Stable public files (hero/bg images, favicon) get 7 days.
+    # `precompressed` serves build-time .br/.zst/.gz sidecars with a real
+    # Content-Length (falls back to on-the-fly `encode` when absent).
     handle {
         root * /srv/ultra/frontend-current
+        @assets path /assets/*
+        header @assets Cache-Control "public, max-age=31536000, immutable"
+        @staticfiles path *.webp *.png *.svg *.ico *.woff2
+        header @staticfiles Cache-Control "public, max-age=604800"
+        @appshell not path /assets/* *.webp *.png *.svg *.ico *.woff2
+        header @appshell Cache-Control "no-cache"
         try_files {path} /index.html
-        file_server
+        file_server {
+            precompressed br zstd gzip
+        }
     }
 }
 

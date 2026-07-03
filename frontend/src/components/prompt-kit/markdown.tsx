@@ -104,7 +104,7 @@ type BisqueLinkMeta = {
   resourceId: string | null;
 };
 
-const BISQUE_LINK_FALLBACK_IMAGE_URL = "/bq-bg8.png";
+const BISQUE_LINK_FALLBACK_IMAGE_URL = "/bq-bg8.webp";
 
 const decodeSafe = (value: string): string => {
   try {

@@ -11,11 +11,14 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import nats
 import pytest
+import ultra_deepagents.data_agent.worker as data_agent_worker_module
+from nats.js.api import AckPolicy
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.data_agent.worker import (
     TERMINAL_DATA_AGENT_JOB_STATUSES,
@@ -25,6 +28,7 @@ from ultra_deepagents.data_agent.worker import (
     DefaultDataAgentProcessor,
     NATSDataAgentWorker,
     acquire_control_plane_data_agent_job_lease,
+    append_control_plane_data_agent_job_event,
     build_data_agent_consumer_config,
     data_agent_ack_extension_interval,
     fetch_control_plane_data_agent_job_status,
@@ -174,6 +178,23 @@ def test_data_agent_consumer_config_uses_control_plane_subject_and_durable():
     assert data_agent_ack_extension_interval(settings) == 60.0
 
 
+def test_data_agent_consumer_config_match_rejects_non_explicit_ack_policy():
+    settings = _settings(
+        data_agent_nats_jobs_subject="ultra.data_agent.jobs",
+        data_agent_nats_worker_durable="ultra-data-agent-worker",
+    )
+    desired = build_data_agent_consumer_config(settings)
+    existing = SimpleNamespace(
+        filter_subject=desired.filter_subject,
+        ack_wait=desired.ack_wait,
+        max_deliver=desired.max_deliver,
+        max_ack_pending=desired.max_ack_pending,
+        ack_policy=AckPolicy.NONE,
+    )
+
+    assert not data_agent_worker_module._data_agent_consumer_config_matches(existing, desired)
+
+
 def test_data_agent_control_plane_helpers_send_owner_headers(monkeypatch):
     captured: list[dict[str, object]] = []
 
@@ -209,7 +230,11 @@ def test_data_agent_control_plane_helpers_send_owner_headers(monkeypatch):
         )
 
     monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
-    settings = _settings(control_status_timeout_seconds=3.0, data_agent_control_lease_ttl_seconds=120.0)
+    settings = _settings(
+        control_status_timeout_seconds=3.0,
+        control_worker_token="data-agent-worker-secret",
+        data_agent_control_lease_ttl_seconds=120.0,
+    )
     job = DataAgentJobEnvelope.from_dict(_job_payload())
 
     lease = asyncio.run(acquire_control_plane_data_agent_job_lease(job, settings))
@@ -225,22 +250,40 @@ def test_data_agent_control_plane_helpers_send_owner_headers(monkeypatch):
             event_metadata={"stage": "metadata"},
         )
     )
+    asyncio.run(
+        append_control_plane_data_agent_job_event(
+            job,
+            settings,
+            event_id="data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status",
+            event_type="data_agent.job.skipped",
+            message="Data Agent job delivery skipped before worker lease.",
+            metadata={"stage": "initial_status_check", "control_status": "succeeded"},
+        )
+    )
     asyncio.run(release_control_plane_data_agent_job_lease(renewed, settings, job=job))
 
     assert lease.lease_token == "lease-token-1"
     assert renewed.lease_token == "lease-token-1"
-    assert [call["method"] for call in captured] == ["POST", "PATCH", "PATCH", "DELETE"]
+    assert [call["method"] for call in captured] == ["POST", "PATCH", "PATCH", "POST", "DELETE"]
     assert captured[0]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/lease"
     assert captured[2]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/status"
+    assert captured[3]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/events"
     for call in captured:
         assert call["headers"]["X-ultra-user-id"] == "agent-user"
         assert call["headers"]["X-ultra-org-id"] == "agent-org"
+        assert call["headers"]["X-ultra-worker-token"] == "data-agent-worker-secret"
     assert captured[0]["payload"] == {"worker_id": "data-agent-worker-a", "ttl_seconds": 120.0}
     assert captured[1]["payload"] == {"lease_token": "lease-token-1", "ttl_seconds": 120.0}
     assert captured[2]["payload"]["status"] == "running"
     assert captured[2]["payload"]["progress_completed"] == 1
     assert captured[2]["payload"]["event_metadata"] == {"stage": "metadata"}
-    assert captured[3]["payload"] == {"lease_token": "lease-token-1"}
+    assert captured[3]["payload"] == {
+        "event_id": "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status",
+        "event_type": "data_agent.job.skipped",
+        "message": "Data Agent job delivery skipped before worker lease.",
+        "metadata": {"stage": "initial_status_check", "control_status": "succeeded"},
+    }
+    assert captured[4]["payload"] == {"lease_token": "lease-token-1"}
 
 
 def test_data_agent_control_plane_status_lookup_sends_owner_headers_and_maps_404(monkeypatch):
@@ -354,12 +397,17 @@ def test_worker_processes_data_agent_job_updates_terminal_status_and_acks():
     assert calls[-1] == ("release", "lease-token-1")
 
 
-def test_worker_acks_terminal_control_plane_data_agent_job_without_compute():
-    calls: list[str] = []
+def test_worker_posts_skip_event_before_ack_for_terminal_control_plane_data_agent_job():
+    calls: list[tuple[str, object]] = []
 
     async def terminal_status(job: DataAgentJobEnvelope, _settings: RuntimeSettings):
-        calls.append(f"status:{job.job_id}")
+        calls.append(("status", job.job_id))
         return "succeeded"
+
+    async def append_skip_event(job: DataAgentJobEnvelope, _settings: RuntimeSettings, **kwargs):
+        calls.append(("event", kwargs))
+        assert job.job_id == "data_agent_job_1"
+        return {"event": {"event_type": kwargs["event_type"], "metadata": kwargs["metadata"]}}
 
     async def acquire_should_not_run(_job: DataAgentJobEnvelope, _settings: RuntimeSettings):
         raise AssertionError("lease should not be acquired for terminal Data Agent jobs")
@@ -373,6 +421,7 @@ def test_worker_acks_terminal_control_plane_data_agent_job_without_compute():
             processor=processor_should_not_run,
             job_status_func=terminal_status,
             lease_func=acquire_should_not_run,
+            event_append_func=append_skip_event,
             worker_heartbeat_func=no_worker_heartbeat,
         )
         message = FakeAck(json.dumps(_job_payload()).encode("utf-8"))
@@ -381,9 +430,94 @@ def test_worker_acks_terminal_control_plane_data_agent_job_without_compute():
 
     message = asyncio.run(scenario())
 
-    assert calls == ["status:data_agent_job_1"]
+    assert calls[0] == ("status", "data_agent_job_1")
+    assert calls[1][0] == "event"
+    skip = calls[1][1]
+    assert skip["event_type"] == "data_agent.job.skipped"
+    assert skip["event_id"] == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    assert skip["message"] == "Data Agent job delivery skipped before worker lease."
+    assert skip["metadata"] == {
+        "ack_action": "ack",
+        "control_status": "succeeded",
+        "dispatch_id": "dispatch-1",
+        "job_type": "extract_metadata",
+        "stage": "initial_status_check",
+        "worker_id": "data-agent-worker-a",
+    }
     assert message.acked == 1
     assert message.naked == 0
+
+
+def test_worker_naks_terminal_control_plane_data_agent_job_when_skip_event_fails():
+    async def terminal_status(_job: DataAgentJobEnvelope, _settings: RuntimeSettings):
+        return "canceled"
+
+    async def append_skip_event(_job: DataAgentJobEnvelope, _settings: RuntimeSettings, **_kwargs):
+        raise RuntimeError("control plane unavailable")
+
+    async def acquire_should_not_run(_job: DataAgentJobEnvelope, _settings: RuntimeSettings):
+        raise AssertionError("lease should not be acquired for terminal Data Agent jobs")
+
+    async def processor_should_not_run(_job: DataAgentJobEnvelope, _progress):
+        raise AssertionError("processor should not run for terminal Data Agent jobs")
+
+    async def scenario():
+        worker = NATSDataAgentWorker(
+            _settings(data_agent_nats_ack_progress_interval_seconds=30.0),
+            processor=processor_should_not_run,
+            job_status_func=terminal_status,
+            lease_func=acquire_should_not_run,
+            event_append_func=append_skip_event,
+            worker_heartbeat_func=no_worker_heartbeat,
+        )
+        message = FakeAck(json.dumps(_job_payload()).encode("utf-8"))
+        await worker._process_message(message)
+        return message
+
+    message = asyncio.run(scenario())
+
+    assert message.acked == 0
+    assert message.naked == 1
+    assert message.nak_delays == [30.0]
+
+
+def test_worker_naks_missing_control_plane_data_agent_job_when_skip_event_cannot_persist():
+    skip_events: list[dict[str, object]] = []
+
+    async def missing_status(_job: DataAgentJobEnvelope, _settings: RuntimeSettings):
+        return "not_found"
+
+    async def append_skip_event(_job: DataAgentJobEnvelope, _settings: RuntimeSettings, **kwargs):
+        skip_events.append(kwargs)
+        raise RuntimeError("job event append returned 404")
+
+    async def acquire_should_not_run(_job: DataAgentJobEnvelope, _settings: RuntimeSettings):
+        raise AssertionError("lease should not be acquired for missing Data Agent jobs")
+
+    async def processor_should_not_run(_job: DataAgentJobEnvelope, _progress):
+        raise AssertionError("processor should not run for missing Data Agent jobs")
+
+    async def scenario():
+        worker = NATSDataAgentWorker(
+            _settings(data_agent_nats_ack_progress_interval_seconds=45.0),
+            processor=processor_should_not_run,
+            job_status_func=missing_status,
+            lease_func=acquire_should_not_run,
+            event_append_func=append_skip_event,
+            worker_heartbeat_func=no_worker_heartbeat,
+        )
+        message = FakeAck(json.dumps(_job_payload()).encode("utf-8"))
+        await worker._process_message(message)
+        return message
+
+    message = asyncio.run(scenario())
+
+    assert message.acked == 0
+    assert message.naked == 1
+    assert message.nak_delays == [45.0]
+    assert skip_events[0]["event_type"] == "data_agent.job.skipped"
+    assert skip_events[0]["event_id"] == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    assert skip_events[0]["metadata"]["control_status"] == "not_found"
 
 
 def test_worker_marks_data_agent_job_failed_and_acks_when_processor_raises():

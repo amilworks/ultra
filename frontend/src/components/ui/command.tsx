@@ -90,19 +90,6 @@ function CommandGroup({
   )
 }
 
-function CommandSeparator({
-  className,
-  ...props
-}: React.ComponentProps<typeof CommandPrimitive.Separator>) {
-  return (
-    <CommandPrimitive.Separator
-      data-slot="command-separator"
-      className={cn("bg-border -mx-1 h-px", className)}
-      {...props}
-    />
-  )
-}
-
 const CommandItem = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof CommandPrimitive.Item>
@@ -122,19 +109,6 @@ const CommandItem = React.forwardRef<
 
 CommandItem.displayName = CommandPrimitive.Item.displayName
 
-function CommandShortcut({
-  className,
-  ...props
-}: React.ComponentProps<"span">) {
-  return (
-    <span
-      data-slot="command-shortcut"
-      className={cn("ml-auto text-xs tracking-widest text-muted-foreground", className)}
-      {...props}
-    />
-  )
-}
-
 export {
   Command,
   CommandEmpty,
@@ -142,6 +116,4 @@ export {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
-  CommandShortcut,
 }

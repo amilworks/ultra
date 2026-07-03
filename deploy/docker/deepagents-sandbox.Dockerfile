@@ -110,4 +110,134 @@ RUN : > /opt/rarespot/ultra_deepagents/__init__.py \
 COPY backend/deepagents_runtime/skills/medical-volume-slices/volume_slices.py /opt/medvol/volume_slices.py
 RUN python -c "import nibabel, SimpleITK, PIL, numpy; import ast; ast.parse(open('/opt/medvol/volume_slices.py').read()); print('medvol bake OK')"
 
+# Computational-biology stack for the main interpreter: single-cell analysis (scanpy/
+# anndata), SOTA community detection (Leiden via leidenalg + python-igraph), ligand-receptor
+# inference (liana), and graph neural networks (torch-geometric, resolved against the exact
+# cu130 torch above). The install RE-ASSERTS the imaging stack's load-bearing pins so the
+# resolver cannot silently move them — numpy==1.26.4 (yolov5/RareSpot NMS + np.int parity),
+# zarr>=3.1 and dask>=2026.6 (the OME-Zarr imaging path via bioio-ome-zarr). This exact set
+# was empirically verified to leave numpy/zarr/dask/torch/torchvision/opencv/bioio-ome-zarr
+# untouched. squidpy is deliberately excluded here: its working builds need numpy>=2 while
+# numpy==1.26.4 forces an old build that breaks on dask 2026 — it lives in the isolated
+# /opt/biograph conda env below instead.
+RUN python -m pip install --no-cache-dir \
+        "numpy==1.26.4" \
+        "zarr>=3.1" \
+        "dask>=2026.6" \
+        anndata \
+        scanpy \
+        leidenalg \
+        python-igraph \
+        liana \
+        torch-geometric \
+    && python -c "import numpy, zarr, dask, torch, torchvision, cv2, bioio_ome_zarr; assert numpy.__version__ == '1.26.4', numpy.__version__; print('bio main-env no-regression OK: numpy', numpy.__version__, 'zarr', zarr.__version__, 'dask', dask.__version__)" \
+    && python -c "import scanpy, anndata, leidenalg, igraph, liana; from torch_geometric.nn import GCNConv; print('bio main-env imports OK: scanpy', scanpy.__version__, 'liana', liana.__version__)"
+
+# graph-tool (Bayesian nested stochastic block models + minimum-description-length model
+# selection — the principled test for whether detected community structure is real signal or
+# an artifact of the algorithm) and squidpy (spatial neighbor graphs, neighborhood
+# enrichment, Moran's I, co-occurrence) cannot live in the pinned main env: graph-tool is a
+# C++/Boost library with no pip wheel, and squidpy's working builds require numpy>=2. They
+# live together in a self-contained conda-forge environment at /opt/biograph (numpy 2,
+# fully isolated from the default interpreter). micromamba is arch-detected so the image
+# builds on both arm64 and amd64. The computational-biology Skill points the agent at
+# /opt/biograph/bin/python for SBM and spatial-graph work; everything else stays in the
+# default interpreter. /opt/biograph is NOT placed on PATH so it never shadows the main env.
+RUN set -eux; \
+    export MAMBA_ROOT_PREFIX=/opt/mamba; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        aarch64 | arm64) mamba_platform=linux-aarch64 ;; \
+        x86_64 | amd64) mamba_platform=linux-64 ;; \
+        *) echo "unsupported arch for micromamba: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -Ls "https://micro.mamba.pm/api/micromamba/${mamba_platform}/latest" | tar -xj -C /usr/local bin/micromamba; \
+    micromamba create -y -p /opt/biograph -c conda-forge \
+        "python=3.11" \
+        graph-tool \
+        squidpy \
+        scanpy \
+        anndata \
+        leidenalg \
+        python-igraph \
+        matplotlib; \
+    micromamba clean --all --yes; \
+    rm -rf /opt/mamba/pkgs /usr/local/bin/micromamba; \
+    /opt/biograph/bin/python -c "import graph_tool.all as gt, squidpy, scanpy, anndata, leidenalg, igraph; print('biograph env OK: graph-tool', gt.__version__.split()[0], '| squidpy', squidpy.__version__, '| scanpy', scanpy.__version__)"
+
+# Computational-ecology / geospatial stack for the main interpreter: vector + raster IO and
+# CRS handling (geopandas via the pyogrio engine, rasterio, rioxarray, shapely, pyproj),
+# spatial statistics (PySAL — libpysal/esda/pointpats/spreg/spopt: Moran's I, LISA, Getis-Ord,
+# spatial regression, point patterns), landscape/fragmentation metrics (pylandstats), zonal
+# stats (rasterstats), terrain + hydrology (xarray-spatial + pysheds), movement ecology
+# (movingpandas), and cartographic helpers (contextily, mapclassify). The install RE-ASSERTS
+# the imaging pins so the resolver can't move them — empirically verified to leave
+# numpy==1.26.4 / zarr / dask / torch / opencv / bioio-ome-zarr intact (no isolated env
+# needed). Two packages are deliberately OMITTED and must not be reached for: fiona (its sdist
+# needs GDAL dev headers absent from this image — the pyogrio engine replaces it) and richdem
+# (no py3.11 wheel; builds against the removed CPython PyFrameObject C-API — pysheds +
+# xarray-spatial replace its flow-routing). The geo wheels bundle GDAL/GEOS/PROJ (no apt GDAL).
+RUN python -m pip install --no-cache-dir \
+        "numpy==1.26.4" \
+        "zarr>=3.1" \
+        "dask>=2026.6" \
+        geopandas \
+        pyogrio \
+        shapely \
+        pyproj \
+        rasterio \
+        rioxarray \
+        libpysal \
+        esda \
+        pointpats \
+        spreg \
+        spopt \
+        pylandstats \
+        rasterstats \
+        xarray-spatial \
+        pysheds \
+        movingpandas \
+        contextily \
+        mapclassify \
+    && python -c "import numpy, zarr, dask, torch, torchvision, cv2, bioio_ome_zarr; assert numpy.__version__ == '1.26.4', numpy.__version__; print('geo main-env no-regression OK: numpy', numpy.__version__, 'zarr', zarr.__version__)" \
+    && python -c "import geopandas, pyogrio, shapely, pyproj, rasterio, rioxarray, libpysal, esda, pointpats, spreg, spopt, pylandstats, rasterstats, xrspatial, pysheds, movingpandas, contextily, mapclassify; print('geo main-env imports OK: geopandas', geopandas.__version__, 'esda', esda.__version__)"
+
+# Computational-materials stack for the main interpreter, biased to the UCSB superalloy /
+# TriBeam-tomography / ICME research line (Pollock): crystallographic orientation + EBSD (orix,
+# kikuchipy, diffsims, defdap), 3D microstructure + porosity quantification (porespy — reusing
+# the already-baked scikit-image + SimpleITK/nibabel 3D stack for TriBeam serial-section
+# volumes), crystal structure + space-group symmetry (pymatgen + spglib), CALPHAD phase
+# stability (pycalphad — needs a user-supplied TDB at runtime, none bundled), atomistic
+# structures (ase), and materials-informatics featurization (matminer, e.g. Magpie). Both
+# batches probed clean against the pinned stack — numpy stays 1.26.4, no isolated env needed
+# (the contrast with computational-biology). Re-asserts the imaging pins for resolver safety.
+# NOTE: pymatgen and defdap expose no top-level __version__, so the imports check is
+# import-only for them (reading module.__version__ would crash the build).
+RUN python -m pip install --no-cache-dir \
+        "numpy==1.26.4" \
+        "zarr>=3.1" \
+        "dask>=2026.6" \
+        pymatgen \
+        ase \
+        spglib \
+        pycalphad \
+        matminer \
+        orix \
+        kikuchipy \
+        diffsims \
+        defdap \
+        porespy \
+    && python -c "import numpy, zarr, dask, torch, torchvision, cv2, bioio_ome_zarr; assert numpy.__version__ == '1.26.4', numpy.__version__; print('mat main-env no-regression OK: numpy', numpy.__version__, 'zarr', zarr.__version__)" \
+    && python -c "import pymatgen, ase, spglib, pycalphad, matminer, orix, kikuchipy, diffsims, defdap, porespy; print('mat main-env imports OK: ase', ase.__version__, 'orix', orix.__version__, 'spglib', spglib.__version__)"
+
+# numba/llvmlite mis-detects the CPU's feature set on some virtualized hosts (notably the arm64
+# Docker VM on Apple Silicon), emitting an illegal instruction (SIGILL) on the FIRST @njit
+# compile — which hard-crashes every numba-JIT path: umap / scanpy neighbors (bio),
+# xarray-spatial terrain (ecology), esda conditional permutations, matminer featurizers. Forcing
+# generic baseline-ISA codegen makes the JIT correct on every host; the modest loss of
+# CPU-specific vectorization is a worthwhile price for not crashing. Set late so it does not
+# invalidate the expensive install layers above (it only affects runtime code execution).
+ENV NUMBA_CPU_NAME=generic \
+    NUMBA_CPU_FEATURES=""
+
 WORKDIR /workspace

@@ -66,7 +66,6 @@ export type BisqueViewerLink = {
   clientViewUrl: string;
   resourceUri?: string | null;
   imageServiceUrl?: string | null;
-  inputUrl?: string;
 };
 
 type ViewerDisplayState = NonNullable<UploadViewerInfo["display_defaults"]>;

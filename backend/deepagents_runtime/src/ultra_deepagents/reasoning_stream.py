@@ -140,13 +140,25 @@ class ReasoningEventStreamer(AsyncCallbackHandler):
         self._parts = []
         self._chars = 0
         self._round_open = status == "running"
+        stamped = self._sequencer.stamp(
+            normalize_reasoning_delta(self._context, text, status=status)
+        )
+        allocated_sequence = stamped.get("sequence")
         try:
-            await self._publish_event(
-                self._sequencer.stamp(
-                    normalize_reasoning_delta(self._context, text, status=status)
-                )
-            )
+            await self._publish_event(stamped)
         except Exception:
+            # The reasoning trace is best-effort, but stamp() already consumed a
+            # source_sequence. Dropping the event silently would leave a
+            # permanent hole that stalls the strict per-run ingest gate. Roll the
+            # counter back so the next event reuses this number — but only when
+            # nothing else has stamped since (i.e. we are still the latest
+            # allocation); otherwise the number is genuinely spent and the
+            # control plane's bounded-retry backstop absorbs the gap.
+            if (
+                isinstance(allocated_sequence, int)
+                and self._sequencer.sequence == allocated_sequence
+            ):
+                self._sequencer.sequence = allocated_sequence - 1
             logger.warning(
                 "Reasoning trace publish failed; continuing run without it.",
                 extra={"run_id": getattr(self._context, "run_id", "")},

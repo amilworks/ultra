@@ -1394,7 +1394,11 @@ func (s *MemoryStore) RenewRunLease(ctx context.Context, input domain.RenewRunLe
 	}
 	now := leaseNow(input.Now)
 	lease, ok := s.leases[input.RunID]
-	if !ok || lease.LeaseToken != strings.TrimSpace(input.LeaseToken) || !lease.LeaseExpiresAt.After(now) {
+	// Token match alone authorizes renewal, even of an expired lease (see the
+	// Postgres implementation): a worker surviving a control-plane outage
+	// revives its lease; a requeued run's lease was cleared, so the token
+	// lookup misses and the worker gets the authoritative conflict.
+	if !ok || lease.LeaseToken != strings.TrimSpace(input.LeaseToken) {
 		return domain.RunLeaseRecord{}, ErrConflict
 	}
 	lease.LeaseExpiresAt = now.Add(positiveLeaseTTL(input.TTL))
@@ -1455,21 +1459,22 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 		ts = domain.Now()
 	}
 	event := domain.RunEventRecord{
-		EventID:      eventID,
-		Sequence:     seq,
-		RunID:        input.RunID,
-		ThreadID:     input.ThreadID,
-		EventKind:    input.EventKind,
-		EventType:    input.EventType,
-		NodeName:     input.NodeName,
-		TaskID:       input.TaskID,
-		CheckpointID: input.CheckpointID,
-		ScopeID:      input.ScopeID,
-		AgentRole:    input.AgentRole,
-		Level:        input.Level,
-		TS:           ts,
-		Message:      input.Message,
-		Payload:      mapOrEmpty(input.Payload),
+		EventID:        eventID,
+		Sequence:       seq,
+		SourceSequence: sourceSequenceOrDefault(input.SourceSequence, seq),
+		RunID:          input.RunID,
+		ThreadID:       input.ThreadID,
+		EventKind:      input.EventKind,
+		EventType:      input.EventType,
+		NodeName:       input.NodeName,
+		TaskID:         input.TaskID,
+		CheckpointID:   input.CheckpointID,
+		ScopeID:        input.ScopeID,
+		AgentRole:      input.AgentRole,
+		Level:          input.Level,
+		TS:             ts,
+		Message:        input.Message,
+		Payload:        mapOrEmpty(input.Payload),
 	}
 	s.events[input.RunID] = append(s.events[input.RunID], event)
 	return event, nil
@@ -1503,24 +1508,32 @@ func (s *MemoryStore) AppendRunEventIfRunActive(ctx context.Context, input domai
 		ts = domain.Now()
 	}
 	event := domain.RunEventRecord{
-		EventID:      eventID,
-		Sequence:     int64(len(s.events[input.RunID]) + 1),
-		RunID:        input.RunID,
-		ThreadID:     input.ThreadID,
-		EventKind:    input.EventKind,
-		EventType:    input.EventType,
-		NodeName:     input.NodeName,
-		TaskID:       input.TaskID,
-		CheckpointID: input.CheckpointID,
-		ScopeID:      input.ScopeID,
-		AgentRole:    input.AgentRole,
-		Level:        input.Level,
-		TS:           ts,
-		Message:      input.Message,
-		Payload:      mapOrEmpty(input.Payload),
+		EventID:        eventID,
+		Sequence:       int64(len(s.events[input.RunID]) + 1),
+		SourceSequence: sourceSequenceOrDefault(input.SourceSequence, int64(len(s.events[input.RunID])+1)),
+		RunID:          input.RunID,
+		ThreadID:       input.ThreadID,
+		EventKind:      input.EventKind,
+		EventType:      input.EventType,
+		NodeName:       input.NodeName,
+		TaskID:         input.TaskID,
+		CheckpointID:   input.CheckpointID,
+		ScopeID:        input.ScopeID,
+		AgentRole:      input.AgentRole,
+		Level:          input.Level,
+		TS:             ts,
+		Message:        input.Message,
+		Payload:        mapOrEmpty(input.Payload),
 	}
 	s.events[input.RunID] = append(s.events[input.RunID], event)
 	return event, RunEventAppendOutcomeAppended, nil
+}
+
+func sourceSequenceOrDefault(sourceSequence int64, defaultSequence int64) int64 {
+	if sourceSequence > 0 {
+		return sourceSequence
+	}
+	return defaultSequence
 }
 
 func (s *MemoryStore) GetRunEvent(ctx context.Context, eventID string) (domain.RunEventRecord, bool, error) {
@@ -1535,6 +1548,21 @@ func (s *MemoryStore) GetRunEvent(ctx context.Context, eventID string) (domain.R
 			if event.EventID == eventID {
 				return event, true, nil
 			}
+		}
+	}
+	return domain.RunEventRecord{}, false, nil
+}
+
+func (s *MemoryStore) GetRunEventBySourceSequence(ctx context.Context, runID string, sourceSequence int64) (domain.RunEventRecord, bool, error) {
+	_ = ctx
+	if sourceSequence <= 0 {
+		return domain.RunEventRecord{}, false, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, event := range s.events[strings.TrimSpace(runID)] {
+		if event.SourceSequence == sourceSequence {
+			return event, true, nil
 		}
 	}
 	return domain.RunEventRecord{}, false, nil
@@ -3873,7 +3901,7 @@ func (s *MemoryStore) RecoverExpiredDataAgentJobLeases(ctx context.Context, inpu
 		if !dataAgentJobRecoverableStatus(job.Status) {
 			continue
 		}
-		if _, ok := s.dataAgentLeases[job.JobID]; !ok {
+		if _, ok := s.dataAgentLeases[job.JobID]; !ok && !dataAgentJobDispatchRetryCandidate(s.dataAgentEvents[job.JobID]) {
 			continue
 		}
 		candidates = append(candidates, job)
@@ -3890,39 +3918,64 @@ func (s *MemoryStore) RecoverExpiredDataAgentJobLeases(ctx context.Context, inpu
 	result := domain.RecoverExpiredDataAgentJobLeasesResult{Checked: len(candidates)}
 	for _, job := range candidates {
 		lease, ok := s.dataAgentLeases[job.JobID]
-		if !ok || lease.LeaseExpiresAt.After(now) {
+		if ok {
+			if lease.LeaseExpiresAt.After(now) {
+				continue
+			}
+			delete(s.dataAgentLeases, job.JobID)
+			job.Status = "queued"
+			job.ProgressCompleted = 0
+			if job.ProgressTotal <= 0 {
+				job.ProgressTotal = job.ResourceCount
+			}
+			job.Error = ""
+			job.StartedAt = time.Time{}
+			job.CompletedAt = time.Time{}
+			job.UpdatedAt = now.UTC()
+			s.dataAgentJobs[job.JobID] = job
+			if _, err := s.appendDataAgentJobEventLocked(domain.AppendDataAgentJobEventInput{
+				JobID:       job.JobID,
+				EventType:   "data_agent.job.requeued",
+				ActorUserID: job.OwnerUserID,
+				ActorOrgID:  job.OwnerOrgID,
+				TS:          now,
+				Message:     reason,
+				Metadata: domain.JSONMap{
+					"reason":           reason,
+					"recovery":         "expired_data_agent_job_lease",
+					"lease_worker_id":  lease.WorkerID,
+					"lease_expires_at": lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
+				},
+			}); err != nil {
+				return result, err
+			}
+		} else if job.Status != "queued" || !dataAgentJobDispatchRetryCandidate(s.dataAgentEvents[job.JobID]) {
 			continue
-		}
-		delete(s.dataAgentLeases, job.JobID)
-		job.Status = "queued"
-		job.ProgressCompleted = 0
-		if job.ProgressTotal <= 0 {
-			job.ProgressTotal = job.ResourceCount
-		}
-		job.Error = ""
-		job.StartedAt = time.Time{}
-		job.CompletedAt = time.Time{}
-		job.UpdatedAt = now.UTC()
-		s.dataAgentJobs[job.JobID] = job
-		if _, err := s.appendDataAgentJobEventLocked(domain.AppendDataAgentJobEventInput{
-			JobID:       job.JobID,
-			EventType:   "data_agent.job.requeued",
-			ActorUserID: job.OwnerUserID,
-			ActorOrgID:  job.OwnerOrgID,
-			TS:          now,
-			Message:     reason,
-			Metadata: domain.JSONMap{
-				"reason":           reason,
-				"recovery":         "expired_data_agent_job_lease",
-				"lease_worker_id":  lease.WorkerID,
-				"lease_expires_at": lease.LeaseExpiresAt.UTC().Format(time.RFC3339Nano),
-			},
-		}); err != nil {
-			return result, err
 		}
 		result.RequeuedJobs = append(result.RequeuedJobs, job)
 	}
 	return result, nil
+}
+
+// dataAgentJobMaxDispatchRetries bounds how many times recovery re-dispatches a
+// job whose dispatch keeps failing. Past this, the job is failed terminally
+// instead of being republished every recovery pass forever.
+const dataAgentJobMaxDispatchRetries = 5
+
+func dataAgentJobDispatchRetryCandidate(events []domain.DataAgentJobEventRecord) bool {
+	if len(events) == 0 {
+		return false
+	}
+	if events[len(events)-1].EventType != "data_agent.job.dispatch_failed" {
+		return false
+	}
+	dispatchFailures := 0
+	for _, event := range events {
+		if event.EventType == "data_agent.job.dispatch_failed" {
+			dispatchFailures++
+		}
+	}
+	return dispatchFailures < dataAgentJobMaxDispatchRetries
 }
 
 func (s *MemoryStore) AppendDataAgentJobEvent(ctx context.Context, input domain.AppendDataAgentJobEventInput) (domain.DataAgentJobEventRecord, error) {

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func resourceArtifactPaths(root string, resource domain.ResourceRecord) []string
 			paths = append(paths, p)
 		}
 	}
-	source := strings.TrimSpace(resource.StoragePath)
+	source := resourceSourcePath(root, resource)
 	add(source)
 	add(filepath.Join(root, "derived", derivedPyramidName(resource.ResourceID)))
 	add(derivedPyramidFailedMarkerPath(root, resource.ResourceID))
@@ -95,6 +96,31 @@ func resourceArtifactPaths(root string, resource domain.ResourceRecord) []string
 	}
 	add(uploadMetadataPath(root, resource.ResourceID))
 	return paths
+}
+
+func resourceSourcePath(root string, resource domain.ResourceRecord) string {
+	if candidate := fileStoragePath(resource.StorageURI); candidate != "" && pathIsUnderRoot(root, candidate) {
+		return candidate
+	}
+	storagePath := strings.TrimSpace(resource.StoragePath)
+	if storagePath == "" {
+		return ""
+	}
+	if filepath.IsAbs(storagePath) {
+		if pathIsUnderRoot(root, storagePath) {
+			return filepath.Clean(storagePath)
+		}
+		return ""
+	}
+	clean := filepath.Clean(storagePath)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	candidate := filepath.Join(root, clean)
+	if pathIsUnderRoot(root, candidate) {
+		return candidate
+	}
+	return ""
 }
 
 // ReclaimExpiredResources permanently removes resources whose undelete window has elapsed:
@@ -112,14 +138,19 @@ func ReclaimExpiredResources(ctx context.Context, store RetentionGCStore, root s
 	}
 	for _, resource := range expired {
 		var freed int64
+		removeFailed := false
 		for _, path := range resourceArtifactPaths(root, resource) {
-			if info, statErr := os.Stat(path); statErr == nil {
-				freed += info.Size()
-			}
-			if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			removedBytes, rmErr := removeResourceArtifact(root, resource, path)
+			if rmErr != nil {
+				removeFailed = true
 				slog.WarnContext(ctx, "retention gc: failed to remove artifact",
 					"resource_id", resource.ResourceID, "path", path, "error", rmErr)
+				continue
 			}
+			freed += removedBytes
+		}
+		if removeFailed {
+			continue
 		}
 		if purgeErr := store.PurgeResource(ctx, resource.ResourceID); purgeErr != nil {
 			slog.WarnContext(ctx, "retention gc: failed to purge resource row",
@@ -132,6 +163,39 @@ func ReclaimExpiredResources(ctx context.Context, store RetentionGCStore, root s
 			"resource_id", resource.ResourceID, "bytes_freed", freed)
 	}
 	return reclaimed, bytes, nil
+}
+
+func removeResourceArtifact(root string, resource domain.ResourceRecord, path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if info.IsDir() {
+		if !resourceBundleArtifactDir(root, resource, path) {
+			return 0, fmt.Errorf("refusing recursive delete for non-bundle artifact directory")
+		}
+		bytes := dirSizeBytes(path)
+		return bytes, os.RemoveAll(path)
+	}
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func resourceBundleArtifactDir(root string, resource domain.ResourceRecord, path string) bool {
+	resourceID := strings.TrimSpace(resource.ResourceID)
+	if resourceID == "" {
+		return false
+	}
+	bundleRoot := filepath.Join(root, bundlesDirName, resourceID)
+	return pathIsUnderRoot(bundleRoot, path)
 }
 
 // RunRetentionGC periodically reclaims expired resources until ctx is canceled. Wired from

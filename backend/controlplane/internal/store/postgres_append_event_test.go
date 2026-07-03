@@ -213,3 +213,44 @@ func TestPostgresAppendRunEventIfRunActiveOutcomes(t *testing.T) {
 		t.Fatalf("missing run outcome = %v err = %v, want dropped", outcome, err)
 	}
 }
+
+func TestPostgresAppendRunEventPersistsSourceSequence(t *testing.T) {
+	s := appendEventTestStore(t)
+	run := appendEventTestRun(t, s)
+	ctx := context.Background()
+
+	controlEvent, err := s.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-" + run.RunID + "-control",
+		RunID:     run.RunID,
+		ThreadID:  run.ThreadID,
+		EventKind: "run.accepted",
+	})
+	if err != nil {
+		t.Fatalf("AppendRunEvent control event: %v", err)
+	}
+	if controlEvent.SourceSequence != controlEvent.Sequence {
+		t.Fatalf("control source sequence = %d, want allocated sequence %d", controlEvent.SourceSequence, controlEvent.Sequence)
+	}
+
+	workerEvent, outcome, err := s.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-" + run.RunID + "-worker-000010",
+		RunID:          run.RunID,
+		ThreadID:       run.ThreadID,
+		EventKind:      "message.delta",
+		SourceSequence: 10,
+		Message:        "worker source sequence",
+	})
+	if err != nil || outcome != RunEventAppendOutcomeAppended {
+		t.Fatalf("worker append outcome = %v err = %v, want appended", outcome, err)
+	}
+	if workerEvent.SourceSequence != 10 {
+		t.Fatalf("worker source sequence = %d, want 10", workerEvent.SourceSequence)
+	}
+	bySource, found, err := s.GetRunEventBySourceSequence(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("GetRunEventBySourceSequence: %v", err)
+	}
+	if !found || bySource.EventID != workerEvent.EventID {
+		t.Fatalf("source sequence lookup found=%v event=%+v, want %s", found, bySource, workerEvent.EventID)
+	}
+}

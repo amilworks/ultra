@@ -5,11 +5,13 @@ import contextlib
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from urllib import error as urllib_error
 
 import nats.errors
 import pytest
 import ultra_deepagents.nats_worker as nats_worker_module
+from nats.js.api import AckPolicy
 from PIL import Image
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.nats_worker import (
@@ -1028,7 +1030,10 @@ class FakeIdleOnceThenRecoversAgent:
         self.recovery_prompt = payload["messages"][-1]["content"]
         assert "model stream went idle" in self.recovery_prompt
         assert "same workspace" in self.recovery_prompt
-        assert "do not repeat completed tool work" in self.recovery_prompt
+        # The recovery prompt must steer AWAY from blindly re-running existing work
+        # (the empty-output -> re-run re-discovery loop seen in the 6.7M-token trace).
+        assert "do NOT re-run a step whose output already exists" in self.recovery_prompt
+        assert "KNOWN failure" in self.recovery_prompt
         yield {
             "type": "event",
             "method": "values",
@@ -1045,6 +1050,96 @@ class FakeIdleOnceThenRecoversAgent:
                 },
             },
         }
+
+
+def _stall_exec_events(call_id: str, command: str, output: str) -> list[dict]:
+    return [
+        {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "tool-started",
+                    "tool_call_id": call_id,
+                    "tool_name": "execute",
+                    "input": {"command": command},
+                },
+            },
+        },
+        {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "tool-finished",
+                    "tool_call_id": call_id,
+                    "output": output,
+                },
+            },
+        },
+    ]
+
+
+class FakeLivelocksThenRecoversAgent:
+    """First attempt re-runs the same command with unchanged output until the
+    within-turn progress-stall guard trips; the corrective attempt finishes."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.recovery_prompt = ""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            for index in range(10):
+                for event in _stall_exec_events(
+                    f"call-{index}", "python run_experiment.py", "results.csv is empty"
+                ):
+                    yield event
+            # The guard must abort the turn well before this hang is reached.
+            await asyncio.Event().wait()
+            return
+        self.recovery_prompt = payload["messages"][-1]["content"]
+        assert "Progress stall detected" in self.recovery_prompt
+        assert "python run_experiment.py" in self.recovery_prompt
+        assert "Do not re-run any repeated command" in self.recovery_prompt
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][-1]["content"]},
+                        {
+                            "role": "assistant",
+                            "content": "Diagnosed the empty CSV and finalized with current results.",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class FakeAlwaysLivelockedAgent:
+    """Every attempt churns the same command: recoveries must exhaust and the run
+    must still COMPLETE with partial results (the guard ends turns, never the run)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        for index in range(10):
+            for event in _stall_exec_events(
+                f"call-{self.calls}-{index}", "python broken.py", "no output"
+            ):
+                yield event
+        await asyncio.Event().wait()
 
 
 class FakeV3FinalValuesOnlyAgent:
@@ -2643,6 +2738,123 @@ def test_run_job_recovers_from_one_idle_model_stream_before_failing(tmp_path: Pa
     assert lease["status"] == "succeeded"
 
 
+def test_run_job_recovers_from_within_turn_progress_stall(tmp_path: Path):
+    """The 6.7M-token livelock class: a turn that keeps re-running the same command
+    with unchanged output must be ENDED (not the run) and corrected via one
+    injected prompt — the within-turn complement to the idle recovery above."""
+
+    async def scenario():
+        fake_agent = FakeLivelocksThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            progress_stall_threshold=3,
+            progress_stall_max_recoveries=1,
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Run the analysis and explain it.",
+            messages=[{"role": "user", "content": "Run the analysis and explain it."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await asyncio.wait_for(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            ),
+            timeout=2.0,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert result == "Diagnosed the empty CSV and finalized with current results."
+    stall_events = [
+        event
+        for event in events
+        if event.get("payload", {}).get("reason") == "progress_stall"
+    ]
+    assert len(stall_events) == 1
+    payload = stall_events[0]["payload"]
+    assert payload["recovery_index"] == 1
+    assert payload["recoveries_exhausted"] is False
+    assert payload["stall_count"] == 3
+    assert payload["repeated_commands"][0]["command"] == "python run_experiment.py"
+    assert events[-1]["event_kind"] == "run.completed"
+    # The turn was aborted at the threshold: 1 novel + 3 repeats = 4 exec pairs,
+    # never the fake's full 10 (the guard, not the hang, ended the turn).
+    tool_completed = [e for e in events if e["event_kind"] == "tool_call.completed"]
+    assert len(tool_completed) == 4
+    lease = json.loads((tmp_path / "workspaces" / "run-1" / "lease.json").read_text())
+    assert lease["status"] == "succeeded"
+
+
+def test_run_job_progress_stall_recoveries_exhausted_still_completes(tmp_path: Path):
+    """A model that ignores the corrective prompt is BOUNDED: recoveries exhaust,
+    the run finalizes with what exists — it must never fail or hang for stalling."""
+
+    async def scenario():
+        fake_agent = FakeAlwaysLivelockedAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            progress_stall_threshold=3,
+            progress_stall_max_recoveries=1,
+        )
+        job = RunJobEnvelope(
+            run_id="run-1",
+            thread_id="thread-1",
+            user_id="researcher-1",
+            goal="Run the analysis.",
+            messages=[{"role": "user", "content": "Run the analysis."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await asyncio.wait_for(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            ),
+            timeout=2.0,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    stall_events = [
+        event
+        for event in events
+        if event.get("payload", {}).get("reason") == "progress_stall"
+    ]
+    assert len(stall_events) >= 2
+    assert stall_events[-1]["payload"]["recoveries_exhausted"] is True
+    assert "finalizing the run honestly" in stall_events[-1]["message"]
+    kinds = [event["event_kind"] for event in events]
+    assert "run.completed" in kinds
+    assert "run.failed" not in kinds
+    # Bounded: initial attempt + 1 recovery (+ possibly bounded completion-guard
+    # continuations that re-trip the guard and exhaust immediately).
+    assert fake_agent.calls <= 4
+
+
 def test_run_job_uses_deepagents_v3_final_values_when_no_delta_stream(tmp_path: Path):
     async def scenario():
         settings = RuntimeSettings(
@@ -3390,10 +3602,30 @@ def test_job_consumer_config_uses_long_running_ack_settings():
 
     assert config.durable_name == "worker-a"
     assert config.filter_subject == "ultra.test.jobs"
+    assert config.ack_policy == AckPolicy.EXPLICIT
     assert config.ack_wait == 300.0
     assert config.max_deliver == 7
     assert config.max_ack_pending == 3
     assert job_ack_extension_interval(settings) == 60.0
+
+
+def test_job_consumer_config_match_rejects_non_explicit_ack_policy():
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        nats_worker_durable="worker-a",
+        nats_jobs_subject="ultra.test.jobs",
+    )
+    desired = build_job_consumer_config(settings)
+    existing = SimpleNamespace(
+        filter_subject=desired.filter_subject,
+        ack_wait=desired.ack_wait,
+        max_deliver=desired.max_deliver,
+        max_ack_pending=desired.max_ack_pending,
+        ack_policy=AckPolicy.NONE,
+    )
+
+    assert not nats_worker_module._consumer_config_matches(existing, desired)
 
 
 def test_job_ack_extension_interval_stays_below_ack_wait_for_long_running_leases():
@@ -3434,6 +3666,16 @@ class CapturingJetStream:
         self.published.append((subject, payload, kwargs.get("headers") or {}))
 
 
+class StreamConfigCapturingJetStream:
+    def __init__(self):
+        self.stream_name = ""
+        self.subjects = []
+
+    async def add_stream(self, *, name: str, subjects: list[str]):
+        self.stream_name = name
+        self.subjects = subjects
+
+
 class HeartbeatCapturingJetStream(CapturingJetStream):
     def __init__(self):
         super().__init__()
@@ -3457,6 +3699,39 @@ def _published_events(js: CapturingJetStream):
 
 def _published_headers(js: CapturingJetStream):
     return [headers for _subject, _payload, headers in js.published]
+
+
+def _published_subjects(js: CapturingJetStream):
+    return [subject for subject, _payload, _headers in js.published]
+
+
+def _assert_worker_skipped_event(
+    event,
+    *,
+    run_id: str,
+    thread_id: str,
+    control_status: str,
+    stage: str,
+):
+    assert event == {
+        "event_id": f"evt_{run_id}_worker_skipped",
+        "sequence": 1,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "event_kind": "run.worker_skipped",
+        "event_type": "run",
+        "node_name": "worker",
+        "agent_role": "worker",
+        "level": "warning",
+        "message": "Worker skipped job because the control plane run is not runnable.",
+        "payload": {
+            "ack_action": "ack",
+            "control_status": control_status,
+            "reason": "control_plane_not_runnable",
+            "stage": stage,
+            "worker_id": "ultra-deepagents-worker",
+        },
+    }
 
 
 def test_worker_publishes_events_with_deterministic_jetstream_message_id():
@@ -3483,6 +3758,62 @@ def test_worker_publishes_events_with_deterministic_jetstream_message_id():
     js = asyncio.run(scenario())
 
     assert _published_headers(js)[0]["Nats-Msg-Id"] == "event:evt-run-1-started"
+
+
+def test_worker_publishes_run_events_to_deterministic_partition_subject():
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="test-model",
+            nats_url="nats://example.test:4222",
+            nats_events_subject="ultra.runs.events",
+            nats_event_partitions=8,
+        )
+        worker = NATSDeepAgentsWorker(settings)
+        js = CapturingJetStream()
+        event = {
+            "event_id": "evt-run-partition-started",
+            "run_id": "run-partitioned",
+            "sequence": 1,
+            "event_kind": "run.started",
+        }
+
+        await worker._publish_event(js, event)
+        await worker._publish_event(js, {**event, "event_id": "evt-run-partition-second", "sequence": 2})
+
+        return js
+
+    js = asyncio.run(scenario())
+
+    subjects = _published_subjects(js)
+    assert subjects == [subjects[0], subjects[0]]
+    assert subjects[0].startswith("ultra.runs.events.p.")
+    partition = int(subjects[0].removeprefix("ultra.runs.events.p."))
+    assert 0 <= partition < 8
+
+
+def test_worker_stream_includes_partitioned_run_event_subjects():
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="test-model",
+            nats_stream="ULTRA_TEST",
+            nats_jobs_subject="ultra.runs.jobs",
+            nats_events_subject="ultra.runs.events",
+            nats_cancel_subject="ultra.runs.cancel",
+        )
+        worker = NATSDeepAgentsWorker(settings)
+        js = StreamConfigCapturingJetStream()
+
+        await worker._ensure_stream(js)
+
+        return js
+
+    js = asyncio.run(scenario())
+
+    assert js.stream_name == "ULTRA_TEST"
+    assert "ultra.runs.events" in js.subjects
+    assert "ultra.runs.events.p.*" in js.subjects
 
 
 def test_worker_acks_failed_job_without_crashing_loop():
@@ -4575,7 +4906,14 @@ def test_worker_acks_terminal_control_plane_run_without_starting_compute():
     assert calls == 0
     assert message.acked == 1
     assert message.naked == 0
-    assert events == []
+    assert len(events) == 1
+    _assert_worker_skipped_event(
+        events[0],
+        run_id="run-1",
+        thread_id="thread-1",
+        control_status="canceled",
+        stage="initial_status_check",
+    )
 
 
 def test_worker_rechecks_control_plane_status_after_acquiring_run_lock(tmp_path: Path):
@@ -4613,7 +4951,14 @@ def test_worker_rechecks_control_plane_status_after_acquiring_run_lock(tmp_path:
     assert calls == 0
     assert message.acked == 1
     assert message.naked == 0
-    assert events == []
+    assert len(events) == 1
+    _assert_worker_skipped_event(
+        events[0],
+        run_id="run-1",
+        thread_id="thread-1",
+        control_status="canceled",
+        stage="pre_compute_recheck",
+    )
 
 
 def test_worker_starts_compute_when_initial_control_status_lookup_fails(tmp_path: Path):
@@ -4709,7 +5054,7 @@ def test_worker_status_monitor_cancels_active_run_when_control_plane_becomes_ter
     async def status_becomes_canceled(_run_id, _settings):
         nonlocal status_calls
         status_calls += 1
-        if status_calls >= 3:
+        if started.is_set() and status_calls >= 3:
             return "canceled"
         return None
 
@@ -4757,7 +5102,7 @@ def test_worker_status_monitor_stops_without_publishing_cancel_for_non_cancel_te
     async def status_becomes_terminal(_run_id, _settings):
         nonlocal status_calls
         status_calls += 1
-        if status_calls >= 3:
+        if started.is_set() and status_calls >= 3:
             return terminal_status
         return None
 
@@ -4786,7 +5131,14 @@ def test_worker_status_monitor_stops_without_publishing_cancel_for_non_cancel_te
     assert started.is_set()
     assert message.acked == 1
     assert message.naked == 0
-    assert events == []
+    assert len(events) == 1
+    _assert_worker_skipped_event(
+        events[0],
+        run_id="run-1",
+        thread_id="thread-1",
+        control_status=terminal_status,
+        stage="status_monitor",
+    )
 
 
 def test_control_plane_status_lookup_reads_v2_run_status(monkeypatch):
@@ -4858,7 +5210,14 @@ def test_worker_acks_missing_control_plane_run_without_starting_compute():
     assert calls == 0
     assert message.acked == 1
     assert message.naked == 0
-    assert events == []
+    assert len(events) == 1
+    _assert_worker_skipped_event(
+        events[0],
+        run_id="run-missing",
+        thread_id="thread-1",
+        control_status="not_found",
+        stage="initial_status_check",
+    )
 
 
 def test_control_plane_status_lookup_maps_authenticated_404_to_not_found(monkeypatch):

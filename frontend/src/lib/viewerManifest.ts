@@ -371,11 +371,11 @@ const normalizeServiceUrls = (source: UnknownRecord, fileId: string) => {
 const normalizeHdf5ServiceUrls = (source: UnknownRecord, fileId: string) => {
   const fileSegment = encodeURIComponent(fileId);
   return {
-    dataset: String(source.dataset ?? `/v1/uploads/${fileSegment}/hdf5/dataset`),
-    slice: String(source.slice ?? `/v1/uploads/${fileSegment}/hdf5/preview/slice`),
-    atlas: String(source.atlas ?? `/v1/uploads/${fileSegment}/hdf5/preview/atlas`),
-    histogram: String(source.histogram ?? `/v1/uploads/${fileSegment}/hdf5/preview/histogram`),
-    table: String(source.table ?? `/v1/uploads/${fileSegment}/hdf5/preview/table`),
+    dataset: String(source.dataset ?? `/v2/uploads/${fileSegment}/hdf5/dataset`),
+    slice: String(source.slice ?? `/v2/uploads/${fileSegment}/hdf5/preview/slice`),
+    atlas: String(source.atlas ?? `/v2/uploads/${fileSegment}/hdf5/preview/atlas`),
+    histogram: String(source.histogram ?? `/v2/uploads/${fileSegment}/hdf5/preview/histogram`),
+    table: String(source.table ?? `/v2/uploads/${fileSegment}/hdf5/preview/table`),
   };
 };
 

@@ -48,24 +48,3 @@ export const formatDurationSeconds = (seconds: number): string => {
   }
   return `${secs}s`;
 };
-
-export const fileExt = (name: string): string => {
-  const dot = name.lastIndexOf(".");
-  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
-};
-
-export const shortId = (value: string): string => {
-  if (!value) return "";
-  if (value.length <= 12) return value;
-  return `${value.slice(0, 6)}...${value.slice(-4)}`;
-};
-
-export const toLocalDateTime = (iso?: string): string => {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
-};
-

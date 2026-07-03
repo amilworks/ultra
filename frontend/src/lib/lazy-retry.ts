@@ -54,14 +54,6 @@ export async function retryDynamicImport<T>(
   throw lastError;
 }
 
-/** `React.lazy` for a default export, hardened with retry + stale-deploy reload. */
-export function lazyWithRetry<TProps>(
-  factory: () => Promise<{ default: ComponentType<TProps> }>,
-  label?: string
-) {
-  return lazy(() => retryDynamicImport(factory, { label }));
-}
-
 /** `React.lazy` for a named export, hardened with retry + stale-deploy reload. */
 export function lazyNamedWithRetry<TModule extends Record<string, unknown>>(
   loader: () => Promise<TModule>,

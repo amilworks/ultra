@@ -1796,7 +1796,12 @@ FOR UPDATE`, input.RunID))
 		}
 		return domain.RunLeaseRecord{}, err
 	}
-	if existing.LeaseToken != strings.TrimSpace(input.LeaseToken) || !existing.LeaseExpiresAt.After(now) {
+	// Token match alone authorizes renewal — even of an EXPIRED lease. A
+	// worker that survived a control-plane outage must be able to revive its
+	// lease and keep its (expensive, GPU-hours) computation. If recovery
+	// already requeued the run, ClearRunLease removed this row, the lookup
+	// above misses, and the worker gets the authoritative conflict instead.
+	if existing.LeaseToken != strings.TrimSpace(input.LeaseToken) {
 		return domain.RunLeaseRecord{}, ErrConflict
 	}
 	lease, err := scanRunLease(tx.QueryRow(ctx, `
@@ -1879,7 +1884,7 @@ RETURNING run_id, worker_id, lease_token, lease_expires_at, created_at, updated_
 //
 // $1 event_id, $2 run_id, $3 thread_id, $4 event_kind, $5 event_type,
 // $6 node_name, $7 task_id, $8 checkpoint_id, $9 scope_id, $10 agent_role,
-// $11 level, $12 ts, $13 message, $14 payload
+// $11 level, $12 ts, $13 message, $14 payload, $15 source_sequence
 const appendRunEventSQL = `
 WITH next AS (
   INSERT INTO control_run_event_sequences AS s (run_id, last_sequence)
@@ -1892,12 +1897,12 @@ WITH next AS (
   RETURNING last_sequence
 )
 INSERT INTO control_run_events (
-  event_id, sequence_number, run_id, thread_id, event_kind, event_type,
+  event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
   node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
-SELECT $1, next.last_sequence, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+SELECT $1, next.last_sequence, COALESCE($15::bigint, next.last_sequence), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 FROM next
-RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+RETURNING event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 `
 
 // appendRunEventIfRunActiveSQL is the single-statement ingest path. Outcome
@@ -1930,18 +1935,18 @@ WITH live_run AS (
     ) + 1
   RETURNING last_sequence
 ), inserted AS (
-  INSERT INTO control_run_events (
-    event_id, sequence_number, run_id, thread_id, event_kind, event_type,
-    node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
-  )
-  SELECT $1, next.last_sequence, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-  FROM next
-  RETURNING event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+	  INSERT INTO control_run_events (
+	    event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
+	    node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+	  )
+	  SELECT $1, next.last_sequence, COALESCE($15::bigint, next.last_sequence), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+	  FROM next
+	  RETURNING event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload, true AS appended
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload, true AS appended
 FROM inserted
 UNION ALL
-SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload, false
+SELECT e.event_id, e.sequence_number, e.source_sequence, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload, false
 FROM control_run_events e
 WHERE e.event_id = $1 AND NOT EXISTS (SELECT 1 FROM inserted)
 `
@@ -2035,6 +2040,7 @@ func appendRunEventArgs(input domain.AppendRunEventInput) []any {
 		timestamptz(ts),
 		nullableText(input.Message),
 		jsonBytes(input.Payload),
+		nullableInt8(input.SourceSequence),
 	}
 }
 
@@ -2042,6 +2048,7 @@ func runEventRowDestinations(row *sqlc.ControlRunEvent) []any {
 	return []any{
 		&row.EventID,
 		&row.SequenceNumber,
+		&row.SourceSequence,
 		&row.RunID,
 		&row.ThreadID,
 		&row.EventKind,
@@ -2525,18 +2532,38 @@ func (s *PostgresStore) GetRunEvent(ctx context.Context, eventID string) (domain
 	return runEventFromRow(row), true, nil
 }
 
+func (s *PostgresStore) GetRunEventBySourceSequence(ctx context.Context, runID string, sourceSequence int64) (domain.RunEventRecord, bool, error) {
+	if strings.TrimSpace(runID) == "" || sourceSequence <= 0 {
+		return domain.RunEventRecord{}, false, nil
+	}
+	row := sqlc.ControlRunEvent{}
+	err := s.pool.QueryRow(ctx, `
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
+       node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+FROM control_run_events
+WHERE run_id = $1 AND source_sequence = $2
+`, runID, sourceSequence).Scan(runEventRowDestinations(&row)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.RunEventRecord{}, false, nil
+		}
+		return domain.RunEventRecord{}, false, mapPgError(err)
+	}
+	return runEventFromRow(row), true, nil
+}
+
 const listRunEventsSQL = `
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM (
-  SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE run_id = $1 ORDER BY sequence_number DESC LIMIT $2
+  SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload FROM control_run_events WHERE run_id = $1 ORDER BY sequence_number DESC LIMIT $2
 ) recent_events
 ORDER BY sequence_number ASC
 `
 
 const listRunEventsForUserSQL = `
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM (
-  SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+  SELECT e.event_id, e.sequence_number, e.source_sequence, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
   FROM control_run_events e
   JOIN control_runs r ON r.run_id = e.run_id
   WHERE e.run_id = $1
@@ -2548,7 +2575,7 @@ ORDER BY sequence_number ASC
 `
 
 const listRunEventsAfterSQL = `
-SELECT event_id, sequence_number, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
+SELECT event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 FROM control_run_events
 WHERE run_id = $1 AND sequence_number > $2
 ORDER BY sequence_number ASC
@@ -2556,7 +2583,7 @@ LIMIT $3
 `
 
 const listRunEventsAfterForUserSQL = `
-SELECT e.event_id, e.sequence_number, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
+SELECT e.event_id, e.sequence_number, e.source_sequence, e.run_id, e.thread_id, e.event_kind, e.event_type, e.node_name, e.task_id, e.checkpoint_id, e.scope_id, e.agent_role, e.level, e.ts, e.message, e.payload
 FROM control_run_events e
 JOIN control_runs r ON r.run_id = e.run_id
 WHERE e.run_id = $1
@@ -2698,6 +2725,7 @@ func scanRunEventRows(rows pgx.Rows, capacity int) ([]domain.RunEventRecord, err
 	scanTargets := []any{
 		&event.EventID,
 		&event.Sequence,
+		&event.SourceSequence,
 		&event.RunID,
 		&threadID,
 		&event.EventKind,
@@ -2949,7 +2977,7 @@ func (s *PostgresStore) ListResourcesPastRetention(ctx context.Context, now time
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT resource_id, COALESCE(storage_path, ''), COALESCE(original_name, ''), size_bytes
+		`SELECT resource_id, COALESCE(storage_uri, ''), COALESCE(storage_path, ''), COALESCE(original_name, ''), size_bytes
 		 FROM control_resources
 		 WHERE status = 'deleted' AND retention_expires_at IS NOT NULL AND retention_expires_at < $1
 		 ORDER BY retention_expires_at ASC LIMIT $2`,
@@ -2962,7 +2990,7 @@ func (s *PostgresStore) ListResourcesPastRetention(ctx context.Context, now time
 	out := []domain.ResourceRecord{}
 	for rows.Next() {
 		var r domain.ResourceRecord
-		if err := rows.Scan(&r.ResourceID, &r.StoragePath, &r.OriginalName, &r.SizeBytes); err != nil {
+		if err := rows.Scan(&r.ResourceID, &r.StorageURI, &r.StoragePath, &r.OriginalName, &r.SizeBytes); err != nil {
 			return nil, mapPgError(err)
 		}
 		r.Status = "deleted"
@@ -6862,7 +6890,7 @@ FOR UPDATE OF j, l`, int32(limit))
 	result := domain.RecoverExpiredDataAgentJobLeasesResult{Checked: len(jobIDs)}
 	for _, jobID := range jobIDs {
 		job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
-SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+	SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
        COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
        progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
        created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
@@ -6929,6 +6957,82 @@ RETURNING job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role
 			return result, err
 		}
 		result.RequeuedJobs = append(result.RequeuedJobs, requeued)
+	}
+	// A job whose dispatch keeps failing must not be re-dispatched forever every
+	// recovery pass: once it has failed to dispatch this many times, mark it
+	// failed so it surfaces terminally instead of churning silently.
+	if _, err := tx.Exec(ctx, `
+UPDATE control_data_agent_jobs j
+SET status = 'failed',
+    error = 'dispatch failed repeatedly; giving up after '
+            || $1::text || ' attempts',
+    completed_at = now(),
+    updated_at = now()
+WHERE j.status = 'queued'
+  AND NOT EXISTS (
+    SELECT 1 FROM control_data_agent_job_leases l WHERE l.job_id = j.job_id
+  )
+  AND (
+    SELECT count(*)
+    FROM control_data_agent_job_events e
+    WHERE e.job_id = j.job_id AND e.event_type = 'data_agent.job.dispatch_failed'
+  ) >= $1`, int32(dataAgentJobMaxDispatchRetries)); err != nil {
+		return result, mapPgError(err)
+	}
+	if remaining := limit - len(result.RequeuedJobs); remaining > 0 {
+		rows, err := tx.Query(ctx, `
+SELECT j.job_id
+FROM control_data_agent_jobs j
+WHERE j.status = 'queued'
+  AND NOT EXISTS (
+    SELECT 1 FROM control_data_agent_job_leases l WHERE l.job_id = j.job_id
+  )
+  AND (
+    SELECT e.event_type
+    FROM control_data_agent_job_events e
+    WHERE e.job_id = j.job_id
+    ORDER BY e.sequence DESC
+    LIMIT 1
+  ) = 'data_agent.job.dispatch_failed'
+  AND (
+    SELECT count(*)
+    FROM control_data_agent_job_events e
+    WHERE e.job_id = j.job_id AND e.event_type = 'data_agent.job.dispatch_failed'
+  ) < $2
+ORDER BY j.updated_at ASC, j.job_id ASC
+LIMIT $1
+FOR UPDATE OF j`, int32(remaining), int32(dataAgentJobMaxDispatchRetries))
+		if err != nil {
+			return result, mapPgError(err)
+		}
+		retryJobIDs := []string{}
+		for rows.Next() {
+			var jobID string
+			if err := rows.Scan(&jobID); err != nil {
+				rows.Close()
+				return result, mapPgError(err)
+			}
+			retryJobIDs = append(retryJobIDs, jobID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, mapPgError(err)
+		}
+		rows.Close()
+		result.Checked += len(retryJobIDs)
+		for _, jobID := range retryJobIDs {
+			job, err := scanDataAgentJobRow(tx.QueryRow(ctx, `
+SELECT job_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(project_id, ''), job_type, status, resource_count, progress_completed,
+       progress_total, COALESCE(error, ''), COALESCE(created_by_user_id, ''),
+       created_at, updated_at, started_at, completed_at, input_selector, output_summary, metadata
+FROM control_data_agent_jobs
+WHERE job_id = $1`, jobID))
+			if err != nil {
+				return result, mapPgError(err)
+			}
+			result.RequeuedJobs = append(result.RequeuedJobs, job)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.RecoverExpiredDataAgentJobLeasesResult{}, err
@@ -7387,21 +7491,22 @@ func runFromRow(row sqlc.ControlRun) domain.RunRecord {
 
 func runEventFromRow(row sqlc.ControlRunEvent) domain.RunEventRecord {
 	return domain.RunEventRecord{
-		EventID:      row.EventID,
-		Sequence:     row.SequenceNumber,
-		RunID:        row.RunID,
-		ThreadID:     textValue(row.ThreadID),
-		EventKind:    row.EventKind,
-		EventType:    textValue(row.EventType),
-		NodeName:     textValue(row.NodeName),
-		TaskID:       textValue(row.TaskID),
-		CheckpointID: textValue(row.CheckpointID),
-		ScopeID:      textValue(row.ScopeID),
-		AgentRole:    textValue(row.AgentRole),
-		Level:        textValue(row.Level),
-		TS:           timeValue(row.Ts),
-		Message:      textValue(row.Message),
-		Payload:      jsonMap(row.Payload),
+		EventID:        row.EventID,
+		Sequence:       row.SequenceNumber,
+		SourceSequence: int8Value(row.SourceSequence),
+		RunID:          row.RunID,
+		ThreadID:       textValue(row.ThreadID),
+		EventKind:      row.EventKind,
+		EventType:      textValue(row.EventType),
+		NodeName:       textValue(row.NodeName),
+		TaskID:         textValue(row.TaskID),
+		CheckpointID:   textValue(row.CheckpointID),
+		ScopeID:        textValue(row.ScopeID),
+		AgentRole:      textValue(row.AgentRole),
+		Level:          textValue(row.Level),
+		TS:             timeValue(row.Ts),
+		Message:        textValue(row.Message),
+		Payload:        jsonMap(row.Payload),
 	}
 }
 

@@ -16,6 +16,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import time
 from typing import Any
 
 __all__ = ["create_app"]
@@ -94,7 +95,15 @@ def localize_pyramid(path: str) -> str:
     try:
         if os.path.exists(local):
             try:
-                os.utime(local, None)  # LRU touch
+                # LRU touch: bump atime for recency but PRESERVE mtime. The viewer-info
+                # sidecar cache keys on (path, size, mtime_ns); bumping mtime here (the
+                # old ``os.utime(local, None)`` set BOTH to now) changed that key on every
+                # request, so a locally-cached pyramid's /viewerinfo missed its sidecar
+                # every time and re-ran the ~300ms multichannel signal-score decode (and
+                # accumulated an orphaned sidecar per hit). Keeping mtime stable lets the
+                # sidecar hit after the first compute.
+                st_local = os.stat(local)
+                os.utime(local, (time.time(), st_local.st_mtime))  # (atime=now, mtime=unchanged)
             except OSError:
                 pass
             return local
@@ -106,6 +115,17 @@ def localize_pyramid(path: str) -> str:
         return local
     except OSError:
         return path  # degrade to the NFS path; never hard-fail
+
+
+async def _localize_pyramid_async(path: str) -> str:
+    """``localize_pyramid`` off the event loop. A cold populate copies a multi-GB
+    pyramid over NFS (~60s at the measured ~21MB/s barrel read rate); done inline
+    in an ``async def`` handler that blocks this worker's entire event loop, so
+    every other request routed to the process freezes for the duration. The warm
+    path is a couple of stats — the threadpool hop costs microseconds."""
+    from starlette.concurrency import run_in_threadpool  # lazy: service-only dep
+
+    return await run_in_threadpool(localize_pyramid, path)
 
 
 def _parse_fusion_request(channels: str | None, channel_colors: str | None):
@@ -189,14 +209,14 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/meta")
     async def meta(path: str) -> dict[str, Any]:
-        return await runner.call("meta", localize_pyramid(path))
+        return await runner.call("meta", await _localize_pyramid_async(path))
 
     @app.get("/tile")
     async def tile(
         path: str, level: int = 0, col: int = 0, row: int = 0, size: int = 512,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "tile", path, level=level, col=col, row=row, tile_size=size,
@@ -209,7 +229,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, x1: int, y1: int, x2: int, y2: int, scale: float | None = None,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "region", path, x1=x1, y1=y1, x2=x2, y2=y2, region_scale=scale,
@@ -223,7 +243,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         channels: str | None = None, channel_colors: str | None = None,
         full_resolution: bool = True,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         # full_resolution=False (transient z-scrub frame) lets the engine pick a
         # bounded pyramid level; the settled view (True) reads the native plane so
@@ -239,7 +259,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, max_size: int = 256, z: int | None = None, level: int | None = None,
         channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
             "thumbnail", path, max_size=max_size, z=z, level=level,
@@ -252,7 +272,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         path: str, grid_rows: int | None = None, grid_cols: int | None = None, level: int | None = None,
         scale: float | None = None, channels: str | None = None, channel_colors: str | None = None,
     ):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         if getattr(runner, "workers", 1) > 1:
             # Multiple worker processes: fan the per-plane reads out across the pool
@@ -272,11 +292,13 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/histogram")
     async def histogram(path: str, bins: int = 256) -> dict[str, Any]:
-        return await runner.call("histogram", localize_pyramid(path), bins=bins)
+        return await runner.call("histogram", await _localize_pyramid_async(path), bins=bins)
 
     @app.get("/viewerinfo")
-    async def viewerinfo(path: str) -> dict[str, Any]:
-        return await runner.call("viewer_info", localize_pyramid(path))
+    async def viewerinfo(path: str, name: str | None = None) -> dict[str, Any]:
+        # ``name`` (the upload's original filename) lets HDF5-data files be detected
+        # when the on-disk blob path has lost its extension; harmless for images.
+        return await runner.call("viewer_info", await _localize_pyramid_async(path), name=name)
 
     @app.get("/video-poster")
     async def video_poster(path: str, t: float = 1.0, max_size: int = 512):
@@ -300,7 +322,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/scalar-volume")
     async def scalar_volume(path: str, channel: int = 0, t: int = 0):
-        path = localize_pyramid(path)
+        path = await _localize_pyramid_async(path)
         if getattr(runner, "workers", 1) > 1:
             from ultra_deepagents.imaging.atlas import assemble_scalar_volume
 
@@ -318,5 +340,97 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             "x-volume-channel": str(vol["channel"]),
         }
         return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+
+    # --- HDF5 data viewer -------------------------------------------------------
+    # These serve the frontend HDF5 explorer (frontend/src/components/viewer/hdf5).
+    # The Go control plane resolves file_id -> path + forwards dataset_path (+ the
+    # per-endpoint params). Response shapes are the frozen FE wire contract
+    # (frontend/src/types.ts Hdf5* types). An unknown dataset -> 404; a non-numeric/
+    # non-tabular/unsupported dataset -> 422 (via the ValueError handler above; the
+    # reader raises messages carrying an "unsupported" marker). Heavy reads run in the
+    # pool (runner.call), bounded + downsampled inside imaging/hdf5.py.
+    from ultra_deepagents.imaging.hdf5 import Hdf5DatasetNotFound
+
+    def _not_found(exc: Exception):
+        return JSONResponse(status_code=404, content={"error": "dataset not found", "detail": str(exc)})
+
+    @app.get("/hdf5/viewerinfo")
+    async def hdf5_viewerinfo(path: str, file_id: str = "", name: str = "") -> dict[str, Any]:
+        # Always builds the kind:"hdf5" payload (the Go gate calls this for uploads whose
+        # OriginalName is an HDF5-data extension); never raises on a corrupt file.
+        return await runner.call("hdf5_viewer_info", path, file_id=file_id, name=name)
+
+    @app.get("/hdf5/dataset")
+    async def hdf5_dataset(path: str, dataset_path: str, file_id: str = ""):
+        try:
+            return await runner.call("hdf5_dataset_summary", path, dataset_path, file_id=file_id)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/materials/dashboard")
+    async def hdf5_materials_dashboard(path: str, file_id: str = ""):
+        try:
+            return await runner.call("hdf5_materials_dashboard", path, file_id=file_id)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/preview/slice")
+    async def hdf5_slice(
+        path: str, dataset_path: str, axis: str = "z", index: int | None = None, component: int = 0,
+    ):
+        try:
+            png = await runner.call(
+                "hdf5_slice_png", path, dataset_path, axis=axis, index=index, component=component,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/hdf5/preview/atlas")
+    async def hdf5_atlas(
+        path: str, dataset_path: str, enhancement: str | None = None, fusion_method: str | None = None,
+        negative: str | None = None, channels: str | None = None,
+    ):
+        try:
+            png = await runner.call("hdf5_atlas_png", path, dataset_path)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/hdf5/preview/scalar-volume")
+    async def hdf5_scalar_volume(path: str, dataset_path: str, channel: int = 0):
+        try:
+            vol = await runner.call("hdf5_scalar_volume", path, dataset_path, channel=channel)
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+        headers = {
+            "x-volume-width": str(vol["width"]),
+            "x-volume-height": str(vol["height"]),
+            "x-volume-depth": str(vol["depth"]),
+            "x-volume-dtype": str(vol["dtype"]),
+            "x-volume-bytes-per-voxel": str(vol["bytes_per_voxel"]),
+            "x-volume-raw-min": str(float(vol["raw_min"])),
+            "x-volume-raw-max": str(float(vol["raw_max"])),
+            "x-volume-channel": str(vol["channel"]),
+        }
+        return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+
+    @app.get("/hdf5/preview/histogram")
+    async def hdf5_histogram(path: str, dataset_path: str, component: int = 0, bins: int = 24, file_id: str = ""):
+        try:
+            return await runner.call(
+                "hdf5_histogram", path, dataset_path, component=component, bins=bins, file_id=file_id,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
+
+    @app.get("/hdf5/preview/table")
+    async def hdf5_table(path: str, dataset_path: str, offset: int = 0, limit: int = 12, file_id: str = ""):
+        try:
+            return await runner.call(
+                "hdf5_table", path, dataset_path, offset=offset, limit=limit, file_id=file_id,
+            )
+        except Hdf5DatasetNotFound as exc:
+            return _not_found(exc)
 
     return app

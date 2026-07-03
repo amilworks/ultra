@@ -108,6 +108,35 @@ def test_runtime_settings_load_model_stream_idle_recoveries(monkeypatch):
     assert settings.model_stream_idle_max_recoveries == 4
 
 
+def test_runtime_settings_default_progress_stall_guard_armed(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_THRESHOLD", raising=False)
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_MAX_RECOVERIES", raising=False)
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.progress_stall_threshold == 12
+    assert settings.progress_stall_max_recoveries == 2
+
+
+def test_runtime_settings_progress_stall_guard_env_overrides(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_THRESHOLD", "0")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_MAX_RECOVERIES", "5")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.progress_stall_threshold == 0  # 0 disables the guard
+    assert settings.progress_stall_max_recoveries == 5
+
+
+def test_runtime_settings_builder_disabled_by_default_opt_in(monkeypatch):
+    # Cleanup candidate: OFF by default after a live A/B; opt back in with env=1.
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_BUILDER_ENABLED", raising=False)
+    assert RuntimeSettings.from_env().builder_enabled is False
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_BUILDER_ENABLED", "1")
+    assert RuntimeSettings.from_env().builder_enabled is True
+
+
 def test_runtime_settings_default_to_higher_autonomous_continuation_guard(monkeypatch):
     monkeypatch.delenv("ULTRA_DEEPAGENTS_COMPLETION_MAX_CONTINUATIONS", raising=False)
 

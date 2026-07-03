@@ -30,6 +30,9 @@ type Config struct {
 	NATSEventsSubject          string
 	NATSCancelSubject          string
 	NATSEventConsumer          string
+	NATSEventPartitions        int
+	NATSStreamMaxAge           time.Duration
+	NATSStreamMaxBytes         int64
 	NATSEventIngestConcurrency int
 	NATSWorkerDurable          string
 	NATSDataAgentWorkerDurable string
@@ -56,17 +59,18 @@ type Config struct {
 	// after WorkOS authentication, regardless of the WorkOS-reported role. This
 	// is the bootstrap path for the first admin (you can't self-promote in-app
 	// until you're already an admin). From ULTRA_CONTROL_ADMIN_EMAILS.
-	WorkOSAdminEmails        []string
-	DevAdminEnabled          bool
-	AllowDevAuthInProduction bool
-	RunRecoveryEnabled       bool
-	RunRecoveryInterval      time.Duration
-	RunRecoveryBatchLimit    int
-	RetentionGCEnabled       bool
-	RetentionGCInterval      time.Duration
-	RetentionGCBatch         int
-	RunEventDeltaRetention   time.Duration
-	WorkerToken              string
+	WorkOSAdminEmails         []string
+	DevAdminEnabled           bool
+	AllowDevAuthInProduction  bool
+	RunRecoveryEnabled        bool
+	RunRecoveryInterval       time.Duration
+	RunRecoveryFirstPassDelay time.Duration
+	RunRecoveryBatchLimit     int
+	RetentionGCEnabled        bool
+	RetentionGCInterval       time.Duration
+	RetentionGCBatch          int
+	RunEventDeltaRetention    time.Duration
+	WorkerToken               string
 }
 
 func Load() Config {
@@ -91,15 +95,27 @@ func Load() Config {
 		// can't hold a connection from the small pool forever. Off by default (0), like
 		// ReadTimeout/WriteTimeout — operators opt in per their workload. Migrations are
 		// exempt (slow DDL is legitimate).
-		DatabaseStatementTimeout:   envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
-		NATSURL:                    envString("ULTRA_CONTROL_NATS_URL", ""),
-		NATSStream:                 envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
-		NATSJobsSubject:            envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),
-		NATSDataAgentJobsSubject:   envString("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", "ultra.data_agent.jobs"),
-		NATSEventsSubject:          envString("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
-		NATSCancelSubject:          envString("ULTRA_CONTROL_NATS_CANCEL_SUBJECT", "ultra.runs.cancel"),
-		NATSEventConsumer:          envString("ULTRA_CONTROL_NATS_EVENT_CONSUMER", "ultra-control-event-ingest"),
+		DatabaseStatementTimeout: envDurationSeconds("ULTRA_CONTROL_DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
+		NATSURL:                  envString("ULTRA_CONTROL_NATS_URL", ""),
+		NATSStream:               envString("ULTRA_CONTROL_NATS_STREAM", "ULTRA_RUNS"),
+		NATSJobsSubject:          envString("ULTRA_CONTROL_NATS_JOBS_SUBJECT", "ultra.runs.jobs"),
+		NATSDataAgentJobsSubject: envString("ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT", "ultra.data_agent.jobs"),
+		NATSEventsSubject:        envString("ULTRA_CONTROL_NATS_EVENTS_SUBJECT", "ultra.runs.events"),
+		NATSCancelSubject:        envString("ULTRA_CONTROL_NATS_CANCEL_SUBJECT", "ultra.runs.cancel"),
+		NATSEventConsumer:        envString("ULTRA_CONTROL_NATS_EVENT_CONSUMER", "ultra-control-event-ingest"),
+		// Must match the worker's partition count, or events published to a
+		// partition the control plane has no consumer for are stored but never
+		// ingested (runs look hung). The worker (config.py) reads
+		// ULTRA_NATS_EVENT_PARTITIONS first, then ULTRA_CONTROL_NATS_EVENT_PARTITIONS;
+		// mirror that precedence exactly so a single shared var keeps both sides
+		// in agreement.
+		NATSEventPartitions:        envInt("ULTRA_NATS_EVENT_PARTITIONS", envInt("ULTRA_CONTROL_NATS_EVENT_PARTITIONS", 64)),
 		NATSEventIngestConcurrency: envInt("ULTRA_CONTROL_NATS_EVENT_INGEST_CONCURRENCY", 4),
+		// Retention bounds for the JetStream stream (events are archived in
+		// Postgres; the stream is transport). MaxAge is clamped to >= the 24h
+		// duplicate window in eventbus.
+		NATSStreamMaxAge:           time.Duration(envInt("ULTRA_CONTROL_NATS_STREAM_MAX_AGE_HOURS", 72)) * time.Hour,
+		NATSStreamMaxBytes:         int64(envInt("ULTRA_CONTROL_NATS_STREAM_MAX_BYTES", 8<<30)),
 		NATSWorkerDurable:          envString("ULTRA_CONTROL_NATS_WORKER_DURABLE", "ultra-deepagents-worker"),
 		NATSDataAgentWorkerDurable: envString("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),

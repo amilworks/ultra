@@ -114,6 +114,17 @@ How to work:
    concurrent workers never overwrite each other, then collect all K results once they return. Keep each fan-out
    batch modest (a handful at a time) since the workers share one endpoint; do a few batches rather than one huge
    burst. Only the independent units fan out — anything that depends on a prior result stays sequential.
+   For long scientific/computational runs, do not launch the full grid, sweep, training job, or long integration
+   as the first expensive command. First run a pilot timing pass on a tiny representative subset: one seed, one
+   duration/window, one grid point, one batch, or about 1-5% of the data. Record elapsed seconds and extrapolate
+   the estimated runtime for the full requested scope. Compare that estimate to the user/control-plane runtime
+   budget when present, otherwise to the sandbox wall-clock cap from tool_capability_manifest. If the estimated
+   runtime exceeds budget, shrink or chunk the grid: reduce seeds, durations, resolution, sample count, or batch
+   size; run resumable chunks; and state the reduced scope explicitly. During execution, checkpoint durable
+   progress under /outputs after each condition or batch, and at least every few minutes for long loops:
+   metrics.jsonl/csv, partial tables, completed-batch manifests, model checkpoints, and enough parameters/seeds
+   to resume. Keep scratch/temp files under /workspace, but progress evidence and final deliverables belong in
+   /outputs.
 4. VERIFY against the measurable check every time you think you are close. Never claim success from a
    single run or an unverified number. Read the metric from STDOUT or a results file (CSV/JSON) - a
    NUMBER, not a picture.
@@ -145,7 +156,10 @@ BUILDER_WORKER_SYSTEM_PROMPT = """You are the Builder's executor worker. You are
 
 Implement it if needed, RUN it in the sandbox, and return ONLY the requested result — the metric, the number, the
 artifact path, or a short factual summary — read from STDOUT or a results file (a NUMBER, not a picture). Be fast and
-focused: do exactly the delegated unit, confirm it ran without a traceback, and report the result concisely. Do NOT
+focused: do exactly the delegated unit, confirm it ran without a traceback, and report the result concisely. For long
+scientific/computational delegated units, run a pilot timing pass before a full expensive command, compare the
+estimated runtime to the stated budget or sandbox wall-clock cap, shrink or chunk oversized work, and checkpoint
+durable progress under /outputs after each condition or batch. Do NOT
 plan the larger goal, do NOT emit a GOAL_OUTCOME verdict (that is the Builder lead's job), and do NOT open image files
 — you are text-only; rely entirely on numeric/textual outputs.
 """
@@ -328,8 +342,18 @@ def build_builder_subagent(
     backend: Any,
     vision_tools: list[Any] | None = None,
     permissions: list[Any] | None = None,
+    extra_middleware: list[Any] | None = None,
 ) -> CompiledSubAgent | None:
     """Build the Builder as a CompiledSubAgent (a full deep agent with its own loop).
+
+    CLEANUP CANDIDATE (2026-07-01): DISABLED by default. A live A/B on the comp-bio task
+    showed the Builder works as designed but concentrates ~92% of a run's tokens in its
+    isolated context for little net gain over the plain coordinator + code-runner path,
+    which the within-turn progress-stall guard (progress_guard.py) already protects. This
+    module (GoalLoop engine, worker spec, model plumbing) and its registration in agent.py
+    are kept behind ``settings.builder_enabled`` for a possible future A/B; if the Builder
+    stays off, this whole file plus its wiring can be removed. See
+    planning/2026-07-01-coordinator-loop-livelock.md.
 
     MODEL-AGNOSTIC: ``build_builder_model`` resolves the configured endpoint (or falls back
     to the coordinator's model). The Builder inherits the coordinator's coding tools +
@@ -355,6 +379,11 @@ def build_builder_subagent(
     if not builder_is_multimodal:
         # The fallback/coordinator model is text-only: guarantee no image block ever reaches it.
         middleware.append(StripImagesForTextModelMiddleware())
+    if extra_middleware:
+        # e.g. the shared attempt-ledger middleware: the Builder lead sees the same
+        # durable record of failed/stagnant commands as the coordinator, so its own
+        # iterate loop cannot re-discover already-failed attempts after compaction.
+        middleware.extend(extra_middleware)
     # The Builder's sub-worker spec. An EXPLICIT "general-purpose" subagent REPLACES the
     # (globally-disabled) auto-added worker so one actually exists for the lead to delegate to, and
     # lets it run a DIFFERENT model than the lead: the lead reasons on build_builder_model while the
@@ -370,7 +399,10 @@ def build_builder_subagent(
         "system_prompt": BUILDER_WORKER_SYSTEM_PROMPT,
         "model": build_builder_worker_model(settings),
         "tools": list(tools),
-        "middleware": [StripImagesForTextModelMiddleware()],
+        # Workers execute the heaviest repeated sub-runs — they carry the shared
+        # attempt-ledger middleware too so a fanned-out worker never blindly
+        # re-runs a command the run already saw fail.
+        "middleware": [StripImagesForTextModelMiddleware(), *(extra_middleware or [])],
     }
     inner = create_deep_agent(
         model=build_builder_model(settings),

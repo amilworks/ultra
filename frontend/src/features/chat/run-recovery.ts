@@ -14,9 +14,12 @@ export const isLegacyRunLookup404Content = (content: string | null | undefined):
 
 export const shouldRecoverRunResultMessage = (
   message: RecoverableRunMessage,
-  options: { isStreamingMessage?: boolean } = {}
+  options: { isStreamingMessage?: boolean; isLocalRunActive?: boolean } = {}
 ): boolean => {
   if (message.role !== "assistant" || !message.runId) {
+    return false;
+  }
+  if (options.isLocalRunActive) {
     return false;
   }
   // A turn the user stopped, or that we have already marked failed, must not be

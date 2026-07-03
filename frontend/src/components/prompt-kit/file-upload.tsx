@@ -236,19 +236,3 @@ export const FileUploadFolderTrigger = React.forwardRef<HTMLButtonElement, FileU
 );
 
 FileUploadFolderTrigger.displayName = "FileUploadFolderTrigger";
-
-export function FileUploadContent({
-  className,
-  children,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement>) {
-  const { dragActive } = useFileUploadContext();
-  return (
-    <div
-      {...props}
-      className={cn("pk-file-upload-content", dragActive && "pk-file-upload-content-drag", className)}
-    >
-      {children}
-    </div>
-  );
-}

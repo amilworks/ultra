@@ -42,6 +42,19 @@ describe("shouldRecoverRunResultMessage", () => {
     ).toBe(false);
   });
 
+  it("does not open recovery while the same run is already streaming locally", () => {
+    expect(
+      shouldRecoverRunResultMessage(
+        {
+          role: "assistant",
+          runId: "run_123",
+          content: "",
+        },
+        { isLocalRunActive: true }
+      )
+    ).toBe(false);
+  });
+
   it("does not treat terminal run failures as stale lookup errors", () => {
     expect(
       shouldRecoverRunResultMessage({

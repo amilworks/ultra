@@ -83,12 +83,15 @@ class DataAgentJobEnvelope:
             metadata=_dict(payload.get("metadata")),
         )
 
-    def principal_headers(self) -> dict[str, str]:
+    def principal_headers(self, settings: RuntimeSettings | None = None) -> dict[str, str]:
         headers = {
             "X-Ultra-User-Id": self.owner_user_id or "local-user",
             "X-Ultra-Org-Id": self.owner_org_id or "local-org",
             "X-Ultra-Role": "researcher",
         }
+        token = str(getattr(settings, "control_worker_token", "") or "").strip() if settings else ""
+        if token:
+            headers["X-Ultra-Worker-Token"] = token
         return headers
 
 
@@ -114,6 +117,7 @@ ReleaseDataAgentLeaseFunc = Callable[
     Awaitable[None],
 ]
 DataAgentStatusUpdateFunc = Callable[..., Awaitable[dict[str, Any] | None]]
+DataAgentEventAppendFunc = Callable[..., Awaitable[dict[str, Any] | None]]
 
 
 def build_data_agent_consumer_config(settings: RuntimeSettings) -> ConsumerConfig:
@@ -151,7 +155,7 @@ async def fetch_control_plane_data_agent_job_status(
             method="GET",
             headers={
                 "Accept": "application/json",
-                **job.principal_headers(),
+                **job.principal_headers(settings),
             },
         )
         timeout = max(0.1, float(settings.control_status_timeout_seconds))
@@ -290,6 +294,35 @@ async def update_control_plane_data_agent_job_status(
     )
 
 
+async def append_control_plane_data_agent_job_event(
+    job: DataAgentJobEnvelope,
+    settings: RuntimeSettings,
+    *,
+    event_id: str = "",
+    event_type: str,
+    message: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    base_url = settings.control_base_url.rstrip("/")
+    if not base_url:
+        return None
+    url = _data_agent_job_url(settings, job, suffix="/events")
+    payload = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "message": message,
+        "metadata": metadata or {},
+    }
+    return await asyncio.to_thread(
+        _request_control_plane_json,
+        url,
+        "POST",
+        payload,
+        settings,
+        job,
+    )
+
+
 def _request_control_plane_data_agent_job_lease(
     url: str,
     method: str,
@@ -345,7 +378,7 @@ def _request_control_plane_json(
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            **job.principal_headers(),
+            **job.principal_headers(settings),
         },
     )
     timeout = max(0.1, float(settings.control_status_timeout_seconds))
@@ -365,6 +398,16 @@ def _data_agent_job_url(
 ) -> str:
     quoted_job_id = urllib_parse.quote(job.job_id, safe="")
     return f"{settings.control_base_url.rstrip('/')}/v2/data-agent/jobs/{quoted_job_id}{suffix}"
+
+
+def _data_agent_skip_event_id(job: DataAgentJobEnvelope) -> str:
+    dispatch_part = _event_id_part(job.dispatch_id) or "no_dispatch"
+    return f"data_agent_job_event_{_event_id_part(job.job_id)}_{dispatch_part}_skipped_initial_status"
+
+
+def _event_id_part(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in _string(value))
+    return cleaned.strip("_")
 
 
 class DefaultDataAgentProcessor:
@@ -498,6 +541,7 @@ class NATSDataAgentWorker:
         renew_lease_func: RenewDataAgentLeaseFunc = renew_control_plane_data_agent_job_lease,
         release_lease_func: ReleaseDataAgentLeaseFunc = release_control_plane_data_agent_job_lease,
         status_update_func: DataAgentStatusUpdateFunc = update_control_plane_data_agent_job_status,
+        event_append_func: DataAgentEventAppendFunc = append_control_plane_data_agent_job_event,
         worker_heartbeat_func: WorkerHeartbeatFunc = post_control_plane_worker_heartbeat,
     ) -> None:
         self.settings = _data_agent_worker_identity(settings or RuntimeSettings.from_env())
@@ -507,6 +551,7 @@ class NATSDataAgentWorker:
         self._renew_lease = renew_lease_func
         self._release_lease = release_lease_func
         self._update_status = status_update_func
+        self._append_event = event_append_func
         self._worker_heartbeat = worker_heartbeat_func
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._shutting_down = False
@@ -603,6 +648,33 @@ class NATSDataAgentWorker:
                     "Skipping Data Agent job because control plane job is not runnable.",
                     extra={"job_id": job.job_id, "status": control_status},
                 )
+                try:
+                    await self._append_event(
+                        job,
+                        self.settings,
+                        event_id=_data_agent_skip_event_id(job),
+                        event_type="data_agent.job.skipped",
+                        message="Data Agent job delivery skipped before worker lease.",
+                        metadata={
+                            "ack_action": "ack",
+                            "control_status": control_status,
+                            "dispatch_id": job.dispatch_id,
+                            "job_type": job.job_type,
+                            "stage": "initial_status_check",
+                            "worker_id": self.settings.data_agent_worker_id,
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "Data Agent skipped-job audit failed; NAKing delivery for retry.",
+                        extra={"job_id": job.job_id, "status": control_status},
+                        exc_info=True,
+                    )
+                    await _nak_message(
+                        message,
+                        delay_seconds=data_agent_redelivery_delay(self.settings),
+                    )
+                    return
                 await _ack_message(message)
                 return
 
@@ -944,10 +1016,15 @@ def _data_agent_consumer_config_matches(existing_config: Any, desired_config: Co
         return False
     return (
         getattr(existing_config, "filter_subject", None) == desired_config.filter_subject
+        and _ack_policy_equal(getattr(existing_config, "ack_policy", None), desired_config.ack_policy)
         and _float_equal(getattr(existing_config, "ack_wait", None), desired_config.ack_wait)
         and getattr(existing_config, "max_deliver", None) == desired_config.max_deliver
         and getattr(existing_config, "max_ack_pending", None) == desired_config.max_ack_pending
     )
+
+
+def _ack_policy_equal(left: Any, right: Any) -> bool:
+    return getattr(left, "value", left) == getattr(right, "value", right)
 
 
 def _float_equal(left: Any, right: Any) -> bool:

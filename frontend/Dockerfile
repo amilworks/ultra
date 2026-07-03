@@ -14,6 +14,19 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY . .
 RUN pnpm run build
 
+# Precompress text assets so the edge (Caddy file_server `precompressed`) can
+# serve .br/.zst/.gz sidecars with a real Content-Length instead of paying
+# per-request compression CPU — and gain brotli, which on-the-fly encoding
+# doesn't offer. Images/fonts are already compressed formats; skip them.
+RUN apt-get update && apt-get install -y --no-install-recommends brotli zstd \
+  && rm -rf /var/lib/apt/lists/* \
+  && find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' \
+       -o -name '*.svg' -o -name '*.json' -o -name '*.txt' -o -name '*.map' \
+       -o -name '*.webmanifest' \) -size +1k \
+       -exec brotli -q 11 -k {} \; \
+       -exec zstd -19 -q -k {} \; \
+       -exec gzip -9 -k {} \;
+
 FROM nginx:1.27-alpine AS runtime
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY <<'EOF' /etc/nginx/conf.d/default.conf

@@ -320,3 +320,60 @@ def test_runner_metadata_is_best_effort():
     )
     assert out["status"] == "succeeded"
     assert "meta_warning" in out
+
+
+def test_prefer_bioio_default_set_covers_proprietary_microscopy_formats():
+    # The baked-in default routes the proprietary microscopy formats (that libbioimage
+    # reads poorly or not at all) through bioio deterministically, and does NOT include
+    # plain tiff/svs (libbioimage-native) or zarr (native ngff, never transcoded).
+    from ultra_deepagents.imaging.job import _prefer_bioio_extensions
+
+    exts = _prefer_bioio_extensions()
+    assert {"czi", "nd2", "lif", "dv", "r3d"} <= exts
+    assert "zarr" not in exts and "ome.zarr" not in exts
+    assert "tif" not in exts and "tiff" not in exts and "svs" not in exts
+
+
+def test_prefer_bioio_env_override_replaces_default():
+    from ultra_deepagents.imaging.job import _prefer_bioio_extensions
+
+    prev = os.environ.get("ULTRA_IMGSVC_PREFER_BIOIO_EXTS")
+    os.environ["ULTRA_IMGSVC_PREFER_BIOIO_EXTS"] = ".czi, nd2 ,lif"
+    try:
+        assert _prefer_bioio_extensions() == frozenset({"czi", "nd2", "lif"})
+    finally:
+        if prev is None:
+            del os.environ["ULTRA_IMGSVC_PREFER_BIOIO_EXTS"]
+        else:
+            os.environ["ULTRA_IMGSVC_PREFER_BIOIO_EXTS"] = prev
+
+
+def test_nd2_routes_through_bioio_transcode(tmp_path):
+    # A Nikon .nd2 (no libbioimage reader) must go straight to the bioio transcode lane —
+    # meta_fn(source) is never consulted for the routing decision.
+    src = str(tmp_path / "acquisition.nd2")
+    dst = str(tmp_path / "d.tif")
+    seen: dict = {}
+
+    def fake_meta(path):
+        if path.endswith(".transcode.ome.tif"):
+            return {"image_num_x": 2048, "image_num_y": 2048, "image_num_z": 1, "image_num_c": 3}
+        raise AssertionError("meta_fn must NOT be called on the .nd2 source (prefer-bioio)")
+
+    def fake_transcode(s, d, **_kw):
+        open(d, "w").close()
+        return TranscodeResult(
+            path=d, series_count=1, series_index=0, series_name="XYPos0",
+            num_c=3, num_z=1, dtype="uint16", series_names=["XYPos0"],
+        )
+
+    def fake_convert(s, d, *, spec):
+        seen["convert_src"] = s
+        return ConvertResult(s, d, 0, "", "")
+
+    out = run_derive_pyramid_job(
+        {"resource_id": "r", "src_path": src, "dst_path": dst, "fmt": "auto"},
+        convert_fn=fake_convert, meta_fn=fake_meta, transcode_fn=fake_transcode,
+    )
+    assert out["transcoded"] is True and out["source_reader"] == "bioio"
+    assert seen["convert_src"].endswith(".transcode.ome.tif")

@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -106,21 +108,7 @@ func New(cfg config.Config) (*App, error) {
 	}
 	if cfg.NATSURL != "" {
 		var err error
-		natsBus, err = eventbus.NewNATSBus(ctx, eventbus.NATSConfig{
-			URL:                    cfg.NATSURL,
-			Stream:                 cfg.NATSStream,
-			JobsSubject:            cfg.NATSJobsSubject,
-			DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
-			EventsSubject:          cfg.NATSEventsSubject,
-			CancelSubject:          cfg.NATSCancelSubject,
-			EventConsumer:          cfg.NATSEventConsumer,
-			EventIngestConcurrency: cfg.NATSEventIngestConcurrency,
-			ConsumerTargets: []eventbus.QueueConsumerTarget{
-				{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
-				{Name: cfg.NATSDataAgentWorkerDurable, Role: "data_agent", Subject: cfg.NATSDataAgentJobsSubject},
-				{Name: cfg.NATSEventConsumer, Role: "event_ingest", Subject: cfg.NATSEventsSubject},
-			},
-		})
+		natsBus, err = eventbus.NewNATSBus(ctx, natsBusConfig(cfg))
 		if err != nil {
 			for _, closeFn := range closeFns {
 				closeFn()
@@ -179,7 +167,7 @@ func New(cfg config.Config) (*App, error) {
 	}
 	if cfg.RunRecoveryEnabled {
 		startFns = append(startFns, func(ctx context.Context) error {
-			startRunRecoveryLoop(ctx, runService, cfg.RunRecoveryInterval, cfg.RunRecoveryBatchLimit)
+			startRunRecoveryLoop(ctx, runService, cfg.RunRecoveryInterval, cfg.RunRecoveryBatchLimit, cfg.RunRecoveryFirstPassDelay)
 			if recoveryStore, ok := controlStore.(dataAgentLeaseRecoveryStore); ok && dataAgentJobs != nil {
 				startDataAgentRecoveryLoop(ctx, recoveryStore, dataAgentJobs, cfg.RunRecoveryInterval, cfg.RunRecoveryBatchLimit)
 			}
@@ -192,7 +180,11 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.RetentionGCEnabled {
 		if gcStore, ok := controlStore.(httpapi.RetentionGCStore); ok {
 			startFns = append(startFns, func(ctx context.Context) error {
-				go httpapi.RunRetentionGC(ctx, gcStore, cfg.UploadRoot, cfg.RetentionGCInterval, cfg.RetentionGCBatch)
+				root, err := retentionGCUploadRoot(cfg.UploadRoot)
+				if err != nil {
+					return err
+				}
+				go httpapi.RunRetentionGC(ctx, gcStore, root, cfg.RetentionGCInterval, cfg.RetentionGCBatch)
 				return nil
 			})
 		}
@@ -301,7 +293,59 @@ func New(cfg config.Config) (*App, error) {
 	}, nil
 }
 
-func startRunRecoveryLoop(ctx context.Context, runs *runcontrol.Service, interval time.Duration, limit int) {
+func natsBusConfig(cfg config.Config) eventbus.NATSConfig {
+	return eventbus.NATSConfig{
+		URL:                    cfg.NATSURL,
+		Stream:                 cfg.NATSStream,
+		JobsSubject:            cfg.NATSJobsSubject,
+		DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
+		EventsSubject:          cfg.NATSEventsSubject,
+		CancelSubject:          cfg.NATSCancelSubject,
+		EventConsumer:          cfg.NATSEventConsumer,
+		EventPartitions:        cfg.NATSEventPartitions,
+		StreamMaxAge:           cfg.NATSStreamMaxAge,
+		StreamMaxBytes:         cfg.NATSStreamMaxBytes,
+		EventIngestConcurrency: cfg.NATSEventIngestConcurrency,
+		IngestErrorClassifier:  classifyRunEventIngestError,
+		ConsumerTargets: []eventbus.QueueConsumerTarget{
+			{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
+			{Name: cfg.NATSDataAgentWorkerDurable, Role: "data_agent", Subject: cfg.NATSDataAgentJobsSubject},
+			{Name: cfg.NATSEventConsumer, Role: "event_ingest", Subject: cfg.NATSEventsSubject},
+		},
+	}
+}
+
+func retentionGCUploadRoot(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "data/uploads"
+	}
+	return filepath.Abs(filepath.Clean(root))
+}
+
+// classifyRunEventIngestError maps ingest-handler errors to retry classes so
+// the eventbus worker applies the right budget: transient store outages retry
+// indefinitely (terminating would permanently lose the event), deterministic
+// poison terminates after a short window, and a missing predecessor bypasses
+// the ordering gate after a bounded wait.
+func classifyRunEventIngestError(err error) eventbus.IngestErrorClass {
+	switch {
+	case err == nil:
+		return eventbus.IngestErrorUnknown
+	case errors.Is(err, runcontrol.ErrRunEventPredecessorPending):
+		return eventbus.IngestErrorPredecessorPending
+	case errors.Is(err, runcontrol.ErrRunEventFanoutUnavailable):
+		return eventbus.IngestErrorTransient
+	case store.IsTransientIngestError(err):
+		return eventbus.IngestErrorTransient
+	case store.IsDeterministicIngestError(err):
+		return eventbus.IngestErrorDeterministic
+	default:
+		return eventbus.IngestErrorUnknown
+	}
+}
+
+func startRunRecoveryLoop(ctx context.Context, runs *runcontrol.Service, interval time.Duration, limit int, firstPassDelay time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
@@ -309,6 +353,23 @@ func startRunRecoveryLoop(ctx context.Context, runs *runcontrol.Service, interva
 		limit = 1000
 	}
 	go func() {
+		// Do NOT run recovery immediately: right after a control-plane
+		// restart every live worker's lease looks expired and its HTTP
+		// heartbeat looks stale (both need the control plane up to refresh).
+		// Judging them at t=0 spuriously requeues every in-flight run on
+		// every deploy. Two renewal/heartbeat intervals is enough for all
+		// live workers to have re-asserted themselves.
+		if firstPassDelay <= 0 {
+			firstPassDelay = 2 * time.Minute
+		}
+		if interval > firstPassDelay {
+			firstPassDelay = interval
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(firstPassDelay):
+		}
 		recoverExpiredRunLeases(ctx, runs, limit)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -387,6 +448,20 @@ func recoverExpiredDataAgentJobLeases(ctx context.Context, store dataAgentLeaseR
 			Metadata:      cloneAppJSONMap(job.Metadata),
 		}
 		if err := publisher.PublishDataAgentJob(ctx, envelope); err != nil {
+			_, _ = store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{
+				JobID:       job.JobID,
+				EventType:   "data_agent.job.dispatch_failed",
+				ActorUserID: job.OwnerUserID,
+				ActorOrgID:  job.OwnerOrgID,
+				TS:          domain.Now(),
+				Message:     "Data Agent job dispatch failed after expired lease recovery.",
+				Metadata: domain.JSONMap{
+					"dispatch_id": dispatchID,
+					"error":       err.Error(),
+					"job_type":    job.JobType,
+					"recovery":    "expired_data_agent_job_lease",
+				},
+			})
 			continue
 		}
 		_, _ = store.AppendDataAgentJobEvent(ctx, domain.AppendDataAgentJobEventInput{

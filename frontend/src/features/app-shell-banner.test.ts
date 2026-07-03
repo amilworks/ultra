@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldShowAppShellBanner } from "../App";
+import { shouldShowAppShellBanner } from "./app-shell-banner";
 
 const missingChatMessage =
   "Requested chat was not found. Opened the latest available conversation instead.";

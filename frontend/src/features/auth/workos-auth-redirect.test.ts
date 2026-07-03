@@ -41,11 +41,12 @@ describe("WorkOS hosted auth redirect", () => {
 
   it("surfaces account denial notices on the WorkOS redirect screen", () => {
     const source = readSource("src/App.tsx");
+    const screensSource = readSource("src/components/auth/AuthShellScreens.tsx");
     const redirectScreenIndex = source.indexOf("<WorkOSRedirectScreen");
     const redirectScreenBlock = source.slice(redirectScreenIndex, redirectScreenIndex + 400);
 
     expect(redirectScreenBlock).toContain("statusMessage=");
-    expect(source).toContain("statusMessage?: string | null");
+    expect(screensSource).toContain("statusMessage?: string | null");
   });
 
   it("does not publish blank post-login draft conversation ids into the URL", () => {

@@ -38,24 +38,6 @@ export const formatViewerSurfaceLabel = (surface: string): string => {
   return VIEWER_SURFACE_LABELS[normalized] ?? (String(surface || "").trim() || "View");
 };
 
-export const getSpacingSummary = (viewerInfo: UploadViewerInfo): string | null => {
-  const spacing = viewerInfo.metadata.physical_spacing;
-  if (!spacing) {
-    return null;
-  }
-  const parts: string[] = [];
-  if (typeof spacing.z === "number" && Number.isFinite(spacing.z) && spacing.z > 0) {
-    parts.push(`z=${spacing.z.toFixed(3)}`);
-  }
-  if (typeof spacing.y === "number" && Number.isFinite(spacing.y) && spacing.y > 0) {
-    parts.push(`y=${spacing.y.toFixed(3)}`);
-  }
-  if (typeof spacing.x === "number" && Number.isFinite(spacing.x) && spacing.x > 0) {
-    parts.push(`x=${spacing.x.toFixed(3)}`);
-  }
-  return parts.length > 0 ? parts.join(" ") : null;
-};
-
 const fallbackAxisLabels = {
   x: { positive: "X", negative: "-X" },
   y: { positive: "Y", negative: "-Y" },
@@ -71,22 +53,6 @@ const normalizeAxisKey = (value: string): "x" | "y" | "z" => {
     return "y";
   }
   return "z";
-};
-
-export const getOrientationSummary = (viewerInfo: UploadViewerInfo): string | null => {
-  const orientation = viewerInfo.viewer.orientation;
-  if (!orientation) {
-    return null;
-  }
-  const axisLabels = orientation.axis_labels ?? fallbackAxisLabels;
-  return [
-    `${String(orientation.frame || "pixel")}`,
-    `X ${axisLabels.x?.negative ?? "-X"}→${axisLabels.x?.positive ?? "X"}`,
-    `Y ${axisLabels.y?.negative ?? "-Y"}→${axisLabels.y?.positive ?? "Y"}`,
-    viewerInfo.is_volume ? `Z ${axisLabels.z?.negative ?? "-Z"}→${axisLabels.z?.positive ?? "Z"}` : null,
-  ]
-    .filter(Boolean)
-    .join(" • ");
 };
 
 export const getPlaneOrientationLabels = (
@@ -116,7 +82,6 @@ export const buildInitialViewerIndices = (viewerInfo: UploadViewerInfo): ViewerI
 });
 
 export const getPlaneCursor = (
-  viewerInfo: UploadViewerInfo,
   axis: "z" | "y" | "x",
   indices: ViewerIndices
 ): { row: number; col: number } => {

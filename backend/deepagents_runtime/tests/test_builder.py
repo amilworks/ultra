@@ -301,17 +301,29 @@ def test_builder_multimodal_adds_vision_tools(monkeypatch):
     assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
 
 
-def test_builder_delegation_guidance_not_in_coordinator_prompt_while_disabled():
-    """Builder remains unit-tested, but the coordinator does not advertise it while
-    development has shifted to scoped coding agents."""
+def test_builder_delegation_guidance_tracks_builder_enabled():
+    """The coordinator advertises the Builder's delegation discipline exactly when the
+    Builder is registered (builder_enabled). Re-enabled after the 6.7M-token livelock
+    trace: iterative build/debug loops must be steered into the Builder's ISOLATED
+    context instead of accumulating inline in the coordinator. Disabled must stay
+    silent so the model is never told to delegate to an absent subagent."""
     from ultra_deepagents.agent import build_system_prompt
     from ultra_deepagents.builder import BUILDER_DELEGATION_GUIDANCE
 
     on = build_system_prompt(_settings(builder_enabled=True))
     off = build_system_prompt(_settings(builder_enabled=False))
-    assert BUILDER_DELEGATION_GUIDANCE not in on
-    assert "DELEGATE IT TO THE BUILDER EARLY" not in on
+    assert BUILDER_DELEGATION_GUIDANCE in on
+    assert "DELEGATE IT TO THE BUILDER EARLY" in on
     assert BUILDER_DELEGATION_GUIDANCE not in off
+    assert "DELEGATE IT TO THE BUILDER EARLY" not in off
+
+
+def test_builder_disabled_by_default():
+    """builder_enabled defaults OFF (cleanup candidate): a live A/B found the Builder
+    concentrates ~92% of a run's tokens for little net gain over the plain coordinator +
+    code-runner path, which the progress-stall guard already protects. The wiring is kept
+    behind the flag for a future A/B; ULTRA_DEEPAGENTS_BUILDER_ENABLED=1 re-enables it."""
+    assert _settings().builder_enabled is False
 
 
 def test_builder_prompt_steers_parallel_fanout():
@@ -322,6 +334,17 @@ def test_builder_prompt_steers_parallel_fanout():
     assert "FAN OUT IN PARALLEL" in p
     assert "SINGLE turn" in p and "CONCURRENTLY" in p
     assert "DISTINCT output path" in p  # output-collision guard for concurrent workers
+
+
+def test_builder_prompt_requires_pilot_checkpoint_and_budget_gate_for_long_runs():
+    """Long scientific experiments must not become one opaque execute() call: the Builder
+    should pilot timing, checkpoint intermediate outputs, and shrink/chunk oversized grids."""
+    p = BUILDER_SYSTEM_PROMPT
+    assert "pilot timing pass" in p
+    assert "checkpoint" in p and "/outputs" in p
+    assert "after each condition or batch" in p
+    assert "shrink or chunk" in p
+    assert "estimated runtime" in p
 
 
 def test_build_builder_model_falls_back_to_coordinator_when_unconfigured():

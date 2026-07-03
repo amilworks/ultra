@@ -28,9 +28,53 @@ import tempfile
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from ultra_deepagents.imaging import fusion, pipelines, viewerinfo
+from ultra_deepagents.imaging import fusion, hdf5, pipelines, viewerinfo
 
 __all__ = ["ImageEngine", "LibBioImageEngine", "StubEngine", "EngineUnavailable", "build_engine"]
+
+
+class _Hdf5EngineMixin:
+    """HDF5 data-viewer operations, shared by both engines.
+
+    Unlike raster decode (libbioimage vs stub), an HDF5 file is opened directly with
+    :mod:`h5py`, so the implementation is identical regardless of engine backend. Each
+    op is a thin delegation to :mod:`ultra_deepagents.imaging.hdf5` and runs in the
+    process pool (via ``runner.call``) so a poison file is crash/timeout isolated. The
+    ``name`` hint lets the caller pass the upload's original filename when the on-disk
+    blob path has lost its extension (see :meth:`_maybe_hdf5_viewer_info`)."""
+
+    def _maybe_hdf5_viewer_info(self, path: str, name: str | None = None) -> dict[str, Any] | None:
+        basename = name or os.path.basename(path)
+        if hdf5.is_hdf5_data_file(basename):
+            return hdf5.build_hdf5_viewer_info(path, original_name=basename)
+        return None
+
+    def hdf5_viewer_info(self, path: str, *, file_id: str = "", name: str = "") -> dict[str, Any]:
+        return hdf5.build_hdf5_viewer_info(path, file_id=file_id, original_name=(name or os.path.basename(path)))
+
+    def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
+        return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
+
+    def hdf5_materials_dashboard(self, path: str, *, file_id: str = "") -> dict[str, Any]:
+        return hdf5.materials_dashboard(path, file_id=file_id)
+
+    def hdf5_slice_png(self, path: str, dataset_path: str, *, axis: str = "z",
+                       index: int | None = None, component: int = 0) -> bytes:
+        return hdf5.slice_png(path, dataset_path, axis=axis, index=index, component=component)
+
+    def hdf5_atlas_png(self, path: str, dataset_path: str, **kwargs: Any) -> bytes:
+        return hdf5.atlas_png(path, dataset_path, **kwargs)
+
+    def hdf5_scalar_volume(self, path: str, dataset_path: str, *, channel: int = 0) -> dict[str, Any]:
+        return hdf5.scalar_volume(path, dataset_path, channel=channel)
+
+    def hdf5_histogram(self, path: str, dataset_path: str, *, component: int = 0, bins: int = 24,
+                       file_id: str = "") -> dict[str, Any]:
+        return hdf5.dataset_histogram(path, dataset_path, component=component, bins=bins, file_id=file_id)
+
+    def hdf5_table(self, path: str, dataset_path: str, *, offset: int = 0, limit: int = 12,
+                   file_id: str = "") -> dict[str, Any]:
+        return hdf5.table_preview(path, dataset_path, offset=offset, limit=limit, file_id=file_id)
 
 
 def _engine_cache_entries() -> int:
@@ -179,8 +223,11 @@ class ImageEngine(Protocol):
         """Per-channel intensity histogram."""
         ...
 
-    def viewer_info(self, path: str) -> dict[str, Any]:
-        """Structured viewer metadata (axis_sizes, channels, spacing, tile_scheme)."""
+    def viewer_info(self, path: str, name: str | None = None) -> dict[str, Any]:
+        """Structured viewer metadata (axis_sizes, channels, spacing, tile_scheme).
+
+        ``name`` is the upload's original filename, used to detect HDF5-data files
+        when the on-disk blob path has lost its extension."""
         ...
 
     def scalar_volume(self, path: str, *, channel: int = 0, t: int = 0) -> dict[str, Any]:
@@ -188,7 +235,7 @@ class ImageEngine(Protocol):
         ...
 
 
-class LibBioImageEngine:
+class LibBioImageEngine(_Hdf5EngineMixin):
     """Real engine over the ``libbioimage`` binding.
 
     One instance per worker process. Construction fails with
@@ -288,25 +335,105 @@ class LibBioImageEngine:
         return windows
 
     def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
+        try:
+            if colors:
+                return self._render_fused(
+                    path,
+                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    colors,
+                    windows,
+                )
+            if not self._is_display_photo(path):
+                # Scalar/scientific: apply ONE global window to every tile (per-tile
+                # data-range would checkerboard the image).
+                return self._render_windowed(
+                    path,
+                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    self._display_global_windows(path, channels),
+                )
+            return self._render(
+                path,
+                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
+            )
+        except ValueError as exc:
+            # Level-0 fallback for planar multi-page SubIFD pyramids (LIF -> bioio ->
+            # OME-TIFF -> imgcnv): the engine's embedded -tile AND -tile-roi readers
+            # both return an empty (0,0,0) region for the BASE level of that layout
+            # (sub-levels read fine), while native full-plane reads work — verified
+            # against the real engine on the affected prod pyramids. Serve the tile by
+            # decoding the native plane and cropping. Genuine out-of-grid tiles and
+            # non-level-0 errors keep the original empty-region error.
+            if level != 0 or "empty region" not in str(exc):
+                raise
+            return self._tile_base_fallback(
+                path, col=col, row=row, tile_size=tile_size,
+                channels=channels, colors=colors, windows=windows, original=exc,
+            )
+
+    # Full-plane decode is only sane for stack-sized planes (the planar-SubIFD class the
+    # fallback exists for: microscopy z/c stacks, a few thousand px per side). A gigapixel
+    # base that unexpectedly reads empty must keep its honest error, never a 9GB decode.
+    _TILE_FALLBACK_MAX_PIXELS = 64 * 1024 * 1024  # 64 MP (e.g. 8k x 8k)
+
+    def _tile_base_fallback(self, path, *, col, row, tile_size, channels, colors, windows, original) -> bytes:
+        """Serve a level-0 tile by reading the NATIVE full plane and cropping.
+
+        Mirrors the three tile() render branches so pixels match what a working
+        embedded-tile read would produce: the scalar branch's global window is
+        per-whole-image (crop-then-window == window-then-crop); the fused branch
+        auto-percentiles over the crop — the SAME pixel set an embedded tile read
+        returns, so its per-tile windowing is unchanged; the photo branch's
+        full-range depth is extent-independent. The full-plane decode is amortized
+        across a viewport's tiles by the engine's per-worker read cache. Raises the
+        ORIGINAL empty-region error for out-of-grid coordinates, missing geometry,
+        or an over-budget plane, so real edge tiles stay 422."""
+        np = self._np
+        try:
+            meta = self._bim.meta(path, self._cache)
+            width = int(meta.get("image_num_x") or 0)
+            height = int(meta.get("image_num_y") or 0)
+            num_c = int(meta.get("image_num_c") or 1)
+        except Exception:  # noqa: BLE001 - no geometry -> keep the honest original error
+            raise original
+        x1, y1 = col * tile_size, row * tile_size
+        if width <= 0 or height <= 0 or x1 >= width or y1 >= height:
+            raise original  # genuinely out of the tile grid
+        # Channel-aware budget: the plane decodes as float32 x C in the worst branch,
+        # so bound SAMPLES (w*h*C), not just pixels — a 64MP 7-channel plane would
+        # otherwise allocate ~1.8GB per request under concurrent load.
+        if width * height * max(1, num_c) > self._TILE_FALLBACK_MAX_PIXELS:
+            raise original
+        x2, y2 = min(x1 + tile_size, width), min(y1 + tile_size, height)
+
+        def _plane(out_depth: str):
+            arr = self._bim.read(
+                path,
+                pipelines.slice_plane(out_depth=out_depth, channels=channels),
+                self._cache,
+            )
+            if 0 in getattr(arr, "shape", ()):
+                raise original  # native plane ALSO empty: nothing more we can do
+            crop = np.ascontiguousarray(arr[..., y1:y2, x1:x2])
+            if 0 in crop.shape:
+                raise original  # meta overstated the geometry: keep the honest 422
+            return crop
+
         if colors:
-            return self._render_fused(
-                path,
-                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
-                colors,
-                windows,
+            rgb = fusion.composite_channels(
+                _plane(pipelines.DEPTH_SCALAR_F32), colors, np=np, windows=windows
             )
+            buf = io.BytesIO()
+            self._Image.fromarray(rgb).save(buf, format="PNG")
+            return buf.getvalue()
         if not self._is_display_photo(path):
-            # Scalar/scientific: apply ONE global window to every tile (per-tile
-            # data-range would checkerboard the image).
-            return self._render_windowed(
-                path,
-                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
-                self._display_global_windows(path, channels),
+            return self._encode_png(
+                _window_to_uint8(
+                    _plane(pipelines.DEPTH_SCALAR_F32),
+                    self._display_global_windows(path, channels),
+                    np,
+                )
             )
-        return self._render(
-            path,
-            pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
-        )
+        return self._encode_png(_plane(self._display_out_depth(path)))
 
     def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
         if colors:
@@ -565,7 +692,14 @@ class LibBioImageEngine:
             )
         return out
 
-    def viewer_info(self, path) -> dict[str, Any]:
+    def viewer_info(self, path, name=None) -> dict[str, Any]:
+        # HDF5-data files (.h5/.hdf5/.hdf/.dream3d) are a different viewer entirely —
+        # detect BEFORE the libbioimage decode path so a data file never enters the
+        # image pipeline. Gated by extension (never magic-byte sniffing) so .ims/.mat
+        # v7.3/NetCDF4 (HDF5-based but images/non-images) stay on their own routes.
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        if hdf5_info is not None:
+            return hdf5_info
         cached = read_viewerinfo_sidecar(path)
         if cached is not None:
             return cached
@@ -690,6 +824,11 @@ class LibBioImageEngine:
         # -depth 32,D,F) and additively composite them with their LUT colors,
         # each channel windowed on its own robust percentile range.
         arr = self._bim.read(path, pipeline, self._cache)
+        # Same empty-region guard as _encode_png: surfaces the (catchable, 422-mapped)
+        # ValueError instead of a cryptic fusion/Pillow error — and lets tile()'s
+        # level-0 base fallback engage for fused reads too.
+        if 0 in getattr(arr, "shape", ()):
+            raise ValueError(f"engine returned an empty region (shape {getattr(arr, 'shape', None)})")
         rgb = fusion.composite_channels(arr, colors, np=self._np, windows=windows)
         buf = io.BytesIO()
         self._Image.fromarray(rgb).save(buf, format="PNG")
@@ -719,11 +858,13 @@ class LibBioImageEngine:
         return buf.getvalue()
 
 
-class StubEngine:
+class StubEngine(_Hdf5EngineMixin):
     """Deterministic Pillow-only backend for tests/CI without the native lib.
 
     Output is a pure function of the request, so callers can assert determinism
-    and content-type and the Go proxy can be tested end-to-end.
+    and content-type and the Go proxy can be tested end-to-end. HDF5 ops are NOT
+    stubbed — they read the real file with h5py (via :class:`_Hdf5EngineMixin`), so
+    the hdf5 endpoints are exercised end-to-end against synthetic fixtures in tests.
     """
 
     _FORMATS = ["ome-tiff", "tiff", "czi", "nd2", "dicom", "nifti", "svs", "ndpi", "png", "jpeg"]
@@ -771,7 +912,10 @@ class StubEngine:
         counts = [((seed + i * 2654435761) % 997) for i in range(bins)]
         return {"bins": bins, "channels": [{"index": 0, "counts": counts, "min": 0.0, "max": 65535.0}]}
 
-    def viewer_info(self, path) -> dict[str, Any]:
+    def viewer_info(self, path, name=None) -> dict[str, Any]:
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        if hdf5_info is not None:
+            return hdf5_info
         seed = _seed(path)
         # Deterministic meta WITH a pyramid so the tile path is exercisable in tests.
         meta = {

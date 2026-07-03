@@ -1,4 +1,3 @@
-import React from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DEFAULT_THINKING_TEXT } from "@/lib/runStepCopy";

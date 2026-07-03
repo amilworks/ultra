@@ -9,10 +9,13 @@ const readSource = (relativePath: string): string =>
 describe("sidebar settings menu", () => {
   it("composes a shadcn settings entry below chat history with a relevant settings dialog", () => {
     const app = readSource("src/App.tsx");
+    const accountButton = readSource("src/components/chat/SidebarAccountSettingsButton.tsx");
+    const deferredToaster = readSource("src/components/DeferredToaster.tsx");
+    const toastLib = readSource("src/lib/toast.ts");
     const settingsDialog = readSource("src/components/AppSettingsDialog.tsx");
     const styles = readSource("src/styles.css");
 
-    expect(app).toMatch(/function SidebarAccountSettingsButton/);
+    expect(accountButton).toMatch(/function SidebarAccountSettingsButton/);
     expect(app).toMatch(/const LazyAppSettingsDialog = lazyNamed/);
     expect(settingsDialog).toMatch(/export function AppSettingsDialog/);
     expect(settingsDialog).toMatch(/<Avatar/);
@@ -22,9 +25,15 @@ describe("sidebar settings menu", () => {
     expect(settingsDialog).toMatch(/<TabsList/);
     expect(settingsDialog).toMatch(/<SelectGroup>/);
     expect(settingsDialog).toMatch(/<Separator/);
-    expect(app).toMatch(/const LazyToaster = lazy/);
-    expect(app).toMatch(/import type \* as Sonner from "sonner";/);
+    expect(deferredToaster).toMatch(/const LazyToaster = lazy/);
+    expect(toastLib).toMatch(/import type \* as Sonner from "sonner";/);
     expect(app).not.toMatch(
+      /import\s+\{[^}]*\b(?:Toaster|toast)\b[^}]*\}\s+from "sonner";/
+    );
+    expect(deferredToaster).not.toMatch(
+      /import\s+\{[^}]*\b(?:Toaster|toast)\b[^}]*\}\s+from "sonner";/
+    );
+    expect(toastLib).not.toMatch(
       /import\s+\{[^}]*\b(?:Toaster|toast)\b[^}]*\}\s+from "sonner";/
     );
     expect(settingsDialog).toMatch(/import \{ toast \} from "sonner";/);
@@ -63,17 +72,17 @@ describe("sidebar settings menu", () => {
     expect(settingsDialog).toMatch(/Open BisQue/);
     expect(settingsDialog).toMatch(/Unlink account/);
     expect(app).toMatch(/showSuccessToast\("Successfully linked BisQue account"/);
-    expect(app).toMatch(/<LazyToaster/);
-    expect(app).toMatch(/app-sidebar-user-menu/);
-    expect(app).toMatch(/<Avatar className="app-sidebar-account-avatar">/);
-    expect(app).toMatch(/className="app-sidebar-account-menu"/);
-    expect(app).toMatch(/<span>Dark<\/span>[\s\S]*<span>Settings<\/span>/);
+    expect(deferredToaster).toMatch(/<LazyToaster/);
+    expect(accountButton).toMatch(/app-sidebar-user-menu/);
+    expect(accountButton).toMatch(/<Avatar className="app-sidebar-account-avatar">/);
+    expect(accountButton).toMatch(/className="app-sidebar-account-menu"/);
+    expect(accountButton).toMatch(/<span>Dark<\/span>[\s\S]*<span>Settings<\/span>/);
     expect(app).not.toMatch(/app-theme-menu-button/);
     expect(app).toMatch(/<span>New chat<\/span>/);
     // The mobile sidebar chat-search was removed by request; guard against reintroduction.
     expect(app).not.toMatch(/Search chats/);
     expect(app).not.toMatch(/mobileConversationQuery/);
-    expect(app).toMatch(/<Settings data-icon="inline-start" aria-hidden="true" \/>/);
+    expect(accountButton).toMatch(/<Settings data-icon="inline-start" aria-hidden="true" \/>/);
     expect(settingsDialog).toMatch(/GitBranch/);
     expect(settingsDialog).toMatch(
       /<GitBranch data-icon="inline-start" aria-hidden="true" \/>\s*GitHub/

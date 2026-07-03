@@ -870,8 +870,18 @@ func TestDataAgentWorkerSkipsTerminalStaleDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDataAgentJobEvents: %v", err)
 	}
-	if events[len(events)-1].EventType != "data_agent.job.canceled" {
-		t.Fatalf("last event = %+v, want no lease/progress after cancellation", events[len(events)-1])
+	last := events[len(events)-1]
+	if last.EventType != "data_agent.job.skipped" {
+		t.Fatalf("last event = %+v, want skipped audit without lease/progress after cancellation", last)
+	}
+	if last.EventID != "data_agent_job_event_data_agent_job_worker_canceled_dispatch_unknown_skipped_initial_status" {
+		t.Fatalf("skipped event id = %q, want deterministic stale-delivery id", last.EventID)
+	}
+	if last.ActorUserID != "data-agent-worker-test" || last.ActorOrgID != "org-a" {
+		t.Fatalf("skipped actor = %s/%s, want worker/org actor", last.ActorUserID, last.ActorOrgID)
+	}
+	if last.Metadata["delivery_action"] != "skip" || last.Metadata["control_status"] != "canceled" || last.Metadata["worker_id"] != "data-agent-worker-test" || last.Metadata["stage"] != "initial_status_check" {
+		t.Fatalf("skipped metadata = %#v, want durable local-worker skip context", last.Metadata)
 	}
 }
 

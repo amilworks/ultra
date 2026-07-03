@@ -36,6 +36,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.NATSDataAgentWorkerDurable != "ultra-data-agent-worker" {
 		t.Fatalf("NATSDataAgentWorkerDurable = %q, want Data Agent durable", cfg.NATSDataAgentWorkerDurable)
 	}
+	if cfg.NATSEventPartitions != 64 {
+		t.Fatalf("NATSEventPartitions = %d, want 64", cfg.NATSEventPartitions)
+	}
 	if cfg.ArtifactRoot == "" {
 		t.Fatalf("ArtifactRoot must have default")
 	}

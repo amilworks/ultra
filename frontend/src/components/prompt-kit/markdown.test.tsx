@@ -38,7 +38,7 @@ describe("Markdown BisQue links", () => {
     expect(screen.getByText(/Launch the BisQue viewer/i)).toBeInTheDocument();
     expect(screen.getByText("00-TGMDi3uJpDHBjwxpBdrQcH")).toBeInTheDocument();
     const fallbackImage = document.querySelector(".bisque-link-preview-image-fallback");
-    expect(fallbackImage).toHaveAttribute("src", "/bq-bg8.png");
+    expect(fallbackImage).toHaveAttribute("src", "/bq-bg8.webp");
     const openViewerLinks = screen.getAllByRole("link", { name: /Open viewer/i });
     expect(openViewerLinks[openViewerLinks.length - 1]).toHaveAttribute("href", viewerUrl);
   });

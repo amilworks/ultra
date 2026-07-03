@@ -5,6 +5,10 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
+const collapsedRailSource = readFileSync(
+  path.join(process.cwd(), "src/components/chat/CollapsedSidebarRail.tsx"),
+  "utf8"
+);
 const runningStatusSource = readFileSync(
   path.join(process.cwd(), "src/components/chat/RunningStatusPill.tsx"),
   "utf8"
@@ -13,8 +17,8 @@ const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "u
 
 describe("sidebar collapse layout", () => {
   it("wires the desktop sidebar to the collapsed icon rail", () => {
-    expect(appSource.includes("function CollapsedSidebarRail")).toBe(true);
-    expect(appSource.includes('aria-label="Collapsed navigation"')).toBe(true);
+    expect(collapsedRailSource.includes("function CollapsedSidebarRail")).toBe(true);
+    expect(collapsedRailSource.includes('aria-label="Collapsed navigation"')).toBe(true);
     expect(appSource.includes('collapsible="icon"')).toBe(true);
     expect(appSource.includes("<CollapsedSidebarRail")).toBe(true);
     expect(appSource.includes("onOpenRecent={openHistoryItem}")).toBe(true);

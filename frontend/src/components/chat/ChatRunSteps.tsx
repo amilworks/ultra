@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import { cn } from "@/lib/utils";
+import { toRecord } from "@/lib/coerce";
 import {
   Steps,
   StepsBar,
@@ -62,13 +63,6 @@ const TOOL_LABELS: Record<string, string> = {
   stage_uploaded_files_for_analysis: "Preparing your files",
   write_file: "Writing a file",
   yolo_detect: "Detecting objects",
-};
-
-const toRecord = (value: unknown): Record<string, unknown> | null => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
 };
 
 const toStepStatus = (value: unknown): StepStatus => {
@@ -195,7 +189,12 @@ export const buildStepItems = (
         id: `tool:${invocationId}`,
         kind: "tool",
         label: formatToolLabel(toolName),
-        detail: detail ?? cleanDetail(payload.command),
+        detail:
+          detail ??
+          cleanDetail(payload.text) ??
+          cleanDetail(payload.output_tail) ??
+          cleanDetail(payload.command_preview) ??
+          cleanDetail(payload.command),
         status: statusFromV2ToolEvent(eventType, payload),
       });
       return;

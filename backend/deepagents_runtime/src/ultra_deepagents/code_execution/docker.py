@@ -3,9 +3,12 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import queue
 import re
 import subprocess
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +16,10 @@ from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, 
 from deepagents.backends.sandbox import BaseSandbox
 
 from ultra_deepagents.code_execution.paths import resolve_workspace_file
+from ultra_deepagents.code_execution.progress import (
+    ExecuteProgressEvent,
+    current_execute_progress_sink,
+)
 
 MATPLOTLIBRC = """\
 backend: Agg
@@ -116,10 +123,12 @@ class DockerSandboxBackend(BaseSandbox):
         workspace_dir: str | Path,
         config: DockerSandboxConfig,
         outputs_dir: str | Path | None = None,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.outputs_dir = Path(outputs_dir) if outputs_dir is not None else None
         self.config = config
+        self._progress_callback = progress_callback
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         if self.outputs_dir is not None:
             self.outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -269,12 +278,11 @@ class DockerSandboxBackend(BaseSandbox):
                 )
         try:
             try:
-                completed = subprocess.run(
+                completed = _run_command_with_progress(
                     self.build_docker_command(command),
-                    capture_output=True,
-                    text=True,
                     timeout=timeout_seconds if timeout_seconds > 0 else None,
-                    check=False,
+                    source_command=command,
+                    progress_callback=self._emit_execute_progress,
                 )
             except FileNotFoundError:
                 return ExecuteResponse(output="Docker executable not found.", exit_code=127)
@@ -310,6 +318,20 @@ class DockerSandboxBackend(BaseSandbox):
         finally:
             if acquired:
                 semaphore.release()
+
+    def _emit_execute_progress(self, event: ExecuteProgressEvent) -> None:
+        payload = event.to_payload()
+        if self._progress_callback is not None:
+            try:
+                self._progress_callback(payload)
+            except Exception:
+                pass
+        sink = current_execute_progress_sink()
+        if sink is not None:
+            try:
+                sink(event)
+            except Exception:
+                pass
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         responses: list[FileUploadResponse] = []
@@ -351,6 +373,184 @@ class DockerSandboxBackend(BaseSandbox):
                     FileDownloadResponse(path=requested_path, content=content, error=None)
                 )
         return responses
+
+
+def _run_command_with_progress(
+    command: list[str],
+    *,
+    timeout: int | float | None,
+    source_command: str,
+    progress_callback: Callable[[ExecuteProgressEvent], None],
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    readers = [
+        threading.Thread(
+            target=_drain_process_stream,
+            args=("stdout", process.stdout, output_queue),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_process_stream,
+            args=("stderr", process.stderr, output_queue),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    started = time.monotonic()
+    deadline = started + float(timeout) if timeout and timeout > 0 else None
+    active_readers = len(readers)
+    output_size_chars = 0
+    progress_index = 0
+    last_emit_at = 0.0
+    pending_line: tuple[str, str] | None = None
+    pending_line_count = 0
+    progress_interval = _sandbox_progress_interval_seconds()
+
+    def emit_progress(
+        stream: str,
+        line: str,
+        *,
+        suppressed_line_count: int = 0,
+    ) -> None:
+        nonlocal progress_index, last_emit_at
+        progress_index += 1
+        last_emit_at = time.monotonic()
+        progress_callback(
+            ExecuteProgressEvent(
+                command=source_command,
+                stream=stream,
+                text=_progress_line_text(line),
+                elapsed_seconds=max(0.0, last_emit_at - started),
+                output_size_chars=output_size_chars,
+                progress_index=progress_index,
+                suppressed_line_count=max(0, suppressed_line_count),
+            )
+        )
+
+    def flush_pending() -> None:
+        nonlocal pending_line, pending_line_count
+        if pending_line is None:
+            return
+        stream, line = pending_line
+        emit_progress(
+            stream,
+            line,
+            suppressed_line_count=max(0, pending_line_count - 1),
+        )
+        pending_line = None
+        pending_line_count = 0
+
+    timed_out = False
+    while active_readers > 0:
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
+        queue_timeout = 0.1
+        if deadline is not None:
+            queue_timeout = max(0.0, min(queue_timeout, deadline - time.monotonic()))
+        try:
+            stream, line = output_queue.get(timeout=queue_timeout)
+        except queue.Empty:
+            continue
+        if line is None:
+            active_readers -= 1
+            continue
+        if stream == "stdout":
+            stdout_parts.append(line)
+        else:
+            stderr_parts.append(line)
+        output_size_chars += len(line)
+        if not line.strip():
+            continue
+        now = time.monotonic()
+        if progress_index == 0 or progress_interval <= 0 or now - last_emit_at >= progress_interval:
+            flush_pending()
+            emit_progress(stream, line)
+        else:
+            pending_line = (stream, line)
+            pending_line_count += 1
+
+    if timed_out:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait(timeout=5)
+        _join_readers(readers)
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=timeout,
+            output="".join(stdout_parts),
+            stderr="".join(stderr_parts),
+        )
+
+    process.wait(timeout=5)
+    _join_readers(readers)
+    flush_pending()
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout="".join(stdout_parts),
+        stderr="".join(stderr_parts),
+    )
+
+
+def _drain_process_stream(
+    stream_name: str,
+    stream: object,
+    output_queue: queue.Queue[tuple[str, str | None]],
+) -> None:
+    try:
+        if stream is None:
+            return
+        for line in stream:
+            output_queue.put((stream_name, str(line)))
+    finally:
+        output_queue.put((stream_name, None))
+
+
+def _join_readers(readers: list[threading.Thread]) -> None:
+    for reader in readers:
+        reader.join(timeout=1)
+
+
+def _sandbox_progress_interval_seconds() -> float:
+    try:
+        return max(
+            0.0,
+            float(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_PROGRESS_INTERVAL_SECONDS", "5")),
+        )
+    except ValueError:
+        return 5.0
+
+
+def _sandbox_progress_max_line_chars() -> int:
+    try:
+        return max(
+            80,
+            int(os.getenv("ULTRA_DEEPAGENTS_SANDBOX_PROGRESS_MAX_LINE_CHARS", "1200")),
+        )
+    except ValueError:
+        return 1200
+
+
+def _progress_line_text(line: str) -> str:
+    text = line.rstrip("\r\n")
+    limit = _sandbox_progress_max_line_chars()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 24)] + "... [line truncated]"
 
 
 def validate_sandbox_command(command: str) -> str | None:

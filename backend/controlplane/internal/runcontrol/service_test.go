@@ -751,6 +751,173 @@ func TestServiceRecoverExpiredRunLeasesRequeuesStaleLeaseOwnerHeartbeat(t *testi
 	}
 }
 
+func TestServiceRecoverExpiredRunLeasesDoesNotRequeueStaleHeartbeatWhenRunEventsAreFresh(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover active worker stream",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "long active worker analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long active worker analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	lease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    run.RunID,
+		WorkerID: "worker-active-stream",
+		TTL:      20 * time.Minute,
+		Now:      now.Add(-5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-active-stream-started",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.started",
+		EventType: "run",
+		Level:     "info",
+		TS:        now.Add(-30 * time.Second),
+		Message:   "Run started.",
+		Payload:   domain.JSONMap{"worker_id": "worker-active-stream"},
+	}); err != nil {
+		t.Fatalf("IngestRunEvent started: %v", err)
+	}
+	drainRunEvents(bus)
+	if _, err := mem.UpsertWorkerHeartbeat(ctx, domain.UpsertWorkerHeartbeatInput{
+		WorkerID:        "worker-active-stream",
+		WorkerKind:      "deepagents",
+		Status:          "busy",
+		CurrentRunID:    run.RunID,
+		LastHeartbeatAt: now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("UpsertWorkerHeartbeat: %v", err)
+	}
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:                       now,
+		Reason:                    "automatic expired run lease recovery",
+		Limit:                     100,
+		WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 0 {
+		t.Fatalf("requeued runs = %+v, want none while run events are fresh", result.RequeuedRuns)
+	}
+	if _, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID:      run.RunID,
+		LeaseToken: lease.LeaseToken,
+		TTL:        time.Hour,
+		Now:        now,
+	}); err != nil {
+		t.Fatalf("RenewRunLease active token: %v", err)
+	}
+	select {
+	case job := <-bus.Jobs():
+		t.Fatalf("unexpected replacement job for active stream: %+v", job)
+	default:
+	}
+}
+
+func TestServiceRecoverExpiredRunLeasesRequeuesMissingLeaseOwnerHeartbeat(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Recover missing heartbeat owner",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "worker crashes before first heartbeat",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "worker crashes before first heartbeat"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	lease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID:    run.RunID,
+		WorkerID: "worker-missing-heartbeat",
+		TTL:      20 * time.Minute,
+		Now:      now.Add(-5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease: %v", err)
+	}
+
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now:                       now,
+		Reason:                    "automatic expired run lease recovery",
+		Limit:                     100,
+		WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 1 || result.RequeuedRuns[0].RunID != run.RunID {
+		t.Fatalf("requeued runs = %+v, want missing-heartbeat run", result.RequeuedRuns)
+	}
+	if _, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID:      run.RunID,
+		LeaseToken: lease.LeaseToken,
+		TTL:        time.Hour,
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("RenewRunLease old token err = %v, want ErrConflict", err)
+	}
+	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.EventKind != "run.requeued" || last.Payload["recovery"] != "stale_run_lease_worker_heartbeat" {
+		t.Fatalf("last event = %+v, want stale heartbeat requeue", last)
+	}
+	if last.Payload["worker_heartbeat_missing"] != true {
+		t.Fatalf("event payload = %+v, want worker_heartbeat_missing marker", last.Payload)
+	}
+	if _, ok := last.Payload["worker_last_heartbeat_at"]; ok {
+		t.Fatalf("event payload = %+v, want no zero worker_last_heartbeat_at for missing heartbeat", last.Payload)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if job.RunID != run.RunID || job.DispatchID == "" {
+			t.Fatalf("replacement job = %+v, want redispatch for missing-heartbeat run", job)
+		}
+	default:
+		t.Fatalf("expected replacement job for missing-heartbeat run")
+	}
+}
+
 func TestServiceRecoverExpiredRunLeasesRedispatchesStaleQueuedRunWithoutLease(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1072,6 +1239,95 @@ func TestServiceIngestRunEventUpdatesLifecycleAndArtifacts(t *testing.T) {
 	}
 	if artifacts[0].Metadata["output_id"] != "out-report" {
 		t.Fatalf("artifact metadata = %+v, want output id preserved", artifacts[0].Metadata)
+	}
+}
+
+func TestServiceIngestRunEventWaitsForSourceSequencePredecessor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "ordering"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "preserve source order",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "go"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainRunEvents(bus)
+
+	completed := domain.AppendRunEventInput{
+		EventID:        "evt-ordering-000004",
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "run.completed",
+		SourceSequence: 4,
+		Payload:        domain.JSONMap{"response_text": "done"},
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); !errors.Is(err, ErrRunEventPredecessorPending) {
+		t.Fatalf("IngestRunEvent completed before predecessors err = %v, want ErrRunEventPredecessorPending", err)
+	}
+	current, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if current.Status != domain.RunStatusQueued {
+		t.Fatalf("run status = %s, want queued until source predecessors arrive", current.Status)
+	}
+
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-ordering-000002",
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "run.started",
+		SourceSequence: 2,
+	}); err != nil {
+		t.Fatalf("IngestRunEvent source sequence 2: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); !errors.Is(err, ErrRunEventPredecessorPending) {
+		t.Fatalf("IngestRunEvent completed before sequence 3 err = %v, want ErrRunEventPredecessorPending", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-ordering-000003",
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "message.delta",
+		SourceSequence: 3,
+		Message:        "almost done",
+	}); err != nil {
+		t.Fatalf("IngestRunEvent source sequence 3: %v", err)
+	}
+	if _, err := service.IngestRunEvent(ctx, completed); err != nil {
+		t.Fatalf("IngestRunEvent completed after predecessors: %v", err)
+	}
+
+	current, err = mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun after completed: %v", err)
+	}
+	if current.Status != domain.RunStatusSucceeded {
+		t.Fatalf("run status = %s, want succeeded after ordered terminal event", current.Status)
+	}
+	events, err := mem.ListRunEventsAfter(ctx, run.RunID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListRunEventsAfter: %v", err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("events = %d, want accepted plus 3 worker events", len(events))
+	}
+	for index, event := range events {
+		wantSourceSequence := int64(index + 1)
+		if event.SourceSequence != wantSourceSequence {
+			t.Fatalf("event %d source sequence = %d, want %d (events=%+v)", index, event.SourceSequence, wantSourceSequence, events)
+		}
 	}
 }
 
@@ -3137,7 +3393,7 @@ func TestServiceCreateRunIdempotentRetryDispatchesQueuedRunAfterAcceptedPersiste
 	}
 }
 
-func TestServiceCancelRunDoesNotMarkCanceledWhenCancelSignalFails(t *testing.T) {
+func TestServiceCancelRunPersistsDurableCancellationWhenCancelSignalFails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	mem := store.NewMemoryStore()
@@ -3160,28 +3416,80 @@ func TestServiceCancelRunDoesNotMarkCanceledWhenCancelSignalFails(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	bus.events = nil
 
-	if _, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"}); err == nil {
-		t.Fatalf("CancelRun error = nil, want cancel transport error")
+	canceled, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"})
+	if err != nil {
+		t.Fatalf("CancelRun should persist durable cancellation despite NATS signal failure: %v", err)
+	}
+	if canceled.Status != domain.RunStatusCanceled {
+		t.Fatalf("run status = %s, want canceled", canceled.Status)
 	}
 	updated, err := mem.GetRun(ctx, run.RunID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
-	if updated.Status == domain.RunStatusCanceled {
-		t.Fatalf("run status = %s, want non-terminal because cancel signal was not delivered", updated.Status)
+	if updated.Status != domain.RunStatusCanceled {
+		t.Fatalf("stored run status = %s, want canceled", updated.Status)
 	}
 	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
 	if err != nil {
 		t.Fatalf("ListRunEvents: %v", err)
 	}
+	foundCanceled := false
 	for _, event := range events {
 		if event.EventKind == "run.canceled" {
-			t.Fatalf("run.canceled event should not be persisted when cancel signal fails: %+v", events)
+			foundCanceled = true
 		}
+	}
+	if !foundCanceled {
+		t.Fatalf("events = %+v, want durable run.canceled event despite cancel signal failure", events)
 	}
 	if len(bus.cancellations) != 1 {
 		t.Fatalf("cancel attempts = %d, want exactly one attempted signal", len(bus.cancellations))
+	}
+	if len(bus.events) != 1 || bus.events[0].EventKind != "run.canceled" {
+		t.Fatalf("fanout events = %+v, want run.canceled fanout before best-effort cancel signal", bus.events)
+	}
+}
+
+func TestServiceCancelRunPersistsDurableCancellationWhenRunEventFanoutFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := &failingRunEventBus{eventErr: errors.New("event fanout unavailable")}
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Cancel fanout failure",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Run until explicitly stopped.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Run until explicitly stopped."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	bus.events = nil
+
+	canceled, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"})
+	if err != nil {
+		t.Fatalf("CancelRun should not fail when run-event fanout fails after durable cancel: %v", err)
+	}
+	if canceled.Status != domain.RunStatusCanceled {
+		t.Fatalf("run status = %s, want canceled", canceled.Status)
+	}
+	if len(bus.events) != 1 || bus.events[0].EventKind != "run.canceled" {
+		t.Fatalf("fanout attempts = %+v, want one run.canceled fanout attempt", bus.events)
+	}
+	if len(bus.cancellations) != 1 || bus.cancellations[0].RunID != run.RunID {
+		t.Fatalf("cancel attempts = %+v, want cancel interrupt attempted after durable event", bus.cancellations)
 	}
 }
 
@@ -3234,11 +3542,8 @@ func TestServiceCancelRunDoesNotMarkCanceledWhenCanceledEventAppendFails(t *test
 	}
 	select {
 	case cancel := <-bus.Cancellations():
-		if cancel.RunID != run.RunID {
-			t.Fatalf("cancel signal = %+v, want run %s", cancel, run.RunID)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("expected cancel signal to be published before durable event append failed")
+		t.Fatalf("cancel signal = %+v, want none because run.canceled was not durable", cancel)
+	default:
 	}
 }
 
@@ -4134,5 +4439,257 @@ func TestServiceIngestHeartbeatsThrottleStatusWrites(t *testing.T) {
 	}
 	if stored != heartbeats {
 		t.Fatalf("stored heartbeats = %d, want all %d events persisted despite throttled status writes", stored, heartbeats)
+	}
+}
+
+// Fix #3: a successor event whose predecessor is missing must NOT stall
+// (ErrRunEventPredecessorPending) when the run is already terminal — the gate
+// short-circuits so the normal drop path acks the late event.
+func TestServiceIngestTerminalRunMissingPredecessorDropsInsteadOfPending(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := NewService(mem, eventbus.NewMemoryBus())
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "u", Title: "t"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{ThreadID: thread.ThreadID, UserID: "u", Goal: "g"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := mem.UpdateRunStatus(ctx, run.RunID, domain.RunStatusCanceled, "", "done"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	// SourceSequence=5, predecessor (4) never stored, run terminal.
+	_, err = service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-late-5",
+		SourceSequence: 5,
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "message.delta",
+		Message:        "late",
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent returned error (should drop cleanly): %v", err)
+	}
+	if errors.Is(err, ErrRunEventPredecessorPending) {
+		t.Fatal("terminal run successor must not be predecessor-pending")
+	}
+}
+
+// Fix #3 (negative): an ACTIVE run with a genuinely missing predecessor still
+// pends, so legitimate reordering is retried rather than dropped.
+func TestServiceIngestActiveRunMissingPredecessorStillPends(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := NewService(mem, eventbus.NewMemoryBus())
+	thread, _ := service.CreateThread(ctx, CreateThreadRequest{UserID: "u", Title: "t"})
+	run, _ := service.CreateRun(ctx, CreateRunRequest{ThreadID: thread.ThreadID, UserID: "u", Goal: "g"})
+	_, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-5",
+		SourceSequence: 5,
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "message.delta",
+	})
+	if !errors.Is(err, ErrRunEventPredecessorPending) {
+		t.Fatalf("active run missing predecessor: err=%v, want ErrRunEventPredecessorPending", err)
+	}
+}
+
+// Fix #2a: a source_sequence collision (two event_ids, same run_id+source_sequence)
+// must resolve to a clean drop (ack), never a hard error that InProgress-loops.
+// Uses live Postgres, which enforces the UNIQUE(run_id, source_sequence) index.
+func TestServiceIngestSourceSequenceCollisionDropsNotStalls(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	pg := store.NewPostgresStore(pool)
+	service := NewService(pg, eventbus.NewMemoryBus())
+	uid := fmt.Sprintf("collide-%d", time.Now().UnixNano())
+	thread, err := pg.CreateThread(ctx, domain.CreateThreadInput{UserID: uid, Title: "t"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := pg.CreateRun(ctx, domain.CreateRunInput{ThreadID: thread.ThreadID, UserID: uid, Goal: "g", Messages: []domain.ThreadMessage{{Role: "user", Content: "x"}}})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	evtA := "evt-A-" + uid
+	evtB := "evt-B-" + uid
+
+	// First event claims (run, source_sequence=1).
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID: evtA, SourceSequence: 1, RunID: run.RunID, ThreadID: thread.ThreadID, EventKind: "message.delta", Message: "A",
+	}); err != nil {
+		t.Fatalf("ingest A: %v", err)
+	}
+	// Colliding event: different event_id, SAME source_sequence.
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID: evtB, SourceSequence: 1, RunID: run.RunID, ThreadID: thread.ThreadID, EventKind: "message.delta", Message: "B",
+	}); err != nil {
+		t.Fatalf("collision ingest must drop cleanly, got error: %v", err)
+	}
+	// Only event A is stored at source_sequence 1; B was absorbed.
+	events, err := pg.ListRunEvents(ctx, run.RunID, 50)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	count := 0
+	for _, e := range events {
+		if e.SourceSequence == 1 {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("events at source_sequence 1 = %d, want 1 (collision absorbed)", count)
+	}
+}
+
+// A4(2): an expired lease alone must NOT requeue a run whose worker is still
+// emitting progress events (e.g. the control plane was briefly unreachable
+// so renewals failed, but computation continued).
+func TestServiceRecoverExpiredLeaseVetoedByFreshWorkerProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	thread, _ := service.CreateThread(ctx, CreateThreadRequest{UserID: "u", Title: "t"})
+	run, err := service.CreateRun(ctx, CreateRunRequest{ThreadID: thread.ThreadID, UserID: "u", Goal: "g"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	if _, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID: run.RunID, WorkerID: "w1", TTL: time.Minute, Now: base,
+	}); err != nil {
+		t.Fatalf("AcquireRunLease: %v", err)
+	}
+	now := base.Add(5 * time.Minute) // lease long expired
+	// Fresh worker progress 30s ago.
+	if _, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID: "evt-progress-1", RunID: run.RunID, ThreadID: thread.ThreadID,
+		EventKind: "message.delta", TS: now.Add(-30 * time.Second), Message: "delta",
+	}); err != nil {
+		t.Fatalf("IngestRunEvent: %v", err)
+	}
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now: now, Limit: 100, WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 0 {
+		t.Fatalf("requeued = %+v, want none while progress is fresh", result.RequeuedRuns)
+	}
+	// Later pass: progress is now stale -> the expired lease is reclaimed.
+	later := now.Add(10 * time.Minute)
+	result, err = service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now: later, Limit: 100, WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases(later): %v", err)
+	}
+	if len(result.RequeuedRuns) != 1 {
+		t.Fatalf("requeued = %+v, want the dead run reclaimed once progress went stale", result.RequeuedRuns)
+	}
+}
+
+// A4(3): a worker that outlived a control-plane outage revives its EXPIRED
+// lease by token; once recovery cleared the lease, renewal conflicts.
+func TestServiceRenewRunLeaseRevivesExpiredLeaseByToken(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := NewService(mem, eventbus.NewMemoryBus())
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	thread, _ := service.CreateThread(ctx, CreateThreadRequest{UserID: "u", Title: "t"})
+	run, _ := service.CreateRun(ctx, CreateRunRequest{ThreadID: thread.ThreadID, UserID: "u", Goal: "g"})
+	lease, err := mem.AcquireRunLease(ctx, domain.AcquireRunLeaseInput{
+		RunID: run.RunID, WorkerID: "w1", TTL: time.Minute, Now: base,
+	})
+	if err != nil {
+		t.Fatalf("AcquireRunLease: %v", err)
+	}
+	expiredNow := base.Add(10 * time.Minute)
+	renewed, err := service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID: run.RunID, LeaseToken: lease.LeaseToken, TTL: 10 * time.Minute, Now: expiredNow,
+	})
+	if err != nil {
+		t.Fatalf("RenewRunLease of expired lease with matching token must succeed: %v", err)
+	}
+	if !renewed.LeaseExpiresAt.After(expiredNow) {
+		t.Fatalf("revived lease expires %v, want after %v", renewed.LeaseExpiresAt, expiredNow)
+	}
+	// Cleared lease (requeue path) -> renewal must conflict.
+	if _, _, err := mem.ClearRunLease(ctx, run.RunID); err != nil {
+		t.Fatalf("ClearRunLease: %v", err)
+	}
+	_, err = service.RenewRunLease(ctx, RenewRunLeaseRequest{
+		RunID: run.RunID, LeaseToken: lease.LeaseToken, TTL: time.Minute, Now: expiredNow,
+	})
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("renewal after ClearRunLease = %v, want ErrConflict (authoritative stop)", err)
+	}
+}
+
+// A6: a running run with NO lease, stale dispatch, and no worker progress is
+// a zombie and must be reclaimed; fresh progress vetoes.
+func TestServiceRecoverReclaimsLeaselessZombieRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, _ := service.CreateThread(ctx, CreateThreadRequest{UserID: "u", Title: "t"})
+	run, err := service.CreateRun(ctx, CreateRunRequest{ThreadID: thread.ThreadID, UserID: "u", Goal: "g"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+	if _, err := mem.UpdateRunStatus(ctx, run.RunID, domain.RunStatusRunning, "", ""); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	// No lease exists. Dispatch happened "now" (real clock at CreateRun).
+	// Within the grace window: not reclaimed.
+	soon := domain.Now().Add(5 * time.Minute)
+	result, err := service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now: soon, Limit: 100, WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases: %v", err)
+	}
+	if len(result.RequeuedRuns) != 0 {
+		t.Fatalf("requeued = %+v, want none inside the zombie grace window", result.RequeuedRuns)
+	}
+	// Past the grace with no progress: reclaimed.
+	later := domain.Now().Add(20 * time.Minute)
+	result, err = service.RecoverExpiredRunLeases(ctx, RecoverExpiredRunLeasesRequest{
+		Now: later, Limit: 100, WorkerHeartbeatStaleAfter: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RecoverExpiredRunLeases(later): %v", err)
+	}
+	if len(result.RequeuedRuns) != 1 {
+		t.Fatalf("requeued = %+v, want the zombie reclaimed after grace", result.RequeuedRuns)
 	}
 }

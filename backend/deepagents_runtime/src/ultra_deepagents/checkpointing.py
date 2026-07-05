@@ -269,7 +269,12 @@ class DurableCheckpointer(InMemorySaver):
 
     async def _persist(self, thread_id: str) -> None:
         try:
-            blob = _encode_thread_slice(self._collect_thread_slice(thread_id))
+            # Snapshot the slice synchronously on the loop (consistent view of
+            # the saver's in-memory dicts), then pickle+compress it off-loop:
+            # the encode is pure CPU over the run's entire cumulative slice and
+            # would otherwise starve NATS acks/heartbeats on every super-step.
+            slice_ = self._collect_thread_slice(thread_id)
+            blob = await asyncio.to_thread(_encode_thread_slice, slice_)
             await self._store.save(thread_id, blob)
         except Exception:
             # Never let a durability hiccup crash an in-flight run; the run

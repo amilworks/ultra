@@ -13,7 +13,6 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import TracebackType
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -76,15 +75,6 @@ def _control_plane_request_has_identity(settings: RuntimeSettings) -> bool:
     return bool(_control_plane_user_id.get())
 
 
-def control_lease_validity_window(settings: RuntimeSettings) -> float:
-    """How long a freshly acquired/renewed control-plane run lease can be
-    trusted while renewals fail. 80% of the TTL leaves a safety margin so this
-    worker stops before lease-expiry recovery hands the run to another worker.
-    """
-    ttl = max(1.0, float(settings.control_run_lease_ttl_seconds))
-    return ttl * 0.8
-
-
 class EventPublishError(RuntimeError):
     pass
 
@@ -102,7 +92,6 @@ class ControlPlaneRunLease:
     run_id: str
     worker_id: str
     lease_token: str
-    lease_expires_at: str = ""
 
 
 WorkerHeartbeatFunc = Callable[..., Awaitable[None]]
@@ -117,18 +106,6 @@ class RunLock:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         with contextlib.suppress(Exception):
             self._handle.close()
-
-    def __enter__(self) -> RunLock:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        _ = exc_type, exc, traceback
-        self.release()
 
 
 def build_job_consumer_config(settings: RuntimeSettings) -> ConsumerConfig:
@@ -273,15 +250,20 @@ async def fetch_control_plane_user_profile(
     return await asyncio.to_thread(fetch)
 
 
-async def fetch_control_plane_run_max_sequence(
+async def fetch_control_plane_run_events_snapshot(
     run_id: str,
     settings: RuntimeSettings,
-) -> int:
-    """Return the run's highest persisted event sequence in the control plane,
-    or 0 when none/unreachable. Pages forward from the last seen cursor."""
+) -> tuple[int, dict[str, Any] | None]:
+    """One pagination pass over the run's persisted control-plane events that
+    simultaneously computes the highest event sequence (resume floor) and the
+    deduped run.token_usage summary, so job start pages the (potentially huge)
+    event history once instead of twice. Returns ``(0, None)`` when the run has
+    no events or does not exist. The usage half requires a request identity;
+    the max sequence is computed regardless."""
     base_url = settings.control_base_url.rstrip("/")
     if not base_url:
-        return 0
+        return 0, None
+    include_usage = _control_plane_request_has_identity(settings)
     quoted_run_id = urllib_parse.quote(run_id, safe="")
     timeout = max(0.1, float(settings.control_status_timeout_seconds))
     page_limit = 500
@@ -301,62 +283,7 @@ async def fetch_control_plane_run_max_sequence(
         events = payload.get("events")
         return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
 
-    def fetch_max() -> int:
-        cursor = 0
-        try:
-            while True:
-                page = fetch_page(cursor)
-                if not page:
-                    break
-                page_max = cursor
-                for event in page:
-                    sequence = int(event.get("sequence") or 0)
-                    if sequence > page_max:
-                        page_max = sequence
-                if page_max <= cursor:
-                    break
-                cursor = page_max
-                if len(page) < page_limit:
-                    break
-        except urllib_error.HTTPError as exc:
-            if exc.code == 404:
-                return 0
-            raise
-        return cursor
-
-    return await asyncio.to_thread(fetch_max)
-
-
-async def fetch_control_plane_run_usage_summary(
-    run_id: str,
-    settings: RuntimeSettings,
-) -> dict[str, Any] | None:
-    """Return deduped token usage already persisted as run.token_usage events."""
-    base_url = settings.control_base_url.rstrip("/")
-    if not base_url:
-        return None
-    if not _control_plane_request_has_identity(settings):
-        return None
-    quoted_run_id = urllib_parse.quote(run_id, safe="")
-    timeout = max(0.1, float(settings.control_status_timeout_seconds))
-    page_limit = 500
-
-    def fetch_page(after_sequence: int) -> list[dict[str, Any]]:
-        query = urllib_parse.urlencode(
-            {"limit": str(page_limit), "after_sequence": str(after_sequence)}
-        )
-        url = f"{base_url}/v2/runs/{quoted_run_id}/events?{query}"
-        request = urllib_request.Request(
-            url, method="GET", headers=_control_plane_headers(settings)
-        )
-        with urllib_request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if not isinstance(payload, dict):
-            return []
-        events = payload.get("events")
-        return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
-
-    def fetch_all() -> dict[str, Any] | None:
+    def fetch_snapshot() -> tuple[int, dict[str, Any] | None]:
         after_sequence = 0
         seen_usage_ids: set[str] = set()
         summary = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -371,6 +298,8 @@ async def fetch_control_plane_run_usage_summary(
                     sequence = _event_sequence(event) or 0
                     if sequence > page_max:
                         page_max = sequence
+                    if not include_usage:
+                        continue
                     if str(event.get("event_kind") or event.get("event_type") or "") != "run.token_usage":
                         continue
                     payload = event.get("payload")
@@ -401,16 +330,44 @@ async def fetch_control_plane_run_usage_summary(
                     break
         except urllib_error.HTTPError as exc:
             if exc.code == 404:
-                return None
+                return 0, None
             raise
-        if summary["input_tokens"] <= 0 and summary["output_tokens"] <= 0 and summary["total_tokens"] <= 0:
-            return None
+        if not include_usage or (
+            summary["input_tokens"] <= 0
+            and summary["output_tokens"] <= 0
+            and summary["total_tokens"] <= 0
+        ):
+            return after_sequence, None
         if model:
             summary["model"] = model
-        return summary
+        return after_sequence, summary
 
+    return await asyncio.to_thread(fetch_snapshot)
+
+
+async def fetch_control_plane_run_max_sequence(
+    run_id: str,
+    settings: RuntimeSettings,
+) -> int:
+    """Return the run's highest persisted event sequence in the control plane,
+    or 0 when none/unreachable. Pages forward from the last seen cursor."""
+    max_sequence, _ = await fetch_control_plane_run_events_snapshot(run_id, settings)
+    return max_sequence
+
+
+async def fetch_control_plane_run_usage_summary(
+    run_id: str,
+    settings: RuntimeSettings,
+) -> dict[str, Any] | None:
+    """Return deduped token usage already persisted as run.token_usage events."""
+    base_url = settings.control_base_url.rstrip("/")
+    if not base_url:
+        return None
+    if not _control_plane_request_has_identity(settings):
+        return None
     try:
-        return await asyncio.to_thread(fetch_all)
+        _, summary = await fetch_control_plane_run_events_snapshot(run_id, settings)
+        return summary
     except Exception:
         logger.warning(
             "Could not read run token usage summary; proceeding without prior usage.",
@@ -569,7 +526,6 @@ def _request_control_plane_run_lease(
         run_id=str(data.get("run_id") or ""),
         worker_id=str(data.get("worker_id") or ""),
         lease_token=str(data.get("lease_token") or ""),
-        lease_expires_at=str(data.get("lease_expires_at") or ""),
     )
 
 
@@ -659,7 +615,6 @@ class NATSDeepAgentsWorker:
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._canceled_run_reasons: dict[str, str] = {}
         self._shutting_down = False
-        self._checkpoint_store: Any | None = None
         self._checkpointer: Any | None = None
         # Serialize sandbox-container sweeps so the startup sweep and the first periodic
         # tick (or overlapping ticks) never issue redundant docker calls on the same IDs.
@@ -701,7 +656,7 @@ class NATSDeepAgentsWorker:
             if self.settings.sandbox_reaper_interval_seconds > 0:
                 reaper_task = asyncio.create_task(self._sandbox_reaper_loop())
             async def handle_cancel_message(message: Any) -> None:
-                await self._handle_cancel_message(message, js)
+                await self._handle_cancel_message(message)
 
             cancel_subscription = await nc.subscribe(
                 self.settings.nats_cancel_subject,
@@ -861,11 +816,9 @@ class NATSDeepAgentsWorker:
 
             heartbeat_index = 0
             control_lease: ControlPlaneRunLease | None = None
-            lease_validity_deadline = float("inf")
 
             async def publish_worker_heartbeat() -> None:
                 nonlocal heartbeat_index, control_lease
-                nonlocal lease_validity_deadline
                 async with publish_lock:
                     if terminal_event_published:
                         return
@@ -891,9 +844,6 @@ class NATSDeepAgentsWorker:
                             renewed = None
                         if renewed is not None:
                             control_lease = renewed
-                            lease_validity_deadline = (
-                                time.monotonic() + control_lease_validity_window(self.settings)
-                            )
                     heartbeat_index += 1
                     sequence = run_sequencer.next_sequence()
                     await self._publish_event(
@@ -977,10 +927,6 @@ class NATSDeepAgentsWorker:
                 return
             try:
                 control_lease = await self._run_lease(job.run_id, self.settings)
-                if control_lease is not None:
-                    lease_validity_deadline = (
-                        time.monotonic() + control_lease_validity_window(self.settings)
-                    )
             except RunLeaseConflict:
                 logger.warning(
                     "Received duplicate delivery for control-plane leased Deep Agents run; redelivering later.",
@@ -1062,22 +1008,24 @@ class NATSDeepAgentsWorker:
                     checkpointer = await self._ensure_checkpointer()
                     if checkpointer is not None:
                         resume_kwargs["checkpointer"] = checkpointer
-                        # Seed the shared sequencer above the run's already-
-                        # persisted events BEFORE starting the heartbeat, so a
-                        # resumed run's events — streamed and heartbeat alike —
-                        # never reuse a source_sequence the original partial run
-                        # already used (which the control plane would dedup or,
-                        # under strict partition ingest, stall on).
-                        resume_floor = await self._run_event_sequence_floor(job.run_id)
-                        if resume_floor > run_sequencer.sequence:
-                            run_sequencer.sequence = resume_floor
+                    # One pass over the run's persisted events yields both the
+                    # resume sequence floor and any prior token usage, instead
+                    # of paging the full event history twice. Seed the shared
+                    # sequencer above the run's already-persisted events BEFORE
+                    # starting the heartbeat, so a resumed run's events —
+                    # streamed and heartbeat alike — never reuse a
+                    # source_sequence the original partial run already used
+                    # (which the control plane would dedup or, under strict
+                    # partition ingest, stall on).
+                    resume_floor, prior_usage = await self._run_events_snapshot(job.run_id)
+                    if resume_floor > run_sequencer.sequence:
+                        run_sequencer.sequence = resume_floor
                     heartbeat_task = _start_run_heartbeat_task(
                         publish_worker_heartbeat,
                         interval_seconds=job_ack_extension_interval(self.settings),
                         worker_task=current_task,
                         on_lease_lost=mark_control_lease_lost,
                     )
-                    prior_usage = await self._run_token_usage_summary(job.run_id)
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
                     user_profile = await self._load_user_profile(job.run_id)
@@ -1178,6 +1126,11 @@ class NATSDeepAgentsWorker:
                 if should_ack:
                     await self._delete_checkpointer_thread(job.run_id)
                     await _ack_message(message)
+                # This worker is done with the run either way (terminal ack or
+                # NAK back to the queue), so drop its cancel bookkeeping. A
+                # redelivery that lost the in-memory fast path still skips via
+                # the authoritative control-plane status check above.
+                self._canceled_run_reasons.pop(job.run_id, None)
         finally:
             if user_context_token is not None:
                 _control_plane_user_id.reset(user_context_token)
@@ -1206,7 +1159,6 @@ class NATSDeepAgentsWorker:
             return None
         if store is None:
             return None
-        self._checkpoint_store = store
         self._checkpointer = DurableCheckpointer(store)
         logger.info("Durable run checkpointing enabled.")
         # Reap abandoned checkpoint rows (runs that crashed before terminal ack)
@@ -1250,23 +1202,21 @@ class NATSDeepAgentsWorker:
                 exc_info=True,
             )
 
-    async def _run_event_sequence_floor(self, run_id: str) -> int:
-        """The run's current max event sequence in the control plane, used to
+    async def _run_events_snapshot(self, run_id: str) -> tuple[int, dict[str, Any] | None]:
+        """Single-pass fetch of the run's max persisted event sequence (used to
         seed the worker sequencer so resumed events append without colliding
-        with the original partial run's already-persisted events."""
+        with the original partial run's already-persisted events) and its
+        best-effort prior token usage for final payload continuity. Degrades to
+        (0, None) — fresh floor, no prior usage — when unreadable."""
         try:
-            return await fetch_control_plane_run_max_sequence(run_id, self.settings)
+            return await fetch_control_plane_run_events_snapshot(run_id, self.settings)
         except Exception:
             logger.warning(
-                "Could not read run event sequence floor; using 0.",
+                "Could not read run events snapshot; using sequence floor 0 and no prior usage.",
                 extra={"run_id": run_id},
                 exc_info=True,
             )
-            return 0
-
-    async def _run_token_usage_summary(self, run_id: str) -> dict[str, Any] | None:
-        """Best-effort prior token usage for final payload continuity."""
-        return await fetch_control_plane_run_usage_summary(run_id, self.settings)
+            return 0, None
 
     async def _load_user_profile(self, run_id: str) -> dict[str, Any] | None:
         """Best-effort fetch of the run owner's profile for memory seeding."""
@@ -1334,20 +1284,28 @@ class NATSDeepAgentsWorker:
             )
             return None
 
-    async def _handle_cancel_message(self, message: Any, js: Any) -> None:
+    async def _handle_cancel_message(self, message: Any) -> None:
         try:
             payload = json.loads(message.data.decode("utf-8"))
         except Exception:
             logger.exception("Discarding malformed Deep Agents cancel payload.")
             return
-        await self._handle_cancel_payload(payload, js)
+        await self._handle_cancel_payload(payload)
 
-    async def _handle_cancel_payload(self, payload: dict[str, Any], js: Any) -> None:
+    async def _handle_cancel_payload(self, payload: dict[str, Any]) -> None:
         run_id = str(payload.get("run_id") or "").strip()
         if not run_id:
             return
         reason = str(payload.get("reason") or "canceled").strip() or "canceled"
         self._canceled_run_reasons[run_id] = reason
+        # Cancels fan out to every worker, so bound the map: entries for runs
+        # this worker processes are popped when the job finishes, but runs
+        # handled elsewhere would otherwise accumulate forever. Evicting an old
+        # entry only shifts a redelivered canceled run from the in-memory fast
+        # path to the authoritative control-plane status check. (Single event
+        # loop; dicts preserve insertion order.)
+        while len(self._canceled_run_reasons) > 1024:
+            self._canceled_run_reasons.pop(next(iter(self._canceled_run_reasons)))
         task = self._active_tasks.get(run_id)
         if task is not None:
             task.cancel()

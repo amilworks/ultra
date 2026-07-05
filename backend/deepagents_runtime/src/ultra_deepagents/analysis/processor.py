@@ -116,7 +116,7 @@ class AnalysisProcessor:
         requested = unique_file_ids(job.resource_ids)
         total = len(requested)
 
-        items: dict[str, dict[str, Any]] = self._prior_items(job, principal)
+        items: dict[str, dict[str, Any]] = await asyncio.to_thread(self._prior_items, job, principal)
 
         path_by_id: dict[str, Path] = {}
         for rid in requested:

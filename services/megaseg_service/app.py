@@ -659,16 +659,20 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             results_dir.mkdir(parents=True, exist_ok=True)
             safe_name = Path(str(upload.filename)).name or "input.bin"
             input_path = inputs_dir / safe_name
-            with input_path.open("wb") as handle:
-                shutil.copyfileobj(upload.file, handle)
-            materialized = _materialize_uploaded_source(input_path, inputs_dir)
+
+            def _persist_upload() -> Path:
+                with input_path.open("wb") as handle:
+                    shutil.copyfileobj(upload.file, handle)
+                return _materialize_uploaded_source(input_path, inputs_dir)
+
+            materialized = await asyncio.to_thread(_persist_upload)
             if runtime.infer_semaphore is None:
                 runtime.infer_semaphore = asyncio.Semaphore(max(1, int(runtime.settings.max_concurrent_jobs)))
             async with runtime.infer_semaphore:
                 result = await asyncio.to_thread(_run_infer_sync, runtime, params, materialized, results_dir)
             if not bool(result.get("success")):
                 raise HTTPException(status_code=422, detail=str(result.get("error") or "Megaseg inference failed."))
-            archive_path = _build_infer_archive(results_dir, result, tmp_dir)
+            archive_path = await asyncio.to_thread(_build_infer_archive, results_dir, result, tmp_dir)
             _log_event("infer_completed", input=safe_name, artifacts=len(_collect_artifact_manifest(results_dir)))
             return FileResponse(
                 archive_path,
@@ -715,6 +719,7 @@ try:
     app = create_app()
 except Exception as exc:  # noqa: BLE001
     logger.exception("Megaseg service failed to initialize default app")
+    init_error = str(exc)
     app = FastAPI(title="Megaseg Service", version="0.1.0")
 
     @app.get("/health")
@@ -724,6 +729,6 @@ except Exception as exc:  # noqa: BLE001
             content={
                 "ok": False,
                 "model_ready": False,
-                "error": str(exc),
+                "error": init_error,
             },
         )

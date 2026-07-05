@@ -453,7 +453,8 @@ async def run_job(
     # run's. Best-effort: never fail a run because retention GC could not run.
     if settings.workspace_retention_seconds > 0:
         try:
-            cleanup_expired_code_workspaces(
+            await asyncio.to_thread(
+                cleanup_expired_code_workspaces,
                 root_dir=workspace_root,
                 retention_seconds=settings.workspace_retention_seconds,
             )
@@ -509,13 +510,15 @@ async def run_job(
 
     try:
         messages = list(job.messages or [{"role": "user", "content": job.goal}])
-        context = _preload_arxiv_papers_for_context(
+        context = await asyncio.to_thread(
+            _preload_arxiv_papers_for_context,
             context,
             goal=job.goal,
             messages=messages,
             cache_root=Path(settings.memory_root).expanduser() / "papers",
         )
-        context = _preload_uploaded_pdf_papers_for_context(
+        context = await asyncio.to_thread(
+            _preload_uploaded_pdf_papers_for_context,
             context,
             upload_roots=settings.rarespot_upload_roots,
             cache_root=Path(settings.memory_root).expanduser() / "papers",
@@ -605,7 +608,8 @@ async def run_job(
                 if model_stream_recoveries_used >= settings.model_stream_idle_max_recoveries:
                     raise
                 model_stream_recoveries_used += 1
-                artifact_events = _collect_output_artifacts(
+                artifact_events = await asyncio.to_thread(
+                    _collect_output_artifacts,
                     context,
                     workspace_dir,
                     artifact_dir,
@@ -653,7 +657,8 @@ async def run_job(
                 # the run for stalling.
                 attempt_result = exc.partial_result
                 resume_from_checkpoint = False
-                artifact_events = _collect_output_artifacts(
+                artifact_events = await asyncio.to_thread(
+                    _collect_output_artifacts,
                     context,
                     workspace_dir,
                     artifact_dir,
@@ -732,7 +737,8 @@ async def run_job(
             if attempt_result.model and not run_usage_model:
                 run_usage_model = attempt_result.model
 
-            artifact_events = _collect_output_artifacts(
+            artifact_events = await asyncio.to_thread(
+                _collect_output_artifacts,
                 context,
                 workspace_dir,
                 artifact_dir,
@@ -927,7 +933,6 @@ async def _stream_agent_attempt(
         stream = await stream
     has_streamed_text = False
     saw_tool_event = False
-    active_tool_calls: set[str] = set()
     pending_task_subagent_names: list[str] = []
     dynamic_namespace_subagent_names: dict[str, str] = {}
     attempt_usage = _empty_token_usage()
@@ -943,10 +948,10 @@ async def _stream_agent_attempt(
     execute_progress_token = set_execute_progress_sink(execute_progress_streamer.emit_sync)
     while True:
         try:
-            # The idle watchdog must fire REGARDLESS of active_tool_calls. The previous
-            # `and not active_tool_calls` gate disarmed it during tool execution — the exact
-            # window in which a stalled vision call (an uncancellable to_thread blocked in
-            # httpx) wedged a worker for 1h43m. Wrapping every __anext__ in wait_for resets
+            # The idle watchdog must fire even while tools are executing. A previous
+            # gate disarmed it during tool execution — the exact window in which a
+            # stalled vision call (an uncancellable to_thread blocked in httpx)
+            # wedged a worker for 1h43m. Wrapping every __anext__ in wait_for resets
             # the deadline on each received event (heartbeat semantics), so slow-but-alive
             # work — which keeps emitting subagent/reasoning/tool/usage events — never trips
             # it; only a true dead-transport stall (zero events for the generous window) does.
@@ -1016,7 +1021,6 @@ async def _stream_agent_attempt(
             _track_delegation_evidence(delegation_evidence, tool_event)
             await publish_event(sequencer.stamp(tool_event))
             execute_progress_streamer.bind_tool_event(tool_event)
-            _track_active_tool_call(active_tool_calls, tool_event)
             saw_tool_event = True
             post_tool_response_parts = []
             if progress_detector is not None:
@@ -1120,20 +1124,6 @@ def _start_agent_event_stream(
     if "config" in signature.parameters or accepts_var_kwargs:
         return method(payload, config=config, context=context, version=version)
     return method(payload, context=context, version=version)
-
-
-def _track_active_tool_call(active_tool_calls: set[str], tool_event: dict[str, Any]) -> None:
-    payload = tool_event.get("payload")
-    if not isinstance(payload, dict):
-        return
-    key = _first_nonempty_string(payload.get("tool_call_id"), payload.get("tool_name"))
-    if not key:
-        return
-    status = str(payload.get("status") or "").strip().lower()
-    if status == "started":
-        active_tool_calls.add(key)
-    elif status in {"completed", "failed", "error"}:
-        active_tool_calls.discard(key)
 
 
 def _track_delegation_evidence(evidence: dict[str, int], tool_event: dict[str, Any]) -> None:
@@ -1381,6 +1371,7 @@ def _collect_output_artifacts(
                     target,
                     relative,
                     figure_quality=figure_quality,
+                    sha256=content_hash,
                 )
             )
     return events
@@ -1411,8 +1402,8 @@ def _artifact_event_for_path(
     relative_path: str,
     *,
     figure_quality: dict[str, Any] | None = None,
+    sha256: str,
 ) -> dict[str, Any]:
-    sha256 = _file_sha256(path)
     mime_type = _artifact_mime_type(path)
     kind = _artifact_kind(path, mime_type)
     path_digest = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:16]
@@ -2320,7 +2311,7 @@ def _tool_event_from_stream_event(
             event,
             tool_names_by_call_id if tool_names_by_call_id is not None else {},
         )
-    if raw_event in {"on_tool_start", "tool_call.started", "tool_call_start"}:
+    if raw_event == "on_tool_start":
         tool_name = _tool_name_from_event(event)
         if not tool_name:
             return None
@@ -2330,7 +2321,7 @@ def _tool_event_from_stream_event(
             status="started",
             payload=_tool_start_payload(event),
         )
-    if raw_event in {"on_tool_end", "tool_call.completed", "tool_call_end"}:
+    if raw_event == "on_tool_end":
         tool_name = _tool_name_from_event(event)
         if not tool_name:
             return None
@@ -2340,7 +2331,7 @@ def _tool_event_from_stream_event(
             status="completed",
             payload=_tool_end_payload(event),
         )
-    if raw_event in {"on_tool_error", "tool_call.failed", "tool_call.error", "tool_call_error"}:
+    if raw_event == "on_tool_error":
         tool_name = _tool_name_from_event(event)
         if not tool_name:
             return None
@@ -2350,8 +2341,6 @@ def _tool_event_from_stream_event(
             status="failed",
             payload=_tool_error_payload(event),
         )
-    if event.get("method") == "tool_calls":
-        return _tool_event_from_deepagents_tool_call(context, event)
     return None
 
 
@@ -2398,42 +2387,6 @@ def _tool_event_from_deepagents_tools_protocol(
         status=status,
         payload=_drop_empty_payload_values(payload),
     )
-
-
-def _tool_event_from_deepagents_tool_call(
-    context: AgentRunContext,
-    event: dict[str, Any],
-) -> dict[str, Any] | None:
-    params = event.get("params")
-    if not isinstance(params, dict):
-        return None
-    data = params.get("data")
-    if isinstance(data, list | tuple):
-        candidates = [item for item in data if isinstance(item, dict)]
-    elif isinstance(data, dict):
-        candidates = [data]
-    else:
-        candidates = []
-    for candidate in candidates:
-        tool_name = _first_nonempty_string(
-            candidate.get("name"),
-            candidate.get("tool_name"),
-            candidate.get("tool"),
-        )
-        if not tool_name:
-            continue
-        status = _first_nonempty_string(candidate.get("status"), candidate.get("state"))
-        if not status:
-            status = "completed" if candidate.get("completed") is True else "started"
-        normalized_status = _normalize_tool_status(status)
-        payload = _tool_payload_from_mapping(candidate)
-        return _normalize_stream_tool_call(
-            context,
-            tool_name=tool_name,
-            status=normalized_status,
-            payload=payload,
-        )
-    return None
 
 
 def _tool_name_from_event(event: dict[str, Any]) -> str:
@@ -2483,29 +2436,6 @@ def _tool_error_payload(event: dict[str, Any]) -> dict[str, Any]:
     if error is not None:
         payload["error"] = _payload_preview_text(error)
     return _drop_empty_payload_values(payload)
-
-
-def _tool_payload_from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    for key in ("id", "run_id", "tool_call_id", "call_id"):
-        value = _first_nonempty_string(mapping.get(key))
-        if value:
-            payload["tool_call_id"] = value
-            break
-    tool_input = mapping.get("input") or mapping.get("args") or mapping.get("arguments")
-    if isinstance(tool_input, dict):
-        payload.update(_compact_payload_mapping(tool_input))
-        payload["input"] = _compact_payload_value(tool_input)
-    elif tool_input is not None:
-        payload["input"] = _compact_payload_value(tool_input)
-    output = mapping.get("output") or mapping.get("result")
-    if output is not None:
-        payload["output_preview"] = _payload_preview_text(output)
-        payload["output_size_chars"] = len(str(output))
-    error = mapping.get("error")
-    if error is not None:
-        payload["error"] = _payload_preview_text(error)
-    return payload
 
 
 def _normalize_stream_tool_call(

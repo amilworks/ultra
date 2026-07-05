@@ -3979,6 +3979,43 @@ def test_worker_publishes_completion_if_runner_returns_without_terminal_event():
     assert events[-1]["payload"]["response_text"] == "runner returned a final answer"
 
 
+def test_worker_seeds_sequence_floor_without_checkpointer():
+    async def run_job_returns_without_terminal(*_args, **_kwargs):
+        return "runner returned after redelivery"
+
+    class SnapshotWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            return None
+
+        async def _run_events_snapshot(self, run_id: str):
+            assert run_id == "run-redelivered"
+            return 42, None
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            worker_ack_progress_interval_seconds=0,
+        )
+        worker = SnapshotWorker(
+            settings,
+            run_job_func=run_job_returns_without_terminal,
+        )
+        message = FakeNATSMessage(
+            b'{"run_id":"run-redelivered","thread_id":"thread-1","user_id":"user-1","goal":"finish"}'
+        )
+        js = CapturingJetStream()
+        await worker._process_message(message, js)
+        return message, _published_events(js)
+
+    message, events = asyncio.run(scenario())
+
+    assert message.acked == 1
+    assert message.naked == 0
+    assert [event["event_kind"] for event in events] == ["run.completed"]
+    assert events[-1]["sequence"] == 43
+
+
 @pytest.mark.parametrize("mode", ["success", "failure", "canceled"])
 def test_worker_clears_checkpoint_runtime_state_after_terminal_job(mode: str, tmp_path: Path):
     class CleanupTrackingCheckpointer:
@@ -4012,9 +4049,9 @@ def test_worker_clears_checkpoint_runtime_state_after_terminal_job(mode: str, tm
         async def _ensure_checkpointer(self):
             return checkpointer
 
-        async def _run_event_sequence_floor(self, run_id: str) -> int:
+        async def _run_events_snapshot(self, run_id: str):
             assert run_id == "run-cleanup"
-            return 0
+            return 0, None
 
     async def scenario():
         settings = RuntimeSettings(
@@ -4830,7 +4867,7 @@ def test_worker_cancel_signal_cancels_active_run_and_publishes_canceled():
         js = CapturingJetStream()
         task = asyncio.create_task(worker._process_message(message, js))
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        await worker._handle_cancel_payload({"run_id": "run-1", "reason": "user stop"}, js)
+        await worker._handle_cancel_payload({"run_id": "run-1", "reason": "user stop"})
         await asyncio.wait_for(task, timeout=1.0)
         return message, _published_events(js)
 
@@ -4858,7 +4895,7 @@ def test_worker_does_not_start_previously_canceled_run():
         )
         worker = NATSDeepAgentsWorker(settings, run_job_func=run_job_should_not_start)
         js = CapturingJetStream()
-        await worker._handle_cancel_payload({"run_id": "run-1", "reason": "pre-canceled"}, js)
+        await worker._handle_cancel_payload({"run_id": "run-1", "reason": "pre-canceled"})
         message = FakeNATSMessage(
             b'{"run_id":"run-1","thread_id":"thread-1","user_id":"user-1","goal":"skip"}'
         )

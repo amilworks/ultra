@@ -11,7 +11,6 @@ from pathlib import Path
 # containers carrying this label, so postgres / megaseg / codeexec-service / sibling
 # tenants on a shared daemon are invisible to it.
 SANDBOX_LABEL = "ultra.sandbox=1"
-CAP_LABEL_KEY = "ultra.sandbox.cap"
 _DOCKER_CALL_TIMEOUT_SECONDS = 30
 _STOPPED_STATUSES = ("exited", "created", "dead")
 

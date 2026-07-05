@@ -1066,7 +1066,6 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
 
         # Volume eligibility + policies.
         is_volume_kind = preview_kind in _VOLUME_KINDS
-        has_z = bool(vol and vol["pz"] > 1)
         volume_eligible = bool(is_volume_kind and vol is not None and (vol["pz"] > 1))
         volume_reason = None
         if is_volume_kind and not volume_eligible:

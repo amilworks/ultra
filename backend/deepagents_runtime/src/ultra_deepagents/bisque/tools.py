@@ -388,15 +388,6 @@ def _collect_pushed(bisque_upload: dict[str, Any], via: str) -> list[dict[str, A
     return pushed
 
 
-def upload_bisque_files(
-    settings: RuntimeSettings,
-    *,
-    file_ids: list[str],
-    context: AgentRunContext | None = None,
-) -> dict[str, Any]:
-    return upload_bisque_outputs(settings, file_ids=file_ids, artifact_ids=[], context=context)
-
-
 def create_bisque_dataset(
     settings: RuntimeSettings,
     *,

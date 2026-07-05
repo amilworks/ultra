@@ -49,9 +49,6 @@ class _Hdf5EngineMixin:
             return hdf5.build_hdf5_viewer_info(path, original_name=basename)
         return None
 
-    def hdf5_viewer_info(self, path: str, *, file_id: str = "", name: str = "") -> dict[str, Any]:
-        return hdf5.build_hdf5_viewer_info(path, file_id=file_id, original_name=(name or os.path.basename(path)))
-
     def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
         return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
 

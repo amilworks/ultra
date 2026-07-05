@@ -461,7 +461,6 @@ def test_runtime_settings_load_rarespot_defaults(monkeypatch):
 
     settings = RuntimeSettings.from_env()
 
-    assert settings.rarespot_tool_enabled is True
     assert settings.rarespot_tile_overlap == 0.25
     assert settings.rarespot_conf_threshold == 0.25
     assert settings.rarespot_iou_threshold == 0.45

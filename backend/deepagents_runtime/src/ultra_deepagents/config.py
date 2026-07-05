@@ -223,8 +223,6 @@ class RuntimeSettings:
     # Empty resolves to ``<memory_root>/policies`` so it rides the same shared
     # barrel as per-user memory in production.
     policies_root: str = ""
-    rarespot_tool_enabled: bool = True
-    rarespot_control_base_url: str = "http://127.0.0.1:8088"
     rarespot_artifact_root: str = "data/artifacts"
     rarespot_weights_path: str = "data/models/yolo/RareSpotWeights.pt"
     rarespot_yolov5_path: str = "third_party/yolov5"
@@ -537,11 +535,6 @@ class RuntimeSettings:
             ),
             skills_root=os.getenv("ULTRA_DEEPAGENTS_SKILLS_ROOT", "").strip(),
             policies_root=os.getenv("ULTRA_DEEPAGENTS_POLICIES_ROOT", "").strip(),
-            rarespot_tool_enabled=_env_bool("ULTRA_RARESPOT_TOOL_ENABLED", True),
-            rarespot_control_base_url=os.getenv(
-                "ULTRA_CONTROL_BASE_URL",
-                "http://127.0.0.1:8088",
-            ).rstrip("/"),
             rarespot_artifact_root=os.getenv(
                 "ULTRA_RARESPOT_ARTIFACT_ROOT",
                 os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),

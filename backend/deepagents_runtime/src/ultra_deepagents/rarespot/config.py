@@ -25,10 +25,6 @@ class RareSpotConfig:
     # signal; costs one extra detect pass over the tiles.
     stability: bool = True
     stability_match_iou: float = 0.5
-    bisque_base_url: str = ""
-    bisque_token: str = ""
-    bisque_username: str = ""
-    bisque_password: str = ""
 
     @property
     def stride(self) -> int:
@@ -59,10 +55,6 @@ class RareSpotConfig:
             spectral=_env_bool("ULTRA_RARESPOT_SPECTRAL", True),
             stability=_env_bool("ULTRA_RARESPOT_STABILITY", True),
             stability_match_iou=float(os.getenv("ULTRA_RARESPOT_STABILITY_MATCH_IOU", "0.5") or "0.5"),
-            bisque_base_url=os.getenv("BISQUE_BASE_URL", ""),
-            bisque_token=os.getenv("BISQUE_SERVICE_TOKEN", ""),
-            bisque_username=os.getenv("BISQUE_SERVICE_USERNAME", ""),
-            bisque_password=os.getenv("BISQUE_SERVICE_PASSWORD", ""),
         )
 
     @classmethod

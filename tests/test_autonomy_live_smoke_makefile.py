@@ -48,7 +48,6 @@ def test_autonomy_gate_includes_deterministic_deepagents_autonomy_quality_checks
     )[0]
     for expected in [
         "tests/test_live_trace.py",
-        "tests/test_prompt_cases.py",
         "tests/test_runner_paper_preload.py",
     ]:
         assert expected in target

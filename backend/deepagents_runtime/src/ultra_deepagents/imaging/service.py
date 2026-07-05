@@ -224,19 +224,6 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         )
         return Response(content=png, media_type=_PNG)
 
-    @app.get("/region")
-    async def region(
-        path: str, x1: int, y1: int, x2: int, y2: int, scale: float | None = None,
-        channels: str | None = None, channel_colors: str | None = None,
-    ):
-        path = await _localize_pyramid_async(path)
-        remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
-        png = await runner.call(
-            "region", path, x1=x1, y1=y1, x2=x2, y2=y2, region_scale=scale,
-            channels=remap, colors=fuse_colors,
-        )
-        return Response(content=png, media_type=_PNG)
-
     @app.get("/slice")
     async def slice_plane(
         path: str, z: int | None = None, t: int | None = None, level: int | None = None,
@@ -311,15 +298,6 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             return Response(content=str(exc), media_type="text/plain", status_code=415)
         return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
 
-    @app.get("/video-info")
-    async def video_info(path: str) -> dict[str, Any]:
-        from ultra_deepagents.imaging import video
-
-        try:
-            return await video.probe_info(path)
-        except video.VideoError as exc:
-            return Response(content=str(exc), media_type="text/plain", status_code=415)
-
     @app.get("/scalar-volume")
     async def scalar_volume(path: str, channel: int = 0, t: int = 0):
         path = await _localize_pyramid_async(path)
@@ -353,12 +331,6 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     def _not_found(exc: Exception):
         return JSONResponse(status_code=404, content={"error": "dataset not found", "detail": str(exc)})
-
-    @app.get("/hdf5/viewerinfo")
-    async def hdf5_viewerinfo(path: str, file_id: str = "", name: str = "") -> dict[str, Any]:
-        # Always builds the kind:"hdf5" payload (the Go gate calls this for uploads whose
-        # OriginalName is an HDF5-data extension); never raises on a corrupt file.
-        return await runner.call("hdf5_viewer_info", path, file_id=file_id, name=name)
 
     @app.get("/hdf5/dataset")
     async def hdf5_dataset(path: str, dataset_path: str, file_id: str = ""):

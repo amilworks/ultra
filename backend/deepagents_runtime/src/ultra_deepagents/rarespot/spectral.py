@@ -8,7 +8,6 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
-import numpy as np
 import torch
 
 from ultra_deepagents.rarespot._matching import hungarian_min_cost
@@ -105,46 +104,6 @@ class SpectralInstabilityScorer:
                 }
             )
         return torch.stack(filtered, dim=0), diagnostics
-
-    @staticmethod
-    def _greedy_iou_matches(
-        ious: torch.Tensor,
-        *,
-        threshold: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        device = ious.device
-        if ious.numel() == 0:
-            empty = torch.empty((0,), device=device, dtype=torch.long)
-            return empty, empty, torch.empty((0,), device=device, dtype=torch.float32)
-        row_idx, col_idx = torch.where(ious >= float(threshold))
-        if row_idx.numel() == 0:
-            empty = torch.empty((0,), device=device, dtype=torch.long)
-            return empty, empty, torch.empty((0,), device=device, dtype=torch.float32)
-        pair_scores = ious[row_idx, col_idx]
-        order = torch.argsort(pair_scores, descending=True)
-        used_rows = torch.zeros(ious.shape[0], device=device, dtype=torch.bool)
-        used_cols = torch.zeros(ious.shape[1], device=device, dtype=torch.bool)
-        matched_rows: list[int] = []
-        matched_cols: list[int] = []
-        matched_scores: list[float] = []
-        for pair_index in order.tolist():
-            row = int(row_idx[pair_index].item())
-            col = int(col_idx[pair_index].item())
-            if bool(used_rows[row]) or bool(used_cols[col]):
-                continue
-            used_rows[row] = True
-            used_cols[col] = True
-            matched_rows.append(row)
-            matched_cols.append(col)
-            matched_scores.append(float(pair_scores[pair_index].item()))
-        if not matched_rows:
-            empty = torch.empty((0,), device=device, dtype=torch.long)
-            return empty, empty, torch.empty((0,), device=device, dtype=torch.float32)
-        return (
-            torch.tensor(matched_rows, device=device, dtype=torch.long),
-            torch.tensor(matched_cols, device=device, dtype=torch.long),
-            torch.tensor(matched_scores, device=device, dtype=torch.float32),
-        )
 
     @staticmethod
     def _optimal_iou_matches(

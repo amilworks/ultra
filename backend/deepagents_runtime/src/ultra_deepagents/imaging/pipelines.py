@@ -26,7 +26,7 @@ raise :class:`ValueError` on bad input. Compose with :func:`build`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 
 __all__ = [
     "DEPTH_DISPLAY_8U",

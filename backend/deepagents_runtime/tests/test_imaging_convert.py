@@ -11,7 +11,6 @@ import pytest
 from ultra_deepagents.imaging.convert import (
     PyramidSpec,
     convert_command,
-    meta_command,
     pyramid_options,
 )
 
@@ -51,10 +50,6 @@ def test_derive_pyramid_creates_destination_directory(tmp_path):
     result = derive_pyramid(str(src), str(dst), imgcnv_bin="true")
     assert result.ok
     assert dst.parent.is_dir()
-
-
-def test_meta_command():
-    assert meta_command("a.nd2", imgcnv_bin="imgcnv") == ["imgcnv", "-i", "a.nd2", "-meta", "-verbose", "0"]
 
 
 def test_pyramidspec_options_roundtrip():

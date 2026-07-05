@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from collections import OrderedDict
 from typing import Any
 
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 

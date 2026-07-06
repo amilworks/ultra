@@ -6,8 +6,6 @@ from ultra_deepagents.live_trace import (
     ControlPlaneClient,
     _artifact_ids_from_text,
     append_followup_messages,
-    artifact_download_urls,
-    build_followup_messages,
     build_tool_capability_matrix,
     evaluate_bisque_trace_quality,
     evaluate_delegation_trace_quality,
@@ -98,20 +96,6 @@ def _rarespot_skill_turn(
             },
         ],
     )
-
-
-def test_build_followup_messages_preserves_prior_transcript():
-    messages = build_followup_messages(
-        prompt="Create the first plot.",
-        response_text="Saved plot.png.",
-        followup="Make it green.",
-    )
-
-    assert messages == [
-        {"role": "user", "content": "Create the first plot."},
-        {"role": "assistant", "content": "Saved plot.png."},
-        {"role": "user", "content": "Make it green."},
-    ]
 
 
 def test_append_followup_messages_preserves_growing_transcript():
@@ -979,11 +963,11 @@ def test_summarize_run_trace_extracts_rarespot_configuration_from_tool_output():
             "response_text": "RareSpot completed.",
         },
         events=[
-            {"event_kind": "tool_call.started", "payload": {"tool_name": "rarespot_ecology_inference"}},
+            {"event_kind": "tool_call.started", "payload": {"tool_name": "execute"}},
             {
                 "event_kind": "tool_call.completed",
                 "payload": {
-                    "tool_name": "rarespot_ecology_inference",
+                    "tool_name": "execute",
                     "output_preview": (
                         '{"run_id":"nested-1","status":"succeeded",'
                         '"configuration":{"tile_size":512,"tile_overlap":0.25,'
@@ -2255,8 +2239,8 @@ def test_build_tool_capability_matrix_summarizes_available_and_used_categories()
                         "artifact_manifest",
                         "stage_artifact_for_analysis",
                         "stage_uploaded_files_for_analysis",
-                        "rarespot_ecology_inference",
                     ],
+                    "available_skills": ["prairie-dog-detection"],
                     "storage": {
                         "workspace": "/workspace",
                         "outputs": "/outputs",
@@ -2598,7 +2582,10 @@ def test_evaluate_rarespot_trace_quality_scores_multirun_analysis():
                 {"kind": "csv", "download_ok": True},
                 {"kind": "report", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         },
@@ -2614,7 +2601,10 @@ def test_evaluate_rarespot_trace_quality_scores_multirun_analysis():
                 ),
                 "artifact_count": 3,
                 "artifacts": [{"kind": "image", "download_ok": True}, {"kind": "csv", "download_ok": True}],
-                "tool_names": ["rarespot_ecology_inference"],
+                "tool_names": ["execute"],
+                "skill_scripts": [
+                    {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+                ],
                 "rarespot_configurations": [_rarespot_default_config()],
                 "idle_recovery_count": 0,
             },
@@ -2674,7 +2664,10 @@ def test_evaluate_rarespot_trace_quality_rejects_stub_or_duplicate_outputs():
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
                 {"kind": "report", "path": "report.md", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         },
@@ -2706,7 +2699,10 @@ def test_evaluate_rarespot_trace_quality_accepts_negated_stub_or_duplicate_text(
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
                 {"kind": "report", "path": "report.md", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         },
@@ -2735,7 +2731,10 @@ def test_evaluate_rarespot_trace_quality_accepts_verified_linked_nested_artifact
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
                 {"kind": "report", "path": "report.md", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         },
@@ -2751,7 +2750,10 @@ def test_evaluate_rarespot_trace_quality_accepts_verified_linked_nested_artifact
                 "artifact_count": 0,
                 "artifacts": [],
                 "linked_artifacts": [],
-                "tool_names": ["rarespot_ecology_inference"],
+                "tool_names": ["execute"],
+                "skill_scripts": [
+                    {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+                ],
                 "rarespot_configurations": [_rarespot_default_config()],
                 "idle_recovery_count": 0,
             },
@@ -2795,7 +2797,10 @@ def test_evaluate_rarespot_trace_quality_rejects_unexpected_tile_configuration()
                 {"kind": "image", "path": "overlay.png", "download_ok": True},
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [
                 {"tile_size": 1280, "tile_overlap": 0.25, "stride": 960, "conf": 0.25, "iou": 0.45}
             ],
@@ -2827,7 +2832,10 @@ def test_evaluate_rarespot_trace_quality_rejects_report_only_rerun():
                 {"kind": "image", "path": "overlay.png", "download_ok": True},
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference"],
+            "tool_names": ["execute"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         },
@@ -2847,7 +2855,10 @@ def test_evaluate_rarespot_trace_quality_rejects_report_only_rerun():
                 "artifact_count": 0,
                 "artifacts": [],
                 "linked_artifacts": [],
-                "tool_names": ["artifact_manifest", "rarespot_ecology_inference"],
+                "tool_names": ["artifact_manifest", "execute"],
+                "skill_scripts": [
+                    {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+                ],
                 "idle_recovery_count": 0,
             },
         ],
@@ -2905,7 +2916,10 @@ def test_evaluate_rarespot_trace_quality_rejects_irrelevant_paper_tools():
                 {"kind": "image", "path": "overlay.png", "download_ok": True},
                 {"kind": "csv", "path": "detections.csv", "download_ok": True},
             ],
-            "tool_names": ["rarespot_ecology_inference", "read_paper_pages"],
+            "tool_names": ["execute", "read_paper_pages"],
+            "skill_scripts": [
+                {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
+            ],
             "rarespot_configurations": [_rarespot_default_config()],
             "idle_recovery_count": 0,
         }
@@ -2966,13 +2980,6 @@ def test_summarize_run_trace_reports_autonomy_recovery_and_timing_metrics():
     ]
     assert summary["terminal_event_kind"] == "run.completed"
     assert summary["terminal_event_sequence"] == 6
-
-
-def test_artifact_download_urls_quote_artifact_ids():
-    assert artifact_download_urls("http://control.test/", ["artifact/one", "artifact two"]) == {
-        "artifact/one": "http://control.test/v2/artifacts/artifact%2Fone/download",
-        "artifact two": "http://control.test/v2/artifacts/artifact%20two/download",
-    }
 
 
 def test_artifact_ids_from_text_extracts_download_links_without_markdown_trailing_chars():

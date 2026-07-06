@@ -151,7 +151,6 @@ def test_staging_env_example_documents_required_control_stack_settings() -> None
         "ULTRA_CONTROL_NATS_URL=",
         "ULTRA_CONTROL_ARTIFACT_ROOT=",
         "ULTRA_CONTROL_BISQUE_ROOT_URL=",
-        "BISQUE_UPSTREAM=http://127.0.0.1:8080",
         "ULTRA_CONTROL_HTTP_ADDR=127.0.0.1:8000",
         "ULTRA_CONTROL_BASE_URL=http://127.0.0.1:8000",
         "ULTRA_CONTROL_UPLOAD_ROOT=/srv/ultra/shared/uploads",

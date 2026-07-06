@@ -24,7 +24,6 @@ __all__ = [
     "ConvertResult",
     "pyramid_options",
     "convert_command",
-    "meta_command",
     "derive_pyramid",
     "DEFAULT_IMGCNV",
 ]
@@ -82,11 +81,6 @@ def convert_command(src, dst, *, spec: PyramidSpec | None = None, imgcnv_bin: st
     """Build the ``imgcnv`` argv that converts ``src`` to a tiled pyramid at ``dst``."""
     spec = spec or PyramidSpec()
     return [imgcnv_bin, "-i", str(src), "-o", str(dst), "-t", spec.fmt, "-options", spec.options()]
-
-
-def meta_command(src, *, imgcnv_bin: str = DEFAULT_IMGCNV) -> list[str]:
-    """Build the ``imgcnv`` argv that prints source metadata (``key: value`` lines)."""
-    return [imgcnv_bin, "-i", str(src), "-meta", "-verbose", "0"]
 
 
 def derive_pyramid(

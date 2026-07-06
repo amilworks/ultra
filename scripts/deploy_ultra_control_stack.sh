@@ -217,7 +217,7 @@ env UV_PYTHON="$UV_PYTHON_VERSION" \
   UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
   UV_PROJECT_ENVIRONMENT="$DEEPAGENTS_VENV_DIR" \
   UV_LINK_MODE=copy \
-  "$UV_BIN" sync --frozen --extra rarespot --project "$DEEPAGENTS_DIR"
+  "$UV_BIN" sync --frozen --project "$DEEPAGENTS_DIR"
 ln -sfn "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 
 build_sandbox_image

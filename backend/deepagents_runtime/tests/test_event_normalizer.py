@@ -5,7 +5,6 @@ from ultra_deepagents.events import (
     normalize_run_completed,
     normalize_run_failed,
     normalize_subagent_message_delta,
-    normalize_subagent_status,
     normalize_tool_call,
 )
 
@@ -48,22 +47,6 @@ def test_normalize_tool_call_includes_tool_status_payload():
     assert event["payload"]["tool_name"] == "execute"
     assert event["payload"]["status"] == "started"
     assert event["payload"]["command"] == "python analysis.py"
-
-
-def test_normalize_subagent_status_includes_task_and_role():
-    event = normalize_subagent_status(
-        _context(),
-        name="statistics-analyst",
-        task_id="task-1",
-        status="running",
-        payload={"phase": "power-analysis"},
-    )
-
-    assert event["event_kind"] == "subagent.running"
-    assert event["node_name"] == "statistics-analyst"
-    assert event["task_id"] == "task-1"
-    assert event["agent_role"] == "statistics-analyst"
-    assert event["payload"]["phase"] == "power-analysis"
 
 
 def test_normalize_subagent_message_delta_keeps_specialist_text_separate():

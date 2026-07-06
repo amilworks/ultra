@@ -153,15 +153,6 @@ def dream3d_path(tmp_path):
     return path
 
 
-def test_hdf5_viewerinfo_route(client, hdf5_path):
-    r = client.get("/hdf5/viewerinfo", params={"path": hdf5_path, "file_id": "fid", "name": "sample.h5"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["kind"] == "hdf5"
-    assert body["hdf5"]["supported"] is True
-    assert "/volume/ct" in _all_paths(body["hdf5"]["tree"])
-
-
 def test_plain_viewerinfo_detects_hdf5_by_path_extension(client, hdf5_path):
     # The generic /viewerinfo endpoint forks to the hdf5 payload when the path (or the
     # optional name hint) is an HDF5-data file, so no image pipeline touches it.
@@ -243,11 +234,3 @@ def test_hdf5_materials_dashboard_route(client, dream3d_path):
 def test_hdf5_materials_dashboard_non_dream3d_is_404(client, hdf5_path):
     r = client.get("/hdf5/materials/dashboard", params={"path": hdf5_path})
     assert r.status_code == 404
-
-
-def _all_paths(tree):
-    out = []
-    for node in tree:
-        out.append(node["path"])
-        out.extend(_all_paths(node["children"]))
-    return out

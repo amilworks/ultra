@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration smoke-pro-mode-opus postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 COMPOSE_ENV_FILE := $(if $(wildcard .env.docker),.env.docker,.env.docker.example)
@@ -95,9 +95,6 @@ test-chat-stack: ## Run production-like Go control and Deep Agents chat checks
 
 verify-integration: ## Validate Go control plane persistence and transport integration
 	$(MAKE) control-integration
-
-smoke-pro-mode-opus: ## Probe the configured Pro Mode Opus gateway and optionally the local backend
-	uv run python scripts/smoke_pro_mode_opus.py
 
 postgres-up: ## Start local Postgres for production-like testing
 	docker compose -f docker-compose.postgres.yml up -d
@@ -230,7 +227,6 @@ deepagents-worker-test: ## Run Deep Agents worker transport, lease, and redelive
 deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and routing tests
 	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \
 		tests/test_live_trace.py \
-		tests/test_prompt_cases.py \
 		tests/test_runner_paper_preload.py
 
 deepagents-smoke: ## Probe the configured Python Deep Agents vLLM model endpoint

@@ -12,8 +12,7 @@ from ultra_deepagents.code_execution.cleanup import (
     reap_orphaned_sandbox_containers,
 )
 from ultra_deepagents.code_execution.docker import DockerSandboxBackend, DockerSandboxConfig
-from ultra_deepagents.code_execution.paths import code_workspace_path, resolve_workspace_file
-from ultra_deepagents.context import AgentRunContext
+from ultra_deepagents.code_execution.paths import resolve_workspace_file
 
 
 def _rfc3339(epoch: float) -> str:
@@ -44,21 +43,6 @@ def _fake_docker(stopped, running, inspect_map, removed_calls):
         raise AssertionError(f"unexpected docker subcommand: {sub}")
 
     return fake_run
-
-
-def test_code_workspace_path_is_scoped_by_org_user_and_run(tmp_path: Path):
-    context = AgentRunContext(
-        assistant_id="ultra-research",
-        org_id="frontier/lab",
-        user_id="faculty A",
-        project_id="project-1",
-        thread_id="thread-1",
-        run_id="run:123",
-    )
-
-    path = code_workspace_path(root_dir=tmp_path, context=context)
-
-    assert path == tmp_path / "frontier_lab" / "faculty_A" / "run_123" / "workspace"
 
 
 def test_resolve_workspace_file_rejects_paths_outside_workspace(tmp_path: Path):

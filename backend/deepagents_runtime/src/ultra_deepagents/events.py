@@ -110,29 +110,6 @@ def normalize_tool_call_progress(
     ).to_dict()
 
 
-def normalize_subagent_status(
-    context: AgentRunContext,
-    name: str,
-    task_id: str,
-    status: str,
-    payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    event_payload = {"name": name, "status": status}
-    event_payload.update(_json_safe_payload(payload))
-    return RunEvent(
-        run_id=context.run_id,
-        thread_id=context.thread_id,
-        event_kind=f"subagent.{status}",
-        event_type="subagent",
-        node_name=name,
-        task_id=task_id,
-        agent_role=name,
-        level="info" if status not in {"failed", "error"} else "error",
-        message=f"{name} {status}",
-        payload=event_payload,
-    ).to_dict()
-
-
 def normalize_subagent_message_delta(
     context: AgentRunContext,
     name: str,

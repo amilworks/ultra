@@ -14,7 +14,6 @@ from urllib import parse, request
 
 RARESPOT_SKILL_NAME = "prairie-dog-detection"
 MEDICAL_VOLUME_SKILL_NAME = "medical-volume-slices"
-RARESPOT_TOOL_NAMES = {"rarespot_ecology_inference"}
 RARESPOT_SCRIPT_PATH = "/opt/rarespot/rarespot_detect.py"
 MEDICAL_VOLUME_SCRIPT_PATH = "/opt/medvol/volume_slices.py"
 SKILL_SCRIPT_PATHS = {
@@ -214,19 +213,6 @@ class ControlPlaneClient:
             req.add_header(key, value)
 
 
-def build_followup_messages(
-    *,
-    prompt: str,
-    response_text: str,
-    followup: str,
-) -> list[dict[str, str]]:
-    return append_followup_messages(
-        [{"role": "user", "content": prompt}],
-        response_text=response_text,
-        followup=followup,
-    )
-
-
 def append_followup_messages(
     transcript: list[dict[str, str]],
     *,
@@ -238,14 +224,6 @@ def append_followup_messages(
         {"role": "assistant", "content": response_text},
         {"role": "user", "content": followup},
     ]
-
-
-def artifact_download_urls(base_url: str, artifact_ids: list[str]) -> dict[str, str]:
-    root = base_url.rstrip("/")
-    return {
-        artifact_id: f"{root}/v2/artifacts/{parse.quote(artifact_id, safe='')}/download"
-        for artifact_id in artifact_ids
-    }
 
 
 def summarize_run_trace(
@@ -1362,9 +1340,8 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             "used": bool(PAPER_TOOL_NAMES & all_used_tools),
         },
         "rarespot_detection": {
-            "available": bool(RARESPOT_TOOL_NAMES & registered_names)
-            or rarespot_skill_available,
-            "used": bool(RARESPOT_TOOL_NAMES & all_used_tools) or rarespot_skill_used,
+            "available": rarespot_skill_available,
+            "used": rarespot_skill_used,
         },
     }
     turn_summaries: list[dict[str, Any]] = []
@@ -1441,8 +1418,7 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                     )
                     > 0,
                     "paper_review": bool(PAPER_TOOL_NAMES & turn_tools),
-                    "rarespot_detection": bool(RARESPOT_TOOL_NAMES & turn_tools)
-                    or _turn_has_rarespot_skill_script(turn),
+                    "rarespot_detection": _turn_has_rarespot_skill_script(turn),
                 },
             }
         )
@@ -1973,14 +1949,12 @@ def _rarespot_configurations(events: list[dict[str, Any]]) -> list[dict[str, Any
         payload = event.get("payload")
         if not isinstance(payload, dict):
             continue
-        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
         output_text = str(payload.get("output_preview") or payload.get("output") or "")
         parsed = _json_object_from_text(output_text)
         if not parsed:
             continue
-        if tool_name and tool_name not in RARESPOT_TOOL_NAMES:
-            if "configuration" not in parsed:
-                continue
+        if "configuration" not in parsed:
+            continue
         config = parsed.get("configuration")
         if not isinstance(config, dict):
             continue
@@ -3068,13 +3042,6 @@ ASYNC_TASK_TOOL_NAMES = {
 ASYNC_FAILURE_STATUSES = {"error", "failed", "failure", "timeout", "interrupted"}
 
 
-def _turn_has_rarespot_legacy_tool(turn: dict[str, Any]) -> bool:
-    tool_names = turn.get("tool_names") or []
-    return isinstance(tool_names, list) and any(
-        str(name) in RARESPOT_TOOL_NAMES for name in tool_names
-    )
-
-
 def _turn_has_rarespot_skill_script(turn: dict[str, Any]) -> bool:
     scripts = turn.get("skill_scripts") or []
     if not isinstance(scripts, list):
@@ -3088,7 +3055,7 @@ def _turn_has_rarespot_skill_script(turn: dict[str, Any]) -> bool:
 
 
 def _turn_has_rarespot_inference(turn: dict[str, Any]) -> bool:
-    return _turn_has_rarespot_legacy_tool(turn) or _turn_has_rarespot_skill_script(turn)
+    return _turn_has_rarespot_skill_script(turn)
 
 
 def _trace_has_rarespot_tool(turns: list[dict[str, Any]]) -> bool:

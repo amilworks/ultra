@@ -1047,10 +1047,9 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     sections.append(PRIOR_ARTIFACT_GUIDANCE.strip())
     sections.append(UPLOADED_FILE_GUIDANCE.strip())
     # Only advertise domain workflows when they apply to this run; otherwise the
-    # model carries hundreds of tokens of instructions for tools it does not have
-    # (e.g. ~650 tok of phantom RareSpot+paper guidance on a generic run). Paper
-    # guidance keys on the paper-tool predicate; RareSpot keys on the broader
-    # domain predicate so report-only ecology runs (no inference tool) keep it.
+    # model carries hundreds of tokens of instructions for tools it does not
+    # have. Paper guidance keys on _should_register_paper_tools; BisQue guidance
+    # keys on _should_register_bisque_tools (with BISQUE_UNLINKED_HINT otherwise).
     if context is None or _should_register_paper_tools(context):
         sections.append(PAPER_REVIEW_GUIDANCE.strip())
     # Only advertise the BisQue tools when they are actually registered for this
@@ -1227,9 +1226,8 @@ class UltraRunContextPromptMiddleware(AgentMiddleware[Any, Any, Any]):
     Intelligence Pro runs on computational-study goals, the results contract.
     """
 
-    def __init__(self, settings: RuntimeSettings) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._settings = settings
         self._started_monotonic = time.monotonic()
 
     def _brief(self, request: ModelRequest) -> str:
@@ -1271,8 +1269,8 @@ class UltraRunContextPromptMiddleware(AgentMiddleware[Any, Any, Any]):
         )
 
 
-def build_runtime_prompt_middleware(settings: RuntimeSettings) -> Any:
-    return UltraRunContextPromptMiddleware(settings)
+def build_runtime_prompt_middleware() -> Any:
+    return UltraRunContextPromptMiddleware()
 
 
 class UltraAttemptLedgerMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -1599,7 +1597,7 @@ def build_research_agent(
             timeout_seconds=settings.subagent_task_timeout_seconds
         )
     )
-    middleware.append(build_runtime_prompt_middleware(settings))
+    middleware.append(build_runtime_prompt_middleware())
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 

@@ -9960,7 +9960,7 @@ details {
    overflow boxes, but desktop sizing makes them cramped on a phone. Drop the
    33rem table floor so simple tables fit the viewport, and tighten type +
    padding so more fits before any in-box horizontal scroll is needed. Code
-   keeps min-width:max-content (it should scroll, not wrap) — just smaller. */
+   keeps min-width:max-content so it scrolls instead of wrapping. */
 @media (max-width: 640px) {
   .pk-table {
     min-width: auto;
@@ -9983,8 +9983,7 @@ details {
    delete, in an unclamped flex row) and the settings dialog close button. min-*
    keeps the glyph compact while the tappable area grows; fine-pointer desktops
    keep their density. Scoped deliberately: a blanket icon-button rule would also
-   hit the fixed-height scroll-to-bottom shell and the viewer's dense toolbars,
-   which need their own layout care (handled with the viewer/Tier-2 pass). */
+   hit the fixed-height scroll-to-bottom shell and dense viewer toolbars. */
 @media (pointer: coarse) {
   .pk-message-actions button,
   .app-settings-close-button {

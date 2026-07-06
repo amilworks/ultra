@@ -83,7 +83,7 @@ class DataAgentJobEnvelope:
             metadata=_dict(payload.get("metadata")),
         )
 
-    def principal_headers(self, settings: RuntimeSettings | None = None) -> dict[str, str]:
+    def principal_headers(self, settings: Any | None = None) -> dict[str, str]:
         headers = {
             "X-Ultra-User-Id": self.owner_user_id or "local-user",
             "X-Ultra-Org-Id": self.owner_org_id or "local-org",
@@ -741,15 +741,31 @@ class NATSDataAgentWorker:
                 finally:
                     await _stop_data_agent_heartbeat_task(data_agent_heartbeat_task)
                     data_agent_heartbeat_task = None
+                output_summary_dict = _dict(output_summary)
+                terminal_status = _data_agent_output_terminal_status(output_summary_dict)
+                terminal_progress_completed = job.resource_count
+                if terminal_status != "succeeded":
+                    terminal_progress_completed = max(
+                        0,
+                        min(
+                            _int(output_summary_dict.get("processed"), default=0),
+                            max(0, job.resource_count),
+                        ),
+                    )
+                terminal_message = _data_agent_terminal_message(terminal_status)
                 await self._update_status(
                     job,
                     self.settings,
-                    status="succeeded",
-                    progress_completed=job.resource_count,
+                    status=terminal_status,
+                    progress_completed=terminal_progress_completed,
                     progress_total=job.resource_count,
-                    message="Data Agent job completed.",
-                    output_summary=_dict(output_summary),
-                    event_metadata={"stage": "worker_completed", "dispatch_id": job.dispatch_id},
+                    error=_data_agent_terminal_error(terminal_status, output_summary_dict),
+                    message=terminal_message,
+                    output_summary=output_summary_dict,
+                    event_metadata={
+                        "stage": _data_agent_terminal_stage(terminal_status),
+                        "dispatch_id": job.dispatch_id,
+                    },
                 )
             except asyncio.CancelledError:
                 if control_lease_lost:
@@ -868,6 +884,37 @@ def data_agent_redelivery_delay(settings: RuntimeSettings) -> float | None:
     if interval <= 0:
         return None
     return interval
+
+
+def _data_agent_output_terminal_status(output_summary: dict[str, Any]) -> str:
+    status = _string(output_summary.get("terminal_status")).lower()
+    if status in TERMINAL_DATA_AGENT_JOB_STATUSES:
+        return status
+    if output_summary.get("canceled") is True:
+        return "canceled"
+    return "succeeded"
+
+
+def _data_agent_terminal_stage(status: str) -> str:
+    if status == "canceled":
+        return "worker_canceled"
+    if status == "failed":
+        return "worker_failed"
+    return "worker_completed"
+
+
+def _data_agent_terminal_message(status: str) -> str:
+    if status == "canceled":
+        return "Data Agent job canceled."
+    if status == "failed":
+        return "Data Agent job failed."
+    return "Data Agent job completed."
+
+
+def _data_agent_terminal_error(status: str, output_summary: dict[str, Any]) -> str:
+    if status != "failed":
+        return ""
+    return _string(output_summary.get("error")) or _string(output_summary.get("summary"))
 
 
 def _start_data_agent_heartbeat_task(

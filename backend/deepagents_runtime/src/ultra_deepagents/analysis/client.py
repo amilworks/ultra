@@ -6,24 +6,104 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tarfile
 import tempfile
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import requests
 
 _CHUNK = 1024 * 1024
+MAX_EXTRACTED_TAR_MEMBERS = 10_000
+MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES = 10 * 1024**3
+
+
+def _safe_tar_member_parts(member_name: str) -> tuple[str, ...]:
+    raw_name = str(member_name or "")
+    if raw_name in {"", "."}:
+        return ()
+    member_path = PurePosixPath(raw_name)
+    if member_path.is_absolute():
+        raise RuntimeError(f"refusing to extract absolute archive member: {member_name}")
+    parts = tuple(part for part in member_path.parts if part not in {"", "."})
+    if any(part == ".." for part in parts):
+        raise RuntimeError(f"refusing to extract unsafe archive member: {member_name}")
+    return parts
+
+
+def _safe_tar_member_target(dest_dir: Path, member: tarfile.TarInfo) -> Path:
+    dest_resolved = dest_dir.resolve()
+    parts = _safe_tar_member_parts(member.name)
+    candidate = dest_dir.joinpath(*parts) if parts else dest_dir
+    target = candidate.resolve(strict=False)
+    try:
+        target.relative_to(dest_resolved)
+    except ValueError as exc:
+        raise RuntimeError(f"refusing to extract unsafe archive member: {member.name}") from exc
+    if target == dest_resolved and not member.isdir():
+        raise RuntimeError(f"refusing to extract archive member over destination root: {member.name}")
+    return target
+
+
+def _validate_safe_tar_member(member: tarfile.TarInfo, dest_dir: Path) -> Path:
+    target = _safe_tar_member_target(dest_dir, member)
+    if member.issym() or member.islnk():
+        raise RuntimeError(f"refusing to extract archive link member: {member.name}")
+    if member.ischr() or member.isblk() or member.isfifo():
+        raise RuntimeError(f"refusing to extract special archive member: {member.name}")
+    if not (member.isdir() or member.isfile()):
+        raise RuntimeError(f"refusing to extract unsupported archive member: {member.name}")
+    return target
+
+
+def _validated_tar_member(
+    member: tarfile.TarInfo,
+    dest_dir: Path,
+    *,
+    member_count: int,
+    total_uncompressed_bytes: int,
+) -> tuple[Path, int]:
+    if member_count > MAX_EXTRACTED_TAR_MEMBERS:
+        raise RuntimeError(
+            f"refusing to extract archive with too many members: "
+            f"{member_count} > {MAX_EXTRACTED_TAR_MEMBERS}"
+        )
+    if member.isfile():
+        size = int(member.size or 0)
+        if size < 0:
+            raise RuntimeError(f"refusing to extract archive member with negative size: {member.name}")
+        total_uncompressed_bytes += size
+        if total_uncompressed_bytes > MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES:
+            raise RuntimeError(
+                f"refusing to extract archive exceeding uncompressed size limit: "
+                f"{total_uncompressed_bytes} > {MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES}"
+            )
+    return _validate_safe_tar_member(member, dest_dir), total_uncompressed_bytes
 
 
 def _safe_extract(archive: tarfile.TarFile, dest_dir: Path) -> None:
-    dest_resolved = dest_dir.resolve()
-    for member in archive.getmembers():
-        target = (dest_dir / member.name).resolve()
-        if target != dest_resolved and not str(target).startswith(f"{dest_resolved}{os.sep}"):
-            raise RuntimeError(f"refusing to extract unsafe archive member: {member.name}")
-    archive.extractall(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    member_count = 0
+    total_uncompressed_bytes = 0
+    for member in archive:
+        member_count += 1
+        target, total_uncompressed_bytes = _validated_tar_member(
+            member,
+            dest_dir,
+            member_count=member_count,
+            total_uncompressed_bytes=total_uncompressed_bytes,
+        )
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise RuntimeError(f"unable to read archive member: {member.name}")
+        with source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination, length=_CHUNK)
 
 
 def run_megaseg_infer(

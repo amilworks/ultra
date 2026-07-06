@@ -9956,6 +9956,43 @@ details {
   min-height: 1.2em;
 }
 
+/* Mobile chat reading: tables and code already scroll inside their own
+   overflow boxes, but desktop sizing makes them cramped on a phone. Drop the
+   33rem table floor so simple tables fit the viewport, and tighten type +
+   padding so more fits before any in-box horizontal scroll is needed. Code
+   keeps min-width:max-content (it should scroll, not wrap) — just smaller. */
+@media (max-width: 640px) {
+  .pk-table {
+    min-width: auto;
+  }
+  .pk-table-head-cell,
+  .pk-table-cell {
+    padding: 0.5rem 0.62rem;
+    font-size: 0.78rem;
+  }
+  .pk-code-render :where(pre) {
+    padding: 0.85rem 1rem 0.95rem;
+  }
+  .pk-code-render :where(pre, code) {
+    font-size: 0.78rem;
+  }
+}
+
+/* Touch: enlarge the always-visible chat-reading controls that fall below the
+   44px target on coarse pointers — the per-message action buttons (copy / edit /
+   delete, in an unclamped flex row) and the settings dialog close button. min-*
+   keeps the glyph compact while the tappable area grows; fine-pointer desktops
+   keep their density. Scoped deliberately: a blanket icon-button rule would also
+   hit the fixed-height scroll-to-bottom shell and the viewer's dense toolbars,
+   which need their own layout care (handled with the viewer/Tier-2 pass). */
+@media (pointer: coarse) {
+  .pk-message-actions button,
+  .app-settings-close-button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
 .pk-code-render::selection,
 .pk-code-render :where(pre, code, span)::selection {
   background: color-mix(in oklab, var(--brand) 16%, transparent);

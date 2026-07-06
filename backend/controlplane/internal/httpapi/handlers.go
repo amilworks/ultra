@@ -550,6 +550,10 @@ func NewRouter(deps ServerDeps) http.Handler {
 	// Outermost middleware: a handler panic becomes a clean 500 for that one request
 	// (structured-logged), never a dropped connection or a stderr stack-trace dump.
 	r.Use(recoverPanics)
+	// Make a duplicate WriteHeader a no-op instead of a superfluous-header log +
+	// possible response corruption (an error path reached after the response was
+	// already started). Inside recoverPanics so the recovery fallback is guarded too.
+	r.Use(guardResponseWriter)
 	r.Get("/v1/health", handleHealth)
 	r.Get("/v1/config/public", handlePublicConfig(deps))
 	r.Get("/v1/auth/session", handleAuthSession(deps))

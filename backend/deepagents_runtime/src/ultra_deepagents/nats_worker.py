@@ -627,11 +627,21 @@ class NATSDeepAgentsWorker:
         instead of crashing the process — a crash orphans the in-flight run. A clean
         shutdown returns; non-NATS errors still propagate."""
         backoff = 1.0
+        # A connection that stayed up at least this long before failing was healthy;
+        # the failure is an isolated blip (e.g. a momentary heartbeat miss under load),
+        # not a flapping reconnect loop. Reset the backoff so it reconnects promptly
+        # instead of carrying forward an escalated delay. Without this, backoff climbs
+        # monotonically to the cap over a worker's lifetime, so every later reconnect —
+        # even after hours of health — eats the full 30s, needlessly stalling a run.
+        stable_connection_seconds = 60.0
         while True:
+            connection_started_at = time.monotonic()
             try:
                 await self._serve_one_connection()
                 return
             except _RECOVERABLE_NATS_ERRORS as exc:
+                if time.monotonic() - connection_started_at >= stable_connection_seconds:
+                    backoff = 1.0
                 logger.warning(
                     "NATS connection lost (%s); reconnecting in %.1fs",
                     type(exc).__name__,

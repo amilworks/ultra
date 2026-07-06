@@ -284,6 +284,36 @@ def _multiscales(attrs: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _fallback_single_scale_datasets(group: Any) -> list[dict[str, Any]]:
+    """Best-effort single-level dataset list for a store missing `multiscales`.
+    Prefers a child array named "0" (the OME base level), else a lone array child,
+    else the root itself when it is a bare array. Returns [] when no single array
+    can be unambiguously identified (e.g. a multi-array group) so the caller still
+    raises rather than guessing."""
+    def _is_array(obj: Any) -> bool:
+        return hasattr(obj, "shape") and hasattr(obj, "dtype") and not hasattr(obj, "keys")
+
+    if _is_array(group):
+        return [{"path": ""}]
+    try:
+        keys = list(group.keys())
+    except Exception:  # noqa: BLE001
+        return []
+    array_keys: list[str] = []
+    for key in keys:
+        try:
+            child = group[key]
+        except Exception:  # noqa: BLE001
+            continue
+        if _is_array(child):
+            array_keys.append(str(key))
+    if "0" in array_keys:
+        return [{"path": "0"}]
+    if len(array_keys) == 1:
+        return [{"path": array_keys[0]}]
+    return []
+
+
 def _axis_names(ms: dict[str, Any], ndim: int) -> list[str]:
     """Lowercase axis names in stored order. Falls back to canonical trailing names
     (…t,c,z,y,x) when `axes` is absent (pre-0.3 NGFF)."""
@@ -328,12 +358,6 @@ def open_ngff(path: str) -> NgffImage:
         raise NgffError(f"not a directory: {path!r}")
     attrs = _read_attrs(path)
     multiscales = _multiscales(attrs)
-    if not multiscales:
-        raise NgffError(f"no OME-Zarr 'multiscales' metadata in {path!r}")
-    ms = multiscales[0]
-    datasets = ms.get("datasets") or []
-    if not datasets:
-        raise NgffError(f"OME-Zarr multiscale has no datasets in {path!r}")
 
     try:
         group = zarr.open_group(path, mode="r")
@@ -342,6 +366,23 @@ def open_ngff(path: str) -> NgffImage:
             group = zarr.open(path, mode="r")
         except Exception as exc:  # noqa: BLE001
             raise NgffError(f"zarr could not open {path!r}: {exc!r}") from exc
+
+    if multiscales:
+        ms = multiscales[0]
+        datasets = ms.get("datasets") or []
+        if not datasets:
+            raise NgffError(f"OME-Zarr multiscale has no datasets in {path!r}")
+    else:
+        # Fallback for a store that carries pixel arrays but no `multiscales`
+        # metadata (e.g. a raw/single-scale conversion that never wrote the OME
+        # attrs). This branch is only reached when the store would otherwise
+        # 422, so it can never regress a spec-compliant store. Treat the
+        # base-resolution array as a single level; axes fall back to the
+        # canonical trailing names by ndim (see _axis_names).
+        ms = {}
+        datasets = _fallback_single_scale_datasets(group)
+        if not datasets:
+            raise NgffError(f"no OME-Zarr 'multiscales' metadata in {path!r}")
 
     levels: list[NgffLevel] = []
     ndim = 0

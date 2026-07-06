@@ -462,7 +462,10 @@ def run_yolov5_detect(
         # and give each its own YOLOv5 config dir so concurrent startups don't race.
         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             env[var] = str(threads_per)
-        env["YOLOV5_CONFIG_DIR"] = str((shard_root / f"out_{i:03d}" / ".yolov5-config").resolve())
+        # Per-shard config dir so concurrent YOLOv5 startups don't race on settings.yaml.
+        # Keep it directly under shard_root (which exists): YOLOv5 does mkdir(exist_ok=True)
+        # WITHOUT parents, so the parent must already exist.
+        env["YOLOV5_CONFIG_DIR"] = str((shard_root / f".yolov5-config-{i:03d}").resolve())
         return subprocess.run(
             _detect_command(source=shard_inputs[i], project=shard_root / f"out_{i:03d}", name=name, config=config),
             cwd=str(config.yolov5_path), env=env, text=True, capture_output=True, check=False,

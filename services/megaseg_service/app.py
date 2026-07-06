@@ -13,21 +13,24 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import torch
-from fsspec.core import url_to_fs
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
+from fsspec.core import url_to_fs
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 logger = logging.getLogger("megaseg_service")
 REMOTE_SOURCE_SCHEMES = {"http", "https", "s3"}
 REMOTE_TIFF_SUFFIXES = (".ome.tif", ".ome.tiff", ".tif", ".tiff")
+_CHUNK_BYTES = 1024 * 1024
+MAX_EXTRACTED_TAR_MEMBERS = 200_000
+MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES = 512 * 1024**3
 
 
 def build_megaseg_model(*args: Any, **kwargs: Any) -> Any:
@@ -71,7 +74,7 @@ class ServiceSettings:
     amp_enabled: bool = False
 
     @classmethod
-    def from_env(cls) -> "ServiceSettings":
+    def from_env(cls) -> ServiceSettings:
         checkpoint_raw = str(os.getenv("MEGASEG_CHECKPOINT_PATH") or "").strip()
         api_key = str(os.getenv("MEGASEG_API_KEY") or "").strip()
         if not checkpoint_raw:
@@ -239,7 +242,7 @@ def _materialize_remote_source(uri: str, inputs_dir: Path, existing_names: set[s
             if not fs.exists(path):
                 raise FileNotFoundError(f"Remote source does not exist: {uri}")
             with fs.open(path, "rb") as source_handle, destination.open("wb") as destination_handle:
-                shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
+                shutil.copyfileobj(source_handle, destination_handle, length=_CHUNK_BYTES)
             return destination
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -305,6 +308,113 @@ def _build_infer_archive(results_dir: Path, result: dict[str, Any], tmp_dir: Pat
     return archive_path
 
 
+def _safe_tar_member_parts(member_name: str) -> tuple[str, ...]:
+    raw_name = str(member_name or "")
+    if raw_name in {"", "."}:
+        return ()
+    member_path = PurePosixPath(raw_name)
+    if member_path.is_absolute():
+        raise RuntimeError(f"Refusing to extract absolute archive member: {member_name}")
+    parts = tuple(part for part in member_path.parts if part not in {"", "."})
+    if any(part == ".." for part in parts):
+        raise RuntimeError(f"Refusing to extract unsafe archive member: {member_name}")
+    return parts
+
+
+def _safe_tar_member_target(dest_dir: Path, member: tarfile.TarInfo) -> Path:
+    dest_resolved = dest_dir.resolve()
+    parts = _safe_tar_member_parts(member.name)
+    candidate = dest_dir.joinpath(*parts) if parts else dest_dir
+    target = candidate.resolve(strict=False)
+    try:
+        target.relative_to(dest_resolved)
+    except ValueError as exc:
+        raise RuntimeError(f"Refusing to extract unsafe archive member: {member.name}") from exc
+    if target == dest_resolved and not member.isdir():
+        raise RuntimeError(f"Refusing to extract archive member over destination root: {member.name}")
+    return target
+
+
+def _validate_safe_tar_member(member: tarfile.TarInfo, dest_dir: Path) -> Path:
+    target = _safe_tar_member_target(dest_dir, member)
+    if member.issym() or member.islnk():
+        raise RuntimeError(f"Refusing to extract archive link member: {member.name}")
+    if member.ischr() or member.isblk() or member.isfifo():
+        raise RuntimeError(f"Refusing to extract special archive member: {member.name}")
+    if not (member.isdir() or member.isfile()):
+        raise RuntimeError(f"Refusing to extract unsupported archive member: {member.name}")
+    return target
+
+
+def _validated_tar_member(
+    member: tarfile.TarInfo,
+    dest_dir: Path,
+    *,
+    expected_root_parts: tuple[str, ...],
+    expected_root: str,
+    member_count: int,
+    total_uncompressed_bytes: int,
+) -> tuple[Path, int]:
+    if member_count > MAX_EXTRACTED_TAR_MEMBERS:
+        raise RuntimeError(
+            f"Refusing to extract archive with too many members: "
+            f"{member_count} > {MAX_EXTRACTED_TAR_MEMBERS}"
+        )
+    if member.isfile():
+        size = int(member.size or 0)
+        if size < 0:
+            raise RuntimeError(f"Refusing to extract archive member with negative size: {member.name}")
+        total_uncompressed_bytes += size
+        if total_uncompressed_bytes > MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES:
+            raise RuntimeError(
+                f"Refusing to extract archive exceeding uncompressed size limit: "
+                f"{total_uncompressed_bytes} > {MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES}"
+            )
+    if expected_root_parts:
+        _validate_expected_tar_root(member, expected_root_parts, expected_root)
+    return _validate_safe_tar_member(member, dest_dir), total_uncompressed_bytes
+
+
+def _validate_expected_tar_root(
+    member: tarfile.TarInfo,
+    expected_root_parts: tuple[str, ...],
+    expected_root: str,
+) -> None:
+    if not expected_root_parts:
+        return
+    parts = _safe_tar_member_parts(member.name)
+    if len(parts) < len(expected_root_parts) or parts[: len(expected_root_parts)] != expected_root_parts:
+        raise RuntimeError(
+            f"Refusing to extract archive member outside expected root {expected_root}: {member.name}"
+        )
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, dest_dir: Path, *, expected_root: str | None = None) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    expected_root_parts = _safe_tar_member_parts(expected_root) if expected_root else ()
+    member_count = 0
+    total_uncompressed_bytes = 0
+    for member in archive:
+        member_count += 1
+        target, total_uncompressed_bytes = _validated_tar_member(
+            member,
+            dest_dir,
+            expected_root_parts=expected_root_parts,
+            expected_root=str(expected_root or ""),
+            member_count=member_count,
+            total_uncompressed_bytes=total_uncompressed_bytes,
+        )
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise RuntimeError(f"Unable to read archive member: {member.name}")
+        with source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination, length=_CHUNK_BYTES)
+
+
 def _run_infer_sync(runtime: ServiceRuntime, request: JobRequest, input_path: Path, output_dir: Path) -> dict[str, Any]:
     if runtime.health_error:
         raise RuntimeError(runtime.health_error)
@@ -331,11 +441,7 @@ def _extract_uploaded_archive(upload_path: Path, inputs_dir: Path) -> Path:
     original_name = archive_name[:-7] if archive_name.endswith(".tar.gz") else upload_path.stem
     extracted_root = inputs_dir / original_name
     with tarfile.open(upload_path, mode="r:gz") as archive:
-        for member in archive.getmembers():
-            member_path = (inputs_dir / member.name).resolve()
-            if not str(member_path).startswith(f"{inputs_dir.resolve()}{os.sep}") and member_path != inputs_dir.resolve():
-                raise RuntimeError(f"Refusing to extract unsafe archive member: {member.name}")
-        archive.extractall(inputs_dir)
+        _safe_extract_tar(archive, inputs_dir, expected_root=original_name)
     if not extracted_root.exists():
         raise RuntimeError(f"Uploaded archive did not contain expected root directory: {original_name}")
     return extracted_root
@@ -397,16 +503,17 @@ def _get_model_for_request(runtime: ServiceRuntime, request: JobRequest) -> tupl
 
 
 def _run_job_sync(runtime: ServiceRuntime, job_id: str) -> None:
-    record = _load_job_record(runtime, job_id)
-    if record.status != "queued":
-        return
-    record.status = "running"
-    record.started_at = _utc_now()
-    record.error = None
-    _save_job_record(runtime, record)
-    _log_event("job_started", job_id=job_id, source_count=len(record.resolved_sources))
-
+    record: JobRecord | None = None
     try:
+        record = _load_job_record(runtime, job_id)
+        if record.status != "queued":
+            return
+        record.status = "running"
+        record.started_at = _utc_now()
+        record.error = None
+        _save_job_record(runtime, record)
+        _log_event("job_started", job_id=job_id, source_count=len(record.resolved_sources))
+
         if runtime.health_error:
             raise RuntimeError(runtime.health_error)
         model, checkpoint_path, device_name = _get_model_for_request(runtime, record.request)
@@ -448,12 +555,19 @@ def _run_job_sync(runtime: ServiceRuntime, job_id: str) -> None:
             artifacts=len(record.artifact_manifest),
         )
     except Exception as exc:  # noqa: BLE001
+        if record is None:
+            logger.exception("Megaseg queued job %s could not be loaded", job_id)
+            return
         record.status = "failed"
         record.finished_at = _utc_now()
         record.error = str(exc)
         record.result = {"success": False, "error": str(exc)}
-        record.artifact_manifest = _collect_artifact_manifest(_job_results_dir(runtime.settings, job_id))
-        _save_job_record(runtime, record)
+        try:
+            record.artifact_manifest = _collect_artifact_manifest(_job_results_dir(runtime.settings, job_id))
+            _save_job_record(runtime, record)
+        except Exception:  # noqa: BLE001
+            logger.exception("Megaseg job %s failed and its failure record could not be saved", job_id)
+            return
         logger.exception("Megaseg job %s failed", job_id)
 
 
@@ -462,7 +576,12 @@ async def _worker_loop(app: FastAPI) -> None:
     while True:
         job_id = await runtime.queue.get()
         try:
-            await asyncio.to_thread(_run_job_sync, runtime, job_id)
+            if runtime.infer_semaphore is None:
+                runtime.infer_semaphore = asyncio.Semaphore(max(1, int(runtime.settings.max_concurrent_jobs)))
+            async with runtime.infer_semaphore:
+                await asyncio.to_thread(_run_job_sync, runtime, job_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Megaseg worker failed while processing queued job %s", job_id)
         finally:
             runtime.queue.task_done()
 

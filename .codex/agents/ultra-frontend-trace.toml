@@ -12,7 +12,7 @@ Focus on:
 - frontend/src/App.tsx
 - frontend/src/components/chat/*
 - frontend/src/features/chat/*
-- frontend/src/lib/api.ts, api-v2.ts, runStepCopy.ts
+- frontend/src/lib/api.ts, runStepCopy.ts
 - ResourceBrowser and artifact/document hydration paths
 
 Protect these invariants:

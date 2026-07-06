@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CODEX_DIR = ROOT / ".codex"
 AGENTS_DIR = CODEX_DIR / "agents"
 MEMORY_DIR = CODEX_DIR / "memory"
+SKILLS_DIR = CODEX_DIR / "skills"
 CONFIG_PATH = CODEX_DIR / "config.toml"
 WORKFLOW_PATH = CODEX_DIR / "README.md"
 
@@ -38,8 +39,10 @@ REQUIRED_AGENTS = {
     "ultra-deepagents-runtime.toml": "ultra_deepagents_runtime",
     "ultra-explorer.toml": "ultra_explorer",
     "ultra-frontend-trace.toml": "ultra_frontend_trace",
+    "ultra-imaging-pipeline.toml": "ultra_imaging_pipeline",
     "ultra-implementer.toml": "ultra_implementer",
     "ultra-nats-expert.toml": "ultra_nats_expert",
+    "ultra-perf-engineer.toml": "ultra_perf_engineer",
     "ultra-reviewer.toml": "ultra_reviewer",
     "ultra-security-data.toml": "ultra_security_data",
     "ultra-test-verifier.toml": "ultra_test_verifier",
@@ -52,23 +55,45 @@ READ_ONLY_AGENTS = {
     "ultra_deepagents_runtime",
     "ultra_explorer",
     "ultra_frontend_trace",
+    "ultra_imaging_pipeline",
     "ultra_nats_expert",
+    "ultra_perf_engineer",
     "ultra_reviewer",
     "ultra_security_data",
     "ultra_trace_debugger",
 }
 
 REQUIRED_MEMORY = {
+    "ultra-imaging-pipeline.md": (
+        "convert once",
+        "derive_pyramid",
+        "viewerinfo",
+    ),
     "ultra-nats-expert.md": (
         "natsdocs",
         "at-least-once",
         "benchmark",
+    ),
+    "ultra-orchestrator.md": (
+        "fan-out",
+        "one writer",
+        "repair loops",
+    ),
+    "ultra-perf-engineer.md": (
+        "baseline",
+        "regression gate",
+        "p95",
     ),
     "ultra-trace-debugger.md": (
         "run forensics query pack",
         "blast-radius",
         "control_run_events",
     ),
+}
+
+REQUIRED_SKILLS = {
+    "complex-software-development",
+    "go-nats-development",
 }
 
 ALLOWED_AGENT_REASONING = {"high", "xhigh"}
@@ -112,8 +137,9 @@ def verify_config() -> None:
     require(isinstance(agents, dict), ".codex/config.toml must define [agents]")
     require(agents.get("max_depth") == 1, "agents.max_depth must remain 1")
     require(
-        int(agents.get("max_threads", 0)) == 8,
-        "agents.max_threads must be 8 for bounded parallelism with trace/NATS specialists",
+        int(agents.get("max_threads", 0)) == 10,
+        "agents.max_threads must be 10: 13-agent roster, review waves run up to "
+        "7 read-only reviewers in parallel, recon stays at 2-5 sharp briefs",
     )
     require(
         int(agents.get("job_max_runtime_seconds", 0)) >= 7200,
@@ -169,6 +195,8 @@ def verify_workflow_doc() -> None:
         "two repair",
         "ultra_trace_debugger",
         "ultra_nats_expert",
+        "ultra_imaging_pipeline",
+        "ultra_perf_engineer",
         "natsdocs",
         ".codex/memory",
     ):
@@ -193,11 +221,36 @@ def verify_memory() -> None:
             )
 
 
+def verify_skills() -> None:
+    require(SKILLS_DIR.is_dir(), "Missing required directory: .codex/skills")
+    actual = {path.name for path in SKILLS_DIR.iterdir() if path.is_dir()}
+    missing = sorted(REQUIRED_SKILLS - actual)
+    require(not missing, f"Missing required skills: {', '.join(missing)}")
+
+    import re
+
+    for folder in sorted(actual):
+        skill_path = SKILLS_DIR / folder / "SKILL.md"
+        label = f".codex/skills/{folder}/SKILL.md"
+        require(skill_path.is_file(), f"Missing required file: {label}")
+        text = skill_path.read_text(encoding="utf-8")
+        frontmatter = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+        require(frontmatter is not None, f"{label} must start with YAML frontmatter")
+        name = re.search(r"^name:\s*(\S+)\s*$", frontmatter.group(1), re.MULTILINE)
+        require(
+            name is not None and name.group(1) == folder,
+            f"{label} frontmatter name must match its folder ({folder!r})",
+        )
+        description = re.search(r"^description:", frontmatter.group(1), re.MULTILINE)
+        require(description is not None, f"{label} frontmatter must include a description")
+
+
 def main() -> None:
     verify_config()
     verify_agents()
     verify_workflow_doc()
     verify_memory()
+    verify_skills()
     print("Codex agent configuration verified.")
 
 

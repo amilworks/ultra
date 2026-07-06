@@ -102,6 +102,7 @@
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
+  --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
   --composer-placeholder: color-mix(in oklab, var(--text-muted) 82%, #ffffff 18%);
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
@@ -1851,6 +1852,79 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 @media (max-width: 640px) and (prefers-reduced-motion: reduce) {
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions {
+    transition: none;
+  }
+}
+
+/* Desktop/tablet: quiet the composer when it is empty and unfocused so an idle
+   prompt box stops reserving ~148px of the screen. The full, spacious typing
+   geometry (78px textarea, generous padding, the complete action row) and the
+   full elevation all return the instant the field is focused, holds text, holds
+   an attachment, or a run is in flight — driven by data-composer-idle on the
+   shell plus native :focus-within. Reuses the exact collapse tokens proven in
+   the phone-only block above; mobile keeps its own scroll-away behavior. */
+@media (min-width: 641px) {
+  .app-composer-shell .app-composer-textarea {
+    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+  }
+  .app-composer-shell .app-composer-actions {
+    transition: padding 220ms ease, margin-top 220ms ease;
+  }
+  /* the collapse mechanism lives on the +/model group (not the whole row) so the
+     send button in .app-composer-actions-end can stay visible at idle. */
+  .app-composer-shell .app-composer-actions-start {
+    max-height: 5rem;
+    overflow: hidden;
+    transition: max-height 220ms ease, opacity 160ms ease;
+  }
+  /* animate the card's own padding so the idle padding trim collapses in sync
+     with the textarea/action-row (overrides the base 160ms card transition). */
+  .app-composer-shell .app-composer-card {
+    transition: border-color 160ms ease, box-shadow 160ms ease,
+      transform 160ms ease, padding 220ms ease;
+  }
+  /* max-height clamps the autosize inline height (which min-height cannot beat)
+     so the field collapses to one line even if autosize last ran while the box
+     was expanded; releases back to the pk max-height on focus. */
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
+    min-height: 2.55rem;
+    max-height: 3rem;
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
+    margin-top: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-start {
+    max-height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* keep the submit affordance on the idle line to balance the placeholder; it
+     floats inline at the right and rejoins the toolbar in flow on focus. */
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-end {
+    position: absolute;
+    right: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-card {
+    border-color: color-mix(in oklab, var(--line) 70%, transparent);
+    box-shadow: var(--composer-shell-shadow-rest);
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+
+@media (min-width: 641px) and (prefers-reduced-motion: reduce) {
+  .app-composer-shell .app-composer-textarea,
+  .app-composer-shell .app-composer-actions,
+  .app-composer-shell .app-composer-actions-start {
     transition: none;
   }
 }
@@ -10171,6 +10245,7 @@ details {
   --viewer-panel-bg: rgba(30, 30, 34, 0.92);
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
   --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
   --composer-placeholder: color-mix(in srgb, var(--text-muted) 82%, white 18%);
   --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --background: oklch(0.145 0 0);

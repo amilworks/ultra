@@ -11245,6 +11245,16 @@ export function App() {
             data-composer-compact={
               isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
             }
+            data-composer-idle={
+              activeConversationHydrated &&
+              !activeSending &&
+              activePrompt.trim().length === 0 &&
+              !hasComposerAttachedFiles &&
+              !slashMenuOpen &&
+              !composerResourcePickerOpen
+                ? "true"
+                : undefined
+            }
             data-composer-menu-open={
               slashMenuOpen || composerResourcePickerOpen ? "true" : undefined
             }

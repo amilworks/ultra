@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -320,6 +322,77 @@ def prepare_tiles(
     return prepared
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, str(default))).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _effective_cpu_budget() -> int:
+    """Cores this process may actually use — the cgroup CPU quota, NOT ``os.cpu_count()``,
+    which reports every host core even inside a ``docker run --cpus=N`` container. Sizing
+    parallelism off ``os.cpu_count()`` on a 384-core host under an 8-core quota would spawn
+    hundreds of workers thrashing 8 cores of CPU time. Falls back to the affinity mask, then
+    the host count, when no quota is set (e.g. the bare analysis worker)."""
+    try:  # cgroup v2
+        parts = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if parts and parts[0] not in ("", "max"):
+            quota = int(parts[0])
+            period = int(parts[1]) if len(parts) > 1 else 100000
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    try:  # cgroup v1
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+        if quota > 0 and period > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def _plan_detect_shards(num_tiles: int, cpu_budget: int) -> tuple[int, int]:
+    """Plan how many parallel detector processes (K) to fan the tiles across, and the CPU
+    threads each gets. Detection over independent tiles is embarrassingly parallel, while a
+    single 512px YOLOv5s inference plateaus at ~1-2 CPU threads (memory-bandwidth bound), so
+    the budget buys MORE shards (parallel tiles) rather than more threads-per-inference —
+    that scales near-linearly where per-inference threads do not. Bounds:
+      - K is capped so each shard gets >= MIN_TILES_PER_WORKER tiles: every detector reloads
+        the model (a fixed cost), so a shard-per-tile would waste it (and its memory).
+      - K*threads ~ the CPU budget, so shards never oversubscribe the quota.
+      - K==1 (few tiles, or a 1-core quota) => the original single-process pass, unchanged.
+    Fully adaptive: any tile-size/overlap the model chose only changes ``num_tiles``; an
+    operator can pin K via ULTRA_RARESPOT_DETECT_WORKERS or the threads knob."""
+    threads_per = max(1, _env_int("ULTRA_RARESPOT_DETECT_THREADS_PER_WORKER", 2))
+    min_tiles_per = max(1, _env_int("ULTRA_RARESPOT_MIN_TILES_PER_WORKER", 8))
+    forced = _env_int("ULTRA_RARESPOT_DETECT_WORKERS", 0)  # 0 = auto from the CPU quota
+    k_cap = forced if forced > 0 else max(1, max(1, cpu_budget) // threads_per)
+    k_by_tiles = max(1, num_tiles // min_tiles_per)
+    k = max(1, min(k_cap, k_by_tiles, max(1, num_tiles)))
+    return k, threads_per
+
+
+def _detect_command(*, source: Path, project: Path, name: str, config: RareSpotConfig) -> list[str]:
+    return [
+        sys.executable,
+        str(config.yolov5_path / "detect.py"),
+        "--weights", str(config.weights_path),
+        "--source", str(source),
+        "--imgsz", str(config.tile_size),
+        "--project", str(project),
+        "--name", name,
+        "--exist-ok", "--save-txt", "--save-conf", "--nosave",
+        "--conf-thres", str(config.conf),
+        "--iou-thres", str(config.iou),
+    ]
+
+
 def run_yolov5_detect(
     *,
     source_dir: Path,
@@ -329,52 +402,97 @@ def run_yolov5_detect(
     name: str = "predict",
 ) -> Path:
     """Run YOLOv5 detect.py over a tile directory; returns the labels output dir.
-    `project_subdir` lets the main and stability passes write to distinct trees."""
-    env = os.environ.copy()
-    env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-    # YOLOv5's detect.py runs check_requirements() at startup, which pip-installs
-    # any missing requirement. That dies in the code sandbox (--network none), so
-    # disable it; the runtime deps (torch, torchvision, ...) are pre-baked into the
-    # sandbox image. Harmless in the legacy worker (its venv already has them).
-    env["YOLOv5_AUTOINSTALL"] = "false"
-    env["YOLOV5_CONFIG_DIR"] = str((output_dir / ".yolov5-config").resolve())
-    env["PYTHONPATH"] = f"{config.yolov5_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    command = [
-        sys.executable,
-        str(config.yolov5_path / "detect.py"),
-        "--weights",
-        str(config.weights_path),
-        "--source",
-        str(source_dir),
-        "--imgsz",
-        str(config.tile_size),
-        "--project",
-        str(output_dir / project_subdir),
-        "--name",
-        name,
-        "--exist-ok",
-        "--save-txt",
-        "--save-conf",
-        "--nosave",
-        "--conf-thres",
-        str(config.conf),
-        "--iou-thres",
-        str(config.iou),
-    ]
-    result = subprocess.run(
-        command,
-        cwd=str(config.yolov5_path),
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    (output_dir / f"{project_subdir}.stdout.log").write_text(result.stdout or "", encoding="utf-8")
-    (output_dir / f"{project_subdir}.stderr.log").write_text(result.stderr or "", encoding="utf-8")
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip()[-4000:]
-        raise RuntimeError(f"YOLOv5 inference failed: {tail}")
-    return output_dir / project_subdir / name / "labels"
+    `project_subdir` lets the main and stability passes write to distinct trees.
+
+    The tile set is fanned across K parallel detector processes sized to the sandbox's CPU
+    quota (see ``_plan_detect_shards``). Per-tile detection is independent + deterministic
+    and cross-tile NMS runs later in image coordinates, so the merged per-tile labels are
+    IDENTICAL to a single sequential pass — a pure throughput win, not a behaviour change.
+    K==1 (few tiles, or a 1-core quota) runs the original single pass unchanged, which is
+    what the parity-golden small-image test exercises."""
+    base_env = os.environ.copy()
+    base_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    # YOLOv5's detect.py runs check_requirements() at startup, which pip-installs any missing
+    # requirement. That dies in the code sandbox (--network none), so disable it; the runtime
+    # deps (torch, torchvision, ...) are pre-baked into the sandbox image.
+    base_env["YOLOv5_AUTOINSTALL"] = "false"
+    base_env["YOLOV5_CONFIG_DIR"] = str((output_dir / ".yolov5-config").resolve())
+    base_env["PYTHONPATH"] = f"{config.yolov5_path}{os.pathsep}{base_env.get('PYTHONPATH', '')}"
+
+    labels_dir = output_dir / project_subdir / name / "labels"
+    tiles = sorted(source_dir.glob("*.jpg"))
+    k, threads_per = _plan_detect_shards(len(tiles), _effective_cpu_budget())
+
+    if k <= 1:
+        result = subprocess.run(
+            _detect_command(source=source_dir, project=output_dir / project_subdir, name=name, config=config),
+            cwd=str(config.yolov5_path), env=base_env, text=True, capture_output=True, check=False,
+        )
+        (output_dir / f"{project_subdir}.stdout.log").write_text(result.stdout or "", encoding="utf-8")
+        (output_dir / f"{project_subdir}.stderr.log").write_text(result.stderr or "", encoding="utf-8")
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip()[-4000:]
+            raise RuntimeError(f"YOLOv5 inference failed: {tail}")
+        return labels_dir
+
+    # --- sharded path: split tiles into K balanced groups, detect in parallel, merge -------
+    shard_root = output_dir / f"{project_subdir}.shards"
+    shard_inputs: list[Path] = []
+    for i in range(k):
+        d = shard_root / f"in_{i:03d}"
+        d.mkdir(parents=True, exist_ok=True)
+        shard_inputs.append(d)
+    # Round-robin so groups are balanced regardless of tile ordering; deterministic (tiles
+    # are sorted) so a rerun is reproducible.
+    for idx, tile in enumerate(tiles):
+        link = shard_inputs[idx % k] / tile.name
+        if link.exists():
+            continue
+        try:
+            os.symlink(tile.resolve(), link)
+        except OSError:
+            try:
+                os.link(tile, link)  # same-filesystem hardlink, no data copy
+            except OSError:
+                shutil.copy2(tile, link)
+
+    def _run_shard(i: int) -> subprocess.CompletedProcess[str]:
+        env = dict(base_env)
+        # Cap each shard's math threads so K shards ~ the CPU quota (no oversubscription),
+        # and give each its own YOLOv5 config dir so concurrent startups don't race.
+        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            env[var] = str(threads_per)
+        env["YOLOV5_CONFIG_DIR"] = str((shard_root / f"out_{i:03d}" / ".yolov5-config").resolve())
+        return subprocess.run(
+            _detect_command(source=shard_inputs[i], project=shard_root / f"out_{i:03d}", name=name, config=config),
+            cwd=str(config.yolov5_path), env=env, text=True, capture_output=True, check=False,
+        )
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    failures: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=k) as pool:
+        for i, result in enumerate(pool.map(_run_shard, range(k))):
+            stdout_parts.append(f"# shard {i}\n{result.stdout or ''}")
+            stderr_parts.append(f"# shard {i}\n{result.stderr or ''}")
+            if result.returncode != 0:
+                failures.append((result.stderr or result.stdout or "").strip()[-1000:])
+
+    (output_dir / f"{project_subdir}.stdout.log").write_text("\n".join(stdout_parts), encoding="utf-8")
+    (output_dir / f"{project_subdir}.stderr.log").write_text("\n".join(stderr_parts), encoding="utf-8")
+    if failures:
+        raise RuntimeError(f"YOLOv5 sharded inference failed in {len(failures)}/{k} shard(s): {failures[0]}")
+
+    # Merge per-tile labels into the canonical dir. Each tile is in exactly one shard, so
+    # stems never collide — the merged set equals a single sequential pass.
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(k):
+        shard_labels = shard_root / f"out_{i:03d}" / name / "labels"
+        if not shard_labels.is_dir():
+            continue
+        for txt in shard_labels.glob("*.txt"):
+            shutil.move(str(txt), str(labels_dir / txt.name))
+    return labels_dir
 
 
 def parse_tile_predictions(

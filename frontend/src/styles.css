@@ -102,6 +102,7 @@
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
+  --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
   --composer-placeholder: color-mix(in oklab, var(--text-muted) 82%, #ffffff 18%);
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
@@ -1825,7 +1826,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    scrolled back to the bottom or a run starts (attribute cleared in JS). */
 @media (max-width: 640px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
   }
   .app-composer-shell .app-composer-actions {
     max-height: 5rem;
@@ -1835,6 +1836,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
   .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
     min-height: 2.55rem;
+    max-height: 3rem;
     padding-top: 0.7rem;
     padding-bottom: 0.7rem;
   }
@@ -1851,6 +1853,79 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 @media (max-width: 640px) and (prefers-reduced-motion: reduce) {
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions {
+    transition: none;
+  }
+}
+
+/* Desktop/tablet: quiet the composer when it is empty and unfocused so an idle
+   prompt box stops reserving ~148px of the screen. The full, spacious typing
+   geometry (78px textarea, generous padding, the complete action row) and the
+   full elevation all return the instant the field is focused, holds text, holds
+   an attachment, or a run is in flight — driven by data-composer-idle on the
+   shell plus native :focus-within. Reuses the exact collapse tokens proven in
+   the phone-only block above; mobile keeps its own scroll-away behavior. */
+@media (min-width: 641px) {
+  .app-composer-shell .app-composer-textarea {
+    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+  }
+  .app-composer-shell .app-composer-actions {
+    transition: padding 220ms ease, margin-top 220ms ease;
+  }
+  /* the collapse mechanism lives on the +/model group (not the whole row) so the
+     send button in .app-composer-actions-end can stay visible at idle. */
+  .app-composer-shell .app-composer-actions-start {
+    max-height: 5rem;
+    overflow: hidden;
+    transition: max-height 220ms ease, opacity 160ms ease;
+  }
+  /* animate the card's own padding so the idle padding trim collapses in sync
+     with the textarea/action-row (overrides the base 160ms card transition). */
+  .app-composer-shell .app-composer-card {
+    transition: border-color 160ms ease, box-shadow 160ms ease,
+      transform 160ms ease, padding 220ms ease;
+  }
+  /* max-height clamps the autosize inline height (which min-height cannot beat)
+     so the field collapses to one line even if autosize last ran while the box
+     was expanded; releases back to the pk max-height on focus. */
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
+    min-height: 2.55rem;
+    max-height: 3rem;
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
+    margin-top: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-start {
+    max-height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* keep the submit affordance on the idle line to balance the placeholder; it
+     floats inline at the right and rejoins the toolbar in flow on focus. */
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-end {
+    position: absolute;
+    right: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-card {
+    border-color: color-mix(in oklab, var(--line) 70%, transparent);
+    box-shadow: var(--composer-shell-shadow-rest);
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+
+@media (min-width: 641px) and (prefers-reduced-motion: reduce) {
+  .app-composer-shell .app-composer-textarea,
+  .app-composer-shell .app-composer-actions,
+  .app-composer-shell .app-composer-actions-start {
     transition: none;
   }
 }
@@ -2040,6 +2115,118 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 @media (prefers-reduced-motion: reduce) {
   .mobile-usage-chevron {
+    transition: none;
+  }
+}
+
+/* Desktop empty/new-chat welcome: a quiet personal eyebrow over a rotating,
+   composer-forward invitation, centered in the canvas above the docked composer.
+   Usage recedes into a one-line strip that expands to the full panel on demand
+   (data leads, chrome recedes). Rendered only when !isPhoneView. */
+.blank-chat-welcome {
+  width: 100%;
+  min-height: min(80vh, 52rem);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 1.9rem;
+  padding: 1rem 1rem 0;
+}
+
+.blank-chat-welcome-greeting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.blank-chat-welcome-eyebrow {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+}
+
+.blank-chat-welcome-hero {
+  margin: 0;
+  max-width: 24rem;
+  font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--text-main);
+}
+
+.blank-chat-usage-disclosure {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.blank-chat-usage-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+
+.blank-chat-usage-strip::-webkit-details-marker {
+  display: none;
+}
+
+.blank-chat-usage-strip:hover,
+.blank-chat-usage-disclosure[open] .blank-chat-usage-strip {
+  background: color-mix(in oklab, var(--text-main) 6%, transparent);
+  color: var(--text-main);
+}
+
+.blank-chat-usage-strip-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.blank-chat-usage-strip-stats strong {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
+}
+
+.blank-chat-usage-strip-dot {
+  opacity: 0.45;
+}
+
+.blank-chat-usage-strip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.blank-chat-usage-strip-chevron {
+  transition: transform 160ms ease;
+}
+
+.blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
+  transform: rotate(180deg);
+}
+
+.blank-chat-usage-disclosure-body {
+  margin-top: 1.35rem;
+  width: min(100%, var(--user-chat-width));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blank-chat-usage-strip-chevron {
     transition: none;
   }
 }
@@ -10171,6 +10358,7 @@ details {
   --viewer-panel-bg: rgba(30, 30, 34, 0.92);
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
   --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
   --composer-placeholder: color-mix(in srgb, var(--text-muted) 82%, white 18%);
   --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --background: oklch(0.145 0 0);

@@ -11,7 +11,9 @@ another writer's changes make the task ambiguous.
 
 Before editing, identify the exact files and local conventions relevant to the
 task. Make the smallest production-grade patch that satisfies the approved
-plan.
+plan. For multi-file or risky work, follow
+.codex/skills/complex-software-development/SKILL.md — especially its increment
+slicing, pre-declared acceptance evidence, and evidence-grade reporting rules.
 
 Prioritize:
 - correctness and maintainability

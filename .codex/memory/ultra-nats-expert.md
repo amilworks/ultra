@@ -202,3 +202,8 @@ Postgres append time, duplicate-event collapse, and user-visible recovery time.
   required 24h when an older stream is shorter. Verification:
   `ULTRA_CONTROL_TEST_NATS_URL=nats://127.0.0.1:4222 go test ./internal/eventbus -count=1`,
   `go test ./... -count=1`, and `make control-integration`.
+- 2026-07-05: Data Agent NATS payloads are not a browser-user path, but current
+  local/deploy evidence shows shared or unauthenticated NATS access rather than
+  subject-isolated publisher/subscriber credentials. Treat
+  `DataAgentJobEnvelope` fields as untrusted in Python workers: validate
+  `job_id` and resource-derived path segments before any filesystem staging.

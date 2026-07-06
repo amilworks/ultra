@@ -2124,9 +2124,40 @@ const ConversationMessageRow = memo(
     previousProps.apiClient === nextProps.apiClient
 );
 
+// Rotating, composer-forward invitations shown on the empty/new-chat screen. Kept
+// in our calm voice: sentence case, warm, no exclamation. Advanced sequentially by a
+// nonce that bumps on every "New chat" action, so each new chat shows the next one
+// (no consecutive repeats). Nonce starts at 0 on load, so the first thing a fresh
+// session sees is WELCOME_PROMPTS[0].
+const WELCOME_PROMPTS = [
+  "What are we working on?",
+  "Where should we start?",
+  "What are you exploring today?",
+  "What can I help you investigate?",
+  "What should we look at first?",
+  "What's the question?",
+] as const;
+
+function welcomePromptForNonce(nonce: number): string {
+  const len = WELCOME_PROMPTS.length;
+  return WELCOME_PROMPTS[((nonce % len) + len) % len];
+}
+
+// Best-effort first name from an identity string (usually an email). "amil@ucsb.edu"
+// -> "Amil". Returns null when nothing usable can be derived so the greeting is skipped.
+function deriveFirstName(identity: string | null): string | null {
+  if (!identity) return null;
+  const local = identity.split("@")[0]?.trim() ?? "";
+  const first = local.split(/[.\-_+]/)[0]?.trim() ?? "";
+  if (!first || /\d/.test(first)) return null;
+  return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+}
+
 type ConversationTranscriptProps = {
   conversationHydrated: boolean;
   isPhoneView: boolean;
+  welcomeName: string | null;
+  welcomeNonce: number;
   messages: UiMessage[];
   blankChatTokenUsage: TokenUsageResponse | null;
   blankChatUsageLoading: boolean;
@@ -2143,6 +2174,8 @@ const ConversationTranscript = memo(
   function ConversationTranscript({
     conversationHydrated,
     isPhoneView,
+    welcomeName,
+    welcomeNonce,
     messages,
     blankChatTokenUsage,
     blankChatUsageLoading,
@@ -2210,6 +2243,7 @@ const ConversationTranscript = memo(
         uploadedFiles,
       ]
     );
+    const welcomePrompt = welcomePromptForNonce(welcomeNonce);
     return (
       <ChatContainerContent
         className="space-y-0 px-4 py-8 sm:px-6 sm:py-14"
@@ -2247,13 +2281,60 @@ const ConversationTranscript = memo(
                 </details>
               </div>
             ) : (
-              <UserTokenUsagePanel
-                tokenUsage={blankChatTokenUsage}
-                loading={blankChatUsageLoading}
-                error={blankChatUsageError}
-                className="blank-chat-usage-panel"
-                density="compact"
-              />
+              <div className="blank-chat-welcome">
+                <div className="blank-chat-welcome-greeting">
+                  {welcomeName ? (
+                    <p className="blank-chat-welcome-eyebrow">
+                      Welcome back, {welcomeName}
+                    </p>
+                  ) : null}
+                  <h2 className="blank-chat-welcome-hero">{welcomePrompt}</h2>
+                </div>
+                <details className="blank-chat-usage-disclosure">
+                  <summary className="blank-chat-usage-strip">
+                    {blankChatTokenUsage?.summary ? (
+                      <span className="blank-chat-usage-strip-stats">
+                        <span>
+                          <strong>
+                            {formatTokens(
+                              blankChatTokenUsage.summary.lifetime_total_tokens
+                            )}
+                          </strong>{" "}
+                          tokens
+                        </span>
+                        <span className="blank-chat-usage-strip-dot" aria-hidden>
+                          ·
+                        </span>
+                        <span>
+                          <strong>
+                            {blankChatTokenUsage.summary.current_streak_days}-day
+                          </strong>{" "}
+                          streak
+                        </span>
+                        <span className="blank-chat-usage-strip-dot" aria-hidden>
+                          ·
+                        </span>
+                      </span>
+                    ) : null}
+                    <span className="blank-chat-usage-strip-toggle">
+                      View usage
+                      <ChevronDown
+                        className="blank-chat-usage-strip-chevron size-4"
+                        aria-hidden
+                      />
+                    </span>
+                  </summary>
+                  <div className="blank-chat-usage-disclosure-body">
+                    <UserTokenUsagePanel
+                      tokenUsage={blankChatTokenUsage}
+                      loading={blankChatUsageLoading}
+                      error={blankChatUsageError}
+                      className="blank-chat-usage-panel"
+                      density="compact"
+                    />
+                  </div>
+                </details>
+              </div>
             )}
           </div>
         ) : shouldVirtualizeMessages && virtualizedScrollParent ? (
@@ -2297,6 +2378,8 @@ const ConversationTranscript = memo(
   (previousProps, nextProps) =>
     previousProps.conversationHydrated === nextProps.conversationHydrated &&
     previousProps.isPhoneView === nextProps.isPhoneView &&
+    previousProps.welcomeName === nextProps.welcomeName &&
+    previousProps.welcomeNonce === nextProps.welcomeNonce &&
     previousProps.messages === nextProps.messages &&
     previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
     previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
@@ -6118,7 +6201,11 @@ export function App() {
     []
   );
 
+  const [welcomeNonce, setWelcomeNonce] = useState(0);
   const createNewConversation = useCallback((): void => {
+    // Advance the rotating welcome prompt on every new-chat action, even when a blank
+    // draft is reused (so the prompt still changes when the user clicks New chat).
+    setWelcomeNonce((value) => value + 1);
     const reusableBlankDraft = findReusableBlankDraftConversation(
       conversations,
       activeConversation?.id ?? activeConversationId
@@ -11215,6 +11302,8 @@ export function App() {
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
                   isPhoneView={isPhoneView}
+                  welcomeName={deriveFirstName(authUser)}
+                  welcomeNonce={welcomeNonce}
                   messages={activeMessages}
                   blankChatTokenUsage={blankChatTokenUsage}
                   blankChatUsageLoading={blankChatUsageLoading}
@@ -11244,6 +11333,16 @@ export function App() {
             className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
             data-composer-compact={
               isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
+            }
+            data-composer-idle={
+              activeConversationHydrated &&
+              !activeSending &&
+              activePrompt.trim().length === 0 &&
+              !hasComposerAttachedFiles &&
+              !slashMenuOpen &&
+              !composerResourcePickerOpen
+                ? "true"
+                : undefined
             }
             data-composer-menu-open={
               slashMenuOpen || composerResourcePickerOpen ? "true" : undefined

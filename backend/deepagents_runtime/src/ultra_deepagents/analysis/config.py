@@ -50,10 +50,11 @@ class AnalysisSettings:
     megaseg_service_url: str
     megaseg_service_api_key: str
     megaseg_timeout_seconds: float
+    control_worker_token: str = ""
     output_prefix: str = "analysis"
 
     @classmethod
-    def from_env(cls) -> "AnalysisSettings":
+    def from_env(cls) -> AnalysisSettings:
         roots = tuple(Path(p).expanduser() for p in _analysis_upload_roots())
         upload_root_raw = (
             _env_str("ULTRA_ANALYSIS_OUTPUT_ROOT")
@@ -75,4 +76,5 @@ class AnalysisSettings:
             # short request timeout): /v1/infer runs a full synchronous segmentation, so this
             # must cover the whole inference, not just the request handshake.
             megaseg_timeout_seconds=_env_float("ULTRA_ANALYSIS_MEGASEG_TIMEOUT_SECONDS", 1800.0),
+            control_worker_token=_env_str("ULTRA_CONTROL_WORKER_TOKEN"),
         )

@@ -5,10 +5,20 @@
 
 model_reasoning_effort = "xhigh"
 
+# Web search lets specialists consult current docs (Go, React, LangGraph,
+# Postgres) beyond the pinned NATS docs MCP. Read-only agents remain sandboxed
+# for filesystem writes regardless.
+[tools]
+web_search = true
+
 [mcp_servers.natsDocs]
 url = "https://docs.nats.io/~gitbook/mcp"
 
 [agents]
-max_threads = 8
+# 10 bounded threads: the roster is 13 specialists and a cross-system review
+# wave legitimately runs reviewer + security + 3 domain specialists + NATS +
+# perf in parallel. Recon still targets 2-5 sharp briefs; the ceiling is not
+# the target.
+max_threads = 10
 max_depth = 1
 job_max_runtime_seconds = 7200

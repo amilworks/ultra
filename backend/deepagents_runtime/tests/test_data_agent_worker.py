@@ -397,6 +397,124 @@ def test_worker_processes_data_agent_job_updates_terminal_status_and_acks():
     assert calls[-1] == ("release", "lease-token-1")
 
 
+def test_worker_maps_canceled_output_summary_to_canceled_terminal_status():
+    statuses: list[dict[str, object]] = []
+    released: list[str] = []
+
+    async def processor(job: DataAgentJobEnvelope, progress):
+        return {
+            "summary": "RareSpot canceled before inference.",
+            "summary_kind": "batch_inference",
+            "model": "rarespot",
+            "canceled": True,
+            "processed": 0,
+            "failed": 0,
+            "total": job.resource_count,
+        }
+
+    async def acquire(job: DataAgentJobEnvelope, settings: RuntimeSettings):
+        return ControlPlaneDataAgentJobLease(
+            job_id=job.job_id,
+            worker_id=settings.data_agent_worker_id,
+            lease_token="lease-token-1",
+        )
+
+    async def release(lease, settings, *, job):
+        released.append(lease.lease_token)
+
+    async def update_status(job, settings, **kwargs):
+        statuses.append(kwargs)
+
+    async def scenario():
+        worker = NATSDataAgentWorker(
+            _settings(),
+            processor=processor,
+            job_status_func=no_data_agent_job_status,
+            lease_func=acquire,
+            release_lease_func=release,
+            status_update_func=update_status,
+            worker_heartbeat_func=no_worker_heartbeat,
+        )
+        message = FakeAck(json.dumps(_job_payload(job_type="analysis.rarespot")).encode("utf-8"))
+        await worker._process_message(message)
+        return message
+
+    message = asyncio.run(scenario())
+
+    assert message.acked == 1
+    assert message.naked == 0
+    assert statuses[-1]["status"] == "canceled"
+    assert statuses[-1]["progress_completed"] == 0
+    assert statuses[-1]["progress_total"] == 2
+    assert statuses[-1]["message"] == "Data Agent job canceled."
+    assert statuses[-1]["output_summary"]["canceled"] is True
+    assert statuses[-1]["output_summary"]["model"] == "rarespot"
+    assert statuses[-1]["event_metadata"] == {
+        "stage": "worker_canceled",
+        "dispatch_id": "dispatch-1",
+    }
+    assert released == ["lease-token-1"]
+
+
+def test_worker_maps_failed_output_summary_terminal_status_to_failed_status():
+    statuses: list[dict[str, object]] = []
+    released: list[str] = []
+
+    async def processor(job: DataAgentJobEnvelope, progress):
+        return {
+            "summary": "RareSpot found no runnable inputs.",
+            "summary_kind": "batch_inference",
+            "model": "rarespot",
+            "terminal_status": "failed",
+            "processed": 0,
+            "failed": job.resource_count,
+            "total": job.resource_count,
+        }
+
+    async def acquire(job: DataAgentJobEnvelope, settings: RuntimeSettings):
+        return ControlPlaneDataAgentJobLease(
+            job_id=job.job_id,
+            worker_id=settings.data_agent_worker_id,
+            lease_token="lease-token-1",
+        )
+
+    async def release(lease, settings, *, job):
+        released.append(lease.lease_token)
+
+    async def update_status(job, settings, **kwargs):
+        statuses.append(kwargs)
+
+    async def scenario():
+        worker = NATSDataAgentWorker(
+            _settings(),
+            processor=processor,
+            job_status_func=no_data_agent_job_status,
+            lease_func=acquire,
+            release_lease_func=release,
+            status_update_func=update_status,
+            worker_heartbeat_func=no_worker_heartbeat,
+        )
+        message = FakeAck(json.dumps(_job_payload(job_type="analysis.rarespot")).encode("utf-8"))
+        await worker._process_message(message)
+        return message
+
+    message = asyncio.run(scenario())
+
+    assert message.acked == 1
+    assert message.naked == 0
+    assert statuses[-1]["status"] == "failed"
+    assert statuses[-1]["progress_completed"] == 0
+    assert statuses[-1]["progress_total"] == 2
+    assert statuses[-1]["message"] == "Data Agent job failed."
+    assert statuses[-1]["error"] == "RareSpot found no runnable inputs."
+    assert statuses[-1]["output_summary"]["terminal_status"] == "failed"
+    assert statuses[-1]["event_metadata"] == {
+        "stage": "worker_failed",
+        "dispatch_id": "dispatch-1",
+    }
+    assert released == ["lease-token-1"]
+
+
 def test_worker_posts_skip_event_before_ack_for_terminal_control_plane_data_agent_job():
     calls: list[tuple[str, object]] = []
 

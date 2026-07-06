@@ -14,14 +14,27 @@ The default workflow is:
 6. Verify with the narrowest relevant Ultra commands and report residual risk.
 
 All custom agents inherit the parent model. The project config sets
-`model_reasoning_effort = "xhigh"`, allows up to 8 bounded threads, gives slow
+`model_reasoning_effort = "xhigh"`, allows up to 10 bounded threads, gives slow
 specialists up to 7200 seconds, and keeps `max_depth = 1` so child agents do not
 recursively spawn more agents. Raise depth only after an explicit design change
-explains the safety, cost, checkpointing, and reviewer stop controls.
+explains the safety, cost, checkpointing, and reviewer stop controls. Web
+search is enabled (`[tools] web_search`) so specialists can consult current
+external docs; treat search results as reference, not repository evidence.
+
+The parent thread keeps its own memory in `.codex/memory/ultra-orchestrator.md`
+— orchestration lessons and a session log. Read it before the first fan-out
+and append a dated session entry after significant swarm work.
 
 The `natsDocs` MCP server points at `https://docs.nats.io/~gitbook/mcp` so NATS
 specialists can consult current official NATS documentation. This is a docs MCP
 endpoint, not a live broker connection.
+
+The engineering method for complex changes lives in
+`.codex/skills/complex-software-development/SKILL.md`; Codex loads it when a
+task matches its description. This README owns the orchestration contract, the
+skill owns how to think inside each phase. Go/NATS work additionally triggers
+`.codex/skills/go-nats-development/SKILL.md`, a pointer to the canonical
+fact-checked skill in `.claude/skills/go-nats-development/`.
 
 ## Recommended Prompt
 
@@ -41,6 +54,10 @@ slices:
   Postgres run-event traces, and evidence-led debugging
 - `ultra_nats_expert` for NATS/JetStream subjects, streams, consumers,
   redelivery, queue diagnostics, and meaningful NATS benchmarks
+- `ultra_imaging_pipeline` for the image service, NGFF/OME-Zarr serving, HDF5
+  routes, conversion workers, viewer info, and tile/slice caching
+- `ultra_perf_engineer` for frontend bundle/render performance, Go data-plane
+  caching and latency, imaging serving performance, and benchmark design
 
 Wait for the read-only agents, then synthesize one plan. Only
 `ultra_implementer` may edit files. After implementation, spawn
@@ -68,6 +85,9 @@ Read-only specialists that debug durable systems keep explicit memory in
 
 - `.codex/memory/ultra-trace-debugger.md`
 - `.codex/memory/ultra-nats-expert.md`
+- `.codex/memory/ultra-imaging-pipeline.md`
+- `.codex/memory/ultra-perf-engineer.md`
+- `.codex/memory/ultra-orchestrator.md` (parent thread, not a specialist)
 
 The agents must read their memory before each relevant task. They should report
 durable lessons as "Memory updates" rather than editing files themselves; the
@@ -85,3 +105,17 @@ Use `ultra_nats_expert` whenever work touches `backend/controlplane/internal/eve
 queue diagnostics, or local-stack NATS operations. Ask it for benchmark designs
 that measure product behavior: recovery, redelivery, duplicate collapse, event
 ingest latency, and user-visible trace health.
+
+Use `ultra_imaging_pipeline` whenever work touches the imaging or viewer data
+plane: `imaging/` and `ngff/` in the Deep Agents runtime, `image_service.py`,
+`ngff_service.py`, `image_convert_worker.py`, the Go `imageservice*.go`
+handlers, viewer info contracts, tile/slice caching, or
+`services/megaseg_service`. It protects the convert-once/read-bounded serving
+contract and the imaging auth boundary, and keeps memory in
+`.codex/memory/ultra-imaging-pipeline.md`.
+
+Use `ultra_perf_engineer` when the question is speed, size, or scale: frontend
+bundle and render behavior, interactive viewer latency, Go caching, event
+ingest throughput, or any claimed optimization. It designs measurements that
+answer product questions (percentiles at realistic scale, one variable per
+comparison) and names the regression gate for every accepted win.

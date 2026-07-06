@@ -1826,7 +1826,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    scrolled back to the bottom or a run starts (attribute cleared in JS). */
 @media (max-width: 640px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
   }
   .app-composer-shell .app-composer-actions {
     max-height: 5rem;
@@ -1836,6 +1836,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
   .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
     min-height: 2.55rem;
+    max-height: 3rem;
     padding-top: 0.7rem;
     padding-bottom: 0.7rem;
   }

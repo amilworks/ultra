@@ -131,6 +131,45 @@ def reap_orphaned_sandbox_containers(
     return removed
 
 
+def kill_sandbox_containers_for_run(
+    run_id: str,
+    *,
+    docker_executable: str = "docker",
+) -> list[str]:
+    """Force-remove any sandbox containers still running for ``run_id`` on THIS host.
+
+    Called when a run's task ends on this worker (completed, cancelled, or redelivered).
+    A cancelled/superseded run's ``docker run --rm`` cannot be stopped by the async task
+    cancel — ``execute()`` blocks in a worker thread that Python cannot interrupt — so
+    without this the container keeps grinding to the 6h ``ultra.sandbox.cap`` and, on a
+    redelivered run, duplicates the whole computation on a second worker. On a clean
+    completion the container has already exited (``--rm``), so this is a no-op.
+
+    Scoped by BOTH the coarse ``ultra.sandbox=1`` tenant boundary AND the per-run
+    ``ultra.sandbox.run`` label, and local to this docker daemon — so it can never touch
+    a sibling tenant or another worker's copy of the same run.
+    """
+    run_id = (run_id or "").strip()
+    if not run_id or shutil.which(docker_executable) is None:
+        return []
+    ids = _docker_ids(
+        docker_executable,
+        [
+            "ps",
+            "-q",
+            "--filter",
+            f"label={SANDBOX_LABEL}",
+            "--filter",
+            f"label=ultra.sandbox.run={run_id}",
+        ],
+    )
+    removed: list[str] = []
+    for cid in ids:
+        if _docker_rm(docker_executable, cid, force=True):
+            removed.append(cid)
+    return removed
+
+
 def _docker_ids(docker_executable: str, args: list[str]) -> list[str]:
     out = _run_docker(docker_executable, args)
     if out is None:

@@ -63,15 +63,25 @@ def generate_perturbed_tiles(
     source_dir: Path,
     stability_dir: Path,
     perturbations: list[tuple[str, Callable[[Any], Any]]],
+    only_stems: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Write ``<stem>__pert-<tag>.jpg`` for every original tile. Returns a manifest mapping
-    each perturbed stem to its original stem + perturbation tag."""
+    each perturbed stem to its original stem + perturbation tag.
+
+    When ``only_stems`` is given, only those tile stems are perturbed. Stability scores a
+    detection by how often it *survives* perturbation, so a tile that had no detection has
+    no box to match and contributes nothing — skipping it is result-identical and, on
+    sparse aerial frames where the vast majority of tiles are empty, cuts the perturbation
+    detector passes (the dominant cost) by an order of magnitude. ``None`` perturbs every
+    tile (the original behaviour), so callers without the detection set are unaffected."""
     from PIL import Image
 
     stability_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, dict[str, Any]] = {}
     for tile_path in sorted(source_dir.glob("*.jpg")):
         original_stem = tile_path.stem
+        if only_stems is not None and original_stem not in only_stems:
+            continue
         with Image.open(tile_path) as image:
             rgb = image.convert("RGB")
             for tag, fn in perturbations:
@@ -170,17 +180,25 @@ def run_detection_stability(
     detect_fn: DetectFn,
     match_iou: float = 0.5,
     iou_threshold: float = 0.45,
+    detection_tile_stems: set[str] | None = None,
 ) -> dict[str, Any]:
     """Orchestrate the stability pass and annotate `predictions` in place. `detect_fn` runs
     the detector over a tile directory and returns its labels dir; it is injected so this
-    is testable without the model."""
+    is testable without the model.
+
+    ``detection_tile_stems`` (the tiles that carried a raw detection in the initial pass)
+    restricts perturbation to tiles that actually have a box to stabilise; ``None`` perturbs
+    every tile (unchanged behaviour)."""
     perturbations = perturbation_fns()
     tags = [tag for tag, _ in perturbations]
     if not tags:
         return {"trials": 0}
     stability_dir = output_dir / "stability_tiles"
     perturbed_manifest = generate_perturbed_tiles(
-        source_dir=source_dir, stability_dir=stability_dir, perturbations=perturbations
+        source_dir=source_dir,
+        stability_dir=stability_dir,
+        perturbations=perturbations,
+        only_stems=detection_tile_stems,
     )
     if not perturbed_manifest:
         return {"trials": 0}

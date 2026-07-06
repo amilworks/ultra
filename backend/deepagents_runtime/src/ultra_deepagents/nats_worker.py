@@ -22,7 +22,10 @@ import nats
 import nats.errors
 from nats.js.api import AckPolicy, ConsumerConfig
 
-from ultra_deepagents.code_execution.cleanup import reap_orphaned_sandbox_containers
+from ultra_deepagents.code_execution.cleanup import (
+    kill_sandbox_containers_for_run,
+    reap_orphaned_sandbox_containers,
+)
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.runner import RunEventSequencer, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
@@ -1124,6 +1127,22 @@ class NATSDeepAgentsWorker:
                 await _stop_control_status_monitor_task(status_monitor_task)
                 if self._active_tasks.get(job.run_id) is current_task:
                     self._active_tasks.pop(job.run_id, None)
+                # Kill any sandbox container still running for this run on this host.
+                # The task cancel above cannot stop a `docker run` blocked in a worker
+                # thread, so a cancelled/redelivered run's sandbox would otherwise grind
+                # to the 6h cap AND duplicate the whole computation on the redelivery
+                # target. No-op on a clean completion (the container already exited via
+                # --rm). Best-effort + off the event loop; a docker hiccup only logs.
+                with contextlib.suppress(Exception):
+                    killed = await asyncio.to_thread(
+                        kill_sandbox_containers_for_run, job.run_id
+                    )
+                    if killed:
+                        logger.info(
+                            "Killed %d orphaned sandbox container(s) for ended run.",
+                            len(killed),
+                            extra={"run_id": job.run_id},
+                        )
                 await self._post_worker_heartbeat(
                     "idle",
                     metadata={"active_tasks": len(self._active_tasks)},

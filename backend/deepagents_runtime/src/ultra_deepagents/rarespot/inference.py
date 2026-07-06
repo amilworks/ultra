@@ -69,6 +69,15 @@ def run_rarespot_inference(
     stability_summary: dict[str, Any] | None = None
     if config.stability:
         emit(progress_callback, {"event": "stability_started"})
+        # Only tiles that carried a raw detection can contribute a stability score, so
+        # restrict the perturbation passes (the dominant cost) to them. YOLOv5 --save-txt
+        # writes a label file only for a tile with >=1 detection; this is the same labels
+        # dir the predictions were parsed from, so the set is consistent with them.
+        detection_tile_stems = {
+            txt.stem
+            for txt in Path(labels_dir).glob("*.txt")
+            if txt.is_file() and txt.stat().st_size > 0
+        }
         stability_summary = run_detection_stability(
             predictions=predictions,
             source_dir=source_dir,
@@ -77,6 +86,7 @@ def run_rarespot_inference(
             detect_fn=lambda **kwargs: run_yolov5_detect(output_dir=output_dir, config=config, **kwargs),
             match_iou=config.stability_match_iou,
             iou_threshold=config.iou,
+            detection_tile_stems=detection_tile_stems,
         )
         emit(progress_callback, {"event": "stability_completed", **((stability_summary or {}).get("label_counts") or {})})
     geospatial_summary = build_geospatial_summary(predictions=predictions, output_dir=output_dir)

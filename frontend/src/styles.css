@@ -2119,6 +2119,118 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
+/* Desktop empty/new-chat welcome: a quiet personal eyebrow over a rotating,
+   composer-forward invitation, centered in the canvas above the docked composer.
+   Usage recedes into a one-line strip that expands to the full panel on demand
+   (data leads, chrome recedes). Rendered only when !isPhoneView. */
+.blank-chat-welcome {
+  width: 100%;
+  min-height: min(80vh, 52rem);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 1.9rem;
+  padding: 1rem 1rem 0;
+}
+
+.blank-chat-welcome-greeting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.blank-chat-welcome-eyebrow {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+}
+
+.blank-chat-welcome-hero {
+  margin: 0;
+  max-width: 24rem;
+  font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--text-main);
+}
+
+.blank-chat-usage-disclosure {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.blank-chat-usage-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+
+.blank-chat-usage-strip::-webkit-details-marker {
+  display: none;
+}
+
+.blank-chat-usage-strip:hover,
+.blank-chat-usage-disclosure[open] .blank-chat-usage-strip {
+  background: color-mix(in oklab, var(--text-main) 6%, transparent);
+  color: var(--text-main);
+}
+
+.blank-chat-usage-strip-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.blank-chat-usage-strip-stats strong {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
+}
+
+.blank-chat-usage-strip-dot {
+  opacity: 0.45;
+}
+
+.blank-chat-usage-strip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.blank-chat-usage-strip-chevron {
+  transition: transform 160ms ease;
+}
+
+.blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
+  transform: rotate(180deg);
+}
+
+.blank-chat-usage-disclosure-body {
+  margin-top: 1.35rem;
+  width: min(100%, var(--user-chat-width));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blank-chat-usage-strip-chevron {
+    transition: none;
+  }
+}
+
 .blank-chat-usage-panel {
   width: min(100%, var(--user-chat-width));
   text-align: left;

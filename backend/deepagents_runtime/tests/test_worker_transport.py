@@ -4108,7 +4108,7 @@ def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_p
             lease_token="lease-token-1",
         )
 
-    async def renew_lease(lease, settings):
+    def renew_lease_sync(lease, settings):
         calls.append(("renew", lease.lease_token))
         return lease
 
@@ -4126,7 +4126,7 @@ def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_p
             settings,
             run_job_func=run_job_returns,
             run_lease_func=acquire_lease,
-            renew_run_lease_func=renew_lease,
+            lease_renew_sync_func=renew_lease_sync,
             release_run_lease_func=release_lease,
         )
         message = FakeNATSMessage(
@@ -4201,7 +4201,9 @@ def test_worker_naks_and_stops_compute_when_control_plane_run_lease_is_lost(tmp_
             lease_token="lease-token-1",
         )
 
-    async def renew_lost_lease(lease, settings):
+    def renew_lost_lease_sync(lease, settings):
+        # Called from the keepalive thread; a 409 means the run was handed to
+        # another worker and this worker must stop.
         calls.append(f"renew:{lease.lease_token}")
         raise RunLeaseConflict("lease moved to another worker")
 
@@ -4224,14 +4226,14 @@ def test_worker_naks_and_stops_compute_when_control_plane_run_lease_is_lost(tmp_
             run_job_func=long_running_run_job,
             run_status_func=run_status,
             run_lease_func=acquire_lease,
-            renew_run_lease_func=renew_lost_lease,
+            lease_renew_sync_func=renew_lost_lease_sync,
             release_run_lease_func=release_lease,
         )
         message = FakeNATSMessage(
             b'{"run_id":"run-1","thread_id":"thread-1","user_id":"user-1","goal":"lease"}'
         )
         js = CapturingJetStream()
-        await asyncio.wait_for(worker._process_message(message, js), timeout=0.5)
+        await asyncio.wait_for(worker._process_message(message, js), timeout=2.0)
         return message, _published_events(js)
 
     message, events = asyncio.run(scenario())
@@ -4241,7 +4243,11 @@ def test_worker_naks_and_stops_compute_when_control_plane_run_lease_is_lost(tmp_
     assert message.acked == 0
     assert message.naked == 1
     assert message.nak_delays == [0.01]
-    assert [event["event_kind"] for event in events] == []
+    # Lease lost -> NAK so another worker picks the run up; this worker must NOT
+    # publish any terminal event. Best-effort progress heartbeats may have fired
+    # before the loop-independent keepalive observed the 409, which is fine.
+    terminal_kinds = {"run.completed", "run.failed", "run.canceled", "run.skipped"}
+    assert terminal_kinds.isdisjoint(event["event_kind"] for event in events)
 
 
 def test_worker_keeps_computing_through_transient_lease_renewal_outage(tmp_path: Path):
@@ -4262,11 +4268,13 @@ def test_worker_keeps_computing_through_transient_lease_renewal_outage(tmp_path:
             lease_token="lease-token-1",
         )
 
-    async def renew_unreachable_lease(lease, settings):
+    def renew_unreachable_lease_sync(lease, settings):
         nonlocal renewal_attempts
         renewal_attempts += 1
         if renewal_attempts >= 3:
             renewals_seen.set()
+        # Transient outage (control-plane replica restart): NOT a 409, so the
+        # keepalive keeps the run alive on the still-valid lease and retries.
         raise RunLeaseUnavailable("control plane connection refused")
 
     async def release_lease(lease, settings):
@@ -4289,7 +4297,7 @@ def test_worker_keeps_computing_through_transient_lease_renewal_outage(tmp_path:
             run_job_func=long_running_run_job,
             run_status_func=run_status,
             run_lease_func=acquire_lease,
-            renew_run_lease_func=renew_unreachable_lease,
+            lease_renew_sync_func=renew_unreachable_lease_sync,
             release_run_lease_func=release_lease,
         )
         message = FakeNATSMessage(
@@ -4305,6 +4313,177 @@ def test_worker_keeps_computing_through_transient_lease_renewal_outage(tmp_path:
     assert message.acked == 1
     assert message.naked == 0
     assert "run.completed" in [event["event_kind"] for event in events]
+
+
+def _keepalive_settings() -> RuntimeSettings:
+    return RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+    )
+
+
+def test_lease_keepalive_renews_rotates_token_and_posts_worker_heartbeat():
+    # The keepalive is the sole renewer: it must follow a rotating lease token
+    # forward AND post the worker heartbeat each tick (the heartbeat is what
+    # keeps the run out of the "stale worker heartbeat" recovery path).
+    def scenario():
+        async def body():
+            loop = asyncio.get_running_loop()
+            seen: list[str] = []
+            heartbeats: list[str | None] = []
+            rotated_twice = asyncio.Event()
+
+            def renew_rotates(lease, _settings):
+                index = len(seen)
+                seen.append(lease.lease_token)
+                if index + 1 >= 2:
+                    loop.call_soon_threadsafe(rotated_twice.set)
+                return ControlPlaneRunLease(
+                    run_id=lease.run_id,
+                    worker_id=lease.worker_id,
+                    lease_token=f"t{index + 1}",
+                )
+
+            def record_heartbeat(_settings, *, status, current_run_id, metadata=None):
+                heartbeats.append((status, current_run_id))
+
+            keepalive = nats_worker_module._LeaseKeepalive(
+                ControlPlaneRunLease(run_id="run-x", worker_id="w", lease_token="t0"),
+                _keepalive_settings(),
+                loop=loop,
+                interval_seconds=0.02,
+                on_lost=lambda: None,
+                renew_func=renew_rotates,
+                heartbeat_func=record_heartbeat,
+            )
+            keepalive.start()
+            await asyncio.wait_for(rotated_twice.wait(), timeout=2.0)
+            await asyncio.to_thread(keepalive.stop)
+            return seen, heartbeats, keepalive.current_lease(), keepalive.lost
+
+        return asyncio.run(body())
+
+    seen, heartbeats, current, lost = scenario()
+    assert lost is False
+    assert seen[:2] == ["t0", "t1"]  # first renewal used the seed token, then followed the rotation
+    assert current.lease_token != "t0"
+    assert heartbeats  # posted the worker heartbeat alongside renewal
+    assert heartbeats[0] == ("busy", "run-x")
+
+
+def test_lease_keepalive_aborts_the_run_on_lease_conflict():
+    # A 409 means the control plane handed the run to another worker: the
+    # keepalive must fire on_lost exactly once and stop renewing.
+    def scenario():
+        async def body():
+            loop = asyncio.get_running_loop()
+            lost_signal = asyncio.Event()
+            renew_calls = 0
+            heartbeats = 0
+
+            def renew_conflict(_lease, _settings):
+                nonlocal renew_calls
+                renew_calls += 1
+                raise RunLeaseConflict("handed to another worker")
+
+            def count_heartbeat(_settings, *, status, current_run_id, metadata=None):
+                nonlocal heartbeats
+                heartbeats += 1
+
+            keepalive = nats_worker_module._LeaseKeepalive(
+                ControlPlaneRunLease(run_id="run-x", worker_id="w", lease_token="t0"),
+                _keepalive_settings(),
+                loop=loop,
+                interval_seconds=0.02,
+                on_lost=lost_signal.set,
+                renew_func=renew_conflict,
+                heartbeat_func=count_heartbeat,
+            )
+            keepalive.start()
+            await asyncio.wait_for(lost_signal.wait(), timeout=2.0)
+            # Give the thread a beat to prove it does not keep renewing.
+            await asyncio.sleep(0.1)
+            await asyncio.to_thread(keepalive.stop)
+            return renew_calls, heartbeats, keepalive.lost
+
+        return asyncio.run(body())
+
+    renew_calls, heartbeats, lost = scenario()
+    assert lost is True
+    assert renew_calls == 1  # stopped after the conflict, no further renewals
+    assert heartbeats == 0  # the conflict aborts before the heartbeat post
+
+
+def test_lease_keepalive_survives_transient_renewal_failures():
+    # A control-plane replica restart (not a 409) must not abort the run: the
+    # lease is still valid for its TTL, so the keepalive retries and keeps the
+    # last-good token.
+    def scenario():
+        async def body():
+            loop = asyncio.get_running_loop()
+            enough = asyncio.Event()
+            attempts = 0
+            heartbeats = 0
+            lost_called = False
+
+            def renew_flaky(_lease, _settings):
+                nonlocal attempts
+                attempts += 1
+                if attempts >= 3:
+                    loop.call_soon_threadsafe(enough.set)
+                raise RunLeaseUnavailable("control plane connection refused")
+
+            def count_heartbeat(_settings, *, status, current_run_id, metadata=None):
+                nonlocal heartbeats
+                heartbeats += 1
+
+            def on_lost():
+                nonlocal lost_called
+                lost_called = True
+
+            keepalive = nats_worker_module._LeaseKeepalive(
+                ControlPlaneRunLease(run_id="run-x", worker_id="w", lease_token="t0"),
+                _keepalive_settings(),
+                loop=loop,
+                interval_seconds=0.02,
+                on_lost=on_lost,
+                renew_func=renew_flaky,
+                heartbeat_func=count_heartbeat,
+            )
+            keepalive.start()
+            await asyncio.wait_for(enough.wait(), timeout=2.0)
+            current = keepalive.current_lease()
+            await asyncio.to_thread(keepalive.stop)
+            return attempts, heartbeats, current, keepalive.lost, lost_called
+
+        return asyncio.run(body())
+
+    attempts, heartbeats, current, lost, lost_called = scenario()
+    assert attempts >= 3
+    assert lost is False
+    assert lost_called is False
+    assert current.lease_token == "t0"  # kept the last-good token through the outage
+    # The worker heartbeat is independent of lease renewal: it keeps posting even
+    # while renewals transiently fail, so the run stays out of the stale-heartbeat
+    # recovery path.
+    assert heartbeats >= 1
+
+
+def test_lease_keepalive_interval_stays_inside_the_ttl():
+    # Production defaults renew every 60s against a 600s TTL (ample headroom);
+    # the interval never exceeds the configured progress cadence.
+    default_interval = nats_worker_module.lease_keepalive_interval(
+        RuntimeSettings(openai_base_url="http://example.test/v1", openai_model="deepseek_v4")
+    )
+    assert default_interval == 60.0
+    fast = nats_worker_module.lease_keepalive_interval(
+        RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            worker_ack_progress_interval_seconds=0.01,
+        )
+    )
+    assert fast == pytest.approx(0.1)
 
 
 def test_worker_publishes_run_heartbeat_during_silent_long_running_compute():

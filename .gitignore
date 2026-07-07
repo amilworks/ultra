@@ -32,6 +32,7 @@ frontend/.playwright-cli/
 .tmp/
 .worktrees/
 .viewer-cache/
+.codex/
 .codex-artifacts/
 *.ome.zarr/
 test-prairie/

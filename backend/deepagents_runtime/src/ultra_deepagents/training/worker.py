@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -326,6 +327,19 @@ class TrainingJobProcessor:
                 "error": f"no ModelManifest registered for model_key={job.model_key}",
             }
         params = dict(job.params)
+        # The exclusion inventory is DEPLOYMENT config, exactly like the frame
+        # source: the UI freeze dispatch sends only the gold_set_id, and which
+        # trained-on identity list this worker excludes against is an install
+        # fact. Params still override for tests/replays.
+        for key, env_name in (
+            ("exclusion_inventory_uri", "ULTRA_TRAINING_EXCLUSION_INVENTORY_URI"),
+            ("inventory_sha256", "ULTRA_TRAINING_EXCLUSION_INVENTORY_SHA256"),
+            ("split_manifest_uri", "ULTRA_TRAINING_SPLIT_MANIFEST_URI"),
+        ):
+            if not str(params.get(key) or "").strip():
+                value = str(os.getenv(env_name) or "").strip()
+                if value:
+                    params[key] = value
         items = [dict(item) for item in (params.get("items") or [])]
         if params.get("materialize", not items):
             ctx = MaterializeContext(
@@ -380,10 +394,41 @@ class TrainingJobProcessor:
             else:
                 violations.extend(extra or [])
 
+        # The eval-ready split layout (plan 4.6/7.2: per-slice images/labels +
+        # data.yaml + manifest.json) is what the benchmark's gold_manifest_uri
+        # points at. Written only for a clean freeze; a layout failure is
+        # fail-closed like any other violation.
+        if not violations and items and not str(params.get("split_manifest_uri") or "").strip():
+            gold_root = Path(
+                os.getenv("ULTRA_TRAINING_GOLD_ROOT") or str(self._job_workdir(job) / "gold")
+            )
+            try:
+                params["split_manifest_uri"] = await asyncio.to_thread(
+                    _write_gold_split_layout,
+                    items,
+                    gold_root,
+                    job.model_key,
+                    str(params.get("gold_set_id") or job.job_id),
+                    manifest,
+                )
+            except Exception as exc:
+                violations.append(
+                    {
+                        "check": "gold_layout_failed",
+                        "item_id": "",
+                        "reason": str(exc) or exc.__class__.__name__,
+                    }
+                )
+
         content_hash = compute_gold_content_hash(items)
         label_stats = _aggregate_gold_label_stats(items)
         gold_status = "failed" if violations else "frozen"
         provenance = dict(params.get("provenance") or {})
+        # Gold-v1 launch state (plan D4-amended): a gold set with no held-out
+        # items is pending the post-checkpoint survey - derived from the DATA,
+        # not asserted by a param.
+        if not any(str(item.get("slice")) == "held_out_test" for item in items):
+            provenance.setdefault("held_out_state", "pending_new_survey")
         for key in (
             "exclusion_inventory_uri",
             "inventory_sha256",
@@ -393,6 +438,7 @@ class TrainingJobProcessor:
             if params.get(key) is not None:
                 provenance.setdefault(key, params[key])
         result_payload = {
+            "gold_set_id": str(params.get("gold_set_id") or ""),
             "status": gold_status,
             "content_hash": content_hash,
             "item_count": len(items),
@@ -493,6 +539,60 @@ class TrainingJobProcessor:
             },
         )
         return {"terminal_status": "succeeded", "weights_uri": weights_uri}
+
+
+def _write_gold_split_layout(
+    items: list[dict[str, Any]],
+    root: Path,
+    model_key: str,
+    gold_set_id: str,
+    manifest: ModelManifest,
+) -> str:
+    """Lay the frozen gold out for the two-pass eval kernel: per-slice sibling
+    ``images/``+``labels/`` dirs (yolov5's img2label_paths convention), a
+    ``data.yaml`` per slice with the manifest's classes, and ``manifest.json``
+    with the slices spec evaluate() consumes. Returns the manifest.json path."""
+    base = root / model_key / gold_set_id
+    class_items = sorted(
+        ((int(key), str(value)) for key, value in (manifest.classes or {}).items()),
+        key=lambda pair: pair[0],
+    )
+    names_yaml = "".join(f"  {index}: {name}\n" for index, name in class_items)
+    slices: dict[str, dict[str, Any]] = {}
+    for item in items:
+        slice_name = str(item.get("slice") or "prior_train")
+        slice_dir = base / slice_name
+        images_dir = slice_dir / "images"
+        labels_dir = slice_dir / "labels"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        frames_dir = Path(str((item.get("metadata") or {}).get("frames_uri") or ""))
+        label_dir = Path(str(item.get("label_uri") or ""))
+        spec = slices.setdefault(slice_name, {"label_count": 0, "item_count": 0})
+        spec["item_count"] += 1
+        for jpg in sorted(frames_dir.glob("*.jpg")):
+            shutil.copy2(jpg, images_dir / jpg.name)
+            txt = label_dir / f"{jpg.stem}.txt"
+            if txt.is_file():
+                shutil.copy2(txt, labels_dir / txt.name)
+                spec["label_count"] += len(txt.read_text(encoding="utf-8").splitlines())
+    for slice_name, spec in slices.items():
+        slice_dir = base / slice_name
+        data_yaml = slice_dir / "data.yaml"
+        data_yaml.write_text(
+            f"path: {slice_dir}\ntrain: images\nval: images\n"
+            f"names:\n{names_yaml}nc: {len(class_items)}\n",
+            encoding="utf-8",
+        )
+        spec["data_yaml"] = str(data_yaml)
+        spec["tiles_dir"] = str(slice_dir / "images")
+        spec["labels_dir"] = str(slice_dir / "labels")
+    manifest_path = base / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"slices": slices, "params": {}}, sort_keys=True, indent=1),
+        encoding="utf-8",
+    )
+    return str(manifest_path)
 
 
 def _aggregate_gold_label_stats(items: list[dict[str, Any]]) -> dict[str, Any]:

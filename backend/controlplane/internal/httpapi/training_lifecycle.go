@@ -45,6 +45,8 @@ type trainingWriteStore interface {
 	CreateTrainingGoldSetDraft(ctx context.Context, input domain.CreateTrainingGoldSetInput) (domain.TrainingGoldSetRecord, error)
 	GetTrainingGoldSet(ctx context.Context, goldSetID string) (domain.TrainingGoldSetRecord, error)
 	GetCurrentTrainingGoldSet(ctx context.Context, modelKey string) (domain.TrainingGoldSetRecord, error)
+	ListTrainingGoldSets(ctx context.Context, modelKey string, limit int) ([]domain.TrainingGoldSetRecord, error)
+	ListTrainingJobs(ctx context.Context, modelKey string, status string, limit int) ([]domain.TrainingJobRecord, error)
 	UpdateTrainingGoldSetState(ctx context.Context, input domain.UpdateTrainingGoldSetStateInput) (domain.TrainingGoldSetRecord, error)
 	InsertTrainingGoldItems(ctx context.Context, goldSetID string, items []domain.TrainingGoldItemInput) (int, error)
 	CreateTrainingModelVersion(ctx context.Context, input domain.CreateTrainingModelVersionInput) (domain.TrainingModelVersionRecord, error)
@@ -891,6 +893,29 @@ func (deps ServerDeps) handleUpdateTrainingJobStatusHTTP(w http.ResponseWriter, 
 		writeStoreError(w, err)
 		return
 	}
+	// A retrain request tracks ITS job: without this, the request row stays
+	// 'queued' forever and the UI reports "retraining in progress" long after
+	// the candidate landed (found live in the first full UI walk).
+	if job.Status == "succeeded" || job.Status == "failed" || job.Status == "canceled" {
+		if job.JobType == "training.assemble" || job.JobType == "training.finetune" {
+			requestStatus := "completed"
+			if job.Status != "succeeded" {
+				requestStatus = "failed"
+			}
+			now := time.Now().UTC()
+			if requests, listErr := training.ListTrainingRetrainRequests(r.Context(), job.ModelKey, 200); listErr == nil {
+				for _, retrain := range requests {
+					if retrain.TrainingJobID != job.JobID || retrain.Status == "completed" || retrain.Status == "failed" {
+						continue
+					}
+					_, _ = training.UpdateTrainingRetrainRequest(r.Context(), domain.UpdateTrainingRetrainRequestInput{
+						RequestID: retrain.RequestID, Status: requestStatus,
+						Error: job.Error, FinishedAt: &now,
+					})
+				}
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -1060,7 +1085,8 @@ func (deps ServerDeps) handleTrainingGoldResult(w http.ResponseWriter, r *http.R
 		return
 	}
 	jobID := strings.TrimSpace(chi.URLParam(r, "job_id"))
-	if _, err := training.GetTrainingJob(r.Context(), jobID); err != nil {
+	job, err := training.GetTrainingJob(r.Context(), jobID)
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
@@ -1078,6 +1104,12 @@ func (deps ServerDeps) handleTrainingGoldResult(w http.ResponseWriter, r *http.R
 	}
 	if !decodeJSON(w, r, &request) {
 		return
+	}
+	if strings.TrimSpace(request.GoldSetID) == "" {
+		// The dispatch pinned the gold set on the job envelope; the worker's
+		// result payload may omit it (found live: an empty id fell through to
+		// a store lookup 404 with no hint of the cause).
+		request.GoldSetID = jsonMapString(job.Params, "gold_set_id")
 	}
 	if request.Status != "frozen" && request.Status != "failed" {
 		writeError(w, http.StatusBadRequest, errors.New("gold result status must be frozen or failed"))

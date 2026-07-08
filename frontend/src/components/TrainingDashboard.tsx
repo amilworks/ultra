@@ -377,7 +377,14 @@ export function TrainingDashboard({
                 )
               }
               onRunBenchmark={() =>
-                void act("Running the benchmark…", () => apiClient.runTrainingBenchmark(modelKey, { mode: "promotion_packet" }))
+                state.candidate
+                  ? void act("Running the benchmark…", () =>
+                      apiClient.runTrainingBenchmark(modelKey, {
+                        mode: "promotion_packet",
+                        version_id: state.candidate!.version_id,
+                      })
+                    )
+                  : undefined
               }
               onPromoteCanary={() =>
                 state.candidate

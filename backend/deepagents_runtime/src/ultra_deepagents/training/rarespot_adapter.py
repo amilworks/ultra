@@ -383,6 +383,38 @@ class BisqueFrameSource:
         partial.replace(destination)
 
 
+def _seed_yolov5_font(config_dir: Path) -> None:
+    """yolov5's check_font DOWNLOADS Arial.ttf into its config dir when
+    missing — and that download is FATAL wherever the host blocks it (proven
+    twice live: 404 inside the tesla container, TLS failure on macOS).
+    matplotlib ships DejaVuSans; seed it as Arial.ttf so no fetch happens."""
+    target = config_dir / "Arial.ttf"
+    if target.is_file():
+        return
+    try:
+        import matplotlib
+
+        source = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf" / "DejaVuSans.ttf"
+        if source.is_file():
+            config_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    except Exception:
+        logger.warning("Could not seed Arial.ttf; yolov5 may attempt a font download.")
+
+
+def _resolve_weights_uri(uri: str) -> str:
+    """Registry weights URIs may be repo-relative (the v0 seed's
+    ``data/models/yolo/RareSpotWeights.pt``); subprocesses run with other
+    cwds, so resolve here. Absolute paths — including the barrel mount the
+    remote executor translates — pass through untouched."""
+    text = str(uri or "").strip()
+    if not text or Path(text).is_absolute():
+        return text
+    from ultra_deepagents.rarespot.config import _resolve_repo_relative
+
+    return str(_resolve_repo_relative(text))
+
+
 def _bisque_ssl_context(url: str) -> ssl.SSLContext | None:
     """Python's bundled OpenSSL trust store rejects bisque2's chain (verified
     live: CERTIFICATE_VERIFY_FAILED on macOS + python.org builds where the
@@ -784,6 +816,7 @@ class RareSpotAdapter(ModelAdapter):
         populated slice (curve metrics), the production detect path at
         conf 0.25 over the gold tiles (operating-point metrics)."""
         started = time.monotonic()
+        weights_uri = _resolve_weights_uri(weights_uri)
         manifest = dict(gold_manifest or {})
         slices_spec = {
             str(name): dict(spec or {}) for name, spec in (manifest.get("slices") or {}).items()
@@ -854,6 +887,10 @@ class RareSpotAdapter(ModelAdapter):
         env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         env["YOLOv5_AUTOINSTALL"] = "false"
         env["YOLOV5_CONFIG_DIR"] = str((workdir / ".yolov5-config").resolve())
+        _seed_yolov5_font(workdir / ".yolov5-config")
+        # Hermetic matplotlib cache: a cold font-cache build writes a warning
+        # to stderr that masked a real failure's tail once (found live).
+        env["MPLCONFIGDIR"] = str((workdir / ".mpl").resolve())
         env["PYTHONPATH"] = f"{yolov5_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
         command = [
             python,
@@ -925,6 +962,7 @@ class RareSpotAdapter(ModelAdapter):
                 spectral=False,
                 stability=False,
             )
+            _seed_yolov5_font(out_dir / ".yolov5-config")
             detect_labels = run_yolov5_detect(
                 source_dir=Path(tiles_dir), output_dir=out_dir, config=config
             )
@@ -1021,11 +1059,13 @@ class RareSpotAdapter(ModelAdapter):
             params["new_tile_count"] = tile_count
 
         # Warm start: dispatch-enriched active weights, else the baked default.
-        # build_finetune_command refuses '' — never train from scratch.
+        # build_finetune_command refuses '' — never train from scratch. The
+        # registry stores repo-relative URIs (the v0 seed); resolve them here.
         weights_uri = str(params.get("weights_uri") or "").strip()
         if not weights_uri:
             weights_uri = str(RareSpotConfig.from_env().weights_path)
-            params["weights_uri"] = weights_uri
+        weights_uri = _resolve_weights_uri(weights_uri)
+        params["weights_uri"] = weights_uri
         params.setdefault("run_dir", str(workdir / "runs"))
         build_finetune_command(params)  # validate the full command NOW
 

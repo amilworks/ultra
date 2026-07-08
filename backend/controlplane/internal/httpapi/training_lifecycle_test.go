@@ -684,3 +684,100 @@ func TestTrainingRetrainDispatchCarriesWarmStartWeights(t *testing.T) {
 		t.Fatalf("warm_start_version_id = %q", got)
 	}
 }
+
+// A finished assemble/finetune job must close its retrain request, or the UI
+// reports "retraining in progress" forever (found live in the full UI walk).
+func TestTrainingRetrainRequestClosesOnJobCompletion(t *testing.T) {
+	t.Parallel()
+	router, _, bus := newTrainingTestRouter(t)
+	goldSetID, goldHash := freezeGoldViaAPI(t, router, "yolov5_rarespot", "pending_new_survey")
+	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v0", goldSetID, goldHash, passingDetectionMetrics(0.83))
+
+	rec, dispatch := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/sync", nil)
+	syncJobID, _ := dispatch["job_id"].(string)
+	doJSON(t, router, http.MethodPost, "/v2/training/jobs/"+syncJobID+"/status-result", map[string]any{
+		"reviewed_images":     80,
+		"retrain_gate_counts": map[string]any{"reviewed_images": 80, "total_objects": 400, "per_class": map[string]any{"prairie_dog": 60, "burrow": 340}},
+	})
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/retrain-request", map[string]any{"note": "e2e"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retrain dispatch = %d", rec.Code)
+	}
+	assembleJobID := bus.TrainingJobs()[len(bus.TrainingJobs())-1].JobID
+
+	// The request starts open.
+	_, list := doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/retrain-requests", nil)
+	requests, _ := list["requests"].([]any)
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 retrain request, got %d", len(requests))
+	}
+	if status, _ := requests[0].(map[string]any)["status"].(string); status == "completed" || status == "failed" {
+		t.Fatalf("request should be open before the job finishes, got %q", status)
+	}
+
+	// The worker reports the assemble job succeeded -> the request closes.
+	rec, _ = doJSON(t, router, http.MethodPatch, "/v2/training/jobs/"+assembleJobID+"/status", map[string]any{"status": "succeeded"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("job status patch = %d body=%s", rec.Code, rec.Body.String())
+	}
+	_, list = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/retrain-requests", nil)
+	requests, _ = list["requests"].([]any)
+	if status, _ := requests[0].(map[string]any)["status"].(string); status != "completed" {
+		t.Fatalf("request must close to completed when its job succeeds, got %q", status)
+	}
+}
+
+// The status read assembles the v1.3 echoes (gold freeze_state, running
+// benchmark) at read time so the answer page can derive its phase.
+func TestTrainingStatusEchoesGoldAndRunningBenchmark(t *testing.T) {
+	t.Parallel()
+	router, _, _ := newTrainingTestRouter(t)
+
+	// No gold yet: a bare "blocked" echo (or "ready" once data exists).
+	_, status := doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/status", nil)
+	gold, _ := status["gold"].(map[string]any)
+	if gold == nil {
+		t.Fatal("gold echo must be present even before any gold set exists")
+	}
+
+	goldSetID, _ := freezeGoldViaAPI(t, router, "yolov5_rarespot", "pending_new_survey")
+	_, status = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/status", nil)
+	gold, _ = status["gold"].(map[string]any)
+	if state, _ := gold["freeze_state"].(string); state != "frozen" {
+		t.Fatalf("frozen gold must echo freeze_state=frozen, got %q", state)
+	}
+	if id, _ := gold["gold_set_id"].(string); id != goldSetID {
+		t.Fatalf("gold echo id = %q want %q", id, goldSetID)
+	}
+
+	// A dispatched (unfinished) benchmark surfaces as running_benchmark.
+	doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/benchmark/run", map[string]any{"version_id": "yolov5_rarespot-v0"})
+	_, status = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/status", nil)
+	if status["running_benchmark"] == nil {
+		t.Fatal("an in-flight benchmark must echo running_benchmark")
+	}
+}
+
+// The worker's gold-result may omit gold_set_id (it's pinned on the job
+// envelope); the handler must fall back to the job param, not 404.
+func TestTrainingGoldResultFallsBackToJobGoldSetID(t *testing.T) {
+	t.Parallel()
+	router, _, bus := newTrainingTestRouter(t)
+	rec, draft := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/gold-sets", map[string]any{})
+	goldSetID, _ := draft["gold_set_id"].(string)
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/gold-sets/"+goldSetID+"/freeze", map[string]any{"confirm": true})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("freeze dispatch = %d", rec.Code)
+	}
+	jobID := bus.TrainingJobs()[len(bus.TrainingJobs())-1].JobID
+
+	// Result payload deliberately omits gold_set_id.
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/jobs/"+jobID+"/gold-result", map[string]any{
+		"status":       "frozen",
+		"content_hash": "hash-fallback",
+		"items":        []any{},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gold-result with omitted gold_set_id = %d body=%s", rec.Code, rec.Body.String())
+	}
+}

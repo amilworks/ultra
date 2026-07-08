@@ -438,6 +438,10 @@ export type PrairieBenchmarkRunResponse = {
 
 export type PrairieBenchmarkRunRequest = {
   mode?: "canonical_only" | "promotion_packet";
+  // Target version: omit for the baseline (defaults to active); pass the
+  // candidate's id when benchmarking a candidate, or the server benchmarks
+  // the active version instead and the candidate never gets a verdict.
+  version_id?: string;
 };
 
 // --- GoldGate training UI (M1.5) -------------------------------------------

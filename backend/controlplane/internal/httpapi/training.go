@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -86,10 +89,11 @@ func trainingModelRecordFromDomain(model domain.TrainingModelRecord) trainingMod
 		Dimensions:        dimensions,
 		DefaultConfig: domain.JSONMap{
 			"workflow": jsonMapString(model.Metadata, "workflow"),
-			// Honest until the M1 job spine ships the write paths: the model
-			// is REGISTERED (capabilities say what it supports by design) but
-			// the training pipeline is not configured on this deployment yet.
-			"training_state": "not_configured",
+			// The M0 "not_configured" honesty flag retired with the M1 job
+			// spine: dispatch routes + the worker exist, so a registered model
+			// IS configured. The UI's not-configured overlay now keys only on
+			// deployments that truly lack the training tables (503 reads).
+			"training_state": "configured",
 			"capabilities":   model.Capabilities,
 			"metric_schema":  model.MetricSchema,
 			"dataset_format": model.DatasetFormat,
@@ -170,7 +174,11 @@ func (deps ServerDeps) writeTrainingModelStatus(w http.ResponseWriter, r *http.R
 	if value, ok := activeMetrics["promotion_benchmark_ready"].(bool); ok {
 		promotionReady = value
 	}
+	goldEcho, canaryEcho, runningBenchmark := deps.trainingStatusEchoes(r, status)
 	writeJSON(w, http.StatusOK, map[string]any{
+		"gold":                        goldEcho,
+		"canary":                      canaryEcho,
+		"running_benchmark":           runningBenchmark,
 		"model_key":                   status.ModelKey,
 		"dataset_name":                status.DatasetName,
 		"dataset_id":                  nullableString(status.DatasetID),
@@ -264,4 +272,122 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
+}
+
+// trainingStatusEchoes assembles the v1.3 status-read echoes (plan 3.6/14.5:
+// gold.freeze_state, canary soak, running_benchmark) at READ time — zero new
+// tables, each individually optional so the UI degrades cleanly when this
+// deployment lacks the write store.
+func (deps ServerDeps) trainingStatusEchoes(
+	r *http.Request, status domain.TrainingModelStatusRecord,
+) (any, any, any) {
+	training, ok := deps.trainingWriteStore()
+	if !ok {
+		return nil, nil, nil
+	}
+	ctx := r.Context()
+
+	var goldEcho any
+	if goldSets, err := training.ListTrainingGoldSets(ctx, status.ModelKey, 1); err == nil && len(goldSets) > 0 {
+		newest := goldSets[0]
+		state := "ready" // a draft exists and is freezable
+		switch newest.Status {
+		case "frozen", "freezing", "failed":
+			state = newest.Status
+		}
+		echo := map[string]any{
+			"gold_set_id":      newest.GoldSetID,
+			"gold_set_version": newest.Version,
+			"freeze_state":     state,
+		}
+		if newest.ContentHash != "" {
+			echo["content_hash"] = newest.ContentHash
+		}
+		if heldOut, ok := newest.Provenance["held_out_state"].(string); ok && heldOut != "" {
+			echo["held_out_state"] = heldOut
+		}
+		if raw, ok := newest.Provenance["freeze_failure_reasons"].([]any); ok && len(raw) > 0 {
+			reasons := make([]string, 0, len(raw))
+			for _, entry := range raw {
+				if violation, ok := entry.(map[string]any); ok {
+					reasons = append(reasons, jsonMapString(violation, "check")+": "+jsonMapString(violation, "reason"))
+				}
+			}
+			echo["freeze_failure_reasons"] = reasons
+		}
+		goldEcho = echo
+	} else if err == nil {
+		// No gold set rows yet: data present means a draft can be cut.
+		state := "blocked"
+		if status.ReviewedImages > 0 {
+			state = "ready"
+		}
+		goldEcho = map[string]any{"freeze_state": state}
+	}
+
+	var runningBenchmark any
+	for _, jobStatus := range []string{"running", "queued"} {
+		jobs, err := training.ListTrainingJobs(ctx, status.ModelKey, jobStatus, 10)
+		if err != nil {
+			break
+		}
+		for _, job := range jobs {
+			if job.JobType != "training.benchmark" {
+				continue
+			}
+			versionID := jsonMapString(job.Params, "model_version_id")
+			if versionID == "" || versionID == status.ActiveModelVersion {
+				versionID = "baseline"
+			}
+			startedAt := job.CreatedAt
+			if !job.StartedAt.IsZero() {
+				startedAt = job.StartedAt
+			}
+			runningBenchmark = map[string]any{
+				"version_id": versionID,
+				"started_at": startedAt.UTC().Format(time.RFC3339),
+			}
+			break
+		}
+		if runningBenchmark != nil {
+			break
+		}
+	}
+
+	var canaryEcho any
+	if lineage, ok := trainingSharedLineageForModel(ctx, training, status.ModelKey); ok {
+		versions, err := training.ListTrainingModelVersions(ctx, lineage.LineageID, 50, 0)
+		if err == nil {
+			for _, version := range versions {
+				if version.Status != "canary" {
+					continue
+				}
+				observations, _ := training.ListTrainingCanaryObservations(ctx, status.ModelKey, version.VersionID, 1000)
+				canaryEcho = map[string]any{
+					"canary_version_id": version.VersionID,
+					"soak_started_at":   version.UpdatedAt.UTC().Format(time.RFC3339),
+					"runs_observed":     len(observations),
+					"min_soak_runs":     envIntDefault("ULTRA_CONTROL_TRAINING_MIN_SOAK_RUNS", 20),
+					"min_soak_hours":    envIntDefault("ULTRA_CONTROL_TRAINING_MIN_SOAK_HOURS", 24),
+					// The resolver's fnv1a32(run_id)%10 split.
+					"traffic_fraction": 0.1,
+				}
+				break
+			}
+		}
+	}
+
+	return goldEcho, canaryEcho, runningBenchmark
+}
+
+func envIntDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

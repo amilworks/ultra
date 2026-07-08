@@ -206,7 +206,7 @@ func TestTrainingPromoteVetoOverrideAndRollback(t *testing.T) {
 	// benchmarked: promote must 409 gate_failed.
 	rec, _ := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/versions", map[string]any{
 		"version_id":  "yolov5_rarespot-v1",
-		"weights_uri": "barrel:/mnt/barrel-data/ultra/training/weights/yolov5_rarespot/v1/weights.pt",
+		"weights_uri": "store:/training/weights/yolov5_rarespot/v1/weights.pt",
 		"provenance":  map[string]any{"trained_by": "offline run", "hyp_sha256": "abc"},
 	})
 	if rec.Code != http.StatusCreated {
@@ -286,7 +286,7 @@ func TestTrainingStaleGoldHashCannotPromote(t *testing.T) {
 	goldSetID, goldHash := freezeGoldViaAPI(t, router, "yolov5_rarespot", "populated")
 	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v0", goldSetID, goldHash, passingDetectionMetrics(0.83))
 	rec, _ := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/versions", map[string]any{
-		"version_id": "yolov5_rarespot-v1", "weights_uri": "barrel:/x.pt", "provenance": map[string]any{"src": "test"},
+		"version_id": "yolov5_rarespot-v1", "weights_uri": "store:/x.pt", "provenance": map[string]any{"src": "test"},
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("register = %d", rec.Code)
@@ -377,7 +377,7 @@ func TestMegaSegAcceptanceWalk(t *testing.T) {
 		domain.TrainingLineageRecord{LineageID: "megaseg-shared", DomainID: "cellbio", ModelKey: "megaseg", Scope: "shared", ActiveVersionID: "megaseg-v0", Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
 		// weights_uri is mandatory version data: the benchmark dispatch resolves
 		// it into the worker envelope and 409s on versions without weights.
-		domain.TrainingModelVersionRecord{VersionID: "megaseg-v0", LineageID: "megaseg-shared", ModelKey: "megaseg", Status: "active", IsFrozen: true, WeightsURI: "barrel:/mnt/barrel-data/ultra/training/weights/megaseg/v0.pt", Metrics: domain.JSONMap{}, Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
+		domain.TrainingModelVersionRecord{VersionID: "megaseg-v0", LineageID: "megaseg-shared", ModelKey: "megaseg", Status: "active", IsFrozen: true, WeightsURI: "store:/training/weights/megaseg/v0.pt", Metrics: domain.JSONMap{}, Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
 		domain.TrainingModelStatusRecord{ModelKey: "megaseg", DatasetName: "curated volumes", ActiveModelVersion: "megaseg-v0", ClassCounts: domain.JSONMap{}, PerClassNewObjects: domain.JSONMap{}, UnsupportedClassCounts: domain.JSONMap{}, RetrainGateReasons: []string{}, RetrainGateCounts: domain.JSONMap{}, RetrainGateThresholds: domain.JSONMap{}},
 		domain.TrainingGatePolicyRecord{ModelKey: "megaseg", MinReviewed: 1, MinNewObjects: 1, MinPerClassObjects: domain.JSONMap{}, MinDays: 0},
 		[]domain.TrainingGuardrailClauseRecord{
@@ -410,7 +410,7 @@ func TestMegaSegAcceptanceWalk(t *testing.T) {
 
 	// Externally-trained candidate via the SAME generic route.
 	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/megaseg/versions", map[string]any{
-		"version_id": "megaseg-v1", "weights_uri": "barrel:/mnt/barrel-data/ultra/training/weights/megaseg/v1.pt",
+		"version_id": "megaseg-v1", "weights_uri": "store:/training/weights/megaseg/v1.pt",
 		"provenance": map[string]any{"trained_by": "external lab run"},
 	})
 	if rec.Code != http.StatusCreated {
@@ -491,7 +491,7 @@ func TestTrainingServingResolverAndCanaryObservations(t *testing.T) {
 	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v0", goldSetID, goldHash, passingDetectionMetrics(0.83))
 	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/versions", map[string]any{
 		"version_id":  "yolov5_rarespot-v1",
-		"weights_uri": "/mnt/barrel-data/ultra/training/weights/yolov5_rarespot/v1/weights.pt",
+		"weights_uri": "store:/training/weights/yolov5_rarespot/v1/weights.pt",
 		"provenance":  map[string]any{"trained_by": "resolver test"},
 	})
 	if rec.Code != http.StatusCreated {

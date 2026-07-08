@@ -5,7 +5,7 @@ commit 86e47b6b): a dedicated ``threading.Thread`` on a wall-clock timer renews
 the control-plane job lease with SYNCHRONOUS HTTP and schedules the NATS
 ``message.in_progress()`` ack extension onto the event loop via
 ``asyncio.run_coroutine_threadsafe``. A synchronous stall of the event loop (a
-large barrel copy/hash done outside ``to_thread``, a long GC pause, an epoch's
+large file copy/hash done outside ``to_thread``, a long GC pause, an epoch's
 blocking step) therefore cannot lapse either liveness signal — as long as the
 worker PROCESS is alive it holds the lease and keeps the delivery in flight,
 so multi-hour finetunes are never reaped and restarted from scratch. If the

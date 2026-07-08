@@ -16,7 +16,7 @@ The five hooks:
   emits the detection.v1 blob with the five mandatory conventions.
 - ``smoke_test`` — names/nc assertion + one real detect pass (plan 6.2).
 - ``train`` — the M3 command builder (``build_finetune_command``) + BN-freeze
-  patch source; actual GPU execution lands on the lambda worker deployment.
+  patch source; actual GPU execution runs on the GPU-node worker deployment.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ class BisqueFrameSource:
     pool into a cache dir shaped exactly like ``LocalDirectoryFrameSource`` input
     (``<stem>.JPG`` + ``<stem>.JPG.xml`` with ``<image>`` as the XML root).
 
-    Wire shapes mirror the Go BisqueService (httpapi/bisque.go) against bisque2:
+    Wire shapes mirror the Go BisqueService (httpapi/bisque.go):
     ``/data_service/dataset/?query=&wpublic=&limit=&offset=`` (paginated to
     exhaustion) finds the pool, ``?view=deep`` on a resource URI resolves dataset
     members and an image's stacked GObject layers, ``/blob_service/{uniq}``
@@ -386,7 +386,7 @@ class BisqueFrameSource:
 def _seed_yolov5_font(config_dir: Path) -> None:
     """yolov5's check_font DOWNLOADS Arial.ttf into its config dir when
     missing — and that download is FATAL wherever the host blocks it (proven
-    twice live: 404 inside the tesla container, TLS failure on macOS).
+    twice live: 404 inside the GPU-node container, TLS failure on macOS).
     matplotlib ships DejaVuSans; seed it as Arial.ttf so no fetch happens."""
     target = config_dir / "Arial.ttf"
     if target.is_file():
@@ -405,7 +405,7 @@ def _seed_yolov5_font(config_dir: Path) -> None:
 def _resolve_weights_uri(uri: str) -> str:
     """Registry weights URIs may be repo-relative (the v0 seed's
     ``data/models/yolo/RareSpotWeights.pt``); subprocesses run with other
-    cwds, so resolve here. Absolute paths — including the barrel mount the
+    cwds, so resolve here. Absolute paths — including the shared-store mount the
     remote executor translates — pass through untouched."""
     text = str(uri or "").strip()
     if not text or Path(text).is_absolute():
@@ -416,7 +416,7 @@ def _resolve_weights_uri(uri: str) -> str:
 
 
 def _bisque_ssl_context(url: str) -> ssl.SSLContext | None:
-    """Python's bundled OpenSSL trust store rejects bisque2's chain (verified
+    """Python's bundled OpenSSL trust store can reject the BisQue TLS chain (verified
     live: CERTIFICATE_VERIFY_FAILED on macOS + python.org builds where the
     system curl succeeds) — certifi's bundle validates it. HTTP URLs need none."""
     if not url.lower().startswith("https:"):
@@ -1072,7 +1072,7 @@ class RareSpotAdapter(ModelAdapter):
         gpu_host = _config_value(params.get("gpu_ssh_host"), "ULTRA_TRAINING_GPU_SSH_HOST")
         if not gpu_host:
             raise NotImplementedError(
-                "GPU execution lands on the lambda worker deployment "
+                "GPU execution runs on the GPU-node worker deployment "
                 "(set ULTRA_TRAINING_GPU_SSH_HOST to enable the remote executor)"
             )
 
@@ -1184,22 +1184,29 @@ class RareSpotAdapter(ModelAdapter):
         gpu_host: str,
         hyp_path: Path,
     ) -> Path:
-        """The proven tesla recipe (2026-07-08 GPU smoke): torch cu121 runtime
-        image (the node driver is CUDA 12.2 — newer cu13x images refuse it),
-        GIT_PYTHON_REFRESH=quiet (no git binary), tensorboard + Pillow<10 pips
-        (vendored loggers import tensorboard unguarded; Pillow>=10 removed
-        getsize and kills the plot thread), and matplotlib's DejaVuSans as
-        Arial.ttf (check_font's download 404s inside the container)."""
-        device = _config_value(params.get("gpu_device"), "ULTRA_TRAINING_GPU_DEVICE") or "4"
+        """The validated GPU-node recipe (proven on a V100): a CUDA-12.1 torch
+        runtime image (a driver older than the image's CUDA refuses it —
+        match the image to the node), GIT_PYTHON_REFRESH=quiet (no git binary),
+        tensorboard + Pillow<10 pips (vendored loggers import tensorboard
+        unguarded; Pillow>=10 removed getsize and kills the plot thread), and
+        matplotlib's DejaVuSans as Arial.ttf (check_font's download 404s
+        inside the container). All host-specific values are env-configured."""
+        device = _config_value(params.get("gpu_device"), "ULTRA_TRAINING_GPU_DEVICE") or "0"
         image = (
             _config_value(params.get("gpu_image"), "ULTRA_TRAINING_GPU_IMAGE")
             or "pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime"
         )
         remote_root = (
             _config_value(params.get("gpu_remote_root"), "ULTRA_TRAINING_GPU_REMOTE_ROOT")
-            or "/home/amil/goldgate-jobs"
+            or "/tmp/goldgate-jobs"  # noqa: S108 - overridden per-deployment via env
         )
         remote_dir = f"{remote_root.rstrip('/')}/{workdir.name}"
+        # Host dir mounted read-only into the container as /models, for warm
+        # weights that live on a shared store rather than being rsynced.
+        # Deployment config; empty means "only staged local weights".
+        models_mount = _config_value(
+            params.get("gpu_models_mount"), "ULTRA_TRAINING_GPU_MODELS_MOUNT"
+        )
 
         # Stage a self-contained job dir: patched yolov5 + hyp + warm weights.
         staged_yolov5 = workdir / "yolov5"
@@ -1217,9 +1224,10 @@ class RareSpotAdapter(ModelAdapter):
         if weights_path.is_file():
             shutil.copy2(weights_path, workdir / "warmstart.pt")
             container_weights = "/workspace/warmstart.pt"
-        elif weights_uri.startswith("/mnt/barrel-data/ultra/models/"):
-            # Barrel is mounted on the GPU node; serve it read-only in place.
-            container_weights = weights_uri.replace("/mnt/barrel-data/ultra/models", "/models", 1)
+        elif models_mount and weights_uri.startswith(models_mount.rstrip("/") + "/"):
+            # The shared model store is mounted read-only on the GPU node;
+            # serve the weights in place instead of copying them.
+            container_weights = weights_uri.replace(models_mount.rstrip("/"), "/models", 1)
         else:
             raise RuntimeError(f"warm-start weights not reachable: {weights_uri}")
 
@@ -1263,11 +1271,14 @@ class RareSpotAdapter(ModelAdapter):
             f"pip install --no-cache-dir -q {pip_deps} && {font_setup} && "
             + " ".join(shlex.quote(part) for part in container_command)
         )
+        models_mount_arg = (
+            f"-v {shlex.quote(models_mount.rstrip('/'))}:/models:ro " if models_mount else ""
+        )
         docker_command = (
             f"docker run --rm --gpus device={device} --shm-size 8g "
             f"-e GIT_PYTHON_REFRESH=quiet "
             f"-v {shlex.quote(remote_dir)}:/workspace "
-            f"-v /mnt/barrel-data/ultra/models:/models:ro "
+            f"{models_mount_arg}"
             f"-w /workspace {shlex.quote(image)} "
             f"bash -c {shlex.quote(container_script)}"
         )

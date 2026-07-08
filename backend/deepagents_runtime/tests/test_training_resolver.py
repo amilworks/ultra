@@ -20,7 +20,7 @@ from ultra_deepagents.training.resolver import ServingWeightsResolver
 
 RESOLUTION = {
     "model_key": "yolov5_rarespot",
-    "weights_uri": "/mnt/barrel-data/ultra/training/weights/yolov5_rarespot/v1/weights.pt",
+    "weights_uri": "/srv/training-store/weights/yolov5_rarespot/v1/weights.pt",
     "version_id": "yolov5_rarespot-v1",
     "is_canary": False,
 }

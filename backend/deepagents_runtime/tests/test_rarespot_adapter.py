@@ -109,7 +109,7 @@ FAKE_JPEG = b"\xff\xd8\xff\xe0goldgate-fake-jpeg\xff\xd9"
 
 
 class _BisqueHTTPServer(ThreadingHTTPServer):
-    """Serves canned bisque2-shaped XML keyed by EXACT path?query strings; every
+    """Serves canned BisQue-shaped XML keyed by EXACT path?query strings; every
     request (path + Authorization header) is recorded for server-side asserts."""
 
     def __init__(self, address) -> None:  # noqa: ANN001 - handler pinned below
@@ -226,20 +226,20 @@ def test_bisque_frame_source_requires_config_at_construction(monkeypatch) -> Non
     with pytest.raises(ValueError, match="root URL"):
         BisqueFrameSource(username="u", password="p")
     with pytest.raises(ValueError, match="credentials"):
-        BisqueFrameSource(root_url="https://bisque2.ece.ucsb.edu")
+        BisqueFrameSource(root_url="https://bisque.example.edu")
     with pytest.raises(ValueError, match="credentials"):
-        BisqueFrameSource(root_url="https://bisque2.ece.ucsb.edu", username="u")
+        BisqueFrameSource(root_url="https://bisque.example.edu", username="u")
 
 
 def test_bisque_frame_source_env_fallbacks(monkeypatch, tmp_path) -> None:
     for name in BISQUE_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ULTRA_CONTROL_BISQUE_ROOT_URL", "https://bisque2.ece.ucsb.edu/")
+    monkeypatch.setenv("ULTRA_CONTROL_BISQUE_ROOT_URL", "https://bisque.example.edu/")
     monkeypatch.setenv("ULTRA_CONTROL_BISQUE_USERNAME", "fleet")
     monkeypatch.setenv("ULTRA_CONTROL_BISQUE_PASSWORD", "secret")
     monkeypatch.setenv("ULTRA_TRAINING_BISQUE_CACHE_DIR", str(tmp_path / "cache"))
     source = BisqueFrameSource()  # construction is offline: no requests yet
-    assert source._root_url == "https://bisque2.ece.ucsb.edu"
+    assert source._root_url == "https://bisque.example.edu"
     assert source._cache_dir == tmp_path / "cache"
     assert source._cache_dir.is_dir()
     # The TRAINING pair outranks the CONTROL pair.
@@ -331,7 +331,7 @@ def test_bisque_401_maps_to_a_clear_credential_error(bisque_server, tmp_path) ->
 def test_resolve_frame_source_routes_bisque_with_params(monkeypatch, tmp_path) -> None:
     for name in BISQUE_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_ROOT_URL", "https://bisque2.ece.ucsb.edu")
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_ROOT_URL", "https://bisque.example.edu")
     monkeypatch.setenv("ULTRA_TRAINING_BISQUE_USERNAME", "fleet")
     monkeypatch.setenv("ULTRA_TRAINING_BISQUE_PASSWORD", "secret")
     ctx = MaterializeContext(
@@ -818,9 +818,9 @@ def test_build_finetune_command_golden_argv() -> None:
     # 60-epoch rule above 1000 new tiles.
     argv_large = build_finetune_command({**params, "new_tile_count": 1001})
     assert argv_large[argv_large.index("--epochs") + 1] == "60"
-    # tesla overflow batch size override.
-    argv_tesla = build_finetune_command({**params, "batch_size": 8})
-    assert argv_tesla[argv_tesla.index("--batch-size") + 1] == "8"
+    # GPU-node overflow batch size override.
+    argv_override = build_finetune_command({**params, "batch_size": 8})
+    assert argv_override[argv_override.index("--batch-size") + 1] == "8"
     # Forbidden knobs never appear (no --close-mosaic arg in the vendored tree;
     # --image-weights destabilizes 2-class).
     assert not any("close" in token for token in argv)
@@ -842,7 +842,7 @@ def test_train_raises_the_m3_not_implemented_branch(tmp_path) -> None:
         },
         workdir=tmp_path,
     )
-    with pytest.raises(NotImplementedError, match="lambda worker deployment"):
+    with pytest.raises(NotImplementedError, match="GPU-node worker deployment"):
         adapter.train(ctx)
 
 
@@ -922,9 +922,9 @@ def _train_workdir(tmp_path: Path) -> Path:
     return workdir
 
 
-def test_train_assembles_and_runs_the_proven_tesla_recipe(tmp_path, monkeypatch) -> None:
+def test_train_assembles_and_runs_the_gpu_recipe(tmp_path, monkeypatch) -> None:
     workdir = _train_workdir(tmp_path)
-    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "amil@gpu.example.edu")
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "user@gpu.example.edu")
     monkeypatch.setenv("ULTRA_TRAINING_GPU_DEVICE", "4")
 
     recorded: list[list[str]] = []
@@ -953,7 +953,7 @@ def test_train_assembles_and_runs_the_proven_tesla_recipe(tmp_path, monkeypatch)
 
     assert artifact["weights_uri"] == str(workdir / "runs" / "finetune" / "weights" / "best.pt")
     assert artifact["hyp_sha256"] == hashlib.sha256(HYP_PATH.read_bytes()).hexdigest()
-    assert artifact["gpu_host"] == "amil@gpu.example.edu"
+    assert artifact["gpu_host"] == "user@gpu.example.edu"
 
     # Staged copies: warm weights, hyp, and the BN-patched train.py (the
     # vendored file itself must stay pristine).
@@ -982,9 +982,11 @@ def test_train_assembles_and_runs_the_proven_tesla_recipe(tmp_path, monkeypatch)
     assert "path: /workspace/dataset" in container_yaml
 
 
-def test_train_translates_barrel_weights_to_the_models_mount(tmp_path, monkeypatch) -> None:
+def test_train_translates_store_weights_to_the_models_mount(tmp_path, monkeypatch) -> None:
     workdir = _train_workdir(tmp_path)
-    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "amil@gpu.example.edu")
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "user@gpu.example.edu")
+    # The shared model store's host path is deployment config.
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_MODELS_MOUNT", "/srv/model-store")
     recorded: list[list[str]] = []
 
     def fake_run(command, **kwargs):
@@ -999,7 +1001,7 @@ def test_train_translates_barrel_weights_to_the_models_mount(tmp_path, monkeypat
     adapter = RareSpotAdapter()
     ctx = TrainContext(
         params={
-            "weights_uri": "/mnt/barrel-data/ultra/models/yolo/RareSpotWeights.pt",
+            "weights_uri": "/srv/model-store/yolo/RareSpotWeights.pt",
             "data_yaml": str(workdir / "dataset" / "data.yaml"),
             "run_dir": str(workdir / "runs"),
             "yolov5_path": str(tmp_path / "vendored-yolov5"),
@@ -1008,8 +1010,9 @@ def test_train_translates_barrel_weights_to_the_models_mount(tmp_path, monkeypat
     )
     adapter.train(ctx)
     docker = " ".join(recorded[2])
-    # Barrel weights are served read-only via the /models mount, not rsynced.
+    # Store weights are served read-only via the /models mount, not rsynced.
     assert "/models/yolo/RareSpotWeights.pt" in docker
+    assert "-v /srv/model-store:/models:ro" in docker
     assert not (workdir / "warmstart.pt").exists()
 
 

@@ -911,7 +911,7 @@ CREATE INDEX IF NOT EXISTS control_training_job_events_job_ts_idx ON control_tra
 
 -- GoldGate M0 seed: the documented direct-DB writes (registry + version 0 +
 -- lineage + gate policy + guardrail clauses). model_key 'yolov5_rarespot' is
--- the ONE canonical spelling (FE, Go, DB, NATS, barrel dirs). The baked
+-- the ONE canonical spelling (FE, Go, DB, NATS, storage dirs). The baked
 -- RareSpotWeights.pt becomes version 0: active, frozen, unbenchmarked — every
 -- future weight must beat it on a frozen gold set to replace it.
 INSERT INTO control_training_models (model_key, task_type, display_name, dataset_format, metric_schema, requires_phash, capabilities, executor, classes, leakage_defenses_extra, metadata)

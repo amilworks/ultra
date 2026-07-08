@@ -215,7 +215,7 @@ def _primary_source_id(row: dict[str, Any]) -> str:
     source_ref = row.get("source_ref") or {}
     return str(
         source_ref.get("bisque_image_id")
-        or source_ref.get("barrel_path")
+        or source_ref.get("store_path")
         or row.get("item_id")
         or ""
     ).strip()

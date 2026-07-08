@@ -362,7 +362,7 @@ class FakeGoldAdapter(ModelAdapter):
         return {"model_key": self.model_key, "purpose": ctx.purpose, "items": list(self._items)}
 
     def train(self, ctx: TrainContext) -> dict:
-        raise NotImplementedError("GPU execution lands on the lambda worker deployment")
+        raise NotImplementedError("GPU execution runs on the GPU-node worker deployment")
 
     def evaluate(self, weights_uri, gold_manifest, slice=None):  # noqa: A002
         return {
@@ -467,7 +467,7 @@ def test_finetune_not_implemented_fails_cleanly_with_reason(monkeypatch) -> None
     assert client.statuses[0] == ("running", "")
     status, error = client.statuses[-1]
     assert status == "failed"
-    assert "lambda worker deployment" in error
+    assert "GPU-node worker deployment" in error
     assert client.acquired == ["training_job_1"]
     assert client.released == ["token-0"]
     assert message.acked == 1
@@ -480,10 +480,10 @@ def test_gold_freeze_happy_path_finalizes_frozen(monkeypatch) -> None:
     client = FakeControlClient()
     worker = _worker(client)
     params = {
-        "exclusion_inventory_uri": "/barrel/inventory.json",
+        "exclusion_inventory_uri": "/srv/training-store/inventory.json",
         "inventory_sha256": "e" * 64,
         "default_slice": "prior_train",
-        "split_manifest_uri": "barrel:/gold/yolov5_rarespot/gs-1/manifest.json",
+        "split_manifest_uri": "store:/gold/yolov5_rarespot/gs-1/manifest.json",
     }
     message = FakeAck(_job_payload(job_type="training.gold_freeze", params=params))
     asyncio.run(worker._process_message(message))
@@ -570,7 +570,7 @@ def test_benchmark_phase_inserts_benchmark_run(monkeypatch) -> None:
     client = FakeControlClient()
     worker = _worker(client)
     params = {
-        "weights_uri": "/barrel/weights/v0.pt",
+        "weights_uri": "/srv/model-store/weights/v0.pt",
         "gold_manifest": {"slices": {}},
         "model_version_id": "yolov5_rarespot-v0",
         "gold_set_id": "gs-1",

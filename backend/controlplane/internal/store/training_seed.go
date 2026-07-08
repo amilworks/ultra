@@ -10,7 +10,7 @@ import (
 // (Postgres), the MemoryStore constructor (dev/tests), and the shared
 // cross-language fixture at backend/contracts/training/yolov5_rarespot.manifest.json
 // (pinned by Go and Python parity tests). 'yolov5_rarespot' is the ONE canonical
-// model-key spelling across FE, Go, DB, NATS subjects, and barrel dir segments.
+// model-key spelling across FE, Go, DB, NATS subjects, and storage dir segments.
 
 const (
 	TrainingSeedModelKey  = "yolov5_rarespot"

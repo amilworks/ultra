@@ -2,7 +2,7 @@
 
 Mirrors the Go side's ``eventbus.TrainingJob`` field-for-field: the subject is
 model-neutral, ``model_key`` travels as a validated attribute, and ``params``
-reference rows/barrel paths — NATS stays dumb delivery, never payloads.
+reference rows/store paths — NATS stays dumb delivery, never payloads.
 """
 
 from __future__ import annotations

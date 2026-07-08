@@ -10,7 +10,7 @@ import (
 // (training.{sync,assemble,finetune,benchmark,gold_freeze}). The subject is
 // model-neutral; model_key travels as a validated attribute and the worker
 // resolves the adapter from it. NATS stays dumb delivery: params reference
-// rows/barrel paths, never payloads.
+// rows/storage paths, never payloads.
 type TrainingJob struct {
 	JobID       string         `json:"job_id"`
 	DispatchID  string         `json:"dispatch_id,omitempty"`

@@ -405,7 +405,7 @@ func TestTrainingGoldSetFreezeLifecycle(t *testing.T) {
 			LabelKind:     "boxes",
 			ContentSHA256: "sha-b",
 			GTLabelSHA256: "gt-b",
-			GTLabelURI:    "barrel://gold/tile-002.txt",
+			GTLabelURI:    "store://gold/tile-002.txt",
 		},
 		{
 			ItemID:        "tile-001",
@@ -415,7 +415,7 @@ func TestTrainingGoldSetFreezeLifecycle(t *testing.T) {
 			ContentSHA256: "sha-a",
 			Phash:         &phash,
 			GTLabelSHA256: "gt-a",
-			GTLabelURI:    "barrel://gold/tile-001.txt",
+			GTLabelURI:    "store://gold/tile-001.txt",
 			Width:         &width,
 			Height:        &width,
 			StrataTags:    domain.JSONMap{"site": "colony-7"},
@@ -455,7 +455,7 @@ func TestTrainingGoldSetFreezeLifecycle(t *testing.T) {
 	// still blocks a second open gold set.
 	if _, err := memory.InsertTrainingGoldItems(ctx, draft.GoldSetID, []domain.TrainingGoldItemInput{{
 		ItemID: "tile-003", Slice: "prior_train", LabelKind: "boxes",
-		ContentSHA256: "sha-c", GTLabelSHA256: "gt-c", GTLabelURI: "barrel://gold/tile-003.txt",
+		ContentSHA256: "sha-c", GTLabelSHA256: "gt-c", GTLabelURI: "store://gold/tile-003.txt",
 	}}); err != nil {
 		t.Fatalf("insert while freezing: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestTrainingGoldSetFreezeLifecycle(t *testing.T) {
 		ContentHash:      "hash-v1",
 		ItemCount:        3,
 		LabelStats:       domain.JSONMap{"prairie_dog": float64(2)},
-		SplitManifestURI: "barrel://gold/v1/manifest.json",
+		SplitManifestURI: "store://gold/v1/manifest.json",
 	})
 	if err != nil {
 		t.Fatalf("freezing->frozen: %v", err)
@@ -581,7 +581,7 @@ func TestTrainingModelVersionLifecycleAndAudit(t *testing.T) {
 		VersionID:   "yolov5_rarespot-v1",
 		LineageID:   TrainingSeedLineageID,
 		ModelKey:    TrainingSeedModelKey,
-		WeightsURI:  "barrel://training/yolov5_rarespot/v1/best.pt",
+		WeightsURI:  "store://training/yolov5_rarespot/v1/best.pt",
 		SourceJobID: "job-finetune-1",
 		Metadata:    domain.JSONMap{"provenance": "finetune run 1"},
 	})
@@ -746,7 +746,7 @@ func TestTrainingBenchmarkRunsAndLatestByHash(t *testing.T) {
 		Metrics:            domain.JSONMap{"map50": 0.58},
 		GuardrailsPassed:   false,
 		GuardrailsReasons:  []string{"agg_map50: dropped 0.02 vs active"},
-		ReportURI:          "barrel://reports/benchmark-1.json",
+		ReportURI:          "store://reports/benchmark-1.json",
 	})
 	if err != nil {
 		t.Fatalf("InsertTrainingBenchmarkRun: %v", err)
@@ -770,7 +770,7 @@ func TestTrainingBenchmarkRunsAndLatestByHash(t *testing.T) {
 		KernelVersion:      "bench-kernel-1",
 		Metrics:            domain.JSONMap{"map50": 0.63},
 		GuardrailsPassed:   true,
-		ReportURI:          "barrel://reports/benchmark-2.json",
+		ReportURI:          "store://reports/benchmark-2.json",
 	})
 	if err != nil {
 		t.Fatalf("insert second benchmark run: %v", err)

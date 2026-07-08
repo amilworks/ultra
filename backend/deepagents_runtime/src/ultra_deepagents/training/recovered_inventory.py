@@ -5,8 +5,8 @@ every gold freeze consumes it through the RareSpot adapter's identity checks,
 and the M3 replay pool seeds from it. Exclusion by identity beats exclusion by
 review-timestamp. The output is content-hashed (inventory_sha256) and destined
 for WORM storage at
-barrel:/mnt/barrel-data/ultra/training/corpus/yolov5_rarespot/recovered-train-v0/
-— the local run produces the artifact; the barrel copy is a deploy step.
+the shared training store (corpus/<model_key>/recovered-train-v0/)
+— the local run produces the artifact; the copy to the store is a deploy step.
 
 Per-tile rows: {relpath, run, stem, content_sha256, phash, label_sha256|null,
 per_class_box_count}. Headers: phash_kernel (the freeze-time hasher asserts
@@ -23,6 +23,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -172,7 +173,12 @@ def build_inventory(dataset_dir: Path, tile_px: int = 512, workers: int = 8) -> 
         "source_dir": str(dataset_dir),
         "phash_kernel": PHASH_KERNEL,
         "tile_px": tile_px,
-        "worm_destination": "barrel:/mnt/barrel-data/ultra/training/corpus/yolov5_rarespot/recovered-train-v0/",
+        # The archival destination is deployment config (the shared training
+        # store URI); the local run only produces the artifact.
+        "worm_destination": os.getenv(
+            "ULTRA_TRAINING_CORPUS_WORM_URI",
+            "store:/training/corpus/yolov5_rarespot/recovered-train-v0/",
+        ),
         "runs": {
             run: {
                 # presumed = treat as trained-on; the checkpoint-opt

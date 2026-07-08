@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -1003,11 +1004,264 @@ class RareSpotAdapter(ModelAdapter):
             )
 
     def train(self, ctx: TrainContext) -> dict[str, Any]:
-        """M3 builder: validate + build the exact plan-6.2 command and the
-        BN-freeze patch now; GPU execution is the lambda worker deployment."""
-        build_finetune_command(dict(ctx.params or {}))
-        bn_freeze_patch_source()
-        raise NotImplementedError("GPU execution lands on the lambda worker deployment")
+        """Assemble the finetune mix locally, then execute the exact plan-6.2
+        command on the remote GPU node (dockerized, D5) and bring best.pt home.
+
+        The GPU executor is deployment config: without
+        ``ULTRA_TRAINING_GPU_SSH_HOST`` this deployment cannot train and the
+        job fails cleanly with the reason (the original M3 marker)."""
+        params = dict(ctx.params or {})
+        workdir = ctx.workdir
+
+        data_yaml = str(params.get("data_yaml") or "").strip()
+        manifest_sha = str(params.get("data_manifest_sha256") or "").strip()
+        if not data_yaml:
+            data_yaml, manifest_sha, tile_count = self._assemble_finetune_dataset(ctx)
+            params["data_yaml"] = data_yaml
+            params["new_tile_count"] = tile_count
+
+        # Warm start: dispatch-enriched active weights, else the baked default.
+        # build_finetune_command refuses '' — never train from scratch.
+        weights_uri = str(params.get("weights_uri") or "").strip()
+        if not weights_uri:
+            weights_uri = str(RareSpotConfig.from_env().weights_path)
+            params["weights_uri"] = weights_uri
+        params.setdefault("run_dir", str(workdir / "runs"))
+        build_finetune_command(params)  # validate the full command NOW
+
+        gpu_host = _config_value(params.get("gpu_ssh_host"), "ULTRA_TRAINING_GPU_SSH_HOST")
+        if not gpu_host:
+            raise NotImplementedError(
+                "GPU execution lands on the lambda worker deployment "
+                "(set ULTRA_TRAINING_GPU_SSH_HOST to enable the remote executor)"
+            )
+
+        hyp_path = Path(str(params.get("hyp_path") or HYP_PATH))
+        best_path = self._run_remote_finetune(
+            workdir=workdir,
+            params=params,
+            weights_uri=weights_uri,
+            gpu_host=gpu_host,
+            hyp_path=hyp_path,
+        )
+        return {
+            "weights_uri": str(best_path),
+            "hyp_sha256": _sha256_file(hyp_path),
+            "data_manifest_sha256": manifest_sha,
+            "new_tile_count": int(params.get("new_tile_count") or 0),
+            "gpu_host": gpu_host,
+        }
+
+    def _assemble_finetune_dataset(self, ctx: TrainContext) -> tuple[str, str, int]:
+        """Materialize the reviewed pool and lay it out as a YOLO dataset
+        (images/labels x train/val) under ``workdir/dataset``. Gold exclusion
+        (defense #4: reviewed_pool MINUS active-gold ids/hashes) applies at the
+        FRAME level via params.gold_exclusion_{item_ids,content_hashes}. The
+        content-hashed ``manifest.json`` is the frozen-snapshot identity."""
+        params = dict(ctx.params or {})
+        materialize = MaterializeContext(
+            purpose="finetune_mix",
+            params=params,
+            workdir=ctx.workdir,
+            settings=ctx.settings,
+        )
+        manifest = self.materialize_dataset(materialize)
+        excluded_ids = {str(v) for v in (params.get("gold_exclusion_item_ids") or [])}
+        excluded_hashes = {str(v) for v in (params.get("gold_exclusion_content_hashes") or [])}
+
+        labeled: list[tuple[Path, Path]] = []
+        background: list[Path] = []
+        excluded_frames = 0
+        for item in manifest.get("items") or []:
+            if (
+                str(item.get("item_id")) in excluded_ids
+                or str(item.get("content_sha256")) in excluded_hashes
+            ):
+                excluded_frames += 1
+                continue
+            frames_dir = Path(str((item.get("metadata") or {}).get("frames_uri") or ""))
+            labels_dir = Path(str(item.get("label_uri") or ""))
+            for jpg in sorted(frames_dir.glob("*.jpg")):
+                txt = labels_dir / f"{jpg.stem}.txt"
+                if txt.is_file():
+                    labeled.append((jpg, txt))
+                else:
+                    background.append(jpg)
+        if not labeled:
+            raise RuntimeError(
+                "finetune assembly produced zero labeled tiles "
+                f"({excluded_frames} frame(s) gold-excluded) - nothing to train on"
+            )
+
+        # Background tiles teach the empty-frame FP guard; cap at 20% of the
+        # labeled count so tiny pools aren't drowned in grass.
+        background = background[: max(1, len(labeled) // 5)]
+
+        dataset_dir = ctx.workdir / "dataset"
+        rows: list[dict[str, Any]] = []
+        for index, (jpg, txt) in enumerate(sorted(labeled) + [(j, None) for j in background]):
+            # Deterministic ~10% val split, never empty on either side.
+            split = "val" if index % 10 == 9 or (index == 0 and len(labeled) < 10) else "train"
+            image_dest = dataset_dir / "images" / split / jpg.name
+            image_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(jpg, image_dest)
+            label_sha = ""
+            if txt is not None:
+                label_dest = dataset_dir / "labels" / split / txt.name
+                label_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(txt, label_dest)
+                label_sha = _sha256_file(txt)
+            rows.append({"tile": jpg.name, "split": split, "label_sha256": label_sha})
+
+        (dataset_dir / "data.yaml").write_text(
+            f"path: {dataset_dir}\n"
+            "train: images/train\n"
+            "val: images/val\n"
+            "names:\n  0: prairie_dog\n  1: burrow\nnc: 2\n",
+            encoding="utf-8",
+        )
+        manifest_path = dataset_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "rows": sorted(rows, key=lambda row: row["tile"]),
+                    "excluded_frames": excluded_frames,
+                    "phash_kernel": PHASH_KERNEL,
+                },
+                sort_keys=True,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+        return str(dataset_dir / "data.yaml"), _sha256_file(manifest_path), len(rows)
+
+    def _run_remote_finetune(
+        self,
+        *,
+        workdir: Path,
+        params: dict[str, Any],
+        weights_uri: str,
+        gpu_host: str,
+        hyp_path: Path,
+    ) -> Path:
+        """The proven tesla recipe (2026-07-08 GPU smoke): torch cu121 runtime
+        image (the node driver is CUDA 12.2 — newer cu13x images refuse it),
+        GIT_PYTHON_REFRESH=quiet (no git binary), tensorboard + Pillow<10 pips
+        (vendored loggers import tensorboard unguarded; Pillow>=10 removed
+        getsize and kills the plot thread), and matplotlib's DejaVuSans as
+        Arial.ttf (check_font's download 404s inside the container)."""
+        device = _config_value(params.get("gpu_device"), "ULTRA_TRAINING_GPU_DEVICE") or "4"
+        image = (
+            _config_value(params.get("gpu_image"), "ULTRA_TRAINING_GPU_IMAGE")
+            or "pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime"
+        )
+        remote_root = (
+            _config_value(params.get("gpu_remote_root"), "ULTRA_TRAINING_GPU_REMOTE_ROOT")
+            or "/home/amil/goldgate-jobs"
+        )
+        remote_dir = f"{remote_root.rstrip('/')}/{workdir.name}"
+
+        # Stage a self-contained job dir: patched yolov5 + hyp + warm weights.
+        staged_yolov5 = workdir / "yolov5"
+        if not staged_yolov5.is_dir():
+            source_yolov5 = self._resolve_yolov5_path(params)
+            shutil.copytree(
+                source_yolov5,
+                staged_yolov5,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "runs", "*.pt"),
+            )
+            _apply_bn_freeze_patch(staged_yolov5 / "train.py")
+        shutil.copy2(hyp_path, workdir / "hyp.yaml")
+
+        weights_path = Path(weights_uri)
+        if weights_path.is_file():
+            shutil.copy2(weights_path, workdir / "warmstart.pt")
+            container_weights = "/workspace/warmstart.pt"
+        elif weights_uri.startswith("/mnt/barrel-data/ultra/models/"):
+            # Barrel is mounted on the GPU node; serve it read-only in place.
+            container_weights = weights_uri.replace("/mnt/barrel-data/ultra/models", "/models", 1)
+        else:
+            raise RuntimeError(f"warm-start weights not reachable: {weights_uri}")
+
+        if not (workdir / "dataset" / "data.yaml").is_file():
+            # The rsync mirrors the WORKDIR; a dataset assembled elsewhere
+            # would silently not exist on the GPU node.
+            raise RuntimeError(
+                "remote finetune requires the assembled dataset under "
+                f"{workdir / 'dataset'} (got data_yaml={params.get('data_yaml')!r})"
+            )
+        container_command = build_finetune_command(
+            {
+                **params,
+                "weights_uri": container_weights,
+                "data_yaml": "/workspace/dataset/data.container.yaml",
+                "run_dir": "/workspace/runs",
+                "yolov5_path": "/workspace/yolov5",
+                "hyp_path": "/workspace/hyp.yaml",
+                "python": "python",
+            }
+        )
+        (workdir / "dataset" / "data.container.yaml").write_text(
+            "path: /workspace/dataset\n"
+            "train: images/train\n"
+            "val: images/val\n"
+            "names:\n  0: prairie_dog\n  1: burrow\nnc: 2\n",
+            encoding="utf-8",
+        )
+
+        pip_deps = (
+            "tensorboard opencv-python-headless pandas matplotlib seaborn scipy tqdm "
+            "pyyaml requests psutil gitpython thop 'pillow<10'"
+        )
+        font_setup = (
+            "mkdir -p /root/.config/Ultralytics && python -c \""
+            "import matplotlib, pathlib, shutil; "
+            "shutil.copy(pathlib.Path(matplotlib.__file__).parent/'mpl-data'/'fonts'/'ttf'/'DejaVuSans.ttf', "
+            "'/root/.config/Ultralytics/Arial.ttf')\""
+        )
+        container_script = (
+            f"pip install --no-cache-dir -q {pip_deps} && {font_setup} && "
+            + " ".join(shlex.quote(part) for part in container_command)
+        )
+        docker_command = (
+            f"docker run --rm --gpus device={device} --shm-size 8g "
+            f"-e GIT_PYTHON_REFRESH=quiet "
+            f"-v {shlex.quote(remote_dir)}:/workspace "
+            f"-v /mnt/barrel-data/ultra/models:/models:ro "
+            f"-w /workspace {shlex.quote(image)} "
+            f"bash -c {shlex.quote(container_script)}"
+        )
+
+        log_path = workdir / "train.remote.log"
+        self._run_logged(["ssh", "-o", "BatchMode=yes", gpu_host, f"mkdir -p {shlex.quote(remote_dir)}"], log_path)
+        self._run_logged(
+            ["rsync", "-a", "--delete", f"{workdir}/", f"{gpu_host}:{remote_dir}/"], log_path
+        )
+        self._run_logged(["ssh", "-o", "BatchMode=yes", gpu_host, docker_command], log_path)
+        best_local = workdir / "runs" / "finetune" / "weights" / "best.pt"
+        best_local.parent.mkdir(parents=True, exist_ok=True)
+        self._run_logged(
+            [
+                "rsync",
+                "-a",
+                f"{gpu_host}:{remote_dir}/runs/finetune/",
+                str(workdir / "runs" / "finetune"),
+            ],
+            log_path,
+        )
+        if not best_local.is_file():
+            tail = log_path.read_text(encoding="utf-8", errors="ignore")[-2000:]
+            raise RuntimeError(f"remote finetune produced no best.pt; log tail: {tail}")
+        return best_local
+
+    @staticmethod
+    def _run_logged(command: list[str], log_path: Path) -> None:
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"$ {' '.join(command[:6])}...\n{result.stdout or ''}{result.stderr or ''}\n")
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip()[-2000:]
+            raise RuntimeError(f"remote finetune step failed ({command[0]}): {tail}")
 
 
 # ------------------------------------------------------------- tiling helpers
@@ -1532,6 +1786,26 @@ def bn_freeze_patch_source() -> str:
     """The ~5-line monkeypatch injected around the vendored train.py freeze
     loop: put frozen-layer BatchNorm into eval() with track_running_stats off."""
     return _BN_FREEZE_PATCH
+
+
+def _apply_bn_freeze_patch(train_py: Path) -> None:
+    """Inject the patch into a STAGED copy of train.py, after its freeze loop
+    (anchored on the '# Image size' block that follows it). Idempotent; the
+    vendored file itself is never modified."""
+    source = train_py.read_text(encoding="utf-8")
+    if "GoldGate BN-freeze patch" in source:
+        return
+    anchor = "    # Image size\n"
+    if anchor not in source:
+        raise RuntimeError(
+            f"BN-freeze patch anchor not found in {train_py} - the vendored "
+            "train.py layout changed; re-pin the injection point"
+        )
+    patch = "".join(
+        "    " + line + "\n" if line.strip() else "\n"
+        for line in bn_freeze_patch_source().splitlines()
+    )
+    train_py.write_text(source.replace(anchor, patch + "\n" + anchor, 1), encoding="utf-8")
 
 
 def _normalize_names(raw: Any) -> dict[int, str] | None:

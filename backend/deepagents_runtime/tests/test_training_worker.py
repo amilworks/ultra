@@ -258,8 +258,10 @@ def test_get_adapter_resolves_rarespot() -> None:
 
 
 def test_materialize_context_validates_purpose() -> None:
+    # The plan-3.5 purposes are all legal - including the ASSEMBLE mix.
+    MaterializeContext(purpose="finetune_mix")
     with pytest.raises(ValueError, match="purpose"):
-        MaterializeContext(purpose="finetune_mix")
+        MaterializeContext(purpose="bogus_purpose")
 
 
 # ---------------------------------------------------------------- worker flow

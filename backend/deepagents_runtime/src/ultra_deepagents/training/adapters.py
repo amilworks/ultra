@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-MATERIALIZE_PURPOSES = ("sync", "gold_cut")
+# Plan 3.5 capability table: SYNC materializes "sync"; ASSEMBLE materializes
+# params.purpose in {"finetune_mix", "gold_cut"}.
+MATERIALIZE_PURPOSES = ("sync", "gold_cut", "finetune_mix")
 
 
 class NoAdapterRegistered(LookupError):  # noqa: N818 - contract name from the plan

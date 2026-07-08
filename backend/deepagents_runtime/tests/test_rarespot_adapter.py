@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -898,3 +899,158 @@ def test_hyp_file_matches_the_plan_recipe() -> None:
         "copy_paste",
     }
     assert required <= set(hyp)
+
+
+# ------------------------------------------------------- remote GPU finetune
+
+
+def _train_workdir(tmp_path: Path) -> Path:
+    """A workdir shaped like the assemble step's output plus a stub vendored
+    yolov5 (train.py with the real injection anchor)."""
+    workdir = tmp_path / "job"
+    dataset = workdir / "dataset"
+    (dataset / "images" / "train").mkdir(parents=True)
+    (dataset / "labels" / "train").mkdir(parents=True)
+    (dataset / "data.yaml").write_text("path: x\n", encoding="utf-8")
+    yolov5 = tmp_path / "vendored-yolov5"
+    yolov5.mkdir()
+    (yolov5 / "train.py").write_text(
+        "    # freeze loop here\n    # Image size\n", encoding="utf-8"
+    )
+    weights = tmp_path / "active.pt"
+    weights.write_bytes(b"fake-checkpoint")
+    return workdir
+
+
+def test_train_assembles_and_runs_the_proven_tesla_recipe(tmp_path, monkeypatch) -> None:
+    workdir = _train_workdir(tmp_path)
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "amil@gpu.example.edu")
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_DEVICE", "4")
+
+    recorded: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        recorded.append(list(command))
+        if command[0] == "rsync" and command[-1].endswith("runs/finetune"):
+            best = workdir / "runs" / "finetune" / "weights" / "best.pt"
+            best.parent.mkdir(parents=True, exist_ok=True)
+            best.write_bytes(b"trained")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = RareSpotAdapter()
+    ctx = TrainContext(
+        params={
+            "weights_uri": str(tmp_path / "active.pt"),
+            "data_yaml": str(workdir / "dataset" / "data.yaml"),
+            "run_dir": str(workdir / "runs"),
+            "yolov5_path": str(tmp_path / "vendored-yolov5"),
+            "new_tile_count": 60,
+        },
+        workdir=workdir,
+    )
+    artifact = adapter.train(ctx)
+
+    assert artifact["weights_uri"] == str(workdir / "runs" / "finetune" / "weights" / "best.pt")
+    assert artifact["hyp_sha256"] == hashlib.sha256(HYP_PATH.read_bytes()).hexdigest()
+    assert artifact["gpu_host"] == "amil@gpu.example.edu"
+
+    # Staged copies: warm weights, hyp, and the BN-patched train.py (the
+    # vendored file itself must stay pristine).
+    assert (workdir / "warmstart.pt").read_bytes() == b"fake-checkpoint"
+    assert (workdir / "hyp.yaml").is_file()
+    staged = (workdir / "yolov5" / "train.py").read_text(encoding="utf-8")
+    assert "GoldGate BN-freeze patch" in staged
+    assert "GoldGate" not in (tmp_path / "vendored-yolov5" / "train.py").read_text(encoding="utf-8")
+
+    # The remote sequence: mkdir, push, docker run, pull.
+    assert [c[0] for c in recorded] == ["ssh", "rsync", "ssh", "rsync"]
+    docker = " ".join(recorded[2])
+    assert "--gpus device=4" in docker
+    assert "--shm-size 8g" in docker
+    assert "GIT_PYTHON_REFRESH=quiet" in docker
+    assert "pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime" in docker
+    assert "pillow<10" in docker and "tensorboard" in docker
+    assert "DejaVuSans.ttf" in docker  # font pre-seed; check_font's download 404s
+    # The exact plan-6.2 command against container paths.
+    assert "/workspace/yolov5/train.py" in docker
+    assert "/workspace/warmstart.pt" in docker
+    assert "/workspace/dataset/data.container.yaml" in docker
+    assert "--freeze 10" in docker
+    # data.container.yaml written with the container dataset root.
+    container_yaml = (workdir / "dataset" / "data.container.yaml").read_text(encoding="utf-8")
+    assert "path: /workspace/dataset" in container_yaml
+
+
+def test_train_translates_barrel_weights_to_the_models_mount(tmp_path, monkeypatch) -> None:
+    workdir = _train_workdir(tmp_path)
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "amil@gpu.example.edu")
+    recorded: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        recorded.append(list(command))
+        if command[0] == "rsync" and command[-1].endswith("runs/finetune"):
+            best = workdir / "runs" / "finetune" / "weights" / "best.pt"
+            best.parent.mkdir(parents=True, exist_ok=True)
+            best.write_bytes(b"trained")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = RareSpotAdapter()
+    ctx = TrainContext(
+        params={
+            "weights_uri": "/mnt/barrel-data/ultra/models/yolo/RareSpotWeights.pt",
+            "data_yaml": str(workdir / "dataset" / "data.yaml"),
+            "run_dir": str(workdir / "runs"),
+            "yolov5_path": str(tmp_path / "vendored-yolov5"),
+        },
+        workdir=workdir,
+    )
+    adapter.train(ctx)
+    docker = " ".join(recorded[2])
+    # Barrel weights are served read-only via the /models mount, not rsynced.
+    assert "/models/yolo/RareSpotWeights.pt" in docker
+    assert not (workdir / "warmstart.pt").exists()
+
+
+def test_assemble_finetune_dataset_layout_exclusion_and_identity(tmp_path) -> None:
+    source_root = tmp_path / "frames"
+    source_root.mkdir()
+    for suffix in (".JPG", ".JPG.xml"):
+        os.symlink(TEST_PRAIRIE / f"{FRAME}{suffix}", source_root / f"{FRAME}{suffix}")
+    adapter = RareSpotAdapter()
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    ctx = TrainContext(
+        params={"frame_source_dir": str(source_root), "site_id": "EnrNE"},
+        workdir=workdir,
+    )
+    data_yaml, manifest_sha, tile_count = adapter._assemble_finetune_dataset(ctx)
+
+    dataset = workdir / "dataset"
+    assert data_yaml == str(dataset / "data.yaml")
+    assert tile_count > 0
+    train_images = sorted((dataset / "images" / "train").glob("*.jpg"))
+    val_images = sorted((dataset / "images" / "val").glob("*.jpg"))
+    assert train_images and val_images  # never an empty side
+    # Every labeled train image has its label twin.
+    manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
+    labeled_rows = [row for row in manifest["rows"] if row["label_sha256"]]
+    assert labeled_rows
+    for row in labeled_rows:
+        split = row["split"]
+        stem = Path(row["tile"]).stem
+        assert (dataset / "labels" / split / f"{stem}.txt").is_file()
+    assert manifest_sha == hashlib.sha256((dataset / "manifest.json").read_bytes()).hexdigest()
+
+    # Gold exclusion by frame identity empties the pool -> loud refusal.
+    ctx_excluded = TrainContext(
+        params={
+            "frame_source_dir": str(source_root),
+            "gold_exclusion_item_ids": [FRAME],
+        },
+        workdir=tmp_path / "job2",
+    )
+    (tmp_path / "job2").mkdir()
+    with pytest.raises(RuntimeError, match="zero labeled tiles"):
+        adapter._assemble_finetune_dataset(ctx_excluded)

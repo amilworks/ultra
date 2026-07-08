@@ -333,10 +333,21 @@ func (deps ServerDeps) handleDispatchTrainingRetrain(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	job, ok := deps.dispatchTrainingJob(w, r, modelKey, "training.assemble", domain.JSONMap{
+	// Warm-start provenance rides the envelope (same worker-contract rule as
+	// the benchmark dispatch): finetune NEVER trains from scratch, and the
+	// worker has no store access to look the active weights up itself.
+	params := domain.JSONMap{
 		"purpose": "finetune_mix",
 		"note":    strings.TrimSpace(request.Note),
-	})
+	}
+	if activeID := strings.TrimSpace(status.ActiveModelVersion); activeID != "" {
+		active, activeErr := training.GetTrainingModelVersion(r.Context(), activeID)
+		if activeErr == nil && strings.TrimSpace(active.WeightsURI) != "" {
+			params["weights_uri"] = active.WeightsURI
+			params["warm_start_version_id"] = activeID
+		}
+	}
+	job, ok := deps.dispatchTrainingJob(w, r, modelKey, "training.assemble", params)
 	if !ok {
 		return
 	}

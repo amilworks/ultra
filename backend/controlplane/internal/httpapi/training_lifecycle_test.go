@@ -640,3 +640,47 @@ func TestTrainingBenchmarkDispatchCarriesWorkerContractParams(t *testing.T) {
 		t.Fatalf("gold_set_content_hash = %q want %q", got, goldHash)
 	}
 }
+
+func TestTrainingRetrainDispatchCarriesWarmStartWeights(t *testing.T) {
+	t.Parallel()
+	router, _, bus := newTrainingTestRouter(t)
+	goldSetID, goldHash := freezeGoldViaAPI(t, router, "yolov5_rarespot", "pending_new_survey")
+	// Active v0 must pass on the current gold (the fixed Gate A precondition).
+	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v0", goldSetID, goldHash, passingDetectionMetrics(0.83))
+
+	// A sync worker reports counts above every policy threshold.
+	rec, dispatch := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/sync", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("sync dispatch = %d", rec.Code)
+	}
+	syncJobID, _ := dispatch["job_id"].(string)
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/jobs/"+syncJobID+"/status-result", map[string]any{
+		"reviewed_images": 80,
+		"retrain_gate_counts": map[string]any{
+			"reviewed_images": 80,
+			"total_objects":   400,
+			"per_class":       map[string]any{"prairie_dog": 60, "burrow": 340},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status-result = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/retrain-request", map[string]any{"note": "e2e"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retrain dispatch = %d body=%s", rec.Code, rec.Body.String())
+	}
+	jobs := bus.TrainingJobs()
+	assemble := jobs[len(jobs)-1]
+	if assemble.JobType != "training.assemble" {
+		t.Fatalf("expected assemble job, got %s", assemble.JobType)
+	}
+	// Warm-start provenance rides the envelope: finetune never trains from
+	// scratch and the worker has no store access to look the weights up.
+	if got, _ := assemble.Params["weights_uri"].(string); got != "data/models/yolo/RareSpotWeights.pt" {
+		t.Fatalf("weights_uri = %q", got)
+	}
+	if got, _ := assemble.Params["warm_start_version_id"].(string); got != "yolov5_rarespot-v0" {
+		t.Fatalf("warm_start_version_id = %q", got)
+	}
+}

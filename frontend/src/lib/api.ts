@@ -1786,8 +1786,8 @@ export class ApiClient {
     return (await response.json()) as TrainingModelsResponse;
   }
 
-  async syncPrairieActiveLearningDataset(): Promise<PrairieSyncResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/sync"), {
+  async syncTrainingModel(modelKey: string): Promise<PrairieSyncResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/sync`), {
       method: "POST",
       headers: this.headers(),
       credentials: "include",
@@ -1798,8 +1798,8 @@ export class ApiClient {
     return (await response.json()) as PrairieSyncResponse;
   }
 
-  async getPrairieActiveLearningStatus(): Promise<PrairieStatusResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/status"), {
+  async getTrainingModelStatus(modelKey: string): Promise<PrairieStatusResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/status`), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",
@@ -1810,10 +1810,11 @@ export class ApiClient {
     return (await response.json()) as PrairieStatusResponse;
   }
 
-  async runPrairieBenchmark(
+  async runTrainingBenchmark(
+    modelKey: string,
     request?: PrairieBenchmarkRunRequest
   ): Promise<PrairieBenchmarkRunResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/benchmark/run"), {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/benchmark/run`), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request ?? { mode: "canonical_only" }),
@@ -1825,8 +1826,8 @@ export class ApiClient {
     return (await response.json()) as PrairieBenchmarkRunResponse;
   }
 
-  async requestPrairieRetrain(request: PrairieRetrainRequest): Promise<TrainingJobResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/retrain-request"), {
+  async requestTrainingRetrain(modelKey: string, request: PrairieRetrainRequest): Promise<TrainingJobResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/retrain-request`), {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(request),
@@ -1838,8 +1839,8 @@ export class ApiClient {
     return (await response.json()) as TrainingJobResponse;
   }
 
-  async listPrairieRetrainRequests(): Promise<PrairieRetrainListResponse> {
-    const response = await fetch(buildUrl(this.baseUrl, "/v2/training/prairie/retrain-requests"), {
+  async listTrainingRetrainRequests(modelKey: string): Promise<PrairieRetrainListResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/retrain-requests`), {
       method: "GET",
       headers: this.headers(),
       credentials: "include",

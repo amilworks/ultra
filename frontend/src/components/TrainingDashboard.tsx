@@ -326,7 +326,7 @@ export function TrainingDashboard({
               onClick={() =>
                 void act(
                   "Syncing reviewed annotations from BisQue…",
-                  () => apiClient.syncPrairieActiveLearningDataset(),
+                  () => apiClient.syncTrainingModel(modelKey),
                   "Synced."
                 )
               }
@@ -368,16 +368,16 @@ export function TrainingDashboard({
               onRetryFreeze={() => setDialog("freeze")}
               onRunBaseline={() =>
                 void act("Running the baseline benchmark…", () =>
-                  apiClient.runPrairieBenchmark({ mode: "canonical_only" })
+                  apiClient.runTrainingBenchmark(modelKey, { mode: "canonical_only" })
                 )
               }
               onRequestRetrain={() =>
                 void act("Submitting the retraining request…", () =>
-                  apiClient.requestPrairieRetrain({ confirm_launch: true })
+                  apiClient.requestTrainingRetrain(modelKey, { confirm_launch: true })
                 )
               }
               onRunBenchmark={() =>
-                void act("Running the benchmark…", () => apiClient.runPrairieBenchmark({ mode: "promotion_packet" }))
+                void act("Running the benchmark…", () => apiClient.runTrainingBenchmark(modelKey, { mode: "promotion_packet" }))
               }
               onPromoteCanary={() =>
                 state.candidate

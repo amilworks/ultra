@@ -104,12 +104,6 @@ func (deps ServerDeps) handleTrainingModelStatus(w http.ResponseWriter, r *http.
 	deps.writeTrainingModelStatus(w, r, strings.TrimSpace(chi.URLParam(r, "model_key")))
 }
 
-// handlePrairieStatus is the transitional alias of the generic status read
-// with model_key pinned to the canonical RareSpot key (M1.5 PR 3 removes it).
-func (deps ServerDeps) handlePrairieStatus(w http.ResponseWriter, r *http.Request) {
-	deps.writeTrainingModelStatus(w, r, store.TrainingSeedModelKey)
-}
-
 // The benchmark readiness fields derive from the ACTIVE version's pinned
 // benchmark provenance (metadata.guardrails.benchmarked_at, the plan-pinned
 // location the M2 engine stamps) — schema-agnostic, so a segmentation model's
@@ -250,13 +244,14 @@ func (deps ServerDeps) handleTrainingVersions(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"count": len(versions), "versions": versions})
 }
 
-func (deps ServerDeps) handlePrairieRetrainRequests(w http.ResponseWriter, r *http.Request) {
+func (deps ServerDeps) handleTrainingRetrainRequests(w http.ResponseWriter, r *http.Request) {
 	training, ok := deps.trainingStore()
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "requests": []any{}})
 		return
 	}
-	requests, err := training.ListTrainingRetrainRequests(r.Context(), store.TrainingSeedModelKey, clampLimit(parseLimit(r, 200), 1000))
+	modelKey := strings.TrimSpace(chi.URLParam(r, "model_key"))
+	requests, err := training.ListTrainingRetrainRequests(r.Context(), modelKey, clampLimit(parseLimit(r, 200), 1000))
 	if err != nil {
 		writeStoreError(w, err)
 		return

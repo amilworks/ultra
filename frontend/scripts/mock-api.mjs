@@ -2520,7 +2520,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/training/prairie/status") {
+  if (request.method === "GET" && url.pathname === "/v2/training/models/yolov5_rarespot/status") {
     // Primary fixture = the LAUNCH state (plan section 14.11): held-out slice
     // pending, frozen gold, truthful thresholds - the all-green demo is gone.
     sendJson(response, 200, {
@@ -2592,7 +2592,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/training/prairie/retrain-requests") {
+  if (request.method === "GET" && url.pathname === "/v2/training/models/yolov5_rarespot/retrain-requests") {
     sendJson(response, 200, { count: 0, requests: [] });
     return;
   }

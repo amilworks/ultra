@@ -24,8 +24,8 @@ export const loadTrainingDashboardSnapshot = async (
 ): Promise<TrainingDashboardSnapshot> => {
   const [modelsPayload, status, retrainPayload] = await Promise.all([
     apiClient.listTrainingModels(),
-    apiClient.getPrairieActiveLearningStatus(),
-    apiClient.listPrairieRetrainRequests(),
+    apiClient.getTrainingModelStatus("yolov5_rarespot"),
+    apiClient.listTrainingRetrainRequests("yolov5_rarespot"),
   ]);
   return {
     models: modelsPayload.models,
@@ -53,8 +53,7 @@ export const getModelStatus = async (
   apiClient: ApiClient,
   modelKey: string
 ): Promise<TrainingModelStatus> => {
-  void modelKey; // routes to the prairie alias until the PR 3 cutover
-  const status = await apiClient.getPrairieActiveLearningStatus();
+  const status = await apiClient.getTrainingModelStatus(modelKey);
   return status as TrainingModelStatus;
 };
 
@@ -72,7 +71,7 @@ export const loadTrainingSnapshot = async (
   const [modelsPayload, status, retrainPayload, lineageSnapshot] = await Promise.all([
     apiClient.listTrainingModels(),
     getModelStatus(apiClient, modelKey),
-    apiClient.listPrairieRetrainRequests(),
+    apiClient.listTrainingRetrainRequests(modelKey),
     loadTrainingLineageSnapshot(apiClient, modelKey, options),
   ]);
   return {

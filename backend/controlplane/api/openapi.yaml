@@ -2818,6 +2818,21 @@ paths:
                 $ref: "#/components/schemas/V2TrainingModelStatusResponse"
         "404":
           description: Unknown model key
+  /v2/training/models/{model_key}/retrain-requests:
+    get:
+      operationId: listV2TrainingRetrainRequests
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Retrain requests for the model
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2PrairieRetrainListResponse"
   /v2/training/models/{model_key}/sync:
     post:
       operationId: dispatchV2TrainingSync
@@ -2926,56 +2941,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JsonObject" }
-  /v2/training/prairie/status:
-    get:
-      operationId: getV2PrairieStatus
-      responses:
-        "200":
-          description: Prairie training status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2PrairieStatusResponse"
-  /v2/training/prairie/retrain-requests:
-    get:
-      operationId: listV2PrairieRetrainRequests
-      responses:
-        "200":
-          description: Prairie retrain requests
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2PrairieRetrainListResponse"
-  /v2/training/prairie/sync:
-    post:
-      operationId: syncV2PrairieActiveLearning
-      responses:
-        "501":
-          description: Prairie active-learning sync is not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
-  /v2/training/prairie/benchmark/run:
-    post:
-      operationId: runV2PrairieBenchmark
-      responses:
-        "501":
-          description: Prairie benchmark jobs are not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
-  /v2/training/prairie/retrain-request:
-    post:
-      operationId: requestV2PrairieRetrain
-      responses:
-        "501":
-          description: Prairie retraining jobs are not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/training/datasets:
     get:
       operationId: listV2TrainingDatasets

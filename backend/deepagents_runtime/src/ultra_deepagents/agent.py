@@ -170,6 +170,24 @@ For substantial prose, match the genre, audience, purpose, and requested voice. 
 Plainness is the default. Keep technique invisible; use ornament only when it serves the genre and argument, and discuss the craft only when asked.
 """
 
+MATH_FORMATTING_GUIDANCE = """
+## Math formatting
+
+The chat renders Markdown with KaTeX, so mathematics must be delimited or it shows as raw LaTeX.
+
+- Fence every formula: inline math in `$ ... $`, display math in `$$ ... $$` with the `$$` on their own lines. Never emit a bare `\\begin{...}` environment (bmatrix, aligned, cases, ...) or a bare `\\boxed{...}` outside `$$`.
+- Inside display math use `\\\\` for row breaks (matrices, `aligned`, `cases`), and do not begin a line of the math body with `-`, `*`, `#`, or a blank line — those collide with Markdown block syntax and split the equation. Write subtractions on one line (`a - b - c`) or use an `aligned` block with `&`/`\\\\`.
+- Keep a whole equation in one delimited block rather than breaking it across paragraphs or list items.
+
+## Tables
+
+The chat renders GitHub-Flavored-Markdown pipe tables, which only display when the header, the `---` delimiter row, and every data row have the SAME number of columns.
+
+- Give the delimiter row exactly one `---` cell per column, matching the header.
+- If a cell's text contains a literal `|` (absolute value `|x|`, bitwise/logical or, alternatives `a|b`), escape it as `\\|`, or wrap the cell in `$...$` / backticks — an unescaped `|` silently adds a column and the whole table renders as raw text.
+- Keep tables out of blockquotes and list items when possible; a top-level table is the most reliable.
+"""
+
 PLOT_WORKFLOW_GUIDANCE = """
 For code, simulation, model-training, or algorithm-demonstration prompts that ask for plots,
 run the code and create inspectable artifacts. In the final answer, mention each plot near
@@ -1038,6 +1056,7 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     sections = [
         SYSTEM_PROMPT.strip(),
         WRITING_GUIDANCE.strip(),
+        MATH_FORMATTING_GUIDANCE.strip(),
         PLOT_WORKFLOW_GUIDANCE.strip(),
         SANDBOX_RUNTIME_GUIDANCE.strip(),
         build_sandbox_resources_guidance(settings),

@@ -40,3 +40,11 @@ def test_capability_phase_mapping_is_total() -> None:
     assert set(phases) == set(TRAINING_JOB_PHASES)
     for phase in phases:
         assert phase.startswith("training.")
+
+
+def test_job_phases_match_shared_fixture() -> None:
+    """The Python half of the 'one enum PR' gate (Go mirror:
+    domain.TrainingJobPhases, pinned by TestTrainingJobPhasesMatchSharedContractFixture)."""
+    fixture = _load_fixture()
+    assert fixture["job_phases"], "fixture job_phases is empty - the enum gate would be vacuous"
+    assert list(TRAINING_JOB_PHASES) == fixture["job_phases"]

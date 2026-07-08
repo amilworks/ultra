@@ -1,5 +1,12 @@
 {
   "_comment": "GoldGate cross-language contract fixture. 'manifest' is pinned by BOTH the Go registry-seed parity test (backend/controlplane/internal/store/training_seed_test.go) and the Python manifest parity test (backend/deepagents_runtime/tests/test_training_manifest.py). 'seed' is pinned by the Go test only (schema.sql + MemoryStore seed coherence). Change any value here ONLY together with schema.sql, training_seed.go, and manifests.py.",
+  "job_phases": [
+    "training.sync",
+    "training.assemble",
+    "training.finetune",
+    "training.benchmark",
+    "training.gold_freeze"
+  ],
   "manifest": {
     "model_key": "yolov5_rarespot",
     "task_type": "detection",

@@ -19,7 +19,8 @@ import (
 // (active_model_version is a VERSION id that exists, never the model key).
 
 type trainingContractFixture struct {
-	Manifest struct {
+	JobPhases []string `json:"job_phases"`
+	Manifest  struct {
 		ModelKey             string            `json:"model_key"`
 		TaskType             string            `json:"task_type"`
 		DisplayName          string            `json:"display_name"`
@@ -159,6 +160,27 @@ func TestTrainingSeedMatchesSharedContractFixture(t *testing.T) {
 		lineage.Scope != fixture.Seed.Lineage.Scope ||
 		lineage.ActiveVersionID != fixture.Seed.Lineage.ActiveVersionID {
 		t.Fatalf("lineage seed %+v does not match fixture %+v", lineage, fixture.Seed.Lineage)
+	}
+}
+
+// TestTrainingJobPhasesMatchSharedContractFixture is the Go half of the "one
+// enum PR" gate: the five phase literals exist once in Go
+// (domain.TrainingJobPhases) and once in Python (TRAINING_JOB_PHASES), both
+// pinned to the same fixture. Adding a sixth literal anywhere must fail here.
+func TestTrainingJobPhasesMatchSharedContractFixture(t *testing.T) {
+	t.Parallel()
+	fixture := loadTrainingContractFixture(t)
+	if len(fixture.JobPhases) == 0 {
+		t.Fatal("fixture job_phases is empty - the enum gate would be vacuous")
+	}
+	assertStringSliceEqual(t, "job_phases", domain.TrainingJobPhases, fixture.JobPhases)
+	for _, phase := range fixture.JobPhases {
+		if !domain.IsTrainingJobPhase(phase) {
+			t.Fatalf("IsTrainingJobPhase(%q) = false for a fixture phase", phase)
+		}
+	}
+	if domain.IsTrainingJobPhase("training.rarespot.finetune") {
+		t.Fatal("model-named job types must never validate - phases are generic, model_key travels in the envelope")
 	}
 }
 

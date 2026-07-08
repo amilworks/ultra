@@ -7,6 +7,28 @@ import "time"
 // columns, routes, or enums. Design:
 // planning/2026-07-07-goldgate-continual-finetuning-plan.md
 
+// TrainingJobPhases is the complete, frozen set of training job types — the
+// "one enum PR": these five literals exist once per language (Python mirror:
+// ultra_deepagents.training.manifests.TRAINING_JOB_PHASES), pinned to the
+// shared fixture by tests on both sides. M3 and M5 add ZERO literals; a model
+// selects from these via its manifest capabilities, never by adding phases.
+var TrainingJobPhases = []string{
+	"training.sync",
+	"training.assemble",
+	"training.finetune",
+	"training.benchmark",
+	"training.gold_freeze",
+}
+
+func IsTrainingJobPhase(jobType string) bool {
+	for _, phase := range TrainingJobPhases {
+		if jobType == phase {
+			return true
+		}
+	}
+	return false
+}
+
 type TrainingModelRecord struct {
 	ModelKey             string    `json:"model_key"`
 	TaskType             string    `json:"task_type"`

@@ -293,7 +293,7 @@ export type TrainingJobResponse = {
 
 export type TrainingDomainOwnerScope = "shared" | "private";
 export type TrainingLineageScope = "shared" | "fork";
-export type TrainingVersionStatus = "candidate" | "canary" | "active" | "retired";
+export type TrainingVersionStatus = "candidate" | "canary" | "active" | "retired" | "rejected";
 
 export type TrainingDomainRecord = {
   domain_id: string;
@@ -337,6 +337,7 @@ export type TrainingModelVersionRecord = {
   status: TrainingVersionStatus;
   metrics: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  activated_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -348,6 +349,9 @@ export type TrainingModelVersionListResponse = {
 
 export type TrainingVersionPromoteRequest = {
   note?: string | null;
+  // Required by the server when promoting canary -> active while the gold
+  // set's held-out slice is pending (plan section 8.2); audited.
+  override_reason?: string | null;
 };
 
 export type TrainingVersionRollbackRequest = {

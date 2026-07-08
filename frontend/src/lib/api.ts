@@ -1964,6 +1964,60 @@ export class ApiClient {
     return (await response.json()) as TrainingModelVersionResponse;
   }
 
+  // GoldGate generic write routes (minted generic in the plan's section 3.6;
+  // they 404 until the M1 backend lands - the capability-gated UI never calls
+  // them before their echoes exist, and a stray 404 renders inline).
+  async createGoldSetDraft(modelKey: string): Promise<Record<string, unknown>> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/training/models/${encodeURIComponent(modelKey)}/gold-sets`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({}),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as Record<string, unknown>;
+  }
+
+  async freezeGoldSet(modelKey: string, goldSetId: string): Promise<Record<string, unknown>> {
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/training/models/${encodeURIComponent(modelKey)}/gold-sets/${encodeURIComponent(goldSetId)}/freeze`
+      ),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ confirm: true }),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as Record<string, unknown>;
+  }
+
+  async rejectModelVersion(versionId: string, reason?: string): Promise<Record<string, unknown>> {
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/training/model-versions/${encodeURIComponent(versionId)}/reject`),
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ reason: reason ?? "" }),
+        credentials: "include",
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as Record<string, unknown>;
+  }
+
   async rollbackTrainingModelVersion(
     versionId: string,
     request: TrainingVersionRollbackRequest

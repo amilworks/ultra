@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"net/http"
 	"strings"
 	"time"
@@ -53,6 +54,8 @@ type trainingWriteStore interface {
 	UpdateTrainingRetrainRequest(ctx context.Context, input domain.UpdateTrainingRetrainRequestInput) (domain.TrainingRetrainRequestRecord, error)
 	InsertTrainingBenchmarkRun(ctx context.Context, input domain.InsertTrainingBenchmarkRunInput) (domain.TrainingBenchmarkRunRecord, error)
 	GetLatestTrainingBenchmarkRun(ctx context.Context, modelVersionID string, goldSetContentHash string) (domain.TrainingBenchmarkRunRecord, error)
+	InsertTrainingCanaryObservation(ctx context.Context, input domain.InsertTrainingCanaryObservationInput) (domain.TrainingCanaryObservationRecord, error)
+	ListTrainingCanaryObservations(ctx context.Context, modelKey string, canaryVersionID string, limit int) ([]domain.TrainingCanaryObservationRecord, error)
 	UpsertTrainingModelStatus(ctx context.Context, record domain.TrainingModelStatusRecord) (domain.TrainingModelStatusRecord, error)
 	ListTrainingGuardrailClauses(ctx context.Context, modelKey string) ([]domain.TrainingGuardrailClauseRecord, error)
 	GetTrainingGatePolicy(ctx context.Context, modelKey string) (domain.TrainingGatePolicyRecord, error)
@@ -270,11 +273,29 @@ func (deps ServerDeps) handleDispatchTrainingBenchmark(w http.ResponseWriter, r 
 			return
 		}
 	}
+	// The worker contract (worker.py _benchmark) requires weights_uri +
+	// gold_manifest_uri + model_version_id — resolve them HERE so the worker
+	// never needs store reads. A version row without weights cannot be
+	// benchmarked; surfacing that now beats a cryptic worker failure.
+	version, err := training.GetTrainingModelVersion(r.Context(), versionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if strings.TrimSpace(version.WeightsURI) == "" {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "version " + versionID + " has no weights_uri to benchmark",
+		})
+		return
+	}
 	job, ok := deps.dispatchTrainingJob(w, r, modelKey, "training.benchmark", domain.JSONMap{
 		"version_id":            versionID,
+		"model_version_id":      versionID,
+		"weights_uri":           version.WeightsURI,
 		"gold_set_id":           gold.GoldSetID,
 		"gold_set_content_hash": gold.ContentHash,
 		"split_manifest_uri":    gold.SplitManifestURI,
+		"gold_manifest_uri":     gold.SplitManifestURI,
 	})
 	if !ok {
 		return
@@ -396,9 +417,20 @@ func (deps ServerDeps) handleRegisterTrainingModelVersion(w http.ResponseWriter,
 }
 
 func trainingLineageForModel(ctx context.Context, training trainingWriteStore, modelKey string) string {
+	lineage, ok := trainingSharedLineageForModel(ctx, training, modelKey)
+	if !ok {
+		return ""
+	}
+	return lineage.LineageID
+}
+
+// trainingSharedLineageForModel is the shared-scope lineage walk every serving
+// read shares (status, register, resolve) - the single active pointer lives on
+// this row.
+func trainingSharedLineageForModel(ctx context.Context, training trainingWriteStore, modelKey string) (domain.TrainingLineageRecord, bool) {
 	domains, err := training.ListTrainingDomains(ctx, 500, 0)
 	if err != nil {
-		return ""
+		return domain.TrainingLineageRecord{}, false
 	}
 	for _, trainingDomain := range domains {
 		lineages, err := training.ListTrainingLineages(ctx, trainingDomain.DomainID, 500, 0)
@@ -407,11 +439,11 @@ func trainingLineageForModel(ctx context.Context, training trainingWriteStore, m
 		}
 		for _, lineage := range lineages {
 			if lineage.ModelKey == modelKey && lineage.Scope == "shared" {
-				return lineage.LineageID
+				return lineage, true
 			}
 		}
 	}
-	return ""
+	return domain.TrainingLineageRecord{}, false
 }
 
 func (deps ServerDeps) handleRejectTrainingModelVersion(w http.ResponseWriter, r *http.Request) {
@@ -553,6 +585,157 @@ func (deps ServerDeps) handleRollbackTrainingModelVersionReal(w http.ResponseWri
 		return
 	}
 	writeJSON(w, http.StatusOK, version)
+}
+
+// --- Serving-weights resolver + canary observations (section 8.1) -----------
+
+// trainingRunServesCanary is the ONE canary split policy: deterministic
+// fnv1a-32(run_id) % 10 == 0 -> 10% canary, 90% active. An empty run_id can
+// never land in the canary bucket (anonymous reads always serve active).
+func trainingRunServesCanary(runID string) bool {
+	if runID == "" {
+		return false
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(runID))
+	return hash.Sum32()%10 == 0
+}
+
+// handleResolveTrainingServingWeights is THE shared serving-weights resolver
+// (section 8.1): every consumer (rarespot config, MegaSeg /v1/infer callers)
+// reads the lineage active pointer + the canary policy from here - promote,
+// canary, and rollback drive serving with no redeploy. No active version is a
+// 404 by design: consumers fail open to their baked weights.
+func (deps ServerDeps) handleResolveTrainingServingWeights(w http.ResponseWriter, r *http.Request) {
+	training, ok := deps.trainingWriteStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "training reads are not configured"})
+		return
+	}
+	modelKey := strings.TrimSpace(chi.URLParam(r, "model_key"))
+	if _, err := training.GetTrainingModel(r.Context(), modelKey); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	lineage, ok := trainingSharedLineageForModel(r.Context(), training, modelKey)
+	if !ok || strings.TrimSpace(lineage.ActiveVersionID) == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error": "no active version for model " + modelKey + " - serve the baked default weights",
+		})
+		return
+	}
+	serve, err := training.GetTrainingModelVersion(r.Context(), lineage.ActiveVersionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error": "active version " + lineage.ActiveVersionID + " has no version row - serve the baked default weights",
+			})
+			return
+		}
+		writeStoreError(w, err)
+		return
+	}
+	isCanary := false
+	if trainingRunServesCanary(strings.TrimSpace(r.URL.Query().Get("run_id"))) {
+		if canary, ok := newestTrainingCanaryVersion(r.Context(), training, lineage.LineageID); ok {
+			serve = canary
+			isCanary = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model_key":   modelKey,
+		"weights_uri": serve.WeightsURI,
+		"version_id":  serve.VersionID,
+		"is_canary":   isCanary,
+	})
+}
+
+func newestTrainingCanaryVersion(ctx context.Context, training trainingWriteStore, lineageID string) (domain.TrainingModelVersionRecord, bool) {
+	versions, err := training.ListTrainingModelVersions(ctx, lineageID, 500, 0)
+	if err != nil {
+		return domain.TrainingModelVersionRecord{}, false
+	}
+	// Newest-first by the store's ordering contract.
+	for _, version := range versions {
+		if version.Status == "canary" {
+			return version, true
+		}
+	}
+	return domain.TrainingModelVersionRecord{}, false
+}
+
+// handleInsertTrainingCanaryObservation (worker contract): shadow-serving
+// telemetry, adapter-defined JSONB metrics. active_version_id defaults to the
+// lineage pointer at insert time so the observation pins WHICH active the
+// canary shadowed.
+func (deps ServerDeps) handleInsertTrainingCanaryObservation(w http.ResponseWriter, r *http.Request) {
+	training, ok := deps.trainingWriteStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "training writes are not configured"})
+		return
+	}
+	modelKey := strings.TrimSpace(chi.URLParam(r, "model_key"))
+	if _, err := training.GetTrainingModel(r.Context(), modelKey); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	var request struct {
+		RunID           string         `json:"run_id"`
+		CanaryVersionID string         `json:"canary_version_id"`
+		ActiveVersionID string         `json:"active_version_id"`
+		CanaryMetrics   domain.JSONMap `json:"canary_metrics"`
+		ActiveMetrics   domain.JSONMap `json:"active_metrics"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if strings.TrimSpace(request.RunID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("run_id is required"))
+		return
+	}
+	if strings.TrimSpace(request.CanaryVersionID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("canary_version_id is required"))
+		return
+	}
+	activeVersionID := strings.TrimSpace(request.ActiveVersionID)
+	if activeVersionID == "" {
+		if lineage, ok := trainingSharedLineageForModel(r.Context(), training, modelKey); ok {
+			activeVersionID = strings.TrimSpace(lineage.ActiveVersionID)
+		}
+	}
+	record, err := training.InsertTrainingCanaryObservation(r.Context(), domain.InsertTrainingCanaryObservationInput{
+		ModelKey:        modelKey,
+		CanaryVersionID: strings.TrimSpace(request.CanaryVersionID),
+		ActiveVersionID: activeVersionID,
+		RunID:           strings.TrimSpace(request.RunID),
+		CanaryMetrics:   request.CanaryMetrics,
+		ActiveMetrics:   request.ActiveMetrics,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
+func (deps ServerDeps) handleListTrainingCanaryObservations(w http.ResponseWriter, r *http.Request) {
+	training, ok := deps.trainingWriteStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "training reads are not configured"})
+		return
+	}
+	modelKey := strings.TrimSpace(chi.URLParam(r, "model_key"))
+	if _, err := training.GetTrainingModel(r.Context(), modelKey); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	canaryVersionID := strings.TrimSpace(r.URL.Query().Get("canary_version_id"))
+	observations, err := training.ListTrainingCanaryObservations(r.Context(), modelKey, canaryVersionID, clampLimit(parseLimit(r, 200), 1000))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(observations), "observations": observations})
 }
 
 // --- Worker endpoints (the Python training worker's HTTP contract) ----------

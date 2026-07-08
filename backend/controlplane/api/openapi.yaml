@@ -2941,6 +2941,63 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JsonObject" }
+  /v2/training/models/{model_key}/resolve:
+    get:
+      operationId: resolveV2TrainingServingWeights
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: run_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: the ONE shared serving-weights resolution (lineage active pointer + deterministic 10% canary split on run_id)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingServingResolution" }
+        "404":
+          description: unknown model key, or no active version (consumers fail open to their baked weights)
+  /v2/training/models/{model_key}/canary-observations:
+    post:
+      operationId: insertV2TrainingCanaryObservation
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: shadow-serving observation recorded (worker contract; adapter-defined JSONB metrics)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingCanaryObservationRecord" }
+        "400":
+          description: run_id or canary_version_id missing
+    get:
+      operationId: listV2TrainingCanaryObservations
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: canary_version_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        "200":
+          description: newest-first canary observations for the UI drift echo
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingCanaryObservationListResponse" }
   /v2/training/datasets:
     get:
       operationId: listV2TrainingDatasets
@@ -3862,6 +3919,37 @@ components:
         job_type: { type: string }
         model_key: { type: string }
         status: { type: string }
+    V2TrainingServingResolution:
+      type: object
+      description: The shared serving-weights resolver's answer (plan section 8.1) - the lineage active pointer, or the newest canary for the deterministic fnv1a-32(run_id) 10% split.
+      required: [model_key, weights_uri, version_id, is_canary]
+      properties:
+        model_key: { type: string }
+        weights_uri: { type: string }
+        version_id: { type: string }
+        is_canary: { type: boolean }
+    V2TrainingCanaryObservationRecord:
+      type: object
+      required: [observation_id, canary_version_id, run_id, canary_metrics, created_at]
+      additionalProperties: true
+      properties:
+        observation_id: { type: string }
+        model_key: { type: string }
+        canary_version_id: { type: string }
+        active_version_id: { type: string }
+        run_id: { type: string }
+        canary_metrics: { $ref: "#/components/schemas/JsonObject" }
+        active_metrics: { $ref: "#/components/schemas/JsonObject" }
+        created_at: { type: string }
+    V2TrainingCanaryObservationListResponse:
+      type: object
+      required: [count, observations]
+      properties:
+        count: { type: integer }
+        observations:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2TrainingCanaryObservationRecord"
     V2TrainingModelStatusResponse:
       type: object
       description: Superset of V2PrairieStatusResponse with the model key, generalized per-class counts, and the Gate A thresholds mirror.

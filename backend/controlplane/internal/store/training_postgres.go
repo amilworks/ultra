@@ -1305,6 +1305,77 @@ LIMIT 1`,
 	return record, nil
 }
 
+func (s *PostgresStore) InsertTrainingCanaryObservation(ctx context.Context, input domain.InsertTrainingCanaryObservationInput) (domain.TrainingCanaryObservationRecord, error) {
+	modelKey := strings.TrimSpace(input.ModelKey)
+	if modelKey == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation model key is required")
+	}
+	canaryVersionID := strings.TrimSpace(input.CanaryVersionID)
+	if canaryVersionID == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation canary version id is required")
+	}
+	runID := strings.TrimSpace(input.RunID)
+	if runID == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation run id is required")
+	}
+	observationID := strings.TrimSpace(input.ObservationID)
+	if observationID == "" {
+		observationID = domain.NewID("canary_observation")
+	}
+	record, err := scanTrainingCanaryObservationRow(s.pool.QueryRow(ctx, `
+INSERT INTO control_training_canary_observations (
+  observation_id, model_key, canary_version_id, active_version_id, run_id,
+  canary_metrics, active_metrics, created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING observation_id, COALESCE(model_key, ''), canary_version_id, active_version_id,
+          run_id, canary_metrics, active_metrics, created_at`,
+		observationID,
+		modelKey,
+		canaryVersionID,
+		strings.TrimSpace(input.ActiveVersionID),
+		runID,
+		jsonBytes(input.CanaryMetrics),
+		jsonBytesOrNil(input.ActiveMetrics),
+		domain.Now(),
+	))
+	if err != nil {
+		return domain.TrainingCanaryObservationRecord{}, mapPgError(err)
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) ListTrainingCanaryObservations(ctx context.Context, modelKey string, canaryVersionID string, limit int) ([]domain.TrainingCanaryObservationRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT observation_id, COALESCE(model_key, ''), canary_version_id, active_version_id,
+       run_id, canary_metrics, active_metrics, created_at
+FROM control_training_canary_observations
+WHERE ($1::text = '' OR model_key = $1)
+  AND ($2::text = '' OR canary_version_id = $2)
+ORDER BY created_at DESC, observation_id DESC
+LIMIT $3`,
+		strings.TrimSpace(modelKey),
+		strings.TrimSpace(canaryVersionID),
+		limit32(limit, 200),
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	records := []domain.TrainingCanaryObservationRecord{}
+	for rows.Next() {
+		record, err := scanTrainingCanaryObservationRow(rows)
+		if err != nil {
+			return nil, mapPgError(err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return records, nil
+}
+
 func (s *PostgresStore) UpsertTrainingModelStatus(ctx context.Context, record domain.TrainingModelStatusRecord) (domain.TrainingModelStatusRecord, error) {
 	modelKey := strings.TrimSpace(record.ModelKey)
 	if modelKey == "" {
@@ -1662,6 +1733,27 @@ func scanTrainingBenchmarkRunRow(row scanner) (domain.TrainingBenchmarkRunRecord
 	}
 	record.Metrics = jsonMap(metrics)
 	record.GuardrailsReasons = jsonStringSlice(reasons)
+	record.CreatedAt = record.CreatedAt.UTC()
+	return record, nil
+}
+
+func scanTrainingCanaryObservationRow(row scanner) (domain.TrainingCanaryObservationRecord, error) {
+	var record domain.TrainingCanaryObservationRecord
+	var canaryMetrics, activeMetrics []byte
+	if err := row.Scan(
+		&record.ObservationID,
+		&record.ModelKey,
+		&record.CanaryVersionID,
+		&record.ActiveVersionID,
+		&record.RunID,
+		&canaryMetrics,
+		&activeMetrics,
+		&record.CreatedAt,
+	); err != nil {
+		return domain.TrainingCanaryObservationRecord{}, err
+	}
+	record.CanaryMetrics = jsonMap(canaryMetrics)
+	record.ActiveMetrics = jsonMap(activeMetrics)
 	record.CreatedAt = record.CreatedAt.UTC()
 	return record, nil
 }

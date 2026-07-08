@@ -15,21 +15,22 @@ import (
 // truthful M0 state (registry + version 0 + lineage + status).
 
 type memoryTrainingState struct {
-	models           map[string]domain.TrainingModelRecord
-	domains          map[string]domain.TrainingDomainRecord
-	lineages         map[string]domain.TrainingLineageRecord
-	versions         map[string]domain.TrainingModelVersionRecord
-	statuses         map[string]domain.TrainingModelStatusRecord
-	retrainRequests  map[string][]domain.TrainingRetrainRequestRecord
-	jobs             map[string]domain.TrainingJobRecord
-	jobEvents        map[string][]domain.TrainingJobEventRecord
-	jobLeases        map[string]domain.TrainingJobLeaseRecord
-	goldSets         map[string]domain.TrainingGoldSetRecord
-	goldItems        map[string][]domain.TrainingGoldItemRecord
-	versionEvents    map[string][]domain.TrainingModelVersionEventRecord
-	benchmarkRuns    map[string][]domain.TrainingBenchmarkRunRecord
-	gatePolicies     map[string]domain.TrainingGatePolicyRecord
-	guardrailClauses map[string][]domain.TrainingGuardrailClauseRecord
+	models             map[string]domain.TrainingModelRecord
+	domains            map[string]domain.TrainingDomainRecord
+	lineages           map[string]domain.TrainingLineageRecord
+	versions           map[string]domain.TrainingModelVersionRecord
+	statuses           map[string]domain.TrainingModelStatusRecord
+	retrainRequests    map[string][]domain.TrainingRetrainRequestRecord
+	jobs               map[string]domain.TrainingJobRecord
+	jobEvents          map[string][]domain.TrainingJobEventRecord
+	jobLeases          map[string]domain.TrainingJobLeaseRecord
+	goldSets           map[string]domain.TrainingGoldSetRecord
+	goldItems          map[string][]domain.TrainingGoldItemRecord
+	versionEvents      map[string][]domain.TrainingModelVersionEventRecord
+	benchmarkRuns      map[string][]domain.TrainingBenchmarkRunRecord
+	gatePolicies       map[string]domain.TrainingGatePolicyRecord
+	guardrailClauses   map[string][]domain.TrainingGuardrailClauseRecord
+	canaryObservations []domain.TrainingCanaryObservationRecord
 }
 
 func newMemoryTrainingState() *memoryTrainingState {
@@ -41,21 +42,22 @@ func newMemoryTrainingState() *memoryTrainingState {
 	status := trainingSeedStatus()
 	gatePolicy := trainingSeedGatePolicy()
 	return &memoryTrainingState{
-		models:           map[string]domain.TrainingModelRecord{model.ModelKey: model},
-		domains:          map[string]domain.TrainingDomainRecord{trainingDomain.DomainID: trainingDomain},
-		lineages:         map[string]domain.TrainingLineageRecord{lineage.LineageID: lineage},
-		versions:         map[string]domain.TrainingModelVersionRecord{version.VersionID: version},
-		statuses:         map[string]domain.TrainingModelStatusRecord{status.ModelKey: status},
-		retrainRequests:  map[string][]domain.TrainingRetrainRequestRecord{},
-		jobs:             map[string]domain.TrainingJobRecord{},
-		jobEvents:        map[string][]domain.TrainingJobEventRecord{},
-		jobLeases:        map[string]domain.TrainingJobLeaseRecord{},
-		goldSets:         map[string]domain.TrainingGoldSetRecord{},
-		goldItems:        map[string][]domain.TrainingGoldItemRecord{},
-		versionEvents:    map[string][]domain.TrainingModelVersionEventRecord{},
-		benchmarkRuns:    map[string][]domain.TrainingBenchmarkRunRecord{},
-		gatePolicies:     map[string]domain.TrainingGatePolicyRecord{gatePolicy.ModelKey: gatePolicy},
-		guardrailClauses: map[string][]domain.TrainingGuardrailClauseRecord{model.ModelKey: trainingSeedGuardrailClauses()},
+		models:             map[string]domain.TrainingModelRecord{model.ModelKey: model},
+		domains:            map[string]domain.TrainingDomainRecord{trainingDomain.DomainID: trainingDomain},
+		lineages:           map[string]domain.TrainingLineageRecord{lineage.LineageID: lineage},
+		versions:           map[string]domain.TrainingModelVersionRecord{version.VersionID: version},
+		statuses:           map[string]domain.TrainingModelStatusRecord{status.ModelKey: status},
+		retrainRequests:    map[string][]domain.TrainingRetrainRequestRecord{},
+		jobs:               map[string]domain.TrainingJobRecord{},
+		jobEvents:          map[string][]domain.TrainingJobEventRecord{},
+		jobLeases:          map[string]domain.TrainingJobLeaseRecord{},
+		goldSets:           map[string]domain.TrainingGoldSetRecord{},
+		goldItems:          map[string][]domain.TrainingGoldItemRecord{},
+		versionEvents:      map[string][]domain.TrainingModelVersionEventRecord{},
+		benchmarkRuns:      map[string][]domain.TrainingBenchmarkRunRecord{},
+		gatePolicies:       map[string]domain.TrainingGatePolicyRecord{gatePolicy.ModelKey: gatePolicy},
+		guardrailClauses:   map[string][]domain.TrainingGuardrailClauseRecord{model.ModelKey: trainingSeedGuardrailClauses()},
+		canaryObservations: []domain.TrainingCanaryObservationRecord{},
 	}
 }
 
@@ -976,6 +978,68 @@ func (s *MemoryStore) GetLatestTrainingBenchmarkRun(ctx context.Context, modelVe
 	return cloneTrainingBenchmarkRun(latest), nil
 }
 
+func (s *MemoryStore) InsertTrainingCanaryObservation(ctx context.Context, input domain.InsertTrainingCanaryObservationInput) (domain.TrainingCanaryObservationRecord, error) {
+	_ = ctx
+	modelKey := strings.TrimSpace(input.ModelKey)
+	if modelKey == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation model key is required")
+	}
+	canaryVersionID := strings.TrimSpace(input.CanaryVersionID)
+	if canaryVersionID == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation canary version id is required")
+	}
+	runID := strings.TrimSpace(input.RunID)
+	if runID == "" {
+		return domain.TrainingCanaryObservationRecord{}, errors.New("canary observation run id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	observationID := strings.TrimSpace(input.ObservationID)
+	if observationID == "" {
+		observationID = domain.NewID("canary_observation")
+	}
+	for _, existing := range s.training.canaryObservations {
+		if existing.ObservationID == observationID {
+			return domain.TrainingCanaryObservationRecord{}, ErrConflict
+		}
+	}
+	record := domain.TrainingCanaryObservationRecord{
+		ObservationID:   observationID,
+		ModelKey:        modelKey,
+		CanaryVersionID: canaryVersionID,
+		ActiveVersionID: strings.TrimSpace(input.ActiveVersionID),
+		RunID:           runID,
+		CanaryMetrics:   cloneJSONMap(input.CanaryMetrics),
+		ActiveMetrics:   cloneJSONMap(input.ActiveMetrics),
+		CreatedAt:       domain.Now(),
+	}
+	s.training.canaryObservations = append(s.training.canaryObservations, record)
+	return cloneTrainingCanaryObservation(record), nil
+}
+
+func (s *MemoryStore) ListTrainingCanaryObservations(ctx context.Context, modelKey string, canaryVersionID string, limit int) ([]domain.TrainingCanaryObservationRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	modelKey = strings.TrimSpace(modelKey)
+	canaryVersionID = strings.TrimSpace(canaryVersionID)
+	// Reverse insertion order first so the stable sort keeps newest-first
+	// within identical timestamps.
+	records := []domain.TrainingCanaryObservationRecord{}
+	for i := len(s.training.canaryObservations) - 1; i >= 0; i-- {
+		observation := s.training.canaryObservations[i]
+		if modelKey != "" && observation.ModelKey != modelKey {
+			continue
+		}
+		if canaryVersionID != "" && observation.CanaryVersionID != canaryVersionID {
+			continue
+		}
+		records = append(records, cloneTrainingCanaryObservation(observation))
+	}
+	sort.SliceStable(records, func(i, j int) bool { return records[i].CreatedAt.After(records[j].CreatedAt) })
+	return take(records, limit), nil
+}
+
 func (s *MemoryStore) UpsertTrainingModelStatus(ctx context.Context, record domain.TrainingModelStatusRecord) (domain.TrainingModelStatusRecord, error) {
 	_ = ctx
 	modelKey := strings.TrimSpace(record.ModelKey)
@@ -1112,6 +1176,12 @@ func cloneTrainingGoldItem(record domain.TrainingGoldItemRecord) domain.Training
 func cloneTrainingBenchmarkRun(record domain.TrainingBenchmarkRunRecord) domain.TrainingBenchmarkRunRecord {
 	record.Metrics = cloneJSONMap(record.Metrics)
 	record.GuardrailsReasons = append([]string{}, record.GuardrailsReasons...)
+	return record
+}
+
+func cloneTrainingCanaryObservation(record domain.TrainingCanaryObservationRecord) domain.TrainingCanaryObservationRecord {
+	record.CanaryMetrics = cloneJSONMap(record.CanaryMetrics)
+	record.ActiveMetrics = cloneJSONMap(record.ActiveMetrics)
 	return record
 }
 

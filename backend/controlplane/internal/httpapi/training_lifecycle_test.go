@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -374,7 +375,9 @@ func TestMegaSegAcceptanceWalk(t *testing.T) {
 		},
 		domain.TrainingDomainRecord{DomainID: "cellbio", Name: "Cell biology", Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
 		domain.TrainingLineageRecord{LineageID: "megaseg-shared", DomainID: "cellbio", ModelKey: "megaseg", Scope: "shared", ActiveVersionID: "megaseg-v0", Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
-		domain.TrainingModelVersionRecord{VersionID: "megaseg-v0", LineageID: "megaseg-shared", ModelKey: "megaseg", Status: "active", IsFrozen: true, Metrics: domain.JSONMap{}, Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
+		// weights_uri is mandatory version data: the benchmark dispatch resolves
+		// it into the worker envelope and 409s on versions without weights.
+		domain.TrainingModelVersionRecord{VersionID: "megaseg-v0", LineageID: "megaseg-shared", ModelKey: "megaseg", Status: "active", IsFrozen: true, WeightsURI: "barrel:/mnt/barrel-data/ultra/training/weights/megaseg/v0.pt", Metrics: domain.JSONMap{}, Metadata: domain.JSONMap{}, CreatedAt: now, UpdatedAt: now},
 		domain.TrainingModelStatusRecord{ModelKey: "megaseg", DatasetName: "curated volumes", ActiveModelVersion: "megaseg-v0", ClassCounts: domain.JSONMap{}, PerClassNewObjects: domain.JSONMap{}, UnsupportedClassCounts: domain.JSONMap{}, RetrainGateReasons: []string{}, RetrainGateCounts: domain.JSONMap{}, RetrainGateThresholds: domain.JSONMap{}},
 		domain.TrainingGatePolicyRecord{ModelKey: "megaseg", MinReviewed: 1, MinNewObjects: 1, MinPerClassObjects: domain.JSONMap{}, MinDays: 0},
 		[]domain.TrainingGuardrailClauseRecord{
@@ -436,6 +439,128 @@ func TestMegaSegAcceptanceWalk(t *testing.T) {
 	}
 }
 
+// trainingCanarySplitRunIDs computes concrete run ids on each side of the
+// fnv1a-32 %10 split so the test pins the POLICY, not an accident of hashing.
+func trainingCanarySplitRunIDs(t *testing.T) (canaryRun string, activeRun string) {
+	t.Helper()
+	for i := 0; canaryRun == "" || activeRun == ""; i++ {
+		id := fmt.Sprintf("run-%d", i)
+		hash := fnv.New32a()
+		_, _ = hash.Write([]byte(id))
+		if hash.Sum32()%10 == 0 {
+			if canaryRun == "" {
+				canaryRun = id
+			}
+		} else if activeRun == "" {
+			activeRun = id
+		}
+	}
+	return canaryRun, activeRun
+}
+
+// TestTrainingServingResolverAndCanaryObservations: the ONE shared resolver
+// (section 8.1) - active for the seeded model, the deterministic 10% canary
+// split once a canary exists via the real promote path, and the observation
+// round-trip (worker POST -> UI drift-echo GET).
+func TestTrainingServingResolverAndCanaryObservations(t *testing.T) {
+	t.Parallel()
+	router, _, _ := newTrainingTestRouter(t)
+
+	// (a) The seeded model resolves to the active v0; no canary exists, so any
+	// run_id serves active with is_canary=false.
+	rec, resolved := doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/resolve?run_id=any-run", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if resolved["version_id"] != "yolov5_rarespot-v0" || resolved["is_canary"] != false {
+		t.Fatalf("seeded resolve must serve active v0: %#v", resolved)
+	}
+	if uri, _ := resolved["weights_uri"].(string); uri == "" {
+		t.Fatalf("resolve must carry the version's weights_uri: %#v", resolved)
+	}
+
+	// Unknown model 404s (consumers fail open to their baked weights).
+	rec, _ = doJSON(t, router, http.MethodGet, "/v2/training/models/nope/resolve?run_id=x", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown model resolve = %d", rec.Code)
+	}
+
+	// (b) A candidate becomes canary via the real promote path (benchmark on
+	// the frozen gold, server veto) - the resolver splits on run_id.
+	goldSetID, goldHash := freezeGoldViaAPI(t, router, "yolov5_rarespot", "pending_new_survey")
+	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v0", goldSetID, goldHash, passingDetectionMetrics(0.83))
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/versions", map[string]any{
+		"version_id":  "yolov5_rarespot-v1",
+		"weights_uri": "/mnt/barrel-data/ultra/training/weights/yolov5_rarespot/v1/weights.pt",
+		"provenance":  map[string]any{"trained_by": "resolver test"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register version = %d body=%s", rec.Code, rec.Body.String())
+	}
+	postBenchmarkResult(t, router, "yolov5_rarespot", "yolov5_rarespot-v1", goldSetID, goldHash, passingDetectionMetrics(0.84))
+	rec, promoted := doJSON(t, router, http.MethodPost, "/v2/training/model-versions/yolov5_rarespot-v1/promote", nil)
+	if rec.Code != http.StatusOK || promoted["status"] != "canary" {
+		t.Fatalf("promote to canary = %d %#v", rec.Code, promoted)
+	}
+
+	canaryRun, activeRun := trainingCanarySplitRunIDs(t)
+	rec, resolved = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/resolve?run_id="+canaryRun, nil)
+	if rec.Code != http.StatusOK || resolved["version_id"] != "yolov5_rarespot-v1" || resolved["is_canary"] != true {
+		t.Fatalf("canary-bucket run must serve the canary: %d %#v", rec.Code, resolved)
+	}
+	rec, resolved = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/resolve?run_id="+activeRun, nil)
+	if rec.Code != http.StatusOK || resolved["version_id"] != "yolov5_rarespot-v0" || resolved["is_canary"] != false {
+		t.Fatalf("active-bucket run must serve active: %d %#v", rec.Code, resolved)
+	}
+	// An empty run_id can never land in the canary bucket.
+	rec, resolved = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/resolve", nil)
+	if rec.Code != http.StatusOK || resolved["version_id"] != "yolov5_rarespot-v0" || resolved["is_canary"] != false {
+		t.Fatalf("empty run_id must serve active: %d %#v", rec.Code, resolved)
+	}
+
+	// (c) Observation POST -> GET round-trips canary_metrics; active_version_id
+	// defaults to the lineage pointer at insert time.
+	rec, posted := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/canary-observations", map[string]any{
+		"run_id":            canaryRun,
+		"canary_version_id": "yolov5_rarespot-v1",
+		"canary_metrics":    map[string]any{"detection_count": 12, "stability_dist": map[string]any{"high": 9, "low": 3}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("observation post = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if posted["active_version_id"] != "yolov5_rarespot-v0" || posted["run_id"] != canaryRun {
+		t.Fatalf("observation record wrong: %#v", posted)
+	}
+	rec, listed := doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/canary-observations?limit=10", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("observation list = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if count, _ := listed["count"].(float64); count != 1 {
+		t.Fatalf("observation count = %#v", listed["count"])
+	}
+	observations, _ := listed["observations"].([]any)
+	if len(observations) != 1 {
+		t.Fatalf("observations = %#v", listed["observations"])
+	}
+	first, _ := observations[0].(map[string]any)
+	metrics, _ := first["canary_metrics"].(map[string]any)
+	if metrics["detection_count"] != float64(12) {
+		t.Fatalf("canary_metrics did not round-trip: %#v", first)
+	}
+	stability, _ := metrics["stability_dist"].(map[string]any)
+	if stability["high"] != float64(9) || stability["low"] != float64(3) {
+		t.Fatalf("nested canary_metrics did not round-trip: %#v", metrics)
+	}
+
+	// Required fields are enforced (worker contract).
+	rec, _ = doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/canary-observations", map[string]any{
+		"run_id": "run-without-canary-version",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing canary_version_id must 400, got %d", rec.Code)
+	}
+}
+
 func TestTrainingLeaseAcceptsPythonWireFloats(t *testing.T) {
 	t.Parallel()
 	router, _, _ := newTrainingTestRouter(t)
@@ -477,5 +602,41 @@ func TestTrainingLeaseAcceptsPythonWireFloats(t *testing.T) {
 	release := post(http.MethodDelete, fmt.Sprintf(`{"lease_token": %q}`, lease.LeaseToken))
 	if release.Code != http.StatusOK {
 		t.Fatalf("release = %d body=%s", release.Code, release.Body.String())
+	}
+}
+
+func TestTrainingBenchmarkDispatchCarriesWorkerContractParams(t *testing.T) {
+	t.Parallel()
+	router, _, bus := newTrainingTestRouter(t)
+	goldSetID, goldHash := freezeGoldViaAPI(t, router, "yolov5_rarespot", "pending_new_survey")
+
+	rec, _ := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/benchmark/run", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("benchmark dispatch = %d body=%s", rec.Code, rec.Body.String())
+	}
+	jobs := bus.TrainingJobs()
+	if len(jobs) == 0 {
+		t.Fatal("benchmark dispatch published nothing")
+	}
+	params := jobs[len(jobs)-1].Params
+	// The worker's _benchmark hard-requires these three; a dispatch without
+	// them queues a job that can only fail (found live, invisible to the
+	// per-side suites - the Go tests posted results directly and the Python
+	// tests fed params by hand).
+	if got, _ := params["weights_uri"].(string); got != "data/models/yolo/RareSpotWeights.pt" {
+		t.Fatalf("weights_uri = %q", got)
+	}
+	if got, _ := params["model_version_id"].(string); got != "yolov5_rarespot-v0" {
+		t.Fatalf("model_version_id = %q", got)
+	}
+	manifestURI, _ := params["gold_manifest_uri"].(string)
+	if manifestURI == "" || manifestURI != params["split_manifest_uri"] {
+		t.Fatalf("gold_manifest_uri = %q (split_manifest_uri = %v)", manifestURI, params["split_manifest_uri"])
+	}
+	if got, _ := params["gold_set_id"].(string); got != goldSetID {
+		t.Fatalf("gold_set_id = %q want %q", got, goldSetID)
+	}
+	if got, _ := params["gold_set_content_hash"].(string); got != goldHash {
+		t.Fatalf("gold_set_content_hash = %q want %q", got, goldHash)
 	}
 }

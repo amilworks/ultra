@@ -808,6 +808,7 @@ CREATE TABLE IF NOT EXISTS control_training_benchmark_runs (
 
 CREATE TABLE IF NOT EXISTS control_training_canary_observations (
   observation_id text PRIMARY KEY,
+  model_key text,
   canary_version_id text NOT NULL,
   active_version_id text NOT NULL,
   run_id text NOT NULL,
@@ -815,6 +816,9 @@ CREATE TABLE IF NOT EXISTS control_training_canary_observations (
   active_metrics jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- model_key scopes the UI drift-echo list route; nullable because rows written
+-- before the column existed cannot be backfilled (new writes always set it).
+ALTER TABLE control_training_canary_observations ADD COLUMN IF NOT EXISTS model_key text;
 
 CREATE TABLE IF NOT EXISTS control_training_retrain_requests (
   request_id text PRIMARY KEY,
@@ -900,6 +904,7 @@ CREATE INDEX IF NOT EXISTS control_training_replay_pool_priority_idx ON control_
 CREATE INDEX IF NOT EXISTS control_training_retrain_requests_model_idx ON control_training_retrain_requests(model_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_training_model_version_events_version_idx ON control_training_model_version_events(version_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_training_canary_observations_canary_idx ON control_training_canary_observations(canary_version_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS control_training_canary_observations_model_idx ON control_training_canary_observations(model_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_training_jobs_model_status_idx ON control_training_jobs(model_key, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_training_jobs_type_idx ON control_training_jobs(job_type, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_training_job_events_job_ts_idx ON control_training_job_events(job_id, ts DESC);

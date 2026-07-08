@@ -376,6 +376,31 @@ type InsertTrainingBenchmarkRunInput struct {
 	ReportURI          string
 }
 
+// TrainingCanaryObservationRecord is one shadow-serving data point (plan
+// section 8.1): a run served by the canary, with adapter-defined JSONB metrics
+// (never model-shaped columns). ActiveVersionID pins WHICH active the canary
+// shadowed at observation time.
+type TrainingCanaryObservationRecord struct {
+	ObservationID   string    `json:"observation_id"`
+	ModelKey        string    `json:"model_key,omitempty"`
+	CanaryVersionID string    `json:"canary_version_id"`
+	ActiveVersionID string    `json:"active_version_id,omitempty"`
+	RunID           string    `json:"run_id"`
+	CanaryMetrics   JSONMap   `json:"canary_metrics"`
+	ActiveMetrics   JSONMap   `json:"active_metrics,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type InsertTrainingCanaryObservationInput struct {
+	ObservationID   string
+	ModelKey        string
+	CanaryVersionID string
+	ActiveVersionID string
+	RunID           string
+	CanaryMetrics   JSONMap
+	ActiveMetrics   JSONMap
+}
+
 type TrainingGuardrailClauseRecord struct {
 	ModelKey   string  `json:"model_key"`
 	ClauseKey  string  `json:"clause_key"`

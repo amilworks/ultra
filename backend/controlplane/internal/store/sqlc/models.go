@@ -400,6 +400,7 @@ type ControlTrainingBenchmarkRun struct {
 
 type ControlTrainingCanaryObservation struct {
 	ObservationID   string             `json:"observation_id"`
+	ModelKey        pgtype.Text        `json:"model_key"`
 	CanaryVersionID string             `json:"canary_version_id"`
 	ActiveVersionID string             `json:"active_version_id"`
 	RunID           string             `json:"run_id"`

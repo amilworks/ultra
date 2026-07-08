@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from ultra_deepagents.rarespot.artifacts import (
     write_prediction_xml,
     write_report,
 )
-from ultra_deepagents.rarespot.config import RareSpotConfig
+from ultra_deepagents.rarespot.config import RareSpotConfig, resolve_serving_weights
 from ultra_deepagents.rarespot.geospatial import build_geospatial_summary
 from ultra_deepagents.rarespot.stability import run_detection_stability
 from ultra_deepagents.rarespot.tiling import (
@@ -42,6 +43,11 @@ def run_rarespot_inference(
 ) -> dict[str, Any]:
     if not image_paths:
         raise ValueError("RareSpot inference requires at least one image.")
+    # Serving-resolver seam (§8.1, env-gated OFF by default): swap in the
+    # resolved active/canary weights before the existence check validates them.
+    weights_path, serving_resolution = resolve_serving_weights(config, run_id)
+    if weights_path != config.weights_path:
+        config = replace(config, weights_path=weights_path)
     if not config.weights_path.exists():
         raise FileNotFoundError(f"RareSpot weights not found: {config.weights_path}")
     if not (config.yolov5_path / "detect.py").exists():
@@ -116,6 +122,10 @@ def run_rarespot_inference(
         "confidence_summary": confidence_summary,
         "predictions": predictions,
     }
+    # Only when the resolver actively served weights: the default payload stays
+    # byte-identical (skill/worker parity is pinned on it).
+    if serving_resolution is not None:
+        prediction_payload["serving_resolution"] = serving_resolution
     predictions_json = write_json(output_dir / "predictions.json", prediction_payload)
     detections_csv = write_detections_csv(output_dir / "detections.csv", predictions)
     report_payload = {

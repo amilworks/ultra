@@ -10,6 +10,7 @@ import (
 type MemoryBus struct {
 	jobs          chan Job
 	dataAgentJobs chan DataAgentJob
+	trainingJobs  []TrainingJob
 	cancellations chan CancelSignal
 	events        chan domain.RunEventRecord
 	mu            sync.RWMutex

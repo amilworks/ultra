@@ -54,6 +54,7 @@ type ServerDeps struct {
 	Runtime           RuntimeSummary
 	QueueDiagnostics  eventbus.QueueDiagnosticsProvider
 	DataAgentJobs     eventbus.DataAgentJobPublisher
+	TrainingJobs      eventbus.TrainingJobPublisher
 	Bisque            *BisqueService
 	BisqueCredentials *BisqueCredentialStore
 	WorkOS            *WorkOSAuth

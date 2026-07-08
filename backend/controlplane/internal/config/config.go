@@ -36,6 +36,8 @@ type Config struct {
 	NATSEventIngestConcurrency int
 	NATSWorkerDurable          string
 	NATSDataAgentWorkerDurable string
+	NATSTrainingJobsSubject    string
+	NATSTrainingWorkerDurable  string
 	ArtifactRoot               string
 	UploadRoot                 string
 	ImageServiceURL            string
@@ -118,6 +120,8 @@ func Load() Config {
 		NATSStreamMaxBytes:         int64(envInt("ULTRA_CONTROL_NATS_STREAM_MAX_BYTES", 8<<30)),
 		NATSWorkerDurable:          envString("ULTRA_CONTROL_NATS_WORKER_DURABLE", "ultra-deepagents-worker"),
 		NATSDataAgentWorkerDurable: envString("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
+		NATSTrainingJobsSubject:    envString("ULTRA_CONTROL_NATS_TRAINING_JOBS_SUBJECT", "ultra.training.jobs"),
+		NATSTrainingWorkerDurable:  envString("ULTRA_CONTROL_NATS_TRAINING_WORKER_DURABLE", "ultra-training-worker"),
 		ArtifactRoot:               envString("ULTRA_CONTROL_ARTIFACT_ROOT", envString("ARTIFACT_ROOT", "data/artifacts")),
 		UploadRoot:                 envString("ULTRA_CONTROL_UPLOAD_ROOT", envString("ULTRA_RESOURCE_ROOT", envString("UPLOAD_STORE_ROOT", "data/uploads"))),
 		ImageServiceURL:            envString("ULTRA_CONTROL_IMAGE_SERVICE_URL", ""),

@@ -21,19 +21,26 @@ The five hooks:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
 import logging
 import math
 import os
+import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 from PIL import Image
 
@@ -128,14 +135,280 @@ class LocalDirectoryFrameSource:
 
 
 class BisqueFrameSource:
-    """Pull reviewed frames + GT XML from BisQue ``Prairie_Dog_Active_Learning``.
+    """Pull reviewed frames + GT XML from the BisQue ``Prairie_Dog_Active_Learning``
+    pool into a cache dir shaped exactly like ``LocalDirectoryFrameSource`` input
+    (``<stem>.JPG`` + ``<stem>.JPG.xml`` with ``<image>`` as the XML root).
 
-    Deliberately a stub: the fleet BisQue credentials/wiring are a later fleet
-    step; the seam (FrameSource) is what M1 pins down.
+    Wire shapes mirror the Go BisqueService (httpapi/bisque.go) against bisque2:
+    ``/data_service/dataset/?query=&wpublic=&limit=&offset=`` (paginated to
+    exhaustion) finds the pool, ``?view=deep`` on a resource URI resolves dataset
+    members and an image's stacked GObject layers, ``/blob_service/{uniq}``
+    serves the original frame bytes; every request carries HTTP Basic auth. A
+    frame is "reviewed" when its deep XML has a layer matching the manifest
+    ``gt_layer_priority`` (gt2 first). An explicit ``tag_query`` swaps the
+    dataset walk for a paginated ``/data_service/image/`` search.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("BisQue frame source lands with fleet credentials")
+    DEFAULT_DATASET = "Prairie_Dog_Active_Learning"
+    PAGE_LIMIT = 100
+
+    def __init__(
+        self,
+        *,
+        root_url: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        dataset: str | None = None,
+        tag_query: str | None = None,
+        cache_dir: str | Path | None = None,
+        timeout: float = 60.0,
+    ) -> None:
+        # Fail fast at CONSTRUCTION: _resolve_frame_source routes kind=='bisque'
+        # here, and a mid-sync auth surprise is worse than a refused dispatch.
+        self._root_url = _config_value(
+            root_url, "ULTRA_TRAINING_BISQUE_ROOT_URL", "ULTRA_CONTROL_BISQUE_ROOT_URL"
+        ).rstrip("/")
+        username = _config_value(
+            username, "ULTRA_TRAINING_BISQUE_USERNAME", "ULTRA_CONTROL_BISQUE_USERNAME"
+        )
+        password = _config_value(
+            password, "ULTRA_TRAINING_BISQUE_PASSWORD", "ULTRA_CONTROL_BISQUE_PASSWORD"
+        )
+        if not self._root_url:
+            raise ValueError(
+                "BisQue frame source needs a root URL: pass root_url= or set "
+                "ULTRA_TRAINING_BISQUE_ROOT_URL (or ULTRA_CONTROL_BISQUE_ROOT_URL)"
+            )
+        if not username or not password:
+            raise ValueError(
+                "BisQue frame source needs credentials: pass username=/password= or set "
+                "ULTRA_TRAINING_BISQUE_USERNAME/PASSWORD (or ULTRA_CONTROL_BISQUE_USERNAME/PASSWORD)"
+            )
+        self._dataset = _config_value(dataset, "ULTRA_TRAINING_BISQUE_DATASET") or self.DEFAULT_DATASET
+        self._tag_query = _config_value(tag_query, "ULTRA_TRAINING_BISQUE_TAG_QUERY")
+        cache = _config_value(cache_dir, "ULTRA_TRAINING_BISQUE_CACHE_DIR")
+        self._cache_dir = Path(cache) if cache else Path(tempfile.mkdtemp(prefix="goldgate-bisque-"))
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        self._headers = {"Accept": "text/xml", "Authorization": f"Basic {token}"}
+        self._timeout = max(1.0, float(timeout))
+        self._frames: dict[str, dict[str, Any]] | None = None
+
+    def list_frames(self) -> list[str]:
+        frames = self._frame_index()
+        return sorted(stem for stem, entry in frames.items() if entry["reviewed"])
+
+    def fetch(self, frame: str) -> tuple[Path, Path]:
+        entry = self._frame_index().get(frame)
+        if entry is None:
+            raise FileNotFoundError(
+                f"frame {frame!r} not found in BisQue pool {self._pool_label()}"
+            )
+        uniq = str(entry["resource_uniq"] or "")
+        if not uniq:
+            raise RuntimeError(f"BisQue frame {frame!r} has no resource_uniq for blob download")
+        image_path = self._cache_dir / f"{frame}.JPG"
+        # A re-upload of identical pixels mints a NEW resource_uniq (plan 5c),
+        # so the uniq marker is what makes stem-named cache reuse safe.
+        marker = self._cache_dir / f"{frame}.JPG.uniq"
+        cached = (
+            image_path.is_file()
+            and image_path.stat().st_size > 0
+            and marker.is_file()
+            and marker.read_text(encoding="utf-8").strip() == uniq
+        )
+        if not cached:
+            blob_url = f"{self._root_url}/blob_service/{urllib_parse.quote(uniq, safe='')}"
+            self._download(blob_url, image_path)
+            marker.write_text(uniq, encoding="utf-8")
+        return image_path, entry["xml_path"]
+
+    # ------------------------------------------------------------- pool walk
+
+    def _frame_index(self) -> dict[str, dict[str, Any]]:
+        if self._frames is not None:
+            return self._frames
+        frames: dict[str, dict[str, Any]] = {}
+        unreviewed = 0
+        for member_uri in self._member_uris():
+            element = self._fetch_deep(member_uri)
+            image = element if element.tag == "image" else element.find(".//image")
+            if image is None:
+                logger.warning("BisQue pool member %s is not an image; skipped", member_uri)
+                continue
+            stem = _frame_stem(str(image.get("name") or "").strip())
+            if not stem:
+                logger.warning("BisQue pool member %s has no name; skipped", member_uri)
+                continue
+            if stem in frames:
+                raise ValueError(
+                    f"duplicate frame stem {stem!r} in BisQue pool {self._pool_label()}"
+                )
+            try:
+                select_gt_layer(image)
+                reviewed = True
+            except ValueError as exc:
+                reviewed = False
+                unreviewed += 1
+                logger.info("BisQue frame %s excluded from the reviewed pool: %s", stem, exc)
+            # Written as <stem>.JPG.xml with <image> as root so downstream
+            # (extract_frame_exif, select_gt_layer, tiling) works IDENTICALLY
+            # to the local-directory path.
+            xml_path = self._cache_dir / f"{stem}.JPG.xml"
+            xml_path.write_bytes(ET.tostring(image, encoding="utf-8"))
+            frames[stem] = {
+                "uri": member_uri,
+                "resource_uniq": str(image.get("resource_uniq") or "").strip(),
+                "xml_path": xml_path,
+                "reviewed": reviewed,
+            }
+        logger.info(
+            "BisQue pool %s: %d frames, %d reviewed, %d without a GT layer in %s",
+            self._pool_label(),
+            len(frames),
+            len(frames) - unreviewed,
+            unreviewed,
+            list(RARESPOT_MANIFEST.gt_layer_priority),
+        )
+        self._frames = frames
+        return frames
+
+    def _member_uris(self) -> list[str]:
+        if self._tag_query:
+            uris: list[str] = []
+            for element in self._paged_resources("image", [("tag_query", self._tag_query)]):
+                uri = str(element.get("uri") or "").strip()
+                if not uri:
+                    continue
+                resolved = urllib_parse.urljoin(self._root_url + "/", uri)
+                if resolved not in uris:
+                    uris.append(resolved)
+            return uris
+        dataset_element = self._fetch_deep(self._dataset_uri())
+        dataset = (
+            dataset_element if dataset_element.tag == "dataset" else dataset_element.find(".//dataset")
+        )
+        if dataset is None:
+            raise RuntimeError(
+                f"BisQue dataset {self._dataset!r} deep view carried no <dataset> element"
+            )
+        members: list[str] = []
+        for value in dataset.findall("value"):
+            text = str(value.text or "").strip()
+            if text:
+                members.append(urllib_parse.urljoin(self._root_url + "/", text))
+        if not members:
+            raise RuntimeError(f"BisQue dataset {self._dataset!r} has no members")
+        return members
+
+    def _dataset_uri(self) -> str:
+        matches: list[str] = []
+        for element in self._paged_resources("dataset", [("query", self._dataset)]):
+            if str(element.get("name") or "").strip() != self._dataset:
+                continue
+            uri = str(element.get("uri") or "").strip()
+            if not uri:
+                continue
+            resolved = urllib_parse.urljoin(self._root_url + "/", uri)
+            if resolved not in matches:
+                matches.append(resolved)
+        if not matches:
+            raise RuntimeError(f"BisQue dataset {self._dataset!r} not found at {self._root_url}")
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"BisQue dataset name {self._dataset!r} is ambiguous ({len(matches)} matches: "
+                f"{matches})"
+            )
+        return matches[0]
+
+    def _paged_resources(
+        self, resource_type: str, params: list[tuple[str, str]]
+    ) -> Iterator[ET.Element]:
+        """data_service listing paginated to exhaustion (mirrors bisque.go
+        searchURL/countAllSearchResults) — never a silent truncation."""
+        offset = 0
+        while True:
+            page = list(params)
+            page.append(("wpublic", "owner,shared"))
+            page.append(("limit", str(self.PAGE_LIMIT)))
+            if offset:
+                page.append(("offset", str(offset)))
+            url = (
+                f"{self._root_url}/data_service/{resource_type}/?{urllib_parse.urlencode(page)}"
+            )
+            root = ET.fromstring(self._get(url))
+            elements = [root] if root.tag == resource_type else root.findall(resource_type)
+            yield from elements
+            if len(elements) < self.PAGE_LIMIT:
+                return
+            offset += self.PAGE_LIMIT
+
+    def _pool_label(self) -> str:
+        return f"tag_query={self._tag_query!r}" if self._tag_query else repr(self._dataset)
+
+    # ------------------------------------------------------------------ wire
+
+    def _fetch_deep(self, resource_uri: str) -> ET.Element:
+        parsed = urllib_parse.urlsplit(resource_uri)
+        query = [(key, value) for key, value in urllib_parse.parse_qsl(parsed.query) if key != "view"]
+        query.append(("view", "deep"))
+        deep_url = urllib_parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib_parse.urlencode(query), "")
+        )
+        return ET.fromstring(self._get(deep_url))
+
+    def _open(self, url: str) -> Any:
+        request = urllib_request.Request(url, headers=dict(self._headers))
+        try:
+            return urllib_request.urlopen(
+                request, timeout=self._timeout, context=_bisque_ssl_context(url)
+            )
+        except urllib_error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise RuntimeError(
+                    f"BisQue rejected the configured credentials (HTTP {exc.code}); check "
+                    "ULTRA_TRAINING_BISQUE_USERNAME/PASSWORD (or the ULTRA_CONTROL_ pair)"
+                ) from exc
+            raise RuntimeError(f"BisQue request failed with HTTP {exc.code}: {url}") from exc
+
+    def _get(self, url: str) -> bytes:
+        with self._open(url) as response:
+            return response.read()
+
+    def _download(self, url: str, destination: Path) -> None:
+        partial = destination.with_name(destination.name + ".part")
+        with self._open(url) as response, partial.open("wb") as handle:
+            shutil.copyfileobj(response, handle, 1024 * 1024)
+        partial.replace(destination)
+
+
+def _bisque_ssl_context(url: str) -> ssl.SSLContext | None:
+    """Python's bundled OpenSSL trust store rejects bisque2's chain (verified
+    live: CERTIFICATE_VERIFY_FAILED on macOS + python.org builds where the
+    system curl succeeds) — certifi's bundle validates it. HTTP URLs need none."""
+    if not url.lower().startswith("https:"):
+        return None
+    import certifi
+
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _config_value(value: Any, *env_names: str) -> str:
+    text = str(value).strip() if value is not None else ""
+    if text:
+        return text
+    for name in env_names:
+        text = str(os.getenv(name) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _frame_stem(name: str) -> str:
+    for suffix in (".JPG", ".jpg", ".JPEG", ".jpeg"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 # ----------------------------------------------------------------------- exif
@@ -269,7 +542,11 @@ class RareSpotAdapter(ModelAdapter):
         if kind in ("", "local_directory") and root:
             return LocalDirectoryFrameSource(root)
         if kind == "bisque":
-            return BisqueFrameSource()
+            return BisqueFrameSource(
+                dataset=str(params.get("bisque_dataset") or "").strip() or None,
+                tag_query=str(params.get("bisque_tag_query") or "").strip() or None,
+                cache_dir=root or None,
+            )
         raise ValueError(
             "no frame source configured: set params.frame_source_dir / "
             "ULTRA_TRAINING_FRAME_SOURCE_DIR (local_directory) or "

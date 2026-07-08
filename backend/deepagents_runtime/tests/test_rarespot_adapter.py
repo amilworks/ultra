@@ -9,11 +9,14 @@ with synthetic inputs.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import threading
 import xml.etree.ElementTree as ET
 from collections import Counter
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,7 @@ from ultra_deepagents.training.phash import PHASH_KERNEL
 from ultra_deepagents.training.rarespot_adapter import (
     GRAY_FILL_RGB,
     HYP_PATH,
+    BisqueFrameSource,
     LeakageCheckRefused,
     LocalDirectoryFrameSource,
     RareSpotAdapter,
@@ -86,11 +90,257 @@ def test_local_directory_frame_source_lists_gt_frames() -> None:
     assert xml_path.name == f"{FRAME}.JPG.xml"
 
 
-def test_bisque_frame_source_is_an_honest_stub() -> None:
-    from ultra_deepagents.training.rarespot_adapter import BisqueFrameSource
+# ------------------------------------------------------- bisque frame source
 
-    with pytest.raises(NotImplementedError, match="fleet credentials"):
-        BisqueFrameSource()
+BISQUE_ENV_NAMES = (
+    "ULTRA_TRAINING_BISQUE_ROOT_URL",
+    "ULTRA_CONTROL_BISQUE_ROOT_URL",
+    "ULTRA_TRAINING_BISQUE_USERNAME",
+    "ULTRA_CONTROL_BISQUE_USERNAME",
+    "ULTRA_TRAINING_BISQUE_PASSWORD",
+    "ULTRA_CONTROL_BISQUE_PASSWORD",
+    "ULTRA_TRAINING_BISQUE_DATASET",
+    "ULTRA_TRAINING_BISQUE_TAG_QUERY",
+    "ULTRA_TRAINING_BISQUE_CACHE_DIR",
+)
+BISQUE_BASIC_AUTH = "Basic " + base64.b64encode(b"goldgate:hunter2").decode("ascii")
+FAKE_JPEG = b"\xff\xd8\xff\xe0goldgate-fake-jpeg\xff\xd9"
+
+
+class _BisqueHTTPServer(ThreadingHTTPServer):
+    """Serves canned bisque2-shaped XML keyed by EXACT path?query strings; every
+    request (path + Authorization header) is recorded for server-side asserts."""
+
+    def __init__(self, address) -> None:  # noqa: ANN001 - handler pinned below
+        super().__init__(address, _BisqueHTTPHandler)
+        self.routes: dict[str, bytes] = {}
+        self.requests: list[tuple[str, str]] = []
+        self.force_status: int | None = None
+
+    @property
+    def root_url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+    @property
+    def request_paths(self) -> list[str]:
+        return [path for path, _ in self.requests]
+
+
+class _BisqueHTTPHandler(BaseHTTPRequestHandler):
+    server: _BisqueHTTPServer
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server contract
+        self.server.requests.append((self.path, self.headers.get("Authorization") or ""))
+        if self.server.force_status is not None:
+            self.send_response(self.server.force_status)
+            self.end_headers()
+            return
+        body = self.server.routes.get(self.path)
+        if body is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:  # noqa: ANN002 - silence test noise
+        pass
+
+
+@pytest.fixture()
+def bisque_server(monkeypatch):
+    # Hermetic: a developer's real BisQue env must not leak into the canned pool.
+    for name in BISQUE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    server = _BisqueHTTPServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _bisque_source(server: _BisqueHTTPServer, cache_dir: Path, **kwargs) -> BisqueFrameSource:
+    return BisqueFrameSource(
+        root_url=server.root_url,
+        username="goldgate",
+        password="hunter2",
+        cache_dir=cache_dir,
+        **kwargs,
+    )
+
+
+def _image_xml(root_url: str, uniq: str, name: str, layer: str) -> bytes:
+    return (
+        f'<image resource_uniq="{uniq}" name="{name}" uri="{root_url}/data_service/{uniq}">'
+        f'<tag name="filename" value="{name}"/>'
+        f'<gobject name="{layer}"><gobject name="prairie_dog">'
+        '<rectangle><vertex index="0" x="10.0" y="20.0"/><vertex index="1" x="42.0" y="52.0"/>'
+        "</rectangle></gobject></gobject></image>"
+    ).encode()
+
+
+def _seed_default_pool(server: _BisqueHTTPServer) -> list[str]:
+    """Two-member Prairie_Dog_Active_Learning pool: 0210 gt2-reviewed, 0299 only
+    an unreviewed ' testing' layer. Returns the exact expected list_frames()
+    request sequence (paths + query strings pinned)."""
+    root = server.root_url
+    search = "/data_service/dataset/?query=Prairie_Dog_Active_Learning&wpublic=owner%2Cshared&limit=100"
+    server.routes[search] = (
+        f'<resource uri="{root}/data_service/dataset">'
+        f'<dataset name="Prairie_Dog_Active_Learning" resource_uniq="00-DS" '
+        f'uri="{root}/data_service/00-DS"/></resource>'
+    ).encode()
+    server.routes["/data_service/00-DS?view=deep"] = (
+        f'<dataset name="Prairie_Dog_Active_Learning" resource_uniq="00-DS" '
+        f'uri="{root}/data_service/00-DS">'
+        f'<value index="0" type="object">{root}/data_service/00-IMG1</value>'
+        f'<value index="1" type="object">{root}/data_service/00-IMG2</value>'
+        "</dataset>"
+    ).encode()
+    server.routes["/data_service/00-IMG1?view=deep"] = _image_xml(
+        root, "00-IMG1", "EnrNE_Day2_Run1__0210.JPG", "gt2"
+    )
+    server.routes["/data_service/00-IMG2?view=deep"] = _image_xml(
+        root, "00-IMG2", "EnrNE_Day2_Run1__0299.JPG", " testing"
+    )
+    server.routes["/blob_service/00-IMG1"] = FAKE_JPEG
+    return [
+        search,
+        "/data_service/00-DS?view=deep",
+        "/data_service/00-IMG1?view=deep",
+        "/data_service/00-IMG2?view=deep",
+    ]
+
+
+def test_bisque_frame_source_requires_config_at_construction(monkeypatch) -> None:
+    for name in BISQUE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="root URL"):
+        BisqueFrameSource(username="u", password="p")
+    with pytest.raises(ValueError, match="credentials"):
+        BisqueFrameSource(root_url="https://bisque2.ece.ucsb.edu")
+    with pytest.raises(ValueError, match="credentials"):
+        BisqueFrameSource(root_url="https://bisque2.ece.ucsb.edu", username="u")
+
+
+def test_bisque_frame_source_env_fallbacks(monkeypatch, tmp_path) -> None:
+    for name in BISQUE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ULTRA_CONTROL_BISQUE_ROOT_URL", "https://bisque2.ece.ucsb.edu/")
+    monkeypatch.setenv("ULTRA_CONTROL_BISQUE_USERNAME", "fleet")
+    monkeypatch.setenv("ULTRA_CONTROL_BISQUE_PASSWORD", "secret")
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_CACHE_DIR", str(tmp_path / "cache"))
+    source = BisqueFrameSource()  # construction is offline: no requests yet
+    assert source._root_url == "https://bisque2.ece.ucsb.edu"
+    assert source._cache_dir == tmp_path / "cache"
+    assert source._cache_dir.is_dir()
+    # The TRAINING pair outranks the CONTROL pair.
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_ROOT_URL", "https://training.example.edu")
+    assert BisqueFrameSource()._root_url == "https://training.example.edu"
+
+
+def test_bisque_list_frames_returns_gt2_reviewed_stems(bisque_server, tmp_path) -> None:
+    expected_paths = _seed_default_pool(bisque_server)
+    source = _bisque_source(bisque_server, tmp_path)
+    assert source.list_frames() == ["EnrNE_Day2_Run1__0210"]
+    # Server-side pin: EXACT paths + query strings, in order, all Basic-authed.
+    assert bisque_server.request_paths == expected_paths
+    assert all(auth == BISQUE_BASIC_AUTH for _, auth in bisque_server.requests)
+    # The unreviewed frame is excluded from the pool but still fetchable.
+    unreviewed_xml = tmp_path / "EnrNE_Day2_Run1__0299.JPG.xml"
+    assert unreviewed_xml.is_file()
+
+
+def test_bisque_fetch_round_trip_writes_image_and_xml(bisque_server, tmp_path) -> None:
+    expected_paths = _seed_default_pool(bisque_server)
+    source = _bisque_source(bisque_server, tmp_path)
+    image_path, xml_path = source.fetch("EnrNE_Day2_Run1__0210")
+    assert image_path == tmp_path / "EnrNE_Day2_Run1__0210.JPG"
+    assert xml_path == tmp_path / "EnrNE_Day2_Run1__0210.JPG.xml"
+    assert image_path.read_bytes() == FAKE_JPEG
+    # The cached XML must work IDENTICALLY to the local-directory path:
+    # <image> root, resource_uniq attr, manifest GT layer selectable.
+    root = ET.parse(xml_path).getroot()
+    assert root.tag == "image"
+    assert root.get("resource_uniq") == "00-IMG1"
+    layer_name, layer = select_gt_layer(root)
+    assert layer_name == "gt2"
+    assert len(layer_boxes(layer)) == 1
+    assert bisque_server.request_paths == [*expected_paths, "/blob_service/00-IMG1"]
+    # Second fetch reuses the cached bytes (uniq marker match): no new requests.
+    source.fetch("EnrNE_Day2_Run1__0210")
+    assert bisque_server.request_paths == [*expected_paths, "/blob_service/00-IMG1"]
+
+
+def test_bisque_fetch_unknown_stem_raises(bisque_server, tmp_path) -> None:
+    _seed_default_pool(bisque_server)
+    source = _bisque_source(bisque_server, tmp_path)
+    with pytest.raises(FileNotFoundError, match="nope"):
+        source.fetch("nope")
+
+
+def test_bisque_tag_query_route_paginates_to_exhaustion(
+    bisque_server, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(BisqueFrameSource, "PAGE_LIMIT", 2)
+    root = bisque_server.root_url
+    page1 = "/data_service/image/?tag_query=gt2&wpublic=owner%2Cshared&limit=2"
+    page2 = "/data_service/image/?tag_query=gt2&wpublic=owner%2Cshared&limit=2&offset=2"
+    listing = '<image resource_uniq="{u}" name="{n}.JPG" uri="{r}/data_service/{u}"/>'
+    bisque_server.routes[page1] = (
+        f'<resource uri="{root}/data_service/image">'
+        + listing.format(u="00-A", n="frame_a", r=root)
+        + listing.format(u="00-B", n="frame_b", r=root)
+        + "</resource>"
+    ).encode()
+    bisque_server.routes[page2] = (
+        f'<resource uri="{root}/data_service/image">'
+        + listing.format(u="00-C", n="frame_c", r=root)
+        + "</resource>"
+    ).encode()
+    for uniq, name in (("00-A", "frame_a"), ("00-B", "frame_b"), ("00-C", "frame_c")):
+        bisque_server.routes[f"/data_service/{uniq}?view=deep"] = _image_xml(
+            root, uniq, f"{name}.JPG", "gt2"
+        )
+    source = _bisque_source(bisque_server, tmp_path, tag_query="gt2")
+    assert source.list_frames() == ["frame_a", "frame_b", "frame_c"]
+    assert bisque_server.request_paths == [
+        page1,
+        page2,
+        "/data_service/00-A?view=deep",
+        "/data_service/00-B?view=deep",
+        "/data_service/00-C?view=deep",
+    ]
+
+
+def test_bisque_401_maps_to_a_clear_credential_error(bisque_server, tmp_path) -> None:
+    bisque_server.force_status = 401
+    source = _bisque_source(bisque_server, tmp_path)
+    with pytest.raises(RuntimeError, match="credentials"):
+        source.list_frames()
+
+
+def test_resolve_frame_source_routes_bisque_with_params(monkeypatch, tmp_path) -> None:
+    for name in BISQUE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_ROOT_URL", "https://bisque2.ece.ucsb.edu")
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_USERNAME", "fleet")
+    monkeypatch.setenv("ULTRA_TRAINING_BISQUE_PASSWORD", "secret")
+    ctx = MaterializeContext(
+        purpose="sync",
+        params={"frame_source": "bisque", "frame_source_dir": str(tmp_path / "cache")},
+        workdir=tmp_path,
+    )
+    source = RareSpotAdapter()._resolve_frame_source(ctx)
+    assert isinstance(source, BisqueFrameSource)
+    assert source._cache_dir == tmp_path / "cache"
 
 
 # ------------------------------------------------------------ materialization

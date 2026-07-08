@@ -2504,7 +2504,7 @@ const server = http.createServer(async (request, response) => {
       count: 1,
       models: [
         {
-          key: "prairie_yolo",
+          key: "yolov5_rarespot",
           name: "Prairie YOLO",
           framework: "yolov5",
           task_type: "object_detection",
@@ -2583,7 +2583,7 @@ const server = http.createServer(async (request, response) => {
           domain_id: "domain_prairie",
           scope: "shared",
           owner_user_id: "user_mobile_smoke",
-          model_key: "prairie_yolo",
+          model_key: "yolov5_rarespot",
           parent_lineage_id: null,
           active_version_id: "version_active",
           metadata: {},

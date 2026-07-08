@@ -67,6 +67,7 @@ type MemoryStore struct {
 	bisque                 map[string]domain.BisqueCredentialRecord
 	leases                 map[string]domain.RunLeaseRecord
 	workers                map[string]domain.WorkerHeartbeatRecord
+	training               *memoryTrainingState
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -107,6 +108,7 @@ func NewMemoryStore() *MemoryStore {
 		bisque:                 map[string]domain.BisqueCredentialRecord{},
 		leases:                 map[string]domain.RunLeaseRecord{},
 		workers:                map[string]domain.WorkerHeartbeatRecord{},
+		training:               newMemoryTrainingState(),
 	}
 	store.orgs["local-org"] = defaultLocalOrganization(domain.Now())
 	return store

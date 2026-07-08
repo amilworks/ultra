@@ -2801,6 +2801,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2TrainingModelsResponse"
+  /v2/training/models/{model_key}/status:
+    get:
+      operationId: getV2TrainingModelStatus
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Model-scoped training status (generic; the prairie status route is a transitional alias)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TrainingModelStatusResponse"
+        "404":
+          description: Unknown model key
   /v2/training/prairie/status:
     get:
       operationId: getV2PrairieStatus
@@ -3763,6 +3780,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2TrainingModelRecord"
+    V2TrainingModelStatusResponse:
+      type: object
+      description: Superset of V2PrairieStatusResponse with the model key, generalized per-class counts, and the Gate A thresholds mirror.
+      required: [model_key, dataset_name, model_health, reviewed_images, unreviewed_images, retrain_gate, retrain_gate_reasons]
+      additionalProperties: true
+      properties:
+        model_key: { type: string }
+        dataset_name: { type: string }
+        dataset_id: { type: string, nullable: true }
+        last_sync_at: { type: string, nullable: true }
+        last_retrain_at: { type: string, nullable: true }
+        active_model_version: { type: string, nullable: true }
+        active_version_activated_at: { type: string, nullable: true }
+        model_health: { type: string }
+        reviewed_images: { type: integer }
+        unreviewed_images: { type: integer }
+        class_counts: { $ref: "#/components/schemas/JsonObject" }
+        per_class_new_objects: { $ref: "#/components/schemas/JsonObject" }
+        unsupported_class_counts: { $ref: "#/components/schemas/JsonObject" }
+        retrain_gate: { type: boolean }
+        retrain_gate_reasons:
+          type: array
+          items: { type: string }
+        retrain_gate_counts: { $ref: "#/components/schemas/JsonObject" }
+        retrain_gate_thresholds: { $ref: "#/components/schemas/JsonObject" }
     V2PrairieStatusResponse:
       type: object
       required: [dataset_name, model_health, reviewed_images, unreviewed_images, retrain_gate, retrain_gate_reasons]

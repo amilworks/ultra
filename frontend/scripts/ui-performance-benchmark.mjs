@@ -32,7 +32,7 @@ const cases = [
   {
     name: "training-route",
     buttonSelector: '.app-sidebar-static button[title^="Training dashboard"]',
-    readySelector: "text=Model Health",
+    readySelector: ".training-panel",
   },
   {
     name: "scientific-viewer-route",

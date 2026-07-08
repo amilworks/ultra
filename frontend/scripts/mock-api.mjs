@@ -2504,7 +2504,7 @@ const server = http.createServer(async (request, response) => {
       count: 1,
       models: [
         {
-          key: "prairie_yolo",
+          key: "yolov5_rarespot",
           name: "Prairie YOLO",
           framework: "yolov5",
           task_type: "object_detection",
@@ -2520,34 +2520,79 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/training/prairie/status") {
+  if (request.method === "GET" && url.pathname === "/v2/training/models/yolov5_rarespot/status") {
+    // Primary fixture = the LAUNCH state (plan section 14.11): held-out slice
+    // pending, frozen gold, truthful thresholds - the all-green demo is gone.
     sendJson(response, 200, {
+      model_key: "yolov5_rarespot",
       dataset_name: "Prairie_Dog_Active_Learning",
       dataset_id: "dataset_prairie",
       last_sync_at: nowIso,
-      next_sync_at: nowIso,
+      next_sync_at: null,
       active_model_version: "version_active",
-      model_health: "healthy",
-      reviewed_images: 24,
-      unreviewed_images: 3,
-      class_counts: { prairie_dog: 48, burrow: 19 },
-      unsupported_class_counts: {},
+      active_version_activated_at: nowIso,
+      model_health: "watch",
+      reviewed_images: 1240,
+      unreviewed_images: 370,
+      class_counts: { prairie_dog: 2344, burrow: 12394 },
+      per_class_new_objects: { prairie_dog: 7, burrow: 25 },
+      unsupported_class_counts: {
+        prairie_dog_in_burrow: { count: 15, disposition: "ignore" },
+      },
       detection_counts: {},
-      latest_metrics: { map50: 0.91 },
-      benchmark_baseline: {},
+      latest_metrics: { map50: 0.83, promotion_benchmark_ready: false },
+      benchmark_baseline: { map50: 0.83 },
       benchmark_latest_candidate: {},
       last_benchmark_at: nowIso,
       benchmark_ready: true,
       canonical_benchmark_ready: true,
-      promotion_benchmark_ready: true,
-      retrain_gate: true,
-      retrain_gate_reasons: [],
-      retrain_gate_counts: {},
+      promotion_benchmark_ready: false,
+      retrain_gate: false,
+      retrain_gate_reasons: [
+        "prairie_dog: 7 of 20 - historically the scarce class",
+      ],
+      retrain_gate_counts: {
+        reviewed_images: 62,
+        total_objects: 214,
+        per_class: { prairie_dog: 7, burrow: 25 },
+      },
+      retrain_gate_thresholds: {
+        min_reviewed: 50,
+        min_new_objects: 200,
+        min_per_class_objects: { prairie_dog: 20, burrow: 20 },
+        min_days: 3,
+      },
+      gold: {
+        gold_set_id: "gold_prairie_v1",
+        gold_set_version: 1,
+        content_hash: "a3f2c9b8d7e6f5a4",
+        freeze_state: "frozen",
+        held_out_state: "pending_new_survey",
+        qualifying_prior_frames: 212,
+        required_prior_frames: 100,
+        per_slice_counts: { prior_train: 212, held_out_test: 0 },
+      },
+      canary: null,
+      running_benchmark: null,
+      recent_events: [
+        {
+          ts: nowIso,
+          kind: "sync",
+          summary: "62 reviewed images synced from BisQue",
+        },
+        {
+          ts: nowIso,
+          kind: "benchmark",
+          version_id: "version_candidate",
+          gold_hash_short: "a3f2c9",
+          summary: "Candidate version_candidate failed the gate (2 of 9 evaluated checks)",
+        },
+      ],
     });
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/training/prairie/retrain-requests") {
+  if (request.method === "GET" && url.pathname === "/v2/training/models/yolov5_rarespot/retrain-requests") {
     sendJson(response, 200, { count: 0, requests: [] });
     return;
   }
@@ -2583,7 +2628,7 @@ const server = http.createServer(async (request, response) => {
           domain_id: "domain_prairie",
           scope: "shared",
           owner_user_id: "user_mobile_smoke",
-          model_key: "prairie_yolo",
+          model_key: "yolov5_rarespot",
           parent_lineage_id: null,
           active_version_id: "version_active",
           metadata: {},
@@ -2597,19 +2642,54 @@ const server = http.createServer(async (request, response) => {
 
   if (
     request.method === "GET" &&
-    url.pathname === "/v2/training/lineages/lineage_prairie/versions"
-  ) {
+    url.pathname === "/v2/training/lineages/lineage_prairie/versions") {
     sendJson(response, 200, {
-      count: 1,
+      count: 2,
       versions: [
+        {
+          version_id: "version_candidate",
+          lineage_id: "lineage_prairie",
+          status: "candidate",
+          metrics: { map50: 0.81, promotion_benchmark_ready: false },
+          metadata: {
+            guardrails: {
+              passed: false,
+              reasons: [
+                "prairie_dog recall 0.41 - below the absolute floor of 0.50",
+                "Prior-data mAP50 0.78 vs 0.81 active - beyond the 0.02 tolerance",
+              ],
+              benchmarked_at: nowIso,
+              gold_set_version: 1,
+              gold_set_content_hash: "a3f2c9b8d7e6f5a4",
+              report_uri: "https://example.invalid/reports/version_candidate.json",
+              clauses: [
+                { clause_key: "agg_map50", metric_path: "aggregate.map50", comparator: "max_drop_vs_active", value: 0.005, candidate_value: 0.829, baseline_value: 0.83, outcome: "passed" },
+                { clause_key: "class_recall_abs", metric_path: "per_class.prairie_dog.recall_at_op", comparator: "abs_floor", value: 0.5, candidate_value: 0.41, baseline_value: 0.52, outcome: "failed", reason: "prairie_dog recall 0.41 - below the absolute floor of 0.50" },
+                { clause_key: "slice_prior_map50", metric_path: "per_slice.prior_train.map50", slice: "prior_train", comparator: "max_drop_vs_active", value: 0.02, candidate_value: 0.78, baseline_value: 0.81, outcome: "failed", reason: "Prior-data mAP50 0.78 vs 0.81 active - beyond the 0.02 tolerance" },
+                { clause_key: "fp_empty_ceiling", metric_path: "aggregate.fp_per_empty_frame", comparator: "max_rise_vs_active", value: 0.1, candidate_value: 0.29, baseline_value: 0.28, outcome: "passed" },
+                { clause_key: "slice_held_map50", metric_path: "per_slice.held_out_test.map50", slice: "held_out_test", comparator: "max_drop_vs_active", value: 0.005, candidate_value: null, baseline_value: null, outcome: "excluded", reason: "excluded - held-out slice pending new survey data" },
+              ],
+            },
+          },
+          activated_at: null,
+          created_at: nowIso,
+          updated_at: nowIso,
+        },
         {
           version_id: "version_active",
           lineage_id: "lineage_prairie",
-          source_job_id: null,
-          artifact_run_id: null,
           status: "active",
-          metrics: { benchmark_ready: true, promotion_benchmark_ready: true },
-          metadata: { guardrails: { passed: true, reasons: [] } },
+          metrics: { map50: 0.83 },
+          metadata: {
+            guardrails: {
+              passed: true,
+              reasons: [],
+              benchmarked_at: nowIso,
+              gold_set_version: 1,
+              gold_set_content_hash: "a3f2c9b8d7e6f5a4",
+            },
+          },
+          activated_at: nowIso,
           created_at: nowIso,
           updated_at: nowIso,
         },

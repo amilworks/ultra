@@ -384,6 +384,247 @@ type ControlThreadMessage struct {
 	RunID     pgtype.Text        `json:"run_id"`
 }
 
+type ControlTrainingBenchmarkRun struct {
+	RunID              string             `json:"run_id"`
+	ModelVersionID     string             `json:"model_version_id"`
+	GoldSetID          string             `json:"gold_set_id"`
+	GoldSetContentHash string             `json:"gold_set_content_hash"`
+	MetricSchema       string             `json:"metric_schema"`
+	KernelVersion      string             `json:"kernel_version"`
+	Metrics            []byte             `json:"metrics"`
+	GuardrailsPassed   bool               `json:"guardrails_passed"`
+	GuardrailsReasons  []byte             `json:"guardrails_reasons"`
+	ReportUri          string             `json:"report_uri"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlTrainingCanaryObservation struct {
+	ObservationID   string             `json:"observation_id"`
+	ModelKey        pgtype.Text        `json:"model_key"`
+	CanaryVersionID string             `json:"canary_version_id"`
+	ActiveVersionID string             `json:"active_version_id"`
+	RunID           string             `json:"run_id"`
+	CanaryMetrics   []byte             `json:"canary_metrics"`
+	ActiveMetrics   []byte             `json:"active_metrics"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlTrainingDomain struct {
+	DomainID    string             `json:"domain_id"`
+	Name        string             `json:"name"`
+	Description pgtype.Text        `json:"description"`
+	Metadata    []byte             `json:"metadata"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlTrainingGateConfigEvent struct {
+	EventID     string             `json:"event_id"`
+	ModelKey    string             `json:"model_key"`
+	TableName   string             `json:"table_name"`
+	Change      []byte             `json:"change"`
+	ActorUserID string             `json:"actor_user_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlTrainingGatePolicy struct {
+	ModelKey           string `json:"model_key"`
+	MinReviewed        int64  `json:"min_reviewed"`
+	MinNewObjects      int64  `json:"min_new_objects"`
+	MinPerClassObjects []byte `json:"min_per_class_objects"`
+	MinDays            int64  `json:"min_days"`
+}
+
+type ControlTrainingGoldItem struct {
+	GoldSetID     string      `json:"gold_set_id"`
+	ItemID        string      `json:"item_id"`
+	SourceRef     []byte      `json:"source_ref"`
+	Slice         string      `json:"slice"`
+	LabelKind     string      `json:"label_kind"`
+	ContentSha256 string      `json:"content_sha256"`
+	Phash         pgtype.Text `json:"phash"`
+	GtLabelSha256 string      `json:"gt_label_sha256"`
+	GtLabelUri    string      `json:"gt_label_uri"`
+	Width         pgtype.Int8 `json:"width"`
+	Height        pgtype.Int8 `json:"height"`
+	Metadata      []byte      `json:"metadata"`
+	FootprintGeom []byte      `json:"footprint_geom"`
+	StrataTags    []byte      `json:"strata_tags"`
+}
+
+type ControlTrainingGoldSet struct {
+	GoldSetID        string             `json:"gold_set_id"`
+	ModelKey         string             `json:"model_key"`
+	Version          int64              `json:"version"`
+	ContentHash      pgtype.Text        `json:"content_hash"`
+	ItemCount        int64              `json:"item_count"`
+	LabelStats       []byte             `json:"label_stats"`
+	StrataSummary    []byte             `json:"strata_summary"`
+	SplitManifestUri pgtype.Text        `json:"split_manifest_uri"`
+	Provenance       []byte             `json:"provenance"`
+	Status           string             `json:"status"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	CreatedByUserID  string             `json:"created_by_user_id"`
+	FrozenAt         pgtype.Timestamptz `json:"frozen_at"`
+}
+
+type ControlTrainingGuardrailClause struct {
+	ModelKey   string      `json:"model_key"`
+	ClauseKey  string      `json:"clause_key"`
+	MetricPath string      `json:"metric_path"`
+	Comparator string      `json:"comparator"`
+	Value      float32     `json:"value"`
+	Slice      pgtype.Text `json:"slice"`
+	Params     []byte      `json:"params"`
+	Enabled    bool        `json:"enabled"`
+	Required   bool        `json:"required"`
+}
+
+type ControlTrainingJob struct {
+	JobID             string             `json:"job_id"`
+	ModelKey          string             `json:"model_key"`
+	JobType           string             `json:"job_type"`
+	Status            string             `json:"status"`
+	GpuPool           pgtype.Text        `json:"gpu_pool"`
+	Params            []byte             `json:"params"`
+	ProgressCompleted int64              `json:"progress_completed"`
+	ProgressTotal     int64              `json:"progress_total"`
+	Error             pgtype.Text        `json:"error"`
+	OwnerUserID       string             `json:"owner_user_id"`
+	OwnerOrgID        pgtype.Text        `json:"owner_org_id"`
+	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	StartedAt         pgtype.Timestamptz `json:"started_at"`
+	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
+	OutputSummary     []byte             `json:"output_summary"`
+	Metadata          []byte             `json:"metadata"`
+}
+
+type ControlTrainingJobEvent struct {
+	EventID     string             `json:"event_id"`
+	JobID       string             `json:"job_id"`
+	Sequence    int64              `json:"sequence"`
+	EventType   string             `json:"event_type"`
+	ActorUserID pgtype.Text        `json:"actor_user_id"`
+	ActorOrgID  pgtype.Text        `json:"actor_org_id"`
+	Ts          pgtype.Timestamptz `json:"ts"`
+	Message     pgtype.Text        `json:"message"`
+	Metadata    []byte             `json:"metadata"`
+}
+
+type ControlTrainingJobLease struct {
+	JobID          string             `json:"job_id"`
+	WorkerID       string             `json:"worker_id"`
+	LeaseToken     string             `json:"lease_token"`
+	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlTrainingLineage struct {
+	LineageID       string             `json:"lineage_id"`
+	DomainID        string             `json:"domain_id"`
+	ModelKey        string             `json:"model_key"`
+	Scope           string             `json:"scope"`
+	OwnerUserID     pgtype.Text        `json:"owner_user_id"`
+	ParentLineageID pgtype.Text        `json:"parent_lineage_id"`
+	ActiveVersionID pgtype.Text        `json:"active_version_id"`
+	Metadata        []byte             `json:"metadata"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlTrainingModel struct {
+	ModelKey             string             `json:"model_key"`
+	TaskType             string             `json:"task_type"`
+	DisplayName          string             `json:"display_name"`
+	DatasetFormat        string             `json:"dataset_format"`
+	MetricSchema         string             `json:"metric_schema"`
+	RequiresPhash        bool               `json:"requires_phash"`
+	Capabilities         []byte             `json:"capabilities"`
+	Executor             []byte             `json:"executor"`
+	Classes              []byte             `json:"classes"`
+	LeakageDefensesExtra []byte             `json:"leakage_defenses_extra"`
+	Metadata             []byte             `json:"metadata"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlTrainingModelStatus struct {
+	ModelKey               string             `json:"model_key"`
+	DatasetName            pgtype.Text        `json:"dataset_name"`
+	DatasetID              pgtype.Text        `json:"dataset_id"`
+	ModelHealth            pgtype.Text        `json:"model_health"`
+	ReviewedImages         int64              `json:"reviewed_images"`
+	UnreviewedImages       int64              `json:"unreviewed_images"`
+	ClassCounts            []byte             `json:"class_counts"`
+	PerClassNewObjects     []byte             `json:"per_class_new_objects"`
+	UnsupportedClassCounts []byte             `json:"unsupported_class_counts"`
+	LastSyncAt             pgtype.Timestamptz `json:"last_sync_at"`
+	LastRetrainAt          pgtype.Timestamptz `json:"last_retrain_at"`
+	ActiveModelVersion     pgtype.Text        `json:"active_model_version"`
+	RetrainGate            bool               `json:"retrain_gate"`
+	RetrainGateReasons     []byte             `json:"retrain_gate_reasons"`
+	RetrainGateCounts      []byte             `json:"retrain_gate_counts"`
+	RetrainGateThresholds  []byte             `json:"retrain_gate_thresholds"`
+}
+
+type ControlTrainingModelVersion struct {
+	VersionID     string             `json:"version_id"`
+	LineageID     string             `json:"lineage_id"`
+	ModelKey      string             `json:"model_key"`
+	Status        string             `json:"status"`
+	IsFrozen      bool               `json:"is_frozen"`
+	WeightsUri    pgtype.Text        `json:"weights_uri"`
+	SourceJobID   pgtype.Text        `json:"source_job_id"`
+	ArtifactRunID pgtype.Text        `json:"artifact_run_id"`
+	Metrics       []byte             `json:"metrics"`
+	Metadata      []byte             `json:"metadata"`
+	ActivatedAt   pgtype.Timestamptz `json:"activated_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlTrainingModelVersionEvent struct {
+	EventID            string             `json:"event_id"`
+	VersionID          string             `json:"version_id"`
+	EventType          string             `json:"event_type"`
+	ActorUserID        string             `json:"actor_user_id"`
+	FromStatus         pgtype.Text        `json:"from_status"`
+	ToStatus           pgtype.Text        `json:"to_status"`
+	BenchmarkRunID     pgtype.Text        `json:"benchmark_run_id"`
+	GoldSetContentHash pgtype.Text        `json:"gold_set_content_hash"`
+	Reason             pgtype.Text        `json:"reason"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlTrainingReplayPool struct {
+	ModelKey       string        `json:"model_key"`
+	ContentSha256  string        `json:"content_sha256"`
+	SourceRef      []byte        `json:"source_ref"`
+	LabelStats     []byte        `json:"label_stats"`
+	SiteID         pgtype.Text   `json:"site_id"`
+	ForgettingRisk pgtype.Float4 `json:"forgetting_risk"`
+	LastUsedEpoch  pgtype.Int8   `json:"last_used_epoch"`
+	Priority       pgtype.Float4 `json:"priority"`
+}
+
+type ControlTrainingRetrainRequest struct {
+	RequestID                 string             `json:"request_id"`
+	ModelKey                  string             `json:"model_key"`
+	TrainingJobID             pgtype.Text        `json:"training_job_id"`
+	Status                    string             `json:"status"`
+	Note                      pgtype.Text        `json:"note"`
+	Error                     pgtype.Text        `json:"error"`
+	ModelVersion              pgtype.Text        `json:"model_version"`
+	GatingSummary             []byte             `json:"gating_summary"`
+	BenchmarkReportArtifactID pgtype.Text        `json:"benchmark_report_artifact_id"`
+	RequestedByUserID         pgtype.Text        `json:"requested_by_user_id"`
+	CreatedAt                 pgtype.Timestamptz `json:"created_at"`
+	StartedAt                 pgtype.Timestamptz `json:"started_at"`
+	FinishedAt                pgtype.Timestamptz `json:"finished_at"`
+}
+
 type ControlUploadChunk struct {
 	SessionID  string             `json:"session_id"`
 	FileToken  string             `json:"file_token"`

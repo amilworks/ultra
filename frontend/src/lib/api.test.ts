@@ -6794,7 +6794,7 @@ describe("ApiClient V2 chat bridge", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      if (url === "https://ultra.example.org/v2/training/prairie/status") {
+      if (url === "https://ultra.example.org/v2/training/models/yolov5_rarespot/status") {
         return new Response(
           JSON.stringify({
             dataset_name: "Prairie Active Learning",
@@ -6817,7 +6817,7 @@ describe("ApiClient V2 chat bridge", () => {
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
-      if (url === "https://ultra.example.org/v2/training/prairie/retrain-requests") {
+      if (url === "https://ultra.example.org/v2/training/models/yolov5_rarespot/retrain-requests") {
         return new Response(JSON.stringify({ count: 0, requests: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -6847,8 +6847,8 @@ describe("ApiClient V2 chat bridge", () => {
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
     await client.listTrainingModels();
-    await client.getPrairieActiveLearningStatus();
-    await client.listPrairieRetrainRequests();
+    await client.getTrainingModelStatus("yolov5_rarespot");
+    await client.listTrainingRetrainRequests("yolov5_rarespot");
     await client.listTrainingDomains(200);
     await client.listDomainLineages("prairie", { limit: 50 });
     await client.listLineageVersions("lineage-1", { limit: 25 });

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ultra_deepagents.config import RuntimeSettings
+
+RARESPOT_MODEL_KEY = "yolov5_rarespot"
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,44 @@ class RareSpotConfig:
             stability=bool(stability),
             stability_match_iou=float(stability_match_iou),
         )
+
+
+def resolve_serving_weights(
+    config: RareSpotConfig,
+    run_id: str,
+    settings: RuntimeSettings | None = None,
+) -> tuple[Path, dict[str, Any] | None]:
+    """Serving-weights seam (§8.1): rarespot is a CONSUMER of the ONE shared
+    resolver — the canary/active policy never lives here. Fleet opt-in via
+    ``ULTRA_RARESPOT_SERVING_RESOLVER`` (default OFF); every failure path —
+    resolver off, control plane down, empty URI, missing file — falls back to
+    the baked ``config.weights_path`` and returns ``None`` resolution info.
+    """
+    if not _env_bool("ULTRA_RARESPOT_SERVING_RESOLVER", False):
+        return config.weights_path, None
+    # The construction sits INSIDE the guard too: a malformed env var (e.g. a
+    # non-numeric timeout) raises in RuntimeSettings.from_env(), and inference
+    # must serve baked weights through ANY resolver failure, not just .resolve().
+    try:
+        # Lazy import: the sandbox Skill imports this module and must stay
+        # import-light when the resolver is off.
+        from ultra_deepagents.training.resolver import ServingWeightsResolver
+
+        resolution = ServingWeightsResolver(settings).resolve(RARESPOT_MODEL_KEY, run_id)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Serving-weights resolver unavailable; using baked weights.", exc_info=True
+        )
+        return config.weights_path, None
+    if not resolution:
+        return config.weights_path, None
+    weights_uri = str(resolution.get("weights_uri") or "").strip()
+    if not weights_uri:
+        return config.weights_path, None
+    weights_path = _resolve_repo_relative(weights_uri)
+    if not weights_path.exists():
+        return config.weights_path, None
+    return weights_path, dict(resolution)
 
 
 def _repo_root() -> Path:

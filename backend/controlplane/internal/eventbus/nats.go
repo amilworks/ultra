@@ -20,6 +20,7 @@ type NATSConfig struct {
 	Stream               string
 	JobsSubject          string
 	DataAgentJobsSubject string
+	TrainingJobsSubject  string
 	EventsSubject        string
 	CancelSubject        string
 	EventConsumer        string
@@ -176,13 +177,14 @@ func natsStreamConfig(name string, subjects []string, maxAge time.Duration, maxB
 }
 
 func natsStreamSubjects(cfg NATSConfig) []string {
-	subjects := make([]string, 0, 5)
+	subjects := make([]string, 0, 6)
 	for _, subject := range []string{
 		cfg.JobsSubject,
 		cfg.EventsSubject,
 		runEventPartitionWildcard(cfg.EventsSubject),
 		cfg.CancelSubject,
 		cfg.DataAgentJobsSubject,
+		cfg.TrainingJobsSubject,
 	} {
 		if strings.TrimSpace(subject) != "" {
 			subjects = append(subjects, subject)

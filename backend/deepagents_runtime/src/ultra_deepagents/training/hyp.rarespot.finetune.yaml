@@ -1,0 +1,46 @@
+# GoldGate RareSpot finetune hyperparameters (plan section 6.2).
+#
+# SELF-AUTHORED AND CHECKED IN on purpose: the vendored third_party/yolov5 tree
+# has no data/hyps/ directory, so train.py's default --hyp path
+# (data/hyps/hyp.scratch-low.yaml) does not exist and a bare run crashes on
+# open(hyp). Always pass this file explicitly (build_finetune_command does).
+#
+# Warm-start finetune values — we resume from the active checkpoint, never
+# scratch: lr0 is ~1/3 of the 0.01 scratch default. Nadir aerial imagery is
+# flip-symmetric, so flipud is ON (unlike COCO); rotation/shear/perspective are
+# OFF (ortho tiles — rotation fabricates impossible burrow geometry); mixup and
+# copy_paste are OFF (both hurt aerial small-object detection).
+
+lr0: 0.0032          # initial LR (~1/3 scratch default; we warm-start)
+lrf: 0.12            # final OneCycleLR fraction
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 2.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+
+# loss gains — stock; do NOT up-weight cls/obj (over-detection is the
+# documented failure mode; we must not encourage more positive predictions)
+box: 0.05
+cls: 0.5
+cls_pw: 1.0
+obj: 1.0
+obj_pw: 1.0
+iou_t: 0.20
+anchor_t: 4.0
+fl_gamma: 0.0
+
+# augmentation
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 0.0         # ortho tiles — no rotation
+translate: 0.1
+scale: 0.5
+shear: 0.0
+perspective: 0.0
+flipud: 0.5          # nadir aerial — vertical flip is valid, unlike COCO
+fliplr: 0.5
+mosaic: 1.0
+mixup: 0.0
+copy_paste: 0.0

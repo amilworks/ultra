@@ -1,0 +1,60 @@
+{
+  "_comment": "GoldGate cross-language contract fixture. 'manifest' is pinned by BOTH the Go registry-seed parity test (backend/controlplane/internal/store/training_seed_test.go) and the Python manifest parity test (backend/deepagents_runtime/tests/test_training_manifest.py). 'seed' is pinned by the Go test only (schema.sql + MemoryStore seed coherence). Change any value here ONLY together with schema.sql, training_seed.go, and manifests.py.",
+  "job_phases": [
+    "training.sync",
+    "training.assemble",
+    "training.finetune",
+    "training.benchmark",
+    "training.gold_freeze"
+  ],
+  "manifest": {
+    "model_key": "yolov5_rarespot",
+    "task_type": "detection",
+    "display_name": "RareSpot prairie-dog/burrow",
+    "dataset_format": "yolo_txt_tiles_512",
+    "metric_schema": "detection.v1",
+    "requires_phash": true,
+    "capabilities": ["SYNC", "ASSEMBLE", "FINETUNE", "BENCHMARK"],
+    "classes": {"0": "prairie_dog", "1": "burrow"},
+    "leakage_defenses_extra": ["aerial_geospatial_overlap"],
+    "gt_layer_priority": ["gt2", "New Ground Truth"],
+    "executor": {
+      "gpu_pool": "titan",
+      "min_vram_gb": 8,
+      "shm_gb": 8,
+      "wall_clock_budget_s": 21600,
+      "cpu_only": false
+    }
+  },
+  "seed": {
+    "version_zero": {
+      "version_id": "yolov5_rarespot-v0",
+      "status": "active",
+      "is_frozen": true
+    },
+    "lineage": {
+      "lineage_id": "yolov5_rarespot-shared",
+      "domain_id": "ecology",
+      "scope": "shared",
+      "active_version_id": "yolov5_rarespot-v0"
+    },
+    "gate_policy": {
+      "min_reviewed": 50,
+      "min_new_objects": 200,
+      "min_per_class_objects": {"prairie_dog": 20, "burrow": 20},
+      "min_days": 3
+    },
+    "guardrail_clause_keys": [
+      "agg_map50",
+      "agg_map50_95",
+      "class_recall_delta",
+      "class_recall_abs",
+      "slice_prior_map50",
+      "slice_held_map50",
+      "class_ap50_collapse",
+      "class_ap50_abs",
+      "fp_empty_ceiling",
+      "precision_delta"
+    ]
+  }
+}

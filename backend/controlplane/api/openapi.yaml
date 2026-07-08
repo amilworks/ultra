@@ -2801,56 +2801,203 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2TrainingModelsResponse"
-  /v2/training/prairie/status:
+  /v2/training/models/{model_key}/status:
     get:
-      operationId: getV2PrairieStatus
+      operationId: getV2TrainingModelStatus
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         "200":
-          description: Prairie training status
+          description: Model-scoped training status (generic; the prairie status route is a transitional alias)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/V2PrairieStatusResponse"
-  /v2/training/prairie/retrain-requests:
+                $ref: "#/components/schemas/V2TrainingModelStatusResponse"
+        "404":
+          description: Unknown model key
+  /v2/training/models/{model_key}/retrain-requests:
     get:
-      operationId: listV2PrairieRetrainRequests
+      operationId: listV2TrainingRetrainRequests
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         "200":
-          description: Prairie retrain requests
+          description: Retrain requests for the model
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2PrairieRetrainListResponse"
-  /v2/training/prairie/sync:
+  /v2/training/models/{model_key}/sync:
     post:
-      operationId: syncV2PrairieActiveLearning
+      operationId: dispatchV2TrainingSync
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
       responses:
-        "501":
-          description: Prairie active-learning sync is not configured
+        "202":
+          description: training.sync job dispatched
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
-  /v2/training/prairie/benchmark/run:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+        "409":
+          description: capability not supported by the model manifest
+  /v2/training/models/{model_key}/gold-sets:
     post:
-      operationId: runV2PrairieBenchmark
+      operationId: createV2TrainingGoldSetDraft
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
       responses:
-        "501":
-          description: Prairie benchmark jobs are not configured
+        "201":
+          description: draft gold set created
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
-  /v2/training/prairie/retrain-request:
+              schema: { $ref: "#/components/schemas/JsonObject" }
+        "409":
+          description: a draft or freezing gold set already exists
+  /v2/training/models/{model_key}/gold-sets/{gold_set_id}/freeze:
     post:
-      operationId: requestV2PrairieRetrain
+      operationId: freezeV2TrainingGoldSet
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: gold_set_id
+          in: path
+          required: true
+          schema: { type: string }
       responses:
-        "501":
-          description: Prairie retraining jobs are not configured
+        "202":
+          description: asynchronous training.gold_freeze job dispatched
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+  /v2/training/models/{model_key}/benchmark/run:
+    post:
+      operationId: dispatchV2TrainingBenchmark
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: training.benchmark job dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+  /v2/training/models/{model_key}/retrain-request:
+    post:
+      operationId: dispatchV2TrainingRetrain
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: Gate A validated; assemble+finetune dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+        "409":
+          description: Gate A blocked (reasons enumerated)
+  /v2/training/models/{model_key}/versions:
+    post:
+      operationId: registerV2TrainingModelVersion
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: externally-trained checkpoint registered as a candidate (guilty until benchmarked)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonObject" }
+  /v2/training/model-versions/{version_id}/reject:
+    post:
+      operationId: rejectV2TrainingModelVersion
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: candidate dismissed (audited)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonObject" }
+  /v2/training/models/{model_key}/resolve:
+    get:
+      operationId: resolveV2TrainingServingWeights
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: run_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: the ONE shared serving-weights resolution (lineage active pointer + deterministic 10% canary split on run_id)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingServingResolution" }
+        "404":
+          description: unknown model key, or no active version (consumers fail open to their baked weights)
+  /v2/training/models/{model_key}/canary-observations:
+    post:
+      operationId: insertV2TrainingCanaryObservation
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: shadow-serving observation recorded (worker contract; adapter-defined JSONB metrics)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingCanaryObservationRecord" }
+        "400":
+          description: run_id or canary_version_id missing
+    get:
+      operationId: listV2TrainingCanaryObservations
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: canary_version_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        "200":
+          description: newest-first canary observations for the UI drift echo
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingCanaryObservationListResponse" }
   /v2/training/datasets:
     get:
       operationId: listV2TrainingDatasets
@@ -3763,6 +3910,71 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2TrainingModelRecord"
+    V2TrainingJobDispatchResponse:
+      type: object
+      required: [job_id, job_type, model_key, status]
+      additionalProperties: true
+      properties:
+        job_id: { type: string }
+        job_type: { type: string }
+        model_key: { type: string }
+        status: { type: string }
+    V2TrainingServingResolution:
+      type: object
+      description: The shared serving-weights resolver's answer (plan section 8.1) - the lineage active pointer, or the newest canary for the deterministic fnv1a-32(run_id) 10% split.
+      required: [model_key, weights_uri, version_id, is_canary]
+      properties:
+        model_key: { type: string }
+        weights_uri: { type: string }
+        version_id: { type: string }
+        is_canary: { type: boolean }
+    V2TrainingCanaryObservationRecord:
+      type: object
+      required: [observation_id, canary_version_id, run_id, canary_metrics, created_at]
+      additionalProperties: true
+      properties:
+        observation_id: { type: string }
+        model_key: { type: string }
+        canary_version_id: { type: string }
+        active_version_id: { type: string }
+        run_id: { type: string }
+        canary_metrics: { $ref: "#/components/schemas/JsonObject" }
+        active_metrics: { $ref: "#/components/schemas/JsonObject" }
+        created_at: { type: string }
+    V2TrainingCanaryObservationListResponse:
+      type: object
+      required: [count, observations]
+      properties:
+        count: { type: integer }
+        observations:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2TrainingCanaryObservationRecord"
+    V2TrainingModelStatusResponse:
+      type: object
+      description: Superset of V2PrairieStatusResponse with the model key, generalized per-class counts, and the Gate A thresholds mirror.
+      required: [model_key, dataset_name, model_health, reviewed_images, unreviewed_images, retrain_gate, retrain_gate_reasons]
+      additionalProperties: true
+      properties:
+        model_key: { type: string }
+        dataset_name: { type: string }
+        dataset_id: { type: string, nullable: true }
+        last_sync_at: { type: string, nullable: true }
+        last_retrain_at: { type: string, nullable: true }
+        active_model_version: { type: string, nullable: true }
+        active_version_activated_at: { type: string, nullable: true }
+        model_health: { type: string }
+        reviewed_images: { type: integer }
+        unreviewed_images: { type: integer }
+        class_counts: { $ref: "#/components/schemas/JsonObject" }
+        per_class_new_objects: { $ref: "#/components/schemas/JsonObject" }
+        unsupported_class_counts: { $ref: "#/components/schemas/JsonObject" }
+        retrain_gate: { type: boolean }
+        retrain_gate_reasons:
+          type: array
+          items: { type: string }
+        retrain_gate_counts: { $ref: "#/components/schemas/JsonObject" }
+        retrain_gate_thresholds: { $ref: "#/components/schemas/JsonObject" }
     V2PrairieStatusResponse:
       type: object
       required: [dataset_name, model_health, reviewed_images, unreviewed_images, retrain_gate, retrain_gate_reasons]

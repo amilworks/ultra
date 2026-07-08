@@ -54,6 +54,7 @@ type ServerDeps struct {
 	Runtime           RuntimeSummary
 	QueueDiagnostics  eventbus.QueueDiagnosticsProvider
 	DataAgentJobs     eventbus.DataAgentJobPublisher
+	TrainingJobs      eventbus.TrainingJobPublisher
 	Bisque            *BisqueService
 	BisqueCredentials *BisqueCredentialStore
 	WorkOS            *WorkOSAuth
@@ -706,11 +707,26 @@ func NewRouter(deps ServerDeps) http.Handler {
 				r.Delete("/admin/conversations/{conversation_id}", deps.handleNotConfigured("admin conversation deletion is not configured in the Go control plane yet"))
 			})
 			r.Get("/training/models", deps.handleTrainingModels)
-			r.Get("/training/prairie/status", deps.handlePrairieStatus)
-			r.Get("/training/prairie/retrain-requests", deps.handleEmptyPrairieRetrainRequests)
-			r.Post("/training/prairie/sync", deps.handleNotConfigured("prairie active-learning sync is not configured in the Go control plane yet"))
-			r.Post("/training/prairie/benchmark/run", deps.handleNotConfigured("prairie benchmark jobs are not configured in the Go control plane yet"))
-			r.Post("/training/prairie/retrain-request", deps.handleNotConfigured("prairie retraining jobs are not configured in the Go control plane yet"))
+			r.Get("/training/models/{model_key}/status", deps.handleTrainingModelStatus)
+			r.Post("/training/models/{model_key}/sync", deps.handleDispatchTrainingSync)
+			r.Post("/training/models/{model_key}/gold-sets", deps.handleCreateTrainingGoldSetDraft)
+			r.Post("/training/models/{model_key}/gold-sets/{gold_set_id}/freeze", deps.handleFreezeTrainingGoldSet)
+			r.Post("/training/models/{model_key}/benchmark/run", deps.handleDispatchTrainingBenchmark)
+			r.Post("/training/models/{model_key}/retrain-request", deps.handleDispatchTrainingRetrain)
+			r.Post("/training/models/{model_key}/versions", deps.handleRegisterTrainingModelVersion)
+			r.Post("/training/model-versions/{version_id}/reject", deps.handleRejectTrainingModelVersion)
+			r.Post("/training/jobs/{job_id}/lease", deps.handleAcquireTrainingJobLease)
+			r.Patch("/training/jobs/{job_id}/lease", deps.handleRenewTrainingJobLease)
+			r.Delete("/training/jobs/{job_id}/lease", deps.handleReleaseTrainingJobLease)
+			r.Post("/training/jobs/{job_id}/events", deps.handleAppendTrainingJobEventHTTP)
+			r.Patch("/training/jobs/{job_id}/status", deps.handleUpdateTrainingJobStatusHTTP)
+			r.Post("/training/jobs/{job_id}/benchmark-result", deps.handleTrainingBenchmarkResult)
+			r.Post("/training/jobs/{job_id}/gold-result", deps.handleTrainingGoldResult)
+			r.Post("/training/jobs/{job_id}/status-result", deps.handleTrainingStatusResult)
+			r.Get("/training/models/{model_key}/retrain-requests", deps.handleTrainingRetrainRequests)
+			r.Get("/training/models/{model_key}/resolve", deps.handleResolveTrainingServingWeights)
+			r.Post("/training/models/{model_key}/canary-observations", deps.handleInsertTrainingCanaryObservation)
+			r.Get("/training/models/{model_key}/canary-observations", deps.handleListTrainingCanaryObservations)
 			r.Get("/training/datasets", deps.handleEmptyTrainingDatasets)
 			r.Post("/training/datasets", deps.handleNotConfigured("training dataset creation is not configured in the Go control plane yet"))
 			r.Get("/training/datasets/{dataset_id}", deps.handleNotConfigured("training datasets are not configured in the Go control plane yet"))
@@ -724,17 +740,17 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/segment/sam3/interactive", deps.handleNotConfigured("SAM3 interactive segmentation is not configured in the Go control plane yet; use V2 chat tools for segmentation workflows"))
 			r.Get("/model-health", deps.handleModelHealth)
 			r.Get("/admin/model-health", deps.handleModelHealth)
-			r.Get("/training/domains", deps.handleEmptyTrainingDomains)
+			r.Get("/training/domains", deps.handleTrainingDomains)
 			r.Post("/training/domains", deps.handleNotConfigured("training domain creation is not configured in the Go control plane yet"))
-			r.Get("/training/domains/{domain_id}/lineages", deps.handleEmptyTrainingLineages)
+			r.Get("/training/domains/{domain_id}/lineages", deps.handleTrainingLineages)
 			r.Post("/training/lineages/{lineage_id}/fork", deps.handleNotConfigured("training lineage forks are not configured in the Go control plane yet"))
-			r.Get("/training/lineages/{lineage_id}/versions", deps.handleEmptyTrainingVersions)
+			r.Get("/training/lineages/{lineage_id}/versions", deps.handleTrainingVersions)
 			r.Post("/training/update-proposals/preview", deps.handleNotConfigured("training update proposals are not configured in the Go control plane yet"))
 			r.Get("/training/update-proposals", deps.handleEmptyTrainingUpdateProposals)
 			r.Post("/training/update-proposals/{proposal_id}/approve", deps.handleNotConfigured("training update proposal decisions are not configured in the Go control plane yet"))
 			r.Post("/training/update-proposals/{proposal_id}/reject", deps.handleNotConfigured("training update proposal decisions are not configured in the Go control plane yet"))
-			r.Post("/training/model-versions/{version_id}/promote", deps.handleNotConfigured("training model promotion is not configured in the Go control plane yet"))
-			r.Post("/training/model-versions/{version_id}/rollback", deps.handleNotConfigured("training model rollback is not configured in the Go control plane yet"))
+			r.Post("/training/model-versions/{version_id}/promote", deps.handlePromoteTrainingModelVersionReal)
+			r.Post("/training/model-versions/{version_id}/rollback", deps.handleRollbackTrainingModelVersionReal)
 			r.Get("/training/merge-requests", deps.handleEmptyTrainingMergeRequests)
 			r.Post("/training/merge-requests", deps.handleNotConfigured("training merge requests are not configured in the Go control plane yet"))
 			r.Post("/training/merge-requests/{merge_id}/approve", deps.handleNotConfigured("training merge request decisions are not configured in the Go control plane yet"))
@@ -10050,81 +10066,9 @@ func (deps ServerDeps) resourceAccounting(ctx context.Context) resourceAccountin
 	return accounting
 }
 
-func (deps ServerDeps) handleTrainingModels(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, trainingModelsResponse{
-		Count: 1,
-		Models: []trainingModelRecord{{
-			Key:               "rarespot-prairie-yolo",
-			Name:              "RareSpot Prairie Detector",
-			Framework:         "PyTorch/YOLOv5",
-			TaskType:          "object_detection",
-			Description:       "Prairie dog and burrow detection through the V2 Deep Agents chat tool path. Training services are not configured in the Go control plane yet.",
-			SupportsTraining:  false,
-			SupportsFinetune:  false,
-			SupportsInference: true,
-			Dimensions:        []string{"2d"},
-			DefaultConfig: domain.JSONMap{
-				"workflow":       "rarespot_ecology",
-				"training_state": "not_configured",
-			},
-		}},
-	})
-}
-
-func (deps ServerDeps) handlePrairieStatus(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, map[string]any{
-		"dataset_name":               "Prairie Active Learning",
-		"dataset_id":                 nil,
-		"last_sync_at":               nil,
-		"next_sync_at":               nil,
-		"active_model_version":       "rarespot-prairie-yolo",
-		"model_health":               "Watch",
-		"reviewed_images":            0,
-		"unreviewed_images":          0,
-		"class_counts":               map[string]int{},
-		"unsupported_class_counts":   map[string]int{},
-		"detection_counts":           map[string]int{},
-		"latest_metrics":             map[string]any{},
-		"benchmark_baseline":         map[string]any{},
-		"benchmark_latest_candidate": map[string]any{},
-		"last_benchmark_at":          nil,
-		"benchmark_ready":            false,
-		"canonical_benchmark_ready":  false,
-		"promotion_benchmark_ready":  false,
-		"retrain_gate":               false,
-		"retrain_gate_reasons": []string{
-			"Training services are not configured in the Go control plane yet.",
-			"Use V2 chat with the RareSpot detector for local inference workflows.",
-		},
-		"retrain_gate_counts": map[string]int{},
-	})
-}
-
-func (deps ServerDeps) handleEmptyPrairieRetrainRequests(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, map[string]any{"count": 0, "requests": []any{}})
-}
-
 func (deps ServerDeps) handleEmptyTrainingDatasets(w http.ResponseWriter, r *http.Request) {
 	_ = deps
 	writeJSON(w, http.StatusOK, map[string]any{"count": 0, "datasets": []any{}})
-}
-
-func (deps ServerDeps) handleEmptyTrainingDomains(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, map[string]any{"count": 0, "domains": []any{}})
-}
-
-func (deps ServerDeps) handleEmptyTrainingLineages(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, map[string]any{"count": 0, "lineages": []any{}})
-}
-
-func (deps ServerDeps) handleEmptyTrainingVersions(w http.ResponseWriter, r *http.Request) {
-	_ = deps
-	writeJSON(w, http.StatusOK, map[string]any{"count": 0, "versions": []any{}})
 }
 
 func (deps ServerDeps) handleEmptyTrainingUpdateProposals(w http.ResponseWriter, r *http.Request) {

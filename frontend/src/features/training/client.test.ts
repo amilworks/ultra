@@ -10,8 +10,8 @@ describe("training slice client", () => {
   it("loads the prairie dashboard snapshot in one call", async () => {
     const apiClient = {
       listTrainingModels: vi.fn().mockResolvedValue({ models: [{ key: "a", supports_inference: true }] }),
-      getPrairieActiveLearningStatus: vi.fn().mockResolvedValue({ benchmark_ready: true }),
-      listPrairieRetrainRequests: vi.fn().mockResolvedValue({ requests: [{ request_id: "r1" }] }),
+      getTrainingModelStatus: vi.fn().mockResolvedValue({ benchmark_ready: true }),
+      listTrainingRetrainRequests: vi.fn().mockResolvedValue({ requests: [{ request_id: "r1" }] }),
     } as unknown as ApiClient;
 
     const snapshot = await loadTrainingDashboardSnapshot(apiClient);

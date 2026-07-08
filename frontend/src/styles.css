@@ -10715,3 +10715,469 @@ details {
     transform: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   GoldGate Training page (M1.5) — the answer page. Calm-language rules of
+   planning/2026-07-07-goldgate-continual-finetuning-plan.md §14.2: tokens
+   only, one surface with hairline dividers, status as dot+sentence, numbers
+   as soft stat tiles inside disclosures, exactly one filled primary per
+   moment, nothing green at rest.
+   --------------------------------------------------------------------------- */
+
+.training-panel {
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) + 0.85rem);
+  background: color-mix(in oklab, var(--bg-panel-strong) 92%, transparent);
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.6rem 1.9rem 1.9rem;
+  min-width: 0;
+}
+
+.training-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.training-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.training-header-title h2 {
+  font-size: 1.3rem;
+  font-weight: 640;
+  color: var(--text-main);
+  margin: 0;
+}
+
+.training-subtitle {
+  margin: 0.3rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.training-section {
+  border-top: 1px solid var(--line);
+  margin-top: 1.15rem;
+  padding-top: 1rem;
+}
+
+.training-status-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.9rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.training-status-sentence {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: var(--text-main);
+  font-size: 0.92rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.training-status-sentence strong {
+  font-weight: 500;
+  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
+}
+
+/* Blessed as training-status-dot — a NEW idiom introduced by the §14 spec
+   (no prior status dot exists in this stylesheet). Always aria-hidden; the
+   sentence carries the meaning in words. */
+.training-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-main);
+  flex: none;
+  align-self: center;
+}
+
+.training-status-dot[data-tone="muted"] {
+  background: var(--text-muted);
+}
+
+.training-status-dot[data-tone="danger"] {
+  background: var(--danger);
+}
+
+.training-status-sep {
+  opacity: 0.45;
+  padding: 0 0.15rem;
+}
+
+.training-rollback-ghost {
+  background: none;
+  border: none;
+  padding: 0.35rem 0.4rem;
+  color: var(--danger);
+  font-size: 0.85rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.training-rollback-ghost:hover {
+  background: color-mix(in oklab, var(--danger) 8%, transparent);
+}
+
+.training-rollback-absent {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.training-digest {
+  margin: 0.85rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.training-focal {
+  margin-top: 1.1rem;
+}
+
+.training-focal-lead {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: var(--text-main);
+  font-size: 0.95rem;
+  margin: 0 0 0.6rem;
+}
+
+.training-gloss {
+  margin: 0 0 0.7rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.training-checklist {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text-main);
+  font-size: 0.9rem;
+}
+
+.training-checklist [data-state="unmet"] {
+  color: var(--text-main);
+}
+
+.training-checklist [data-state="met"],
+.training-checklist [data-state="excluded"] {
+  color: var(--text-muted);
+}
+
+.training-verdict-groups {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.training-verdict-groups > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text-main);
+}
+
+.training-verdict-groups .training-verdict-reason {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin: 0 0 0.2rem 0.75rem;
+}
+
+.training-clause-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.86rem;
+}
+
+.training-clause-table th {
+  text-align: left;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0.3rem 0.4rem 0.3rem 0;
+}
+
+.training-clause-table td {
+  border-top: 1px solid var(--line);
+  padding: 0.38rem 0.4rem 0.38rem 0;
+  color: var(--text-main);
+}
+
+.training-clause-table th[data-numeric],
+.training-clause-table td[data-numeric] {
+  text-align: right;
+}
+
+.training-clause-table .training-clause-note td {
+  border-top: none;
+  padding-top: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.training-clause-fail {
+  color: var(--danger);
+}
+
+.training-provenance {
+  margin: 0.6rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+/* The ONE amber caveat pill (styles.css viewer-caption-badge recipe, minus
+   cursor:help): held-out-pending, rendered only beside a promote affordance. */
+.training-held-out-flag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.42rem;
+  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in oklab, #b45309 16%, transparent);
+  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.training-caveat-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0.8rem 0 0;
+}
+
+.training-caveat-row p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.training-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.95rem;
+  flex-wrap: wrap;
+}
+
+.training-ghost-action {
+  background: none;
+  border: none;
+  padding: 0.35rem 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.training-ghost-action:hover {
+  background: color-mix(in oklab, var(--text-main) 6%, transparent);
+  color: var(--text-main);
+}
+
+.training-disclosure {
+  border-top: 1px solid var(--line);
+}
+
+.training-disclosure summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 44px;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+  padding: 0 0.25rem;
+}
+
+.training-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.training-disclosure summary:hover {
+  background: color-mix(in oklab, var(--text-main) 6%, transparent);
+  color: var(--text-main);
+}
+
+.training-disclosure-chevron {
+  transition: transform 160ms ease;
+  flex: none;
+}
+
+.training-disclosure[open] .training-disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.training-disclosure-body {
+  padding: 0.35rem 0 1rem 0.75rem;
+  border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  margin-left: 0.4rem;
+}
+
+/* Soft stat tile — the user-token-usage-stat recipe verbatim; the GRID is
+   auto-fit (not repeat(5)) so any model's tile count lays out cleanly. */
+.training-stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.9rem;
+}
+
+.training-stat-tile {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.35rem;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-radius: calc(var(--radius) + 0.35rem);
+  background: color-mix(in oklab, var(--muted) 45%, var(--background) 55%);
+  padding: 1rem 1.05rem;
+}
+
+.training-stat-tile-value {
+  color: var(--popover-foreground);
+  font-size: clamp(1.45rem, 2.8vw, 2rem);
+  font-weight: 650;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.training-stat-tile-label {
+  color: var(--muted-foreground);
+  font-size: 0.88rem;
+  font-weight: 560;
+}
+
+/* Determinate coverage bar — the upload-progress-track recipe with a neutral
+   ink fill (never emerald). */
+.training-coverage-bar {
+  height: 0.46rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 62%, transparent);
+  overflow: hidden;
+  margin-top: 0.45rem;
+}
+
+.training-coverage-bar > div {
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--text-main) 70%, transparent);
+}
+
+.training-inline-error {
+  margin: 0.7rem 0 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.training-inline-busy {
+  margin: 0.7rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.training-history-list {
+  display: grid;
+  gap: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.training-history-list .training-history-failed {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .training-panel {
+    padding: 1.15rem 1rem 1.4rem;
+  }
+
+  .training-status-sentence {
+    display: block;
+  }
+
+  .training-status-sentence > span[data-clause] {
+    display: block;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+
+  .training-status-sep {
+    display: none;
+  }
+
+  .training-stat-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .training-actions .training-primary-action {
+    width: 100%;
+  }
+
+  /* Clause table restacks to per-clause blocks — never overflow-x. */
+  .training-clause-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .training-clause-table,
+  .training-clause-table tbody,
+  .training-clause-table tr,
+  .training-clause-table td {
+    display: block;
+  }
+
+  .training-clause-table td {
+    border-top: none;
+    padding: 0.1rem 0;
+  }
+
+  .training-clause-table tr {
+    border-top: 1px solid var(--line);
+    padding: 0.4rem 0;
+  }
+
+  .training-clause-table td[data-numeric] {
+    text-align: left;
+    color: var(--text-muted);
+    display: inline-block;
+    margin-right: 0.7rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .training-disclosure-chevron {
+    transition: none;
+  }
+}

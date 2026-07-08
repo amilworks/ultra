@@ -174,10 +174,10 @@ func (deps ServerDeps) handleCreateBatchAnalysisJob(w http.ResponseWriter, r *ht
 		CreatedAt:      now,
 		Metadata: domain.JSONMap{
 			"analysis": domain.JSONMap{
-				"model":        model,
+				"model":         model,
 				"model_display": display,
-				"input_count":  len(resourceIDs),
-				"created_at":   now.UTC().Format(time.RFC3339Nano),
+				"input_count":   len(resourceIDs),
+				"created_at":    now.UTC().Format(time.RFC3339Nano),
 			},
 		},
 	})

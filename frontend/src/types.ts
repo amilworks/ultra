@@ -293,7 +293,7 @@ export type TrainingJobResponse = {
 
 export type TrainingDomainOwnerScope = "shared" | "private";
 export type TrainingLineageScope = "shared" | "fork";
-export type TrainingVersionStatus = "candidate" | "canary" | "active" | "retired";
+export type TrainingVersionStatus = "candidate" | "canary" | "active" | "retired" | "rejected";
 
 export type TrainingDomainRecord = {
   domain_id: string;
@@ -337,6 +337,7 @@ export type TrainingModelVersionRecord = {
   status: TrainingVersionStatus;
   metrics: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  activated_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -348,6 +349,9 @@ export type TrainingModelVersionListResponse = {
 
 export type TrainingVersionPromoteRequest = {
   note?: string | null;
+  // Required by the server when promoting canary -> active while the gold
+  // set's held-out slice is pending (plan section 8.2); audited.
+  override_reason?: string | null;
 };
 
 export type TrainingVersionRollbackRequest = {
@@ -434,6 +438,90 @@ export type PrairieBenchmarkRunResponse = {
 
 export type PrairieBenchmarkRunRequest = {
   mode?: "canonical_only" | "promotion_packet";
+  // Target version: omit for the baseline (defaults to active); pass the
+  // candidate's id when benchmarking a candidate, or the server benchmarks
+  // the active version instead and the candidate never gets a verdict.
+  version_id?: string;
+};
+
+// --- GoldGate training UI (M1.5) -------------------------------------------
+// Status-read echoes (plan section 3.6/14.5). Each is individually optional:
+// an older backend omits it and the UI degrades per the section-14.5 table.
+
+export type TrainingGoldFreezeState = "blocked" | "ready" | "freezing" | "frozen" | "failed";
+
+export type TrainingGoldEcho = {
+  gold_set_id?: string | null;
+  gold_set_version?: number | null;
+  content_hash?: string | null;
+  freeze_state?: TrainingGoldFreezeState;
+  qualifying_prior_frames?: number;
+  required_prior_frames?: number;
+  freeze_failure_reasons?: string[];
+  held_out_state?: "pending_new_survey" | "populated";
+  per_slice_counts?: Record<string, number>;
+};
+
+export type TrainingCanaryEcho = {
+  canary_version_id: string;
+  soak_started_at: string;
+  runs_observed: number;
+  min_soak_runs: number;
+  min_soak_hours: number;
+  traffic_fraction: number;
+  drift_note?: string | null;
+};
+
+export type TrainingRecentEvent = {
+  ts: string;
+  kind: string;
+  version_id?: string;
+  gold_hash_short?: string;
+  report_uri?: string;
+  summary: string;
+};
+
+export type TrainingRunningBenchmark = {
+  version_id: string; // a version id, or the literal 'baseline'
+  started_at: string;
+};
+
+// The PINNED metadata.guardrails.clauses[] element shape (plan section 7.6,
+// stamped by the M2 gate engine at benchmark time).
+export type GateClauseWire = {
+  clause_key: string;
+  metric_path: string;
+  slice?: string | null;
+  comparator: "max_drop_vs_active" | "abs_floor" | "max_rise_vs_active" | "abs_ceiling";
+  value: number;
+  candidate_value?: number | null;
+  baseline_value?: number | null;
+  outcome: "passed" | "failed" | "excluded";
+  reason?: string | null;
+};
+
+export type GateGuardrailsWire = {
+  passed?: boolean;
+  reasons?: string[];
+  clauses?: GateClauseWire[];
+  benchmarked_at?: string | null;
+  gold_set_version?: number | null;
+  gold_set_content_hash?: string | null;
+  report_uri?: string | null;
+};
+
+// Normalized, model-agnostic status the rebuilt dashboard consumes; superset
+// of the prairie wire shape with per-class counts as plain Records.
+export type TrainingModelStatus = PrairieStatusResponse & {
+  model_key?: string;
+  per_class_new_objects?: Record<string, number>;
+  retrain_gate_thresholds?: Record<string, unknown>;
+  active_version_activated_at?: string | null;
+  last_retrain_at?: string | null;
+  gold?: TrainingGoldEcho | null;
+  canary?: TrainingCanaryEcho | null;
+  running_benchmark?: TrainingRunningBenchmark | null;
+  recent_events?: TrainingRecentEvent[];
 };
 
 export type UploadedFileRecord = {

@@ -85,6 +85,7 @@ func New(cfg config.Config) (*App, error) {
 	var jobSource <-chan eventbus.Job
 	var dataAgentJobSource <-chan eventbus.DataAgentJob
 	var dataAgentJobs eventbus.DataAgentJobPublisher
+	var trainingJobs eventbus.TrainingJobPublisher
 	var natsBus *eventbus.NATSBus
 	runtime := httpapi.RuntimeSummary{
 		AppVersion:               cfg.AppVersion,
@@ -120,6 +121,7 @@ func New(cfg config.Config) (*App, error) {
 		bus = eventbus.NewSplitBus(natsBus, localEvents)
 		runEvents = localEvents
 		dataAgentJobs = natsBus
+		trainingJobs = natsBus
 		runtime.DispatchMode = "nats_jetstream"
 		runtime.JobTransport = "nats_jetstream"
 		runtime.EventTransport = "nats_jetstream_to_local_fanout"
@@ -132,6 +134,7 @@ func New(cfg config.Config) (*App, error) {
 		jobSource = memBus.Jobs()
 		dataAgentJobSource = memBus.DataAgentJobs()
 		dataAgentJobs = memBus
+		trainingJobs = memBus
 	}
 
 	runService := runcontrol.NewServiceWithOptions(controlStore, bus, runcontrol.ServiceOptions{
@@ -272,6 +275,7 @@ func New(cfg config.Config) (*App, error) {
 		Runtime:             runtime,
 		QueueDiagnostics:    natsBus,
 		DataAgentJobs:       dataAgentJobs,
+		TrainingJobs:        trainingJobs,
 		Bisque:              bisqueService,
 		BisqueCredentials:   bisqueCredentialStore,
 		WorkOS:              workOSAuth,
@@ -299,6 +303,7 @@ func natsBusConfig(cfg config.Config) eventbus.NATSConfig {
 		Stream:                 cfg.NATSStream,
 		JobsSubject:            cfg.NATSJobsSubject,
 		DataAgentJobsSubject:   cfg.NATSDataAgentJobsSubject,
+		TrainingJobsSubject:    cfg.NATSTrainingJobsSubject,
 		EventsSubject:          cfg.NATSEventsSubject,
 		CancelSubject:          cfg.NATSCancelSubject,
 		EventConsumer:          cfg.NATSEventConsumer,
@@ -310,6 +315,7 @@ func natsBusConfig(cfg config.Config) eventbus.NATSConfig {
 		ConsumerTargets: []eventbus.QueueConsumerTarget{
 			{Name: cfg.NATSWorkerDurable, Role: "deepagents", Subject: cfg.NATSJobsSubject},
 			{Name: cfg.NATSDataAgentWorkerDurable, Role: "data_agent", Subject: cfg.NATSDataAgentJobsSubject},
+			{Name: cfg.NATSTrainingWorkerDurable, Role: "training", Subject: cfg.NATSTrainingJobsSubject},
 			{Name: cfg.NATSEventConsumer, Role: "event_ingest", Subject: cfg.NATSEventsSubject},
 		},
 	}

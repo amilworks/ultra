@@ -2818,6 +2818,114 @@ paths:
                 $ref: "#/components/schemas/V2TrainingModelStatusResponse"
         "404":
           description: Unknown model key
+  /v2/training/models/{model_key}/sync:
+    post:
+      operationId: dispatchV2TrainingSync
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: training.sync job dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+        "409":
+          description: capability not supported by the model manifest
+  /v2/training/models/{model_key}/gold-sets:
+    post:
+      operationId: createV2TrainingGoldSetDraft
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: draft gold set created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonObject" }
+        "409":
+          description: a draft or freezing gold set already exists
+  /v2/training/models/{model_key}/gold-sets/{gold_set_id}/freeze:
+    post:
+      operationId: freezeV2TrainingGoldSet
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: gold_set_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: asynchronous training.gold_freeze job dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+  /v2/training/models/{model_key}/benchmark/run:
+    post:
+      operationId: dispatchV2TrainingBenchmark
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: training.benchmark job dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+  /v2/training/models/{model_key}/retrain-request:
+    post:
+      operationId: dispatchV2TrainingRetrain
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: Gate A validated; assemble+finetune dispatched
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2TrainingJobDispatchResponse" }
+        "409":
+          description: Gate A blocked (reasons enumerated)
+  /v2/training/models/{model_key}/versions:
+    post:
+      operationId: registerV2TrainingModelVersion
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: externally-trained checkpoint registered as a candidate (guilty until benchmarked)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonObject" }
+  /v2/training/model-versions/{version_id}/reject:
+    post:
+      operationId: rejectV2TrainingModelVersion
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: candidate dismissed (audited)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonObject" }
   /v2/training/prairie/status:
     get:
       operationId: getV2PrairieStatus
@@ -3780,6 +3888,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2TrainingModelRecord"
+    V2TrainingJobDispatchResponse:
+      type: object
+      required: [job_id, job_type, model_key, status]
+      additionalProperties: true
+      properties:
+        job_id: { type: string }
+        job_type: { type: string }
+        model_key: { type: string }
+        status: { type: string }
     V2TrainingModelStatusResponse:
       type: object
       description: Superset of V2PrairieStatusResponse with the model key, generalized per-class counts, and the Gate A thresholds mirror.

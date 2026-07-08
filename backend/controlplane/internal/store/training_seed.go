@@ -92,6 +92,52 @@ func trainingSeedVersion(now time.Time) domain.TrainingModelVersionRecord {
 	}
 }
 
+// trainingSeedGatePolicy mirrors the control_training_gate_policies INSERT in
+// schema.sql (the fixture's canonical gate_policy; a value tune must change
+// both together or the seed-parity tests fail).
+func trainingSeedGatePolicy() domain.TrainingGatePolicyRecord {
+	return domain.TrainingGatePolicyRecord{
+		ModelKey:      TrainingSeedModelKey,
+		MinReviewed:   50,
+		MinNewObjects: 200,
+		MinPerClassObjects: domain.JSONMap{
+			"prairie_dog": float64(20),
+			"burrow":      float64(20),
+		},
+		MinDays: 3,
+	}
+}
+
+// trainingSeedGuardrailClauses mirrors the control_training_guardrail_clauses
+// INSERT in schema.sql row-for-row (10 clauses; the fixture pins the keys).
+func trainingSeedGuardrailClauses() []domain.TrainingGuardrailClauseRecord {
+	clause := func(key string, metricPath string, comparator string, value float64, slice string, params domain.JSONMap) domain.TrainingGuardrailClauseRecord {
+		return domain.TrainingGuardrailClauseRecord{
+			ModelKey:   TrainingSeedModelKey,
+			ClauseKey:  key,
+			MetricPath: metricPath,
+			Comparator: comparator,
+			Value:      value,
+			Slice:      slice,
+			Params:     params,
+			Enabled:    true,
+			Required:   true,
+		}
+	}
+	return []domain.TrainingGuardrailClauseRecord{
+		clause("agg_map50", "aggregate.map50", "max_drop_vs_active", 0.005, "", domain.JSONMap{}),
+		clause("agg_map50_95", "aggregate.map50_95", "max_drop_vs_active", 0.005, "", domain.JSONMap{}),
+		clause("class_recall_delta", "per_class.*.recall_at_op", "max_drop_vs_active", 0.02, "", domain.JSONMap{}),
+		clause("class_recall_abs", "per_class.*.recall_at_op", "abs_floor", 0.50, "", domain.JSONMap{}),
+		clause("slice_prior_map50", "per_slice.prior_train.map50", "max_drop_vs_active", 0.02, "prior_train", domain.JSONMap{"min_label_count": float64(10)}),
+		clause("slice_held_map50", "per_slice.held_out_test.map50", "max_drop_vs_active", 0.005, "held_out_test", domain.JSONMap{"min_label_count": float64(10)}),
+		clause("class_ap50_collapse", "per_class.*.ap50", "max_drop_vs_active", 0.05, "", domain.JSONMap{}),
+		clause("class_ap50_abs", "per_class.*.ap50", "abs_floor", 0.10, "", domain.JSONMap{"strict": true}),
+		clause("fp_empty_ceiling", "aggregate.fp_per_empty_frame", "max_rise_vs_active", 0.10, "", domain.JSONMap{}),
+		clause("precision_delta", "aggregate.precision_at_op", "max_drop_vs_active", 0.03, "", domain.JSONMap{}),
+	}
+}
+
 func trainingSeedStatus() domain.TrainingModelStatusRecord {
 	return domain.TrainingModelStatusRecord{
 		ModelKey:               TrainingSeedModelKey,
@@ -116,5 +162,42 @@ func trainingSeedStatus() domain.TrainingModelStatusRecord {
 			},
 			"min_days": float64(3),
 		},
+	}
+}
+
+// SeedTrainingModel is the in-memory analog of the documented seed migration
+// (the ONLY direct-DB writes the M5 acceptance test permits): registry row +
+// gate policy + guardrail clause rows + domain/lineage/version-0. Postgres
+// gets the same rows via a SQL seed migration; MemoryStore gets them here so
+// the acceptance walk is testable hermetically.
+func (s *MemoryStore) SeedTrainingModel(
+	model domain.TrainingModelRecord,
+	trainingDomain domain.TrainingDomainRecord,
+	lineage domain.TrainingLineageRecord,
+	versionZero domain.TrainingModelVersionRecord,
+	status domain.TrainingModelStatusRecord,
+	policy domain.TrainingGatePolicyRecord,
+	clauses []domain.TrainingGuardrailClauseRecord,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.training.models[model.ModelKey] = model
+	if trainingDomain.DomainID != "" {
+		s.training.domains[trainingDomain.DomainID] = trainingDomain
+	}
+	if lineage.LineageID != "" {
+		s.training.lineages[lineage.LineageID] = lineage
+	}
+	if versionZero.VersionID != "" {
+		s.training.versions[versionZero.VersionID] = versionZero
+	}
+	if status.ModelKey != "" {
+		s.training.statuses[status.ModelKey] = status
+	}
+	if policy.ModelKey != "" {
+		s.training.gatePolicies[policy.ModelKey] = policy
+	}
+	if len(clauses) > 0 {
+		s.training.guardrailClauses[model.ModelKey] = clauses
 	}
 }

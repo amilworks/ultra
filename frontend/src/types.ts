@@ -436,6 +436,86 @@ export type PrairieBenchmarkRunRequest = {
   mode?: "canonical_only" | "promotion_packet";
 };
 
+// --- GoldGate training UI (M1.5) -------------------------------------------
+// Status-read echoes (plan section 3.6/14.5). Each is individually optional:
+// an older backend omits it and the UI degrades per the section-14.5 table.
+
+export type TrainingGoldFreezeState = "blocked" | "ready" | "freezing" | "frozen" | "failed";
+
+export type TrainingGoldEcho = {
+  gold_set_id?: string | null;
+  gold_set_version?: number | null;
+  content_hash?: string | null;
+  freeze_state?: TrainingGoldFreezeState;
+  qualifying_prior_frames?: number;
+  required_prior_frames?: number;
+  freeze_failure_reasons?: string[];
+  held_out_state?: "pending_new_survey" | "populated";
+  per_slice_counts?: Record<string, number>;
+};
+
+export type TrainingCanaryEcho = {
+  canary_version_id: string;
+  soak_started_at: string;
+  runs_observed: number;
+  min_soak_runs: number;
+  min_soak_hours: number;
+  traffic_fraction: number;
+  drift_note?: string | null;
+};
+
+export type TrainingRecentEvent = {
+  ts: string;
+  kind: string;
+  version_id?: string;
+  gold_hash_short?: string;
+  report_uri?: string;
+  summary: string;
+};
+
+export type TrainingRunningBenchmark = {
+  version_id: string; // a version id, or the literal 'baseline'
+  started_at: string;
+};
+
+// The PINNED metadata.guardrails.clauses[] element shape (plan section 7.6,
+// stamped by the M2 gate engine at benchmark time).
+export type GateClauseWire = {
+  clause_key: string;
+  metric_path: string;
+  slice?: string | null;
+  comparator: "max_drop_vs_active" | "abs_floor" | "max_rise_vs_active" | "abs_ceiling";
+  value: number;
+  candidate_value?: number | null;
+  baseline_value?: number | null;
+  outcome: "passed" | "failed" | "excluded";
+  reason?: string | null;
+};
+
+export type GateGuardrailsWire = {
+  passed?: boolean;
+  reasons?: string[];
+  clauses?: GateClauseWire[];
+  benchmarked_at?: string | null;
+  gold_set_version?: number | null;
+  gold_set_content_hash?: string | null;
+  report_uri?: string | null;
+};
+
+// Normalized, model-agnostic status the rebuilt dashboard consumes; superset
+// of the prairie wire shape with per-class counts as plain Records.
+export type TrainingModelStatus = PrairieStatusResponse & {
+  model_key?: string;
+  per_class_new_objects?: Record<string, number>;
+  retrain_gate_thresholds?: Record<string, unknown>;
+  active_version_activated_at?: string | null;
+  last_retrain_at?: string | null;
+  gold?: TrainingGoldEcho | null;
+  canary?: TrainingCanaryEcho | null;
+  running_benchmark?: TrainingRunningBenchmark | null;
+  recent_events?: TrainingRecentEvent[];
+};
+
 export type UploadedFileRecord = {
   file_id: string;
   original_name: string;

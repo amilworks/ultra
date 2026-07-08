@@ -564,9 +564,12 @@ func (deps ServerDeps) handleAcquireTrainingJobLease(w http.ResponseWriter, r *h
 		return
 	}
 	jobID := strings.TrimSpace(chi.URLParam(r, "job_id"))
+	// ttl_seconds is float64: the Python worker serializes its float settings
+	// as "3600.0", which encoding/json refuses to unmarshal into an int (the
+	// 400 wedged the whole training queue on first live contact).
 	var request struct {
-		WorkerID   string `json:"worker_id"`
-		TTLSeconds int    `json:"ttl_seconds"`
+		WorkerID   string  `json:"worker_id"`
+		TTLSeconds float64 `json:"ttl_seconds"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -597,8 +600,8 @@ func (deps ServerDeps) handleRenewTrainingJobLease(w http.ResponseWriter, r *htt
 	}
 	jobID := strings.TrimSpace(chi.URLParam(r, "job_id"))
 	var request struct {
-		LeaseToken string `json:"lease_token"`
-		TTLSeconds int    `json:"ttl_seconds"`
+		LeaseToken string  `json:"lease_token"`
+		TTLSeconds float64 `json:"ttl_seconds"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -635,14 +638,14 @@ func (deps ServerDeps) handleReleaseTrainingJobLease(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
 }
 
-func trainingLeaseTTL(seconds int) time.Duration {
+func trainingLeaseTTL(seconds float64) time.Duration {
 	if seconds <= 0 {
 		// Training runs are HOURS long; the default sits far above the
 		// data-agent 300/600s defaults (section 9.2) and the OS-thread
 		// keepalive renews at TTL/3 regardless.
 		return 30 * time.Minute
 	}
-	return time.Duration(seconds) * time.Second
+	return time.Duration(seconds * float64(time.Second))
 }
 
 func (deps ServerDeps) handleAppendTrainingJobEventHTTP(w http.ResponseWriter, r *http.Request) {

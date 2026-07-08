@@ -25,6 +25,7 @@ from ultra_deepagents.training.control_client import (
     TrainingControlClient,
     TrainingJobLease,
     TrainingLeaseConflict,
+    TrainingLeaseUnavailable,
 )
 from ultra_deepagents.training.envelope import TrainingJobEnvelope
 from ultra_deepagents.training.keepalive import (
@@ -431,12 +432,27 @@ def test_malformed_payload_is_terminated_not_redelivered() -> None:
 
 def test_lease_conflict_naks_for_redelivery() -> None:
     client = FakeControlClient(lease_error=TrainingLeaseConflict("held elsewhere"))
-    worker = _worker(client)
+    worker = _worker(client, ack_wait_seconds=120.0, redelivery_delay_seconds=1.0)
     message = FakeAck(_job_payload())
     asyncio.run(worker._process_message(message))
     assert message.naked == 1
     assert message.acked == 0
     assert client.statuses == []
+    # Conflict retries are spaced a whole AckWait apart, NOT the short
+    # redelivery delay: a crashed worker's stale lease persists up to the
+    # lease TTL, and MaxDeliver-spaced retries must outlast it.
+    assert message.nak_delays == [120.0]
+
+
+def test_lease_unavailable_naks_with_short_delay() -> None:
+    client = FakeControlClient(lease_error=TrainingLeaseUnavailable("control plane down"))
+    worker = _worker(client, ack_wait_seconds=120.0, redelivery_delay_seconds=1.0)
+    message = FakeAck(_job_payload())
+    asyncio.run(worker._process_message(message))
+    assert message.naked == 1
+    assert message.acked == 0
+    assert client.statuses == []
+    assert message.nak_delays == [1.0]
 
 
 def test_finetune_not_implemented_fails_cleanly_with_reason(monkeypatch) -> None:
@@ -619,9 +635,11 @@ def test_worker_settings_env_defaults(monkeypatch) -> None:
     settings = TrainingWorkerSettings.from_env(_runtime_settings())
     assert settings.jobs_subject == "ultra.training.jobs"
     assert settings.durable == "ultra-training-worker"
-    # Plan 9.2: well above the data-agent 300/600s defaults.
-    assert settings.ack_wait_seconds == 3600.0
+    # Short AckWait bounds crash recovery (in_progress() keepalive touches
+    # carry long jobs); the lease TTL is the crash-takeover window.
+    assert settings.ack_wait_seconds == 300.0
     assert settings.lease_ttl_seconds == 3600.0
+    assert settings.max_deliver == 20
 
     monkeypatch.setenv("ULTRA_CONTROL_NATS_TRAINING_JOBS_SUBJECT", "ultra.training.jobs.test")
     monkeypatch.setenv("ULTRA_CONTROL_NATS_TRAINING_WORKER_DURABLE", "ultra-training-worker-test")

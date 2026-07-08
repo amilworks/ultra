@@ -255,16 +255,25 @@ class RareSpotAdapter(ModelAdapter):
         }
 
     def _resolve_frame_source(self, ctx: MaterializeContext) -> FrameSource:
+        # Job params override; the env pair is DEPLOYMENT config — the sync
+        # dispatch is deliberately parameterless (the UI never chooses a data
+        # source), so where frames come from is a per-worker install fact,
+        # exactly like the fleet BisQue credentials will be.
         params = dict(ctx.params or {})
-        kind = str(params.get("frame_source") or "").strip().lower()
-        root = str(params.get("frame_source_dir") or "").strip()
+        kind = str(
+            params.get("frame_source") or os.getenv("ULTRA_TRAINING_FRAME_SOURCE") or ""
+        ).strip().lower()
+        root = str(
+            params.get("frame_source_dir") or os.getenv("ULTRA_TRAINING_FRAME_SOURCE_DIR") or ""
+        ).strip()
         if kind in ("", "local_directory") and root:
             return LocalDirectoryFrameSource(root)
         if kind == "bisque":
             return BisqueFrameSource()
         raise ValueError(
-            "no frame source configured: set params.frame_source_dir (local_directory) "
-            "or params.frame_source='bisque'"
+            "no frame source configured: set params.frame_source_dir / "
+            "ULTRA_TRAINING_FRAME_SOURCE_DIR (local_directory) or "
+            "frame_source='bisque'"
         )
 
     def _materialize_frame(

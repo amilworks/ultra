@@ -435,3 +435,47 @@ func TestMegaSegAcceptanceWalk(t *testing.T) {
 		t.Fatalf("registry should list 2 models, got %d err=%v", len(models), err)
 	}
 }
+
+func TestTrainingLeaseAcceptsPythonWireFloats(t *testing.T) {
+	t.Parallel()
+	router, _, _ := newTrainingTestRouter(t)
+
+	rec, dispatch := doJSON(t, router, http.MethodPost, "/v2/training/models/yolov5_rarespot/sync", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("sync dispatch = %d body=%s", rec.Code, rec.Body.String())
+	}
+	jobID, _ := dispatch["job_id"].(string)
+
+	// EXACT wire bytes: the Python client json.dumps()-es its float settings,
+	// so ttl_seconds arrives as "3600.0". An int-typed request struct 400s on
+	// that and silently wedges the whole training queue (observed live) - the
+	// raw string literals here are the contract, do not switch to doJSON.
+	post := func(method, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/v2/training/jobs/"+jobID+"/lease", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	acquire := post(http.MethodPost, `{"worker_id": "ultra-training-worker@test:1", "ttl_seconds": 3600.0}`)
+	if acquire.Code != http.StatusOK {
+		t.Fatalf("acquire with float ttl = %d body=%s", acquire.Code, acquire.Body.String())
+	}
+	var lease struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	if err := json.Unmarshal(acquire.Body.Bytes(), &lease); err != nil || lease.LeaseToken == "" {
+		t.Fatalf("acquire response lease_token missing: %s", acquire.Body.String())
+	}
+
+	renew := post(http.MethodPatch, fmt.Sprintf(`{"lease_token": %q, "ttl_seconds": 3600.0}`, lease.LeaseToken))
+	if renew.Code != http.StatusOK {
+		t.Fatalf("renew with float ttl = %d body=%s", renew.Code, renew.Body.String())
+	}
+
+	release := post(http.MethodDelete, fmt.Sprintf(`{"lease_token": %q}`, lease.LeaseToken))
+	if release.Code != http.StatusOK {
+		t.Fatalf("release = %d body=%s", release.Code, release.Body.String())
+	}
+}

@@ -61,7 +61,10 @@ from ultra_deepagents.training.control_client import (
     TrainingLeaseUnavailable,
 )
 from ultra_deepagents.training.envelope import TrainingJobEnvelope
-from ultra_deepagents.training.keepalive import TrainingLeaseKeepalive
+from ultra_deepagents.training.keepalive import (
+    TrainingLeaseKeepalive,
+    training_keepalive_interval,
+)
 from ultra_deepagents.training.manifests import MANIFESTS, ModelManifest
 
 logger = logging.getLogger(__name__)
@@ -79,12 +82,12 @@ class TrainingWorkerSettings:
     stream: str = "ULTRA_RUNS"
     jobs_subject: str = "ultra.training.jobs"
     durable: str = "ultra-training-worker"
-    ack_wait_seconds: float = 3600.0
+    ack_wait_seconds: float = 300.0
     lease_ttl_seconds: float = 3600.0
     redelivery_delay_seconds: float = 30.0
     worker_id: str = "ultra-training-worker"
     worker_kind: str = "training"
-    max_deliver: int = 5
+    max_deliver: int = 20
     max_concurrency: int = 1
     workdir_root: str = ""
 
@@ -101,12 +104,19 @@ class TrainingWorkerSettings:
             durable=os.getenv(
                 "ULTRA_CONTROL_NATS_TRAINING_WORKER_DURABLE", "ultra-training-worker"
             ),
-            # Plan 9.2: well above the data-agent's 300/600s defaults — a
-            # multi-hour epoch must never race the redelivery clock even if the
-            # keepalive misses ticks.
+            # The redelivery clock is decoupled from job length: the keepalive
+            # thread extends the ack with in_progress() every tick, so a
+            # multi-hour epoch never races AckWait. A SHORT AckWait is what
+            # bounds recovery when a worker dies un-acked — with
+            # max_ack_pending=1 a dead delivery freezes the whole queue for
+            # exactly this long (observed live: the 3600s original wedged the
+            # queue for an hour, silently).
             ack_wait_seconds=max(
-                1.0, float(os.getenv("ULTRA_TRAINING_NATS_ACK_WAIT_SECONDS", "3600"))
+                1.0, float(os.getenv("ULTRA_TRAINING_NATS_ACK_WAIT_SECONDS", "300"))
             ),
+            # The lease is control-plane liveness (renewed every keepalive
+            # tick); its TTL is the crash-recovery window before another
+            # worker may take the job over.
             lease_ttl_seconds=max(
                 1.0, float(os.getenv("ULTRA_TRAINING_CONTROL_LEASE_TTL_SECONDS", "3600"))
             ),
@@ -118,7 +128,12 @@ class TrainingWorkerSettings:
                 f"ultra-training-worker@{socket.gethostname()}:{os.getpid()}",
             ),
             worker_kind=os.getenv("ULTRA_TRAINING_WORKER_KIND", "training"),
-            max_deliver=max(1, int(os.getenv("ULTRA_TRAINING_WORKER_MAX_DELIVER", "5"))),
+            # 20 mirrors the run-worker golden constant. It must be large
+            # enough that lease-conflict redeliveries (spaced ack_wait apart)
+            # span past the lease TTL — a crashed worker's stale lease blocks
+            # takeover until it expires, and exhausting MaxDeliver before then
+            # would orphan the job.
+            max_deliver=max(1, int(os.getenv("ULTRA_TRAINING_WORKER_MAX_DELIVER", "20"))),
             max_concurrency=max(1, int(os.getenv("ULTRA_TRAINING_WORKER_MAX_CONCURRENCY", "1"))),
             workdir_root=os.getenv("ULTRA_TRAINING_WORKDIR_ROOT", "").strip(),
         )
@@ -556,6 +571,19 @@ class NATSTrainingWorker:
         try:
             await self._ensure_stream(js)
             subscription = await self._subscribe(js)
+            # Boot must be loud: a training worker that subscribes silently is
+            # indistinguishable from one that never started (observed live).
+            logger.info(
+                "Training worker %s consuming %s (stream=%s durable=%s "
+                "ack_wait=%.0fs max_deliver=%d max_ack_pending=%d).",
+                self.settings.worker_id,
+                self.settings.jobs_subject,
+                self.settings.stream,
+                self.settings.durable,
+                self.settings.ack_wait_seconds,
+                self.settings.max_deliver,
+                self.settings.max_concurrency,
+            )
             max_concurrency = max(1, self.settings.max_concurrency)
             last_idle_heartbeat_at = 0.0
             while not self._stop_requested:
@@ -662,7 +690,30 @@ class NATSTrainingWorker:
             lease = await asyncio.to_thread(
                 client.acquire_lease, job.job_id, ttl_seconds=self.settings.lease_ttl_seconds
             )
-        except (TrainingLeaseConflict, TrainingLeaseUnavailable):
+        except TrainingLeaseConflict:
+            # Another worker (or a crashed worker's not-yet-expired lease)
+            # holds the job. Retrying every redelivery_delay would burn
+            # MaxDeliver in minutes while a stale lease can persist for the
+            # full TTL — space conflict retries a whole AckWait apart instead.
+            logger.info(
+                "Training job lease is held elsewhere; delaying redelivery.",
+                extra={"job_id": job.job_id, "job_type": job.job_type},
+            )
+            await _nak_message(
+                message,
+                delay_seconds=max(
+                    self.settings.redelivery_delay_seconds, self.settings.ack_wait_seconds
+                ),
+            )
+            return
+        except TrainingLeaseUnavailable:
+            # Control-plane hiccup (down, timing out, 5xx). This path MUST log:
+            # a silent NAK loop here is indistinguishable from a dead worker.
+            logger.warning(
+                "Training job lease request failed; NAKing for redelivery.",
+                extra={"job_id": job.job_id, "job_type": job.job_type},
+                exc_info=True,
+            )
             await _nak_message(message, delay_seconds=self.settings.redelivery_delay_seconds)
             return
 
@@ -682,6 +733,13 @@ class NATSTrainingWorker:
                 loop=asyncio.get_running_loop(),
                 ttl_seconds=self.settings.lease_ttl_seconds,
                 message=message,
+                # The tick serves TWO deadlines: lease renewal (TTL) and the
+                # in_progress() ack extension (AckWait). Derive it from the
+                # tighter of the two — TTL/3 alone would let a short AckWait
+                # lapse between ticks and redeliver a live job.
+                interval_seconds=training_keepalive_interval(
+                    min(self.settings.lease_ttl_seconds, self.settings.ack_wait_seconds)
+                ),
                 on_lost=mark_lease_lost,
             )
             keepalive.start()
@@ -689,6 +747,12 @@ class NATSTrainingWorker:
         processor = self._processor_factory(self.settings, client)
         await self._post_worker_heartbeat("busy", current_run_id=job.job_id, job_type=job.job_type)
         try:
+            logger.info(
+                "Training job %s (%s, model=%s) started.",
+                job.job_id,
+                job.job_type,
+                job.model_key,
+            )
             await asyncio.to_thread(client.update_job_status, job.job_id, status="running")
             summary = dict(await processor.process(job, adapter) or {})
             terminal_status = str(summary.pop("terminal_status", "succeeded"))
@@ -702,6 +766,13 @@ class NATSTrainingWorker:
                 error=error_text,
                 output_summary=summary,
             )
+            logger.info(
+                "Training job %s (%s) finished: %s%s",
+                job.job_id,
+                job.job_type,
+                terminal_status,
+                f" ({error_text})" if error_text else "",
+            )
         except asyncio.CancelledError:
             if lease_lost or (keepalive is not None and keepalive.lost):
                 # Authoritative hand-off: another worker owns the job now.
@@ -714,6 +785,12 @@ class NATSTrainingWorker:
                 return
             raise
         except Exception as exc:
+            logger.warning(
+                "Training job %s (%s) failed: %s",
+                job.job_id,
+                job.job_type,
+                str(exc) or exc.__class__.__name__,
+            )
             try:
                 await asyncio.to_thread(
                     client.update_job_status,

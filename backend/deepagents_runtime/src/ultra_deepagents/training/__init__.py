@@ -1,16 +1,41 @@
-"""GoldGate training adapters (M0 skeleton).
+"""GoldGate training subsystem.
 
-The declarative half of the ModelAdapter contract lives here from M0 so the
-model-key spelling and manifest values are pinned cross-language before any
-executor exists. The imperative adapter hooks (materialize_dataset, train,
-evaluate, smoke_test, extra_leakage_checks) arrive with the M1 training worker.
-Design: planning/2026-07-07-goldgate-continual-finetuning-plan.md (section 3.5).
+The declarative half of the ModelAdapter contract (manifests) is pinned
+cross-language from M0. The M1 training worker adds the imperative half: the
+five adapter hooks (adapters.py, rarespot_adapter.py), the job envelope, the
+sync control-plane client, the OS-thread lease keepalive, and the NATS worker
+with the five generic phase branches (worker.py).
+Design: planning/2026-07-07-goldgate-continual-finetuning-plan.md.
 """
 
+from ultra_deepagents.training.adapters import (
+    ADAPTERS,
+    MaterializeContext,
+    ModelAdapter,
+    NoAdapterRegistered,
+    TrainContext,
+    get_adapter,
+    register_adapter,
+)
+from ultra_deepagents.training.envelope import TrainingJobEnvelope
 from ultra_deepagents.training.manifests import (
     MANIFESTS,
-    ModelManifest,
     RARESPOT_MANIFEST,
+    TRAINING_JOB_PHASES,
+    ModelManifest,
 )
 
-__all__ = ["MANIFESTS", "ModelManifest", "RARESPOT_MANIFEST"]
+__all__ = [
+    "ADAPTERS",
+    "MANIFESTS",
+    "RARESPOT_MANIFEST",
+    "TRAINING_JOB_PHASES",
+    "MaterializeContext",
+    "ModelAdapter",
+    "ModelManifest",
+    "NoAdapterRegistered",
+    "TrainContext",
+    "TrainingJobEnvelope",
+    "get_adapter",
+    "register_adapter",
+]

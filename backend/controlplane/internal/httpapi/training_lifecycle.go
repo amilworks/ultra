@@ -578,7 +578,15 @@ func (deps ServerDeps) handleAcquireTrainingJobLease(w http.ResponseWriter, r *h
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lease": lease, "job": job})
+	// Flat lease fields at the top level - the worker's contract - with the
+	// job nested for context.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":           lease.JobID,
+		"worker_id":        lease.WorkerID,
+		"lease_token":      lease.LeaseToken,
+		"lease_expires_at": lease.LeaseExpiresAt,
+		"job":              job,
+	})
 }
 
 func (deps ServerDeps) handleRenewTrainingJobLease(w http.ResponseWriter, r *http.Request) {
@@ -860,15 +868,16 @@ func (deps ServerDeps) handleTrainingGoldResult(w http.ResponseWriter, r *http.R
 		return
 	}
 	var request struct {
-		GoldSetID        string                         `json:"gold_set_id"`
-		Status           string                         `json:"status"` // frozen | failed
-		ContentHash      string                         `json:"content_hash"`
-		LabelStats       domain.JSONMap                 `json:"label_stats"`
-		StrataSummary    domain.JSONMap                 `json:"strata_summary"`
-		Provenance       domain.JSONMap                 `json:"provenance"`
-		SplitManifestURI string                         `json:"split_manifest_uri"`
-		FailureReasons   []string                       `json:"failure_reasons"`
-		Items            []domain.TrainingGoldItemInput `json:"items"`
+		GoldSetID        string         `json:"gold_set_id"`
+		Status           string         `json:"status"` // frozen | failed
+		ContentHash      string         `json:"content_hash"`
+		LabelStats       domain.JSONMap `json:"label_stats"`
+		StrataSummary    domain.JSONMap `json:"strata_summary"`
+		Provenance       domain.JSONMap `json:"provenance"`
+		SplitManifestURI string         `json:"split_manifest_uri"`
+		// The worker reports structured violations: [{check, item_id, reason, defense?}].
+		FailureReasons []domain.JSONMap `json:"failure_reasons"`
+		Items          []goldItemWire   `json:"items"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -879,7 +888,11 @@ func (deps ServerDeps) handleTrainingGoldResult(w http.ResponseWriter, r *http.R
 	}
 	itemCount := 0
 	if len(request.Items) > 0 {
-		inserted, err := training.InsertTrainingGoldItems(r.Context(), request.GoldSetID, request.Items)
+		inputs := make([]domain.TrainingGoldItemInput, 0, len(request.Items))
+		for _, item := range request.Items {
+			inputs = append(inputs, item.toInput())
+		}
+		inserted, err := training.InsertTrainingGoldItems(r.Context(), request.GoldSetID, inputs)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -925,20 +938,52 @@ func (deps ServerDeps) handleTrainingStatusResult(w http.ResponseWriter, r *http
 		writeStoreError(w, err)
 		return
 	}
+	// The worker's flat contract: status fields at the top level plus the
+	// Gate A counts under retrain_gate_counts.
 	var request struct {
-		Status domain.TrainingModelStatusRecord `json:"status"`
-		Counts struct {
-			ReviewedSinceActive int64            `json:"reviewed_images_since_active"`
-			NewTotalObjects     int64            `json:"new_total_objects"`
-			NewPerClassObjects  map[string]int64 `json:"new_per_class_objects"`
-			DaysSinceLastTrain  float64          `json:"days_since_last_train"`
-		} `json:"counts"`
+		DatasetName            string         `json:"dataset_name"`
+		DatasetID              string         `json:"dataset_id"`
+		ModelHealth            string         `json:"model_health"`
+		ReviewedImages         int64          `json:"reviewed_images"`
+		UnreviewedImages       int64          `json:"unreviewed_images"`
+		ClassCounts            domain.JSONMap `json:"class_counts"`
+		PerClassNewObjects     domain.JSONMap `json:"per_class_new_objects"`
+		UnsupportedClassCounts domain.JSONMap `json:"unsupported_class_counts"`
+		RetrainGateCounts      struct {
+			ReviewedImages int64            `json:"reviewed_images"`
+			TotalObjects   int64            `json:"total_objects"`
+			PerClass       map[string]int64 `json:"per_class"`
+		} `json:"retrain_gate_counts"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	record := request.Status
+	previous, _ := training.GetTrainingModelStatus(r.Context(), job.ModelKey)
+	record := previous
 	record.ModelKey = job.ModelKey
+	record.DatasetName = request.DatasetName
+	if strings.TrimSpace(request.DatasetID) != "" {
+		record.DatasetID = request.DatasetID
+	}
+	if strings.TrimSpace(request.ModelHealth) != "" {
+		record.ModelHealth = request.ModelHealth
+	}
+	record.ReviewedImages = request.ReviewedImages
+	record.UnreviewedImages = request.UnreviewedImages
+	record.ClassCounts = request.ClassCounts
+	record.PerClassNewObjects = request.PerClassNewObjects
+	record.UnsupportedClassCounts = request.UnsupportedClassCounts
+	now := time.Now().UTC()
+	record.LastSyncAt = &now
+	record.RetrainGateCounts = domain.JSONMap{
+		"reviewed_images": request.RetrainGateCounts.ReviewedImages,
+		"total_objects":   request.RetrainGateCounts.TotalObjects,
+		"per_class":       request.RetrainGateCounts.PerClass,
+	}
+	daysSinceLastTrain := float64(-1)
+	if previous.LastRetrainAt != nil {
+		daysSinceLastTrain = now.Sub(*previous.LastRetrainAt).Hours() / 24
+	}
 
 	policyRecord, policyErr := training.GetTrainingGatePolicy(r.Context(), job.ModelKey)
 	if policyErr == nil {
@@ -962,10 +1007,10 @@ func (deps ServerDeps) handleTrainingStatusResult(w http.ResponseWriter, r *http
 			MinReviewed: policyRecord.MinReviewed, MinNewObjects: policyRecord.MinNewObjects,
 			MinPerClassObjects: perClassPolicy, MinDays: policyRecord.MinDays,
 		}, gateengine.GateACounts{
-			ReviewedImagesSinceActive: request.Counts.ReviewedSinceActive,
-			NewTotalObjects:           request.Counts.NewTotalObjects,
-			NewPerClassObjects:        request.Counts.NewPerClassObjects,
-			DaysSinceLastTrain:        request.Counts.DaysSinceLastTrain,
+			ReviewedImagesSinceActive: request.RetrainGateCounts.ReviewedImages,
+			NewTotalObjects:           request.RetrainGateCounts.TotalObjects,
+			NewPerClassObjects:        request.RetrainGateCounts.PerClass,
+			DaysSinceLastTrain:        daysSinceLastTrain,
 			ActivePassesGold:          activePassesGold,
 		})
 		record.RetrainGate = gateA.Ready
@@ -981,4 +1026,57 @@ func (deps ServerDeps) handleTrainingStatusResult(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// goldItemWire is the training worker's gold-item wire shape; label_uri,
+// exif_present, and per-item label_stats ride into the stored input.
+type goldItemWire struct {
+	ItemID        string         `json:"item_id"`
+	SourceRef     domain.JSONMap `json:"source_ref"`
+	Slice         string         `json:"slice"`
+	LabelKind     string         `json:"label_kind"`
+	ContentSHA256 string         `json:"content_sha256"`
+	Phash         *string        `json:"phash"`
+	GTLabelSHA256 string         `json:"gt_label_sha256"`
+	LabelURI      string         `json:"label_uri"`
+	GTLabelURI    string         `json:"gt_label_uri"`
+	Width         *int64         `json:"width"`
+	Height        *int64         `json:"height"`
+	ExifPresent   *bool          `json:"exif_present"`
+	LabelStats    domain.JSONMap `json:"label_stats"`
+	Metadata      domain.JSONMap `json:"metadata"`
+	FootprintGeom domain.JSONMap `json:"footprint_geom"`
+	StrataTags    domain.JSONMap `json:"strata_tags"`
+}
+
+func (w goldItemWire) toInput() domain.TrainingGoldItemInput {
+	labelURI := w.GTLabelURI
+	if strings.TrimSpace(labelURI) == "" {
+		labelURI = w.LabelURI
+	}
+	metadata := domain.JSONMap{}
+	for key, value := range w.Metadata {
+		metadata[key] = value
+	}
+	if w.ExifPresent != nil {
+		metadata["exif_present"] = *w.ExifPresent
+	}
+	if len(w.LabelStats) > 0 {
+		metadata["label_stats"] = w.LabelStats
+	}
+	return domain.TrainingGoldItemInput{
+		ItemID:        w.ItemID,
+		SourceRef:     w.SourceRef,
+		Slice:         w.Slice,
+		LabelKind:     w.LabelKind,
+		ContentSHA256: w.ContentSHA256,
+		Phash:         w.Phash,
+		GTLabelSHA256: w.GTLabelSHA256,
+		GTLabelURI:    labelURI,
+		Width:         w.Width,
+		Height:        w.Height,
+		Metadata:      metadata,
+		FootprintGeom: w.FootprintGeom,
+		StrataTags:    w.StrataTags,
+	}
 }

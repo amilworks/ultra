@@ -20,6 +20,17 @@ server {
 
     client_max_body_size 2048M;
 
+    # Content Security Policy — defense-in-depth for the chat surface (agent
+    # output is prompt-injectable). Shipped as Report-Only so it CANNOT break
+    # rendering: validate the browser violation reports in staging, then rename
+    # the header to `Content-Security-Policy` to enforce. In this single-host
+    # topology BisQue is proxied SAME-ORIGIN (/client_service/ etc.), so no
+    # external host is needed. Production build has no inline <script>; runtime
+    # inline <style> (shadcn ChartStyle, katex) needs style-src 'unsafe-inline';
+    # shiki uses the JS regex engine (no wasm/eval).
+    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
     root /srv/ultra/frontend-current;
     index index.html;
 

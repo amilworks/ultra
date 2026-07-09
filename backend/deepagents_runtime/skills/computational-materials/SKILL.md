@@ -1,6 +1,6 @@
 ---
 name: computational-materials
-description: Domain toolkit and rigor for computational materials science — superalloy microstructure, EBSD/crystallographic orientation analysis, 3D serial-section/tomography (TriBeam) segmentation and quantification (grains, phases, precipitates, porosity), CALPHAD phase stability, and materials-informatics featurization. Use when a task involves EBSD orientation/misorientation/texture, 3D microstructure segmentation from serial-section or tomography volumes, grain/phase/precipitate/porosity quantification, crystal structure or space-group analysis, phase-diagram / phase-fraction / phase-stability (gamma-prime, TCP) prediction, or ML over alloy composition/process space. Read it before writing code that would otherwise reach for a hand-rolled surrogate (a home-made quaternion misorientation, a bare intensity threshold for grains, an averaged-atomic-property feature vector, or an ad-hoc phase-stability heuristic).
+description: Domain toolkit and rigor for computational materials science — superalloy microstructure, EBSD/crystallographic orientation analysis, 3D serial-section/tomography (TriBeam) segmentation and quantification (grains, phases, precipitates, porosity), CALPHAD phase stability, and materials-informatics featurization. Use when a task involves EBSD orientation/misorientation/texture, 3D microstructure segmentation from serial-section or tomography volumes, grain/phase/precipitate/porosity quantification, crystal structure or space-group analysis, phase-diagram / phase-fraction / phase-stability (gamma-prime, TCP) prediction, or ML over alloy composition/process space. Read it before writing code that would otherwise reach for a hand-rolled surrogate (a home-made quaternion misorientation, a hand-rolled IPF colour mapping, a bare intensity threshold for grains, an averaged-atomic-property feature vector, or an ad-hoc phase-stability heuristic).
 ---
 
 # Computational Materials
@@ -33,11 +33,23 @@ distribution, texture strength, or predicted phase fraction that drives a conclu
 
 ### 1. Use the field-standard named tool, name the method, pin its parameters
 Do not substitute a generic surrogate when a canonical materials tool exists.
+**Before writing analysis code, copy the vetted recipe** — correct call + a runnable self-check +
+the named anti-pattern — from **[references/materials-recipes.md](references/materials-recipes.md)**
+(misorientation vs Mackenzie, grain segmentation + stereology, CALPHAD phase fractions, space-group ID,
+Magpie featurization, porosity) and **[references/ebsd-ipf-recipe.md](references/ebsd-ipf-recipe.md)**
+(IPF colouring). Hand-rolling these is how wrong-but-plausible results ship; run the self-check first.
 - **EBSD / orientation:** use **orix** for orientations, symmetry, misorientation, and
-  IPF/pole-figure/ODF plotting — never a hand-written quaternion or Euler misorientation. State
-  the crystal symmetry (point group / Laue class), the reference frame, and the orientation
-  representation. Use **kikuchipy** from raw Kikuchi patterns (state the indexing — Hough or
-  dictionary — and its parameters); **diffsims** to build the simulated-diffraction dictionary.
+  IPF/pole-figure/ODF plotting — never a hand-written quaternion, Euler misorientation, **or IPF
+  RGB mapping**. The naive "sort the vector so x≤y≤z, then R=x,G=y,B=z" paints the whole triangle
+  blue/cyan — it is WRONG. The correct cubic IPF-Z key is **001=red, 101=green, 111=blue**, which
+  `orix.plot.IPFColorKeyTSL` renders (and colours orientations) for you. Copy the vetted recipe —
+  colour key, per-pixel map, and a self-check — from
+  **[references/ebsd-ipf-recipe.md](references/ebsd-ipf-recipe.md)**. This holds even for a quick
+  *illustrative/teaching* figure: a wrong colour key shown to a user is worse than none. State the
+  crystal symmetry (point group / Laue class), which sample direction the IPF is for (ND=IPF-Z /
+  RD=IPF-X / TD=IPF-Y), and the orientation representation. Use **kikuchipy** from raw Kikuchi
+  patterns (state the indexing — Hough or dictionary — and its parameters); **diffsims** to build
+  the simulated-diffraction dictionary.
 - **3D microstructure segmentation (TriBeam volumes):** use **scikit-image** named methods —
   marker-controlled `watershed` for grains, `label`+`regionprops_table` for per-grain/phase/
   precipitate/pore metrics, `morphology` for cleanup — not a bare intensity threshold. State the

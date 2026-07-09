@@ -4,7 +4,7 @@
 // in-flight phases render open. Microcopy is the §14.6 catalog verbatim.
 
 import { Button } from "@/components/ui/button";
-import type { GateGuardrailsWire, TrainingModelStatus } from "../../types";
+import type { GateGuardrailsWire, TrainingModelStatus, TrainingRunningFinetune } from "../../types";
 import {
   deriveBindingConstraint,
   type TrainingPhaseState,
@@ -16,6 +16,33 @@ const goldVersionLabel = (status: TrainingModelStatus): string => {
   const version = status.gold?.gold_set_version;
   return version ? `gold-v${version}` : "the gold set";
 };
+
+// Live finetune progress: an epoch bar + best-mAP caption, driven by the status
+// read's running_finetune echo (the in-flight job's latest training.progress event).
+function TrainingProgressBar({ finetune }: { finetune: TrainingRunningFinetune }) {
+  const completed = Math.max(0, Math.trunc(finetune.completed ?? 0));
+  const total = Math.max(1, Math.trunc(finetune.total ?? 1));
+  const pct = Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
+  const caption = finetune.message?.trim() || `epoch ${completed}/${total}`;
+  return (
+    <div
+      className="training-progress"
+      role="progressbar"
+      aria-valuenow={completed}
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-label={`Finetune epoch ${completed} of ${total}`}
+    >
+      <div className="training-progress-track">
+        <div className="training-progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <p className="training-progress-caption">
+        {caption}
+        {typeof finetune.map50 === "number" ? ` · best mAP@50 ${finetune.map50.toFixed(3)}` : ""}
+      </p>
+    </div>
+  );
+}
 
 function GateAChecklist({ status, goldOk }: { status: TrainingModelStatus; goldOk: boolean | null }) {
   const counts = (status.retrain_gate_counts ?? {}) as Record<string, unknown>;
@@ -143,10 +170,15 @@ export function FocalCard({
       ) : null}
 
       {state.phase === "retrain-running" ? (
-        <p className="training-focal-lead">
-          <span className="training-status-dot" data-tone="muted" aria-hidden="true" />
-          Retraining in progress. A candidate will appear here with its benchmark verdict.
-        </p>
+        <>
+          <p className="training-focal-lead">
+            <span className="training-status-dot" data-tone="muted" aria-hidden="true" />
+            Retraining in progress. A candidate will appear here with its benchmark verdict.
+          </p>
+          {status.running_finetune && (status.running_finetune.total ?? 0) > 0 ? (
+            <TrainingProgressBar finetune={status.running_finetune} />
+          ) : null}
+        </>
       ) : null}
 
       {state.phase === "benchmark-running" ? (

@@ -10,10 +10,10 @@ Design contract
   data series is the *same* color in a matplotlib figure and in a recharts
   dashboard. matplotlib figures always export **light-on-white**, so this module
   uses the LIGHT column of the palette; keep it in sync with the CSS tokens.
-* The palette is calm by construction: chroma held to ~0.10-0.12 (roughly half
-  the loudness of the stock shadcn defaults) and series 1 is a near-neutral
-  graphite so the common single-series chart reads as monochrome, not "a
-  colored chart."
+* The palette is vibrant but disciplined: the CVD-tuned hue/luminance structure
+  with chroma ~1.4x the calm original, so charts have life without the colorblind
+  collisions a from-scratch bright palette causes. It leads with blue (a single
+  series is blue); graphite is the neutral/context slot for greying data out.
 * The palette is colorblind-validated (Machado-2009 + WCAG, via the dataviz
   validator). See ``references/palette.md`` in this skill for the proofs and the
   residual weak pairs that require a marker-shape secondary encoding.
@@ -33,18 +33,23 @@ from __future__ import annotations
 
 # --- Categorical palette -----------------------------------------------------
 # Slot -> (light hex, dark hex). Same hue per slot across themes; only L/C shift.
-# Slot 1 is a deliberate near-neutral ink anchor (below the categorical chroma
-# floor by design): it is the monochrome default for a single-series chart.
+# Vibrant set: the CVD-tuned hue/luminance structure with chroma boosted ~1.4x
+# (livelier AND slightly more colorblind-robust than the calm original). The
+# palette LEADS WITH BLUE, so a single-series chart is blue, not grey. Graphite
+# (slot 8) is the neutral/context anchor (used to grey out de-emphasized data).
+# Colorblind-validated (dataviz Machado-2009 + WCAG): adjacent CVD dE >= 39,
+# all-pairs dE ~9 (floor band -> scatter uses marker shapes), all >= 3:1 on both
+# surfaces. Keep in sync with frontend --chart-* and references/palette.md.
 _CATEGORICAL: tuple[tuple[str, str, str], ...] = (
-    # name                  light      dark
-    ("graphite",           "#3c414b", "#b8bec8"),  # 1  ink anchor / primary
-    ("slate-blue",         "#3a68a5", "#6294d8"),  # 2  cool accent / seq anchor
-    ("terracotta",         "#ae5937", "#d17956"),  # 3  warm counterpoint
-    ("teal",               "#008e88", "#00958e"),  # 4  cyan-green (CVD-robust)
-    ("ochre",              "#ac8128", "#b88c2e"),  # 5  muted gold
-    ("muted-rose",         "#aa4f58", "#bf6068"),  # 6  dusty rose (NOT a status)
-    ("dusty-violet",       "#67428c", "#8c68b5"),  # 7  desaturated violet
-    ("sage",               "#549157", "#67a469"),  # 8  muted green (least used)
+    # name           light      dark
+    ("blue",        "#1e65bd", "#4a92f2"),  # 1  primary — single series leads here
+    ("terracotta",  "#c14701", "#e66933"),  # 2  warm counterpoint (blue/orange = CVD-robust)
+    ("teal",        "#00948d", "#00aca4"),  # 3  cyan-green
+    ("ochre",       "#b97c00", "#c18200"),  # 4  gold
+    ("rose",        "#bd394e", "#d34b5d"),  # 5  crimson-rose (NOT a status color)
+    ("violet",      "#6e34a0", "#935ccb"),  # 6  royal violet
+    ("green",       "#399743", "#4eaa55"),  # 7  green
+    ("graphite",    "#3c414b", "#b8bec8"),  # 8  neutral / context anchor
 )
 
 #: Light-mode categorical colors, in fixed order. Assign in sequence, never
@@ -59,6 +64,14 @@ MUTED = "#737373"        # axis + tick labels    (== --text-muted)
 CONTEXT = "#9a9893"      # greyed-out context series (de-emphasized data)
 DANGER = "#c62828"       # genuine failure / bad  (== --danger)  -- never "series N"
 WARNING = "#b45309"      # caveat / threshold     (the app's one sanctioned amber)
+
+# --- Diagram / illustration palette (outlined shapes on white; NOT data marks) --
+# Soft pastels for hand-authored diagrams (flow/block/architecture) where each
+# shape has an ink outline carrying the edge. Do NOT use these as line/bar/point
+# colors -- they fail contrast on white and wash out. See SKILL.md "Diagrams".
+DIAGRAM_PALETTE = ["#86c7ea", "#a3dd9b", "#f19ca6", "#b39ddb", "#43cdaa", "#f3c98b"]
+DIAGRAM_NAMES = ["blue", "green", "pink", "violet", "teal", "amber"]
+DIAGRAM_OUTLINE = INK    # every diagram shape gets a ~1.6px ink stroke + ink text
 
 # --- Sequential ramp (single hue, low -> high magnitude) ---------------------
 SEQUENTIAL: list[str] = [

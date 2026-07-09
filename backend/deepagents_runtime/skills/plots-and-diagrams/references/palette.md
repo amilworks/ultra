@@ -12,24 +12,25 @@ figure and in a UI chart. If you change a hex here, change both consumers.
 
 ## Design intent
 Ink is the brand. The palette starts from a near-neutral graphite (so a
-single-series chart reads as calm monochrome, not "a colored chart"), and adds
-restrained editorial hues (chroma ~0.10–0.12, ~half the loudness of the stock
-shadcn defaults). Every slot keeps **one hue across light/dark** — only
-lightness/chroma shift for the background. This fixes the prior defect where a
-series changed hue entirely when the theme toggled.
+single-series chart leads with blue, not grey) and uses vibrant editorial hues
+(chroma ~0.14–0.17). This is the CVD-tuned hue/luminance structure of the
+original calm set with chroma boosted ~1.4× — livelier *and* slightly more
+colorblind-robust than the calm version (a from-scratch bright palette collapsed
+under CVD; boosting the tuned structure did not). Every slot keeps **one hue
+across light/dark** — only lightness/chroma shift for the background.
 
 ## Categorical (fixed order — never cycle, never reorder)
 
-| Slot | Name          | Light     | Dark      | Notes |
-|------|---------------|-----------|-----------|-------|
-| 1    | graphite      | `#3c414b` | `#b8bec8` | ink anchor; the monochrome default for one series |
-| 2    | slate-blue    | `#3a68a5` | `#6294d8` | primary chromatic accent; sequential anchor |
-| 3    | terracotta    | `#ae5937` | `#d17956` | warm counterpoint (blue↔orange is the CVD-robust pair) |
-| 4    | teal          | `#008e88` | `#00958e` | cyan-green; retains blue so it survives red-green CVD |
-| 5    | ochre         | `#ac8128` | `#b88c2e` | muted gold |
-| 6    | muted-rose    | `#aa4f58` | `#bf6068` | dusty rose — **not** a status color |
-| 7    | dusty-violet  | `#67428c` | `#8c68b5` | desaturated violet |
-| 8    | sage          | `#549157` | `#67a469` | muted green; least-used slot |
+| Slot | Name        | Light     | Dark      | Notes |
+|------|-------------|-----------|-----------|-------|
+| 1    | blue        | `#1e65bd` | `#4a92f2` | primary; a single series is blue; sequential anchor |
+| 2    | terracotta  | `#c14701` | `#e66933` | warm counterpoint (blue↔orange is the CVD-robust pair) |
+| 3    | teal        | `#00948d` | `#00aca4` | cyan-green; retains blue so it survives red-green CVD |
+| 4    | ochre       | `#b97c00` | `#c18200` | gold |
+| 5    | rose        | `#bd394e` | `#d34b5d` | crimson-rose — **not** a status color |
+| 6    | violet      | `#6e34a0` | `#935ccb` | royal violet |
+| 7    | green       | `#399743` | `#4eaa55` | green; the green↔rose all-pairs weak pair needs marker shapes |
+| 8    | graphite    | `#3c414b` | `#b8bec8` | neutral / context anchor (grey out de-emphasized data) |
 
 The slot **order** is the colorblind-safety mechanism — it was derived by
 maximizing the minimum adjacent CVD separation across both modes. Do not reorder.
@@ -57,26 +58,37 @@ maximizing the minimum adjacent CVD separation across both modes. Do not reorder
 - `#c62828` danger / failure / negative — never a categorical "series N".
 - `#b45309` warning / caveat / threshold (the app's one sanctioned amber).
 
+## Diagram palette (outlined shapes only — NOT data marks)
+For hand-authored diagrams (flow / block / architecture), where a dark outline
+carries each shape's edge, use these soft pastels + an **ink outline** (`#171717`,
+~1.6px) and ink text. They are deliberately light and **fail 3:1 on white as bare
+marks** — never use them for lines/bars/points.
+
+| Name | Hex | | Name | Hex |
+|------|-----|-|------|-----|
+| blue | `#86c7ea` | | violet | `#b39ddb` |
+| green | `#a3dd9b` | | teal | `#43cdaa` |
+| pink | `#f19ca6` | | amber | `#f3c98b` |
+
 ## Validation (computed, not eyeballed)
-Checked with the `dataviz` skill's validator (Machado-2009 CVD + WCAG) and an
-independent CIEDE2000/APCA pass:
+Checked with the `dataviz` skill's validator (Machado-2009 CVD + WCAG):
 
 - Contrast as a mark: all 8 clear **WCAG ≥ 3:1** on both the light (#ffffff) and
   dark (#171717) plot surfaces.
-- Chromatic slots 2–8 pass the lightness band and chroma floor in both modes.
-  Slot 1 (graphite) is intentionally below the chroma floor — it is the neutral
+- Chromatic slots 1–7 pass the lightness band and chroma floor in both modes.
+  Slot 8 (graphite) is intentionally below the chroma floor — it is the neutral
   anchor, not a hue.
-- Adjacent CVD separation is strong (ΔE2000 ≈ 15–17; ΔE76 ≈ 33). Do not quote a
-  "2.7× margin" — that was a CIE76 artifact; the honest figure is ~1.4× the floor.
-- **Residual weak pairs (need a secondary encoding — marker shape, not color):**
-  sage ↔ rose (all-pairs, deuteranopia); and to a lesser degree slate ↔ violet
-  and (dark) terracotta ↔ ochre. These only matter when non-adjacent marks can
-  neighbor (scatter, bubble, small multiples) — add a marker shape there.
+- Adjacent CVD separation is strong (ΔE76 ≈ 39). All-pairs worst ≈ 9 (ΔE76,
+  deuteranopia: green↔rose light, ochre↔terracotta dark) — the floor band, so
+  **scatter/bubble/small-multiples must add a marker shape** (already the rule).
+  This is slightly better than the calm palette's ~7.9.
+- The vibrant set was derived by boosting the calm palette's chroma ~1.4×; a
+  from-scratch evenly-spread bright palette was **rejected** (coral↔green ΔE 1.4).
 
 ## Re-validate after any edit
 ```
 node <dataviz-skill>/scripts/validate_palette.js \
-  "#3a68a5,#ae5937,#008e88,#ac8128,#aa4f58,#67428c,#549157" --mode light --surface "#ffffff"
+  "#1e65bd,#c14701,#00948d,#b97c00,#bd394e,#6e34a0,#399743" --mode light --surface "#ffffff" --pairs all
 node <dataviz-skill>/scripts/validate_palette.js \
-  "#b8bec8,#6294d8,#d17956,#00958e,#b88c2e,#bf6068,#8c68b5,#67a469" --mode dark --surface "#171717"
+  "#4a92f2,#e66933,#00aca4,#c18200,#d34b5d,#935ccb,#4eaa55,#b8bec8" --mode dark --surface "#171717" --pairs all
 ```

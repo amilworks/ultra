@@ -70,17 +70,18 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
-  /* Ultra brand data palette — calm, ink-anchored, one hue per index across
-     light/dark. Colorblind-validated (dataviz Machado-2009 + WCAG). Keep in sync
-     with skills/plots-and-diagrams/references/palette.md (matplotlib shares it). */
-  --chart-1: oklch(0.375 0.018 264.3); /* graphite    #3c414b */
-  --chart-2: oklch(0.514 0.110 256.1); /* slate-blue  #3a68a5 */
-  --chart-3: oklch(0.560 0.121 41.8);  /* terracotta  #ae5937 */
-  --chart-4: oklch(0.583 0.101 189.5); /* teal        #008e88 */
-  --chart-5: oklch(0.630 0.115 81.4);  /* ochre       #ac8128 */
-  --chart-6: oklch(0.544 0.120 15.8);  /* muted-rose  #aa4f58 */
-  --chart-7: oklch(0.456 0.121 305.2); /* dusty-violet #67428c */
-  --chart-8: oklch(0.600 0.107 145.2); /* sage        #549157 */
+  /* Ultra brand data palette — vibrant, one hue per index across light/dark,
+     leads with blue (graphite is the neutral/context tail, slot 8).
+     Colorblind-validated (dataviz Machado-2009 + WCAG). Keep in sync with
+     skills/plots-and-diagrams/references/palette.md (matplotlib shares it). */
+  --chart-1: oklch(0.513 0.155 256.3); /* blue        #1e65bd */
+  --chart-2: oklch(0.559 0.169 41.7);  /* terracotta  #c14701 */
+  --chart-3: oklch(0.601 0.104 188.9); /* teal        #00948d */
+  --chart-4: oklch(0.633 0.134 74.6);  /* ochre       #b97c00 */
+  --chart-5: oklch(0.544 0.168 15.7);  /* rose        #bd394e */
+  --chart-6: oklch(0.456 0.169 305.3); /* violet      #6e34a0 */
+  --chart-7: oklch(0.601 0.150 145.3); /* green       #399743 */
+  --chart-8: oklch(0.375 0.018 264.3); /* graphite    #3c414b */
   /* chart chrome — quiet neutrals, never a hue */
   --chart-grid: rgba(23, 23, 23, 0.08);
   --chart-axis: rgba(23, 23, 23, 0.22);
@@ -10455,14 +10456,14 @@ details {
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
   /* Ultra brand data palette (dark) — same hue per index as light; only L/C shift. */
-  --chart-1: oklch(0.800 0.016 260.7); /* graphite    #b8bec8 */
-  --chart-2: oklch(0.660 0.115 256.4); /* slate-blue  #6294d8 */
-  --chart-3: oklch(0.665 0.121 42.1);  /* terracotta  #d17956 */
-  --chart-4: oklch(0.600 0.110 189.6); /* teal        #00958e (CVD fix vs graphite) */
-  --chart-5: oklch(0.666 0.120 82.4);  /* ochre       #b88c2e */
-  --chart-6: oklch(0.604 0.122 16.2);  /* muted-rose  #bf6068 */
-  --chart-7: oklch(0.585 0.120 304.5); /* dusty-violet #8c68b5 */
-  --chart-8: oklch(0.662 0.107 145.0); /* sage        #67a469 */
+  --chart-1: oklch(0.660 0.161 256.5); /* blue        #4a92f2 */
+  --chart-2: oklch(0.665 0.169 42.0);  /* terracotta  #e66933 */
+  --chart-3: oklch(0.671 0.116 188.9); /* teal        #00aca4 */
+  --chart-4: oklch(0.655 0.138 74.9);  /* ochre       #c18200 */
+  --chart-5: oklch(0.603 0.171 16.1);  /* rose        #d34b5d */
+  --chart-6: oklch(0.585 0.169 304.6); /* violet      #935ccb */
+  --chart-7: oklch(0.662 0.150 145.1); /* green       #4eaa55 */
+  --chart-8: oklch(0.800 0.016 260.7); /* graphite    #b8bec8 */
   --chart-grid: rgba(255, 255, 255, 0.10);
   --chart-axis: rgba(255, 255, 255, 0.24);
   --chart-label: #a1a1aa;

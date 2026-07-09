@@ -34,9 +34,18 @@ def test_palette_shape_and_hex(us):
     assert len(us.PALETTE_NAMES) == 8
     for hexes in (us.PALETTE, us.PALETTE_DARK):
         assert all(_HEX.match(h) for h in hexes)
-    # slot 1 is the graphite anchor; slot 4 is the CVD-fixed teal.
-    assert us.PALETTE[0] == "#3c414b"
-    assert us.PALETTE_DARK[3] == "#00958e"
+    # vibrant palette leads with blue; graphite is the neutral tail (slot 8).
+    assert us.PALETTE[0] == "#1e65bd"
+    assert us.PALETTE[7] == "#3c414b"
+    assert us.PALETTE_NAMES[0] == "blue"
+    assert us.PALETTE_NAMES[7] == "graphite"
+
+
+def test_diagram_palette_present(us):
+    # Pastel palette for outlined diagrams (distinct from data marks).
+    assert len(us.DIAGRAM_PALETTE) >= 5
+    assert all(_HEX.match(h) for h in us.DIAGRAM_PALETTE)
+    assert us.DIAGRAM_OUTLINE == "#171717"
 
 
 def test_reserved_status_colors_match_app(us):

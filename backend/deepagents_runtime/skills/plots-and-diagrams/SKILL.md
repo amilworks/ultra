@@ -59,10 +59,11 @@ mpl.rcParams.update({
     "axes.titlecolor": "#171717", "axes.titlesize": 12.5, "axes.titleweight": "medium",
     "legend.frameon": False, "lines.linewidth": 2.0,
 })
-# Ultra brand categorical palette (light-on-white) — same as the app --chart-* tokens:
+# Ultra brand categorical palette (light-on-white) — same as the app --chart-* tokens.
+# Leads with blue; graphite (last) is the neutral/context slot.
 mpl.rcParams["axes.prop_cycle"] = cycler(color=[
-    "#3c414b", "#3a68a5", "#ae5937", "#008e88",
-    "#ac8128", "#aa4f58", "#67428c", "#549157"])
+    "#1e65bd", "#c14701", "#00948d", "#b97c00",
+    "#bd394e", "#6e34a0", "#399743", "#3c414b"])
 ```
 
 **Fonts.** The default is the professional **LaTeX / Computer Modern** look —
@@ -78,6 +79,14 @@ For the LaTeX look without the helper, add these to the fallback rcParams:
 "mathtext.fontset": "cm", "axes.formatter.use_mathtext": True,
 "axes.unicode_minus": False`.
 
+**Glyph coverage (LaTeX font).** `cmr10` covers ASCII, basic Latin, and math —
+but **not** em/en-dashes (— –), curly quotes (‘ ’ “ ”), ×, or many Unicode
+symbols. In titles/labels/annotations use plain ASCII punctuation (hyphen `-`,
+straight quotes `"`) or wrap symbols in `$...$` math (`$\times$`, `$\pm$`);
+otherwise the character silently drops (a matplotlib "missing glyph" warning).
+The minus sign is already handled. If you truly need Unicode punctuation, use
+`font="sans"` (full coverage).
+
 ## Choose the form (form follows data)
 Pick from what the data *is*, not from habit:
 - **Trend over a continuous axis (time)** → line. **Comparison across
@@ -89,7 +98,12 @@ Pick from what the data *is*, not from habit:
 - **2-D matrix / density / correlation** → heatmap with `sequential_cmap()`.
 - **Uncertainty** → error bars or shaded bands (carry the ± from
   computational-experiment-rigor onto the figure — don't plot bare point estimates).
-- **One series** → don't add color. **One number** → a stat callout, not a chart.
+- **One series** → don't add color by default. **One number** → a stat callout,
+  not a chart. But a monochrome single-series bar chart can look flat — when a
+  chart is a showcase, add life *without* breaking the rules: color the bars **by
+  value** with `sequential_cmap()` (taller = darker; this legitimately encodes
+  magnitude), or give each bar its own categorical hue for a nominal set. Both
+  beat a wall of identical bars.
 
 ## Keep it calm
 The app is near-monochrome and editorial; figures match that.
@@ -127,19 +141,21 @@ most layout bugs live. A few rules keep them clean:
   truly sits in empty space.
 
 ## Color = meaning
-Color is the app's scarcest signal. **Start monochrome** (graphite alone) and
-add a hue **only to encode a variable** — a highlighted series, a status, a
-threshold. Grey the context (`CONTEXT`), color the focus — use `highlight(n, focus)`.
-- **Categorical**: draw in fixed order from `PALETTE` (graphite, slate-blue,
-  terracotta, teal, ochre, rose, violet, sage). **Keep the default 1–4 for the
-  common case** — they're the most distinct. At **5+ series, stop and reconsider
-  the chart** (small multiples, aggregation, direct labels) before reaching for
-  slots 5–8. Never cycle past 8 — fold extras into "other" or facet.
+Color still earns its place — don't spray all 8 hues at a 2-series chart. The
+palette **leads with blue**, so a single series is blue; add more hues only to
+encode more series. Grey the context (`CONTEXT`), color the focus — use
+`highlight(n, focus)`.
+- **Categorical**: draw in fixed order from `PALETTE` (blue, terracotta, teal,
+  ochre, rose, violet, green, graphite). **Keep to 1–4 for the common case** —
+  they're the most distinct. At **5+ series, consider small multiples,
+  aggregation, or direct labels** before using slots 5–8. Never cycle past 8 —
+  fold extras into "other" or facet. `graphite` (slot 8) is the neutral for
+  de-emphasis, not a loud series.
 - **Sequential** (heatmaps, intensity) → `sequential_cmap()` (single-hue).
 - **Diverging** (signed values) → `diverging_cmap()` (cool ↔ neutral ↔ warm).
 - **Status is reserved**: red `DANGER` (#c62828) for genuine failure/negative,
   amber `WARNING` (#b45309) for a caveat/threshold. Never reuse them as a
-  categorical "series N", and don't also use slot-6 rose as a series in a chart
+  categorical "series N", and don't also use slot-5 rose as a series in a chart
   that already carries a red failure mark (they read alike). Also **don't spend
   red/amber on a neutral highlight** — a mean, an optimum, a marked point, a
   limiting case: emphasize those with ink/graphite (slot 1) or a categorical hue,
@@ -160,8 +176,12 @@ threshold. Grey the context (`CONTEXT`), color the focus — use `highlight(n, f
   Files left elsewhere in `/workspace` are only kept if named in the reply.
 
 ## Diagrams (flow / architecture / state / DAG)
-For structural (non-data) diagrams, author calm: neutral fills, hairline ink
-edges, ink text, color only to encode state/status.
+For structural (non-data) diagrams, use the **pastel diagram palette** —
+`DIAGRAM_PALETTE` in `ultra_style` (soft blue/green/pink/violet/teal/amber) —
+with an **ink outline** (`DIAGRAM_OUTLINE`, ~1.6px) and ink text on every shape.
+Pastels belong here precisely *because* the outline carries the edge; never use
+them as data marks (they wash out below 3:1 on white). Reserve saturated
+red/amber for genuine status.
 - **Render to an image in `/outputs`** — that is the only way it appears inline.
   A raw ```` ```mermaid ```` or DOT block **does not draw** in Ultra chat (no
   mermaid/Graphviz renderer), and the sandbox ships **no `dot` binary and no
@@ -170,6 +190,10 @@ edges, ink text, color only to encode state/status.
   with an explicit layout; or **hand-author a clean SVG** (neutral fills, ink
   strokes, Inter/DejaVu labels) and save it to `/outputs` — often the most
   calm-native result for flow/architecture diagrams.
+- **Flowchart text:** put any sub-text *inside* its box (wrapped to the box
+  width), never as a separate label beneath the box — beneath-box labels overrun
+  into their neighbours and pile into an unreadable smear. Size each box to its
+  text (or shorten the text) and space boxes with real gaps.
 - Emit Mermaid/DOT *source* only when the destination is a document opened by a
   mermaid/DOT-capable viewer, not Ultra chat. When in doubt, render to SVG/PNG.
 
